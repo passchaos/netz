@@ -16,11 +16,14 @@ const net = std.Io.net;
 pub const Error = net.HostName.ValidateError ||
     net.HostName.ConnectError || net.IpAddress.ConnectError ||
     address_resolver.Error || error{
+    InvalidAddressConnectPolicy,
     InvalidServerReference,
     UnsupportedRedirectScheme,
 };
 
 pub const AddressResolver = address_resolver.Resolver;
+pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
+pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
 
 pub fn connectHost(
     allocator: std.mem.Allocator,
@@ -29,27 +32,51 @@ pub fn connectHost(
     port: u16,
     timeout: ?std.Io.Duration,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (net.IpAddress.parse(host, port)) |address| {
         return tcp_connect.ip(io, address, timeout);
     } else |_| {}
     const host_name = try net.HostName.init(host);
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.host(io, host_name, port, timeout);
+    }
     const deadline = try deadline_policy.fromTimeout(io, timeout);
-    const addresses = try configured.resolve(
-        configured.context,
-        allocator,
-        io,
-        host,
-        port,
-        deadline,
-    );
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
     defer allocator.free(addresses);
     return if (deadline) |absolute|
-        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+        tcp_connect.resolvedWithPolicyAndDeadline(
+            allocator,
+            io,
+            addresses,
+            absolute,
+            policy,
+        )
     else
-        tcp_connect.resolved(io, addresses, null);
+        tcp_connect.resolvedWithPolicy(
+            allocator,
+            io,
+            addresses,
+            null,
+            policy,
+        );
 }
 
 pub fn connectHostWithDeadline(
@@ -59,23 +86,41 @@ pub fn connectHostWithDeadline(
     port: u16,
     deadline: std.Io.Clock.Timestamp,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (net.IpAddress.parse(host, port)) |address| {
         return tcp_connect.ipWithDeadline(io, address, deadline);
     } else |_| {}
     const host_name = try net.HostName.init(host);
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.hostWithDeadline(io, host_name, port, deadline);
-    const addresses = try configured.resolve(
-        configured.context,
+    }
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
+    defer allocator.free(addresses);
+    return tcp_connect.resolvedWithPolicyAndDeadline(
         allocator,
         io,
-        host,
-        port,
+        addresses,
         deadline,
+        policy,
     );
-    defer allocator.free(addresses);
-    return tcp_connect.resolvedWithDeadline(io, addresses, deadline);
 }
 
 pub fn connectHostBound(
@@ -86,7 +131,9 @@ pub fn connectHostBound(
     local_address: net.IpAddress,
     timeout: ?std.Io.Duration,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (net.IpAddress.parse(host, port)) |address| {
         return tcp_connect.ipBound(
             io,
@@ -96,7 +143,7 @@ pub fn connectHostBound(
         );
     } else |_| {}
     const host_name = try net.HostName.init(host);
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.hostBound(
             io,
             host_name,
@@ -104,25 +151,44 @@ pub fn connectHostBound(
             local_address,
             timeout,
         );
+    }
     const deadline = try deadline_policy.fromTimeout(io, timeout);
-    const addresses = try configured.resolve(
-        configured.context,
-        allocator,
-        io,
-        host,
-        port,
-        deadline,
-    );
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
     defer allocator.free(addresses);
     return if (deadline) |absolute|
-        tcp_connect.resolvedBoundWithDeadline(
+        tcp_connect.resolvedBoundWithPolicyAndDeadline(
+            allocator,
             io,
             addresses,
             local_address,
             absolute,
+            policy,
         )
     else
-        tcp_connect.resolvedBound(io, addresses, local_address, null);
+        tcp_connect.resolvedBoundWithPolicy(
+            allocator,
+            io,
+            addresses,
+            local_address,
+            null,
+            policy,
+        );
 }
 
 pub fn connectHostBoundWithDeadline(
@@ -133,7 +199,9 @@ pub fn connectHostBoundWithDeadline(
     local_address: net.IpAddress,
     deadline: std.Io.Clock.Timestamp,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (net.IpAddress.parse(host, port)) |address| {
         return tcp_connect.ipBoundWithDeadline(
             io,
@@ -143,7 +211,7 @@ pub fn connectHostBoundWithDeadline(
         );
     } else |_| {}
     const host_name = try net.HostName.init(host);
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.hostBoundWithDeadline(
             io,
             host_name,
@@ -151,20 +219,32 @@ pub fn connectHostBoundWithDeadline(
             local_address,
             deadline,
         );
-    const addresses = try configured.resolve(
-        configured.context,
-        allocator,
-        io,
-        host,
-        port,
-        deadline,
-    );
+    }
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
     defer allocator.free(addresses);
-    return tcp_connect.resolvedBoundWithDeadline(
+    return tcp_connect.resolvedBoundWithPolicyAndDeadline(
+        allocator,
         io,
         addresses,
         local_address,
         deadline,
+        policy,
     );
 }
 
@@ -175,7 +255,9 @@ pub fn connectTarget(
     expected_transport: redirect.Transport,
     timeout: ?std.Io.Duration,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (target.transport != expected_transport) {
         return error.UnsupportedRedirectScheme;
     }
@@ -205,22 +287,44 @@ pub fn connectTarget(
     // callers to have obtained it from `redirect.parse`.
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.host(io, host_name, target.port, timeout);
+    }
     const deadline = try deadline_policy.fromTimeout(io, timeout);
-    const addresses = try configured.resolve(
-        configured.context,
-        allocator,
-        io,
-        target.host,
-        target.port,
-        deadline,
-    );
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            target.host,
+            target.port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            target.host,
+            target.port,
+            deadline,
+        );
     defer allocator.free(addresses);
     return if (deadline) |absolute|
-        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+        tcp_connect.resolvedWithPolicyAndDeadline(
+            allocator,
+            io,
+            addresses,
+            absolute,
+            policy,
+        )
     else
-        tcp_connect.resolved(io, addresses, null);
+        tcp_connect.resolvedWithPolicy(
+            allocator,
+            io,
+            addresses,
+            null,
+            policy,
+        );
 }
 
 pub fn connectTargetWithDeadline(
@@ -230,7 +334,9 @@ pub fn connectTargetWithDeadline(
     expected_transport: redirect.Transport,
     deadline: std.Io.Clock.Timestamp,
     resolver: ?AddressResolver,
+    policy: AddressConnectPolicy,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(policy);
     if (target.transport != expected_transport) {
         return error.UnsupportedRedirectScheme;
     }
@@ -254,18 +360,34 @@ pub fn connectTargetWithDeadline(
     } else |_| {}
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
-    const configured = resolver orelse
+    if (resolver == null and policy == .ordered) {
         return tcp_connect.hostWithDeadline(io, host_name, target.port, deadline);
-    const addresses = try configured.resolve(
-        configured.context,
+    }
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            target.host,
+            target.port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            target.host,
+            target.port,
+            deadline,
+        );
+    defer allocator.free(addresses);
+    return tcp_connect.resolvedWithPolicyAndDeadline(
         allocator,
         io,
-        target.host,
-        target.port,
+        addresses,
         deadline,
+        policy,
     );
-    defer allocator.free(addresses);
-    return tcp_connect.resolvedWithDeadline(io, addresses, deadline);
 }
 
 /// Return host text suitable for TLS SNI and certificate verification. URI

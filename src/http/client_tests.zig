@@ -940,12 +940,90 @@ test "unified HTTP client uses one resolver contract for h1 and h2" {
     if (worker.h2_err) |err| return err;
 }
 
+test "unified HTTP client applies Happy Eyeballs to system resolution" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        server: *http1_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/happy-eyeballs",
+                request.request.target,
+            );
+            try connection.writeResponse(.{
+                .body = "happy",
+                .request_method = request.request.method,
+            });
+        }
+    };
+    var worker = Worker{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}/happy-eyeballs",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+    var client = try http.Client.init(allocator, io, .{
+        .address_connect_policy = .{ .happy_eyeballs = .{
+            .attempt_delay = .fromMilliseconds(10),
+        } },
+    });
+    defer client.deinit();
+    var response = try client.requestUriWithTimeout(
+        uri,
+        .{},
+        .fromSeconds(3),
+    );
+    defer response.deinit();
+    try std.testing.expectEqualStrings("happy", response.body());
+
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+}
+
 test "unified HTTP client rejects zero timeout before I/O" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     var client = try http.Client.init(allocator, threaded.io(), .{});
     defer client.deinit();
+    try std.testing.expectError(
+        error.InvalidAddressConnectPolicy,
+        http.Client.init(allocator, threaded.io(), .{
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .zero,
+            } },
+        }),
+    );
     try std.testing.expectError(
         error.Timeout,
         client.requestUriWithTimeout(

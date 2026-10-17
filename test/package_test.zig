@@ -10153,6 +10153,24 @@ test "public modules are reachable" {
         netz.webtransport.runtime,
         "AddressResolver",
     ));
+    try std.testing.expect(@hasDecl(netz.http, "AddressConnectPolicy"));
+    try std.testing.expect(@hasDecl(netz.http, "HappyEyeballsOptions"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "AddressConnectPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "HappyEyeballsOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "AddressConnectPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "HappyEyeballsOptions",
+    ));
     try std.testing.expect(@hasDecl(
         netz.webtransport,
         "applicationErrorCodeToHttp3",

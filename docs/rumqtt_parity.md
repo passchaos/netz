@@ -2504,6 +2504,12 @@ the broker that completed Upgrade rather than the initially requested load
 balancer. A reconnect-aware connector rebuilds the HTTP chain per attempt and
 passes TLS 1.2/1.3 tickets into the first WSS origin; cross-origin redirect
 policy clears those tickets before the next authority.
+Raw TCP, native TLS, WS/WSS, HTTP proxy, MQTT redirect, and managed reconnect
+paths retain the same explicit `AddressConnectPolicy`. Ordered fallback remains
+the compatibility default. Happy Eyeballs is opt-in, bounded, deadline-aware,
+and cancellation-safe; connector-specific policy wins when present, otherwise
+reconnect-owned policy is inherited. Returned addresses never replace MQTT
+authority or TLS identity, and literal IP targets bypass the resolver/race.
 WS and WSS listeners may additionally require an exact Origin allowlist; a
 configured policy rejects missing, duplicate, or non-matching Origin headers
 before the 101 response, while the default remains disabled for native clients.

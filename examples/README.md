@@ -927,3 +927,15 @@ backend or platform details do not spread through protocol implementations.
 Initialization fails explicitly instead of silently switching to a thread-pool
 I/O model. Runnable examples also use `std.Io.async` for in-process concurrency;
 only benchmark fixtures select specialized backends for controlled measurement.
+
+HTTP/1-2, WS/WSS, MQTT TCP/TLS/WS/WSS, and cleartext HTTP proxy endpoints expose
+the shared `AddressConnectPolicy`. `.ordered` remains the compatibility default
+and attempts resolver results sequentially. Opt-in `.happy_eyeballs` stable-
+interleaves IPv6/IPv4 results, starts the first immediately, defaults to a
+250-ms stagger and two in-flight attempts, advances immediately after a path
+failure, and keeps one absolute caller/connect deadline over the complete race.
+External cancellation waits for every connect task to settle, and every
+successful unselected socket is closed before return. Literal IPs bypass both
+resolution and racing. HTTP/3 and WebTransport retain their existing ordered
+QUIC-handshake fallback; transport-level QUIC racing requires a separate
+connection-state design and is not implied by the TCP policy.

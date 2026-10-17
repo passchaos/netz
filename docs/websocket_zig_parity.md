@@ -225,6 +225,13 @@ independently to every WSS authority. A configured cleartext proxy is retained,
 but each hop gets a new authority-form CONNECT and proxy fields never enter the
 origin Upgrade. Missing Location leaves the final 3xx `ConnectAttempt`
 inspectable; duplicate or empty Location fails closed.
+WS/WSS hostname, URI, redirect, and proxy connections also expose the shared
+TCP `AddressConnectPolicy`. Ordered resolver fallback remains the default;
+opt-in Happy Eyeballs stable-interleaves address families under a bounded
+stagger and in-flight cap. Resolver results change only the socket route, never
+Host, SNI, or certificate identity. Literal IPs bypass resolution/racing, one
+absolute deadline covers every attempt, and cancellation closes successful
+losers before the connection API returns.
 The same redirect options can now attach `http.CookieJar`. Before every WS/WSS
 hop the client derives one Cookie field from that URI after applying Path,
 Domain, Secure, HttpOnly and SameSite; a caller-supplied Cookie/Cookie2 is

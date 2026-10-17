@@ -97,6 +97,9 @@ test "MQTT URI resolver falls back and bypasses IP literals" {
         .{
             .client_id = "resolved-mqtt",
             .address_resolver = resolver_option,
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromSeconds(5),
+            } },
         },
         .fromSeconds(3),
     );

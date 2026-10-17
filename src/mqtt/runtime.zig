@@ -48,6 +48,7 @@ pub const Error = packet_transport.Error || error{
     TlsKeyUpdateUnavailable,
     ConnectorDeadlineUnsupported,
     InvalidSocketOption,
+    InvalidAddressConnectPolicy,
     SocketOptionFailed,
     SocketOptionUnsupported,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
@@ -61,6 +62,8 @@ pub const disconnectReasonForProtocolViolation =
     protocol_error.disconnectReason;
 pub const TcpKeepAlive = socket_options.TcpKeepAlive;
 pub const AddressResolver = network_endpoint.AddressResolver;
+pub const AddressConnectPolicy = network_endpoint.AddressConnectPolicy;
+pub const HappyEyeballsOptions = network_endpoint.HappyEyeballsOptions;
 
 /// MQTT 3.1 reserves the complete CONNACK acknowledgement byte. Mosquitto
 /// uses bit 0 as the later Session Present field; callers must opt into that
@@ -1732,6 +1735,7 @@ pub const Client = struct {
             port,
             options.network_connect_timeout,
             options.address_resolver,
+            options.address_connect_policy,
         );
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
@@ -1755,6 +1759,7 @@ pub const Client = struct {
             local_address,
             options.network_connect_timeout,
             options.address_resolver,
+            options.address_connect_policy,
         );
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
@@ -1782,6 +1787,7 @@ pub const Client = struct {
             port,
             network_deadline,
             options.address_resolver,
+            options.address_connect_policy,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -1815,6 +1821,7 @@ pub const Client = struct {
             local_address,
             network_deadline,
             options.address_resolver,
+            options.address_connect_policy,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -1992,6 +1999,7 @@ pub const Client = struct {
             .tcp,
             network_deadline,
             options.address_resolver,
+            options.address_connect_policy,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -2316,6 +2324,7 @@ fn connectTargetAttempt(
         .tcp,
         options.network_connect_timeout,
         options.address_resolver,
+        options.address_connect_policy,
     );
     return connectStreamAttempt(allocator, io, stream, options, true);
 }
@@ -2443,6 +2452,10 @@ pub const ConnectOptions = struct {
     /// borrowed and must outlive any reconnect client initialized from this
     /// options value.
     address_resolver: ?AddressResolver = null,
+    /// Explicit multi-address TCP policy. Ordered fallback remains the default;
+    /// Happy Eyeballs is opt-in and bounded by its configured stagger/parallel
+    /// limits.
+    address_connect_policy: AddressConnectPolicy = .ordered,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     /// Baseline broker publish capabilities to enforce when MQTT 5 CONNACK

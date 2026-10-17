@@ -11,6 +11,7 @@
 const std = @import("std");
 const zio = @import("zio");
 const deadline_policy = @import("deadline.zig");
+const happy_eyeballs = @import("tcp_connect/happy_eyeballs.zig");
 
 const net = std.Io.net;
 
@@ -24,6 +25,21 @@ pub const ResolvedConnectError = net.HostName.LookupError ||
     net.IpAddress.ConnectError;
 pub const ResolvedBoundConnectError = net.HostName.LookupError ||
     BoundConnectError;
+pub const AddressConnectPolicy = happy_eyeballs.Policy;
+pub const HappyEyeballsOptions = happy_eyeballs.Options;
+pub const ResolvedPolicyConnectError = ResolvedConnectError ||
+    happy_eyeballs.Error;
+pub const ResolvedBoundPolicyConnectError = ResolvedBoundConnectError ||
+    happy_eyeballs.Error;
+
+pub fn validateAddressConnectPolicy(
+    policy: AddressConnectPolicy,
+) error{InvalidAddressConnectPolicy}!void {
+    switch (policy) {
+        .ordered => {},
+        .happy_eyeballs => |options| try happy_eyeballs.validate(options),
+    }
+}
 
 pub fn ip(
     io: std.Io,
@@ -139,6 +155,65 @@ pub fn resolvedWithDeadline(
     );
 }
 
+pub fn resolvedWithPolicy(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    timeout: ?std.Io.Duration,
+    policy: AddressConnectPolicy,
+) ResolvedPolicyConnectError!net.Stream {
+    const deadline = if (timeout) |duration|
+        (try deadline_policy.fromTimeout(io, duration)).?
+    else
+        null;
+    return resolvedWithPolicyBefore(
+        allocator,
+        io,
+        addresses,
+        deadline,
+        policy,
+    );
+}
+
+pub fn resolvedWithPolicyAndDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+    policy: AddressConnectPolicy,
+) ResolvedPolicyConnectError!net.Stream {
+    return resolvedWithPolicyBefore(
+        allocator,
+        io,
+        addresses,
+        try deadline_policy.usableAwake(io, deadline),
+        policy,
+    );
+}
+
+fn resolvedWithPolicyBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+    policy: AddressConnectPolicy,
+) ResolvedPolicyConnectError!net.Stream {
+    return switch (policy) {
+        .ordered => resolvedBefore(io, addresses, deadline),
+        .happy_eyeballs => |options| happy_eyeballs.connect(
+            net.IpAddress.ConnectError,
+            allocator,
+            io,
+            addresses,
+            options,
+            deadline,
+            {},
+            connectResolvedIp,
+            shouldTryNextResolvedAddress,
+        ),
+    };
+}
+
 fn resolvedBefore(
     io: std.Io,
     addresses: []const net.IpAddress,
@@ -186,6 +261,75 @@ pub fn resolvedBoundWithDeadline(
         local_address,
         try deadline_policy.usableAwake(io, deadline),
     );
+}
+
+pub fn resolvedBoundWithPolicy(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    timeout: ?std.Io.Duration,
+    policy: AddressConnectPolicy,
+) ResolvedBoundPolicyConnectError!net.Stream {
+    const deadline = if (timeout) |duration|
+        (try deadline_policy.fromTimeout(io, duration)).?
+    else
+        null;
+    return resolvedBoundWithPolicyBefore(
+        allocator,
+        io,
+        addresses,
+        local_address,
+        deadline,
+        policy,
+    );
+}
+
+pub fn resolvedBoundWithPolicyAndDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+    policy: AddressConnectPolicy,
+) ResolvedBoundPolicyConnectError!net.Stream {
+    return resolvedBoundWithPolicyBefore(
+        allocator,
+        io,
+        addresses,
+        local_address,
+        try deadline_policy.usableAwake(io, deadline),
+        policy,
+    );
+}
+
+fn resolvedBoundWithPolicyBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+    policy: AddressConnectPolicy,
+) ResolvedBoundPolicyConnectError!net.Stream {
+    return switch (policy) {
+        .ordered => resolvedBoundBefore(
+            io,
+            addresses,
+            local_address,
+            deadline,
+        ),
+        .happy_eyeballs => |options| happy_eyeballs.connect(
+            BoundConnectError,
+            allocator,
+            io,
+            addresses,
+            options,
+            deadline,
+            local_address,
+            connectResolvedBoundIp,
+            shouldTryNextResolvedAddress,
+        ),
+    };
 }
 
 fn resolvedBoundBefore(
@@ -484,6 +628,27 @@ fn connectIp(
     return address.connect(io, .{ .mode = .stream });
 }
 
+fn connectResolvedIp(
+    _: void,
+    io: std.Io,
+    address: net.IpAddress,
+    _: ?std.Io.Clock.Timestamp,
+) net.IpAddress.ConnectError!net.Stream {
+    return connectIp(io, address);
+}
+
+fn connectResolvedBoundIp(
+    local_address: net.IpAddress,
+    io: std.Io,
+    address: net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+) BoundConnectError!net.Stream {
+    return if (deadline) |absolute|
+        ipBoundWithDeadline(io, address, local_address, absolute)
+    else
+        ipBound(io, address, local_address, null);
+}
+
 fn connectHost(
     io: std.Io,
     host_name: net.HostName,
@@ -520,6 +685,422 @@ test "TCP connect deadline accepts a ready endpoint" {
     defer stream.close(io);
     const accepted = try listener.accept(io);
     accepted.close(io);
+}
+
+test "TCP Happy Eyeballs rejects an invalid attempt policy" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidAddressConnectPolicy,
+        resolvedWithPolicy(
+            std.testing.allocator,
+            threaded.io(),
+            &.{.{ .ip4 = .loopback(1) }},
+            null,
+            .{ .happy_eyeballs = .{ .attempt_delay = .zero } },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAddressConnectPolicy,
+        resolvedWithPolicy(
+            std.testing.allocator,
+            threaded.io(),
+            &.{.{ .ip4 = .loopback(1) }},
+            null,
+            .{ .happy_eyeballs = .{ .max_in_flight = 0 } },
+        ),
+    );
+}
+
+test "TCP ordered address policy remains allocation free" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var stream = try resolvedWithPolicy(
+        failing.allocator(),
+        io,
+        &.{listener.socket.address},
+        .fromSeconds(1),
+        .ordered,
+    );
+    defer stream.close(io);
+    const accepted = try listener.accept(io);
+    accepted.close(io);
+}
+
+test "TCP Happy Eyeballs allocates only beyond stack capacity" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var addresses: [9]net.IpAddress = undefined;
+    for (&addresses, 0..) |*address, index| {
+        address.* = .{ .ip4 = .loopback(@intCast(index + 1)) };
+    }
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        resolvedWithPolicy(
+            failing.allocator(),
+            threaded.io(),
+            &addresses,
+            .fromSeconds(1),
+            .{ .happy_eyeballs = .{} },
+        ),
+    );
+}
+
+test "TCP Happy Eyeballs advances immediately after path failure" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    var unavailable = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    const unavailable_address = unavailable.socket.address;
+    unavailable.deinit(io);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+
+    const started = std.Io.Clock.awake.now(io);
+    var stream = try resolvedWithPolicy(
+        failing.allocator(),
+        io,
+        &.{ unavailable_address, listener.socket.address },
+        .fromSeconds(1),
+        .{ .happy_eyeballs = .{
+            .attempt_delay = .fromSeconds(5),
+        } },
+    );
+    defer stream.close(io);
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            500 * std.time.ns_per_ms,
+    );
+    const accepted = try listener.accept(io);
+    accepted.close(io);
+}
+
+test "TCP Happy Eyeballs returns the last retryable path error" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const MockIo = struct {
+        var calls: std.atomic.Value(u8) = .init(0);
+
+        fn netConnectIp(
+            _: ?*anyopaque,
+            address: *const net.IpAddress,
+            _: net.IpAddress.ConnectOptions,
+        ) net.IpAddress.ConnectError!net.Socket {
+            _ = calls.fetchAdd(1, .acq_rel);
+            return if (address.getPort() == 1)
+                error.ConnectionRefused
+            else
+                error.NetworkUnreachable;
+        }
+    };
+    MockIo.calls.store(0, .release);
+    var vtable = io.vtable.*;
+    vtable.netConnectIp = MockIo.netConnectIp;
+    const racing_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    try std.testing.expectError(
+        error.NetworkUnreachable,
+        resolvedWithPolicy(
+            std.testing.allocator,
+            racing_io,
+            &.{
+                .{ .ip6 = .loopback(1) },
+                .{ .ip4 = .loopback(2) },
+            },
+            .fromSeconds(1),
+            .{ .happy_eyeballs = .{
+                .attempt_delay = .fromSeconds(5),
+            } },
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 2), MockIo.calls.load(.acquire));
+}
+
+test "TCP Happy Eyeballs fails fast on resource errors" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const MockIo = struct {
+        var calls: std.atomic.Value(u8) = .init(0);
+
+        fn netConnectIp(
+            _: ?*anyopaque,
+            _: *const net.IpAddress,
+            _: net.IpAddress.ConnectOptions,
+        ) net.IpAddress.ConnectError!net.Socket {
+            _ = calls.fetchAdd(1, .acq_rel);
+            return error.SystemResources;
+        }
+    };
+    MockIo.calls.store(0, .release);
+    var vtable = io.vtable.*;
+    vtable.netConnectIp = MockIo.netConnectIp;
+    const racing_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+    try std.testing.expectError(
+        error.SystemResources,
+        resolvedWithPolicy(
+            std.testing.allocator,
+            racing_io,
+            &.{
+                .{ .ip6 = .loopback(1) },
+                .{ .ip4 = .loopback(2) },
+            },
+            .fromSeconds(1),
+            .{ .happy_eyeballs = .{
+                .attempt_delay = .fromSeconds(5),
+            } },
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 1), MockIo.calls.load(.acquire));
+}
+
+test "TCP Happy Eyeballs staggers attempts and closes a successful loser" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var slow_listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer slow_listener.deinit(io);
+    var winner_listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer winner_listener.deinit(io);
+
+    const MockIo = struct {
+        var active: ?*@This() = null;
+
+        delegate: std.Io,
+        slow_port: u16,
+        never: std.Io.Event = .unset,
+        calls: std.atomic.Value(u8) = .init(0),
+        close_calls: std.atomic.Value(u8) = .init(0),
+        first_started_ns: std.atomic.Value(i64) = .init(0),
+        second_started_ns: std.atomic.Value(i64) = .init(0),
+
+        fn netConnectIp(
+            _: ?*anyopaque,
+            address: *const net.IpAddress,
+            options: net.IpAddress.ConnectOptions,
+        ) net.IpAddress.ConnectError!net.Socket {
+            const self = active.?;
+            const call = self.calls.fetchAdd(1, .acq_rel);
+            const now: i64 = @intCast(std.Io.Clock.awake.now(
+                self.delegate,
+            ).nanoseconds);
+            if (call == 0) {
+                self.first_started_ns.store(now, .release);
+            } else {
+                self.second_started_ns.store(now, .release);
+            }
+            if (address.getPort() == self.slow_port) {
+                self.never.wait(self.delegate) catch |err| switch (err) {
+                    error.Canceled => {},
+                };
+                const old = std.Io.swapCancelProtection(
+                    self.delegate,
+                    .blocked,
+                );
+                defer _ = std.Io.swapCancelProtection(self.delegate, old);
+                return self.delegate.vtable.netConnectIp(
+                    self.delegate.userdata,
+                    address,
+                    options,
+                );
+            }
+            return self.delegate.vtable.netConnectIp(
+                self.delegate.userdata,
+                address,
+                options,
+            );
+        }
+
+        fn netClose(
+            _: ?*anyopaque,
+            handles: []const net.Socket.Handle,
+        ) void {
+            const self = active.?;
+            _ = self.close_calls.fetchAdd(@intCast(handles.len), .acq_rel);
+            self.delegate.vtable.netClose(self.delegate.userdata, handles);
+        }
+    };
+    var mock = MockIo{
+        .delegate = io,
+        .slow_port = slow_listener.socket.address.getPort(),
+    };
+    MockIo.active = &mock;
+    defer MockIo.active = null;
+    var vtable = io.vtable.*;
+    vtable.netConnectIp = MockIo.netConnectIp;
+    vtable.netClose = MockIo.netClose;
+    const racing_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+
+    const delay = std.Io.Duration.fromMilliseconds(30);
+    var winner = try resolvedWithPolicy(
+        std.testing.allocator,
+        racing_io,
+        &.{ slow_listener.socket.address, winner_listener.socket.address },
+        .fromSeconds(2),
+        .{ .happy_eyeballs = .{
+            .attempt_delay = delay,
+            .max_in_flight = 2,
+        } },
+    );
+    defer winner.close(io);
+    try std.testing.expectEqual(@as(u8, 2), mock.calls.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 1), mock.close_calls.load(.acquire));
+    try std.testing.expect(
+        mock.second_started_ns.load(.acquire) -
+            mock.first_started_ns.load(.acquire) +
+            5 * std.time.ns_per_ms >=
+            delay.nanoseconds,
+    );
+
+    const accepted_winner = try winner_listener.accept(io);
+    accepted_winner.close(io);
+    const accepted_loser = try slow_listener.accept(io);
+    accepted_loser.close(io);
+}
+
+test "TCP Happy Eyeballs applies one deadline to all attempts" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const MockIo = struct {
+        var active: ?*@This() = null;
+
+        delegate: std.Io,
+        never: std.Io.Event = .unset,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn netConnectIp(
+            _: ?*anyopaque,
+            _: *const net.IpAddress,
+            _: net.IpAddress.ConnectOptions,
+        ) net.IpAddress.ConnectError!net.Socket {
+            const self = active.?;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            self.never.wait(self.delegate) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+            return error.Unexpected;
+        }
+    };
+    var mock = MockIo{ .delegate = io };
+    MockIo.active = &mock;
+    defer MockIo.active = null;
+    var vtable = io.vtable.*;
+    vtable.netConnectIp = MockIo.netConnectIp;
+    const racing_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.Timeout,
+        resolvedWithPolicy(
+            std.testing.allocator,
+            racing_io,
+            &.{
+                .{ .ip6 = .loopback(1) },
+                .{ .ip4 = .loopback(2) },
+                .{ .ip6 = .loopback(3) },
+            },
+            .fromMilliseconds(50),
+            .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(10),
+                .max_in_flight = 2,
+            } },
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 2), mock.calls.load(.acquire));
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            500 * std.time.ns_per_ms,
+    );
+}
+
+test "TCP Happy Eyeballs propagates external cancellation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const MockIo = struct {
+        var active: ?*@This() = null;
+
+        delegate: std.Io,
+        started: std.Io.Event = .unset,
+        never: std.Io.Event = .unset,
+
+        fn netConnectIp(
+            _: ?*anyopaque,
+            _: *const net.IpAddress,
+            _: net.IpAddress.ConnectOptions,
+        ) net.IpAddress.ConnectError!net.Socket {
+            const self = active.?;
+            self.started.set(self.delegate);
+            self.never.wait(self.delegate) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+            return error.Unexpected;
+        }
+    };
+    var mock = MockIo{ .delegate = io };
+    MockIo.active = &mock;
+    defer MockIo.active = null;
+    var vtable = io.vtable.*;
+    vtable.netConnectIp = MockIo.netConnectIp;
+    const racing_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
+
+    var future = try io.concurrent(resolvedWithPolicy, .{
+        std.testing.allocator,
+        racing_io,
+        &.{
+            net.IpAddress{ .ip6 = .loopback(1) },
+            net.IpAddress{ .ip4 = .loopback(2) },
+        },
+        null,
+        AddressConnectPolicy{ .happy_eyeballs = .{
+            .attempt_delay = .fromSeconds(1),
+        } },
+    });
+    try mock.started.wait(io);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
 }
 
 test "TCP bound connect uses the requested IPv4 source" {
@@ -578,11 +1159,15 @@ test "TCP resolved bound connect falls back under one deadline" {
         .bytes = .{ 127, 0, 0, 2 },
         .port = 0,
     } };
-    var stream = try resolvedBoundWithDeadline(
+    var stream = try resolvedBoundWithPolicyAndDeadline(
+        std.testing.allocator,
         io,
         &.{ unavailable_address, listener.socket.address },
         local,
         .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        .{ .happy_eyeballs = .{
+            .attempt_delay = .fromSeconds(5),
+        } },
     );
     defer stream.close(io);
     const accepted = try listener.accept(io);

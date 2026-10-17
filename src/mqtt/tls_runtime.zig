@@ -440,6 +440,7 @@ pub const Client = struct {
             port,
             options.mqtt.network_connect_timeout,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         );
         return connectStreamAttempt(
             allocator,
@@ -468,6 +469,7 @@ pub const Client = struct {
             local_address,
             options.mqtt.network_connect_timeout,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         );
         return connectStreamAttempt(
             allocator,
@@ -579,6 +581,7 @@ pub const Client = struct {
             port,
             network_deadline,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -612,6 +615,7 @@ pub const Client = struct {
             local_address,
             network_deadline,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -881,6 +885,7 @@ pub const Client = struct {
             .tls,
             options.mqtt.network_connect_timeout,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         ) catch |err| return switch (err) {
             error.UnsupportedRedirectScheme => error.UnsupportedScheme,
             error.InvalidServerReference => error.InvalidUri,
@@ -996,6 +1001,7 @@ pub const Client = struct {
             .tls,
             network_deadline,
             options.mqtt.address_resolver,
+            options.mqtt.address_connect_policy,
         ) catch |err| return switch (err) {
             error.UnsupportedRedirectScheme => error.UnsupportedScheme,
             error.InvalidServerReference => error.InvalidUri,
@@ -1427,9 +1433,14 @@ fn reconnectOptions(
     const network_connect_timeout = options.mqtt.network_connect_timeout;
     const address_resolver = options.mqtt.address_resolver orelse
         mqtt_options.address_resolver;
+    const address_connect_policy = switch (options.mqtt.address_connect_policy) {
+        .ordered => mqtt_options.address_connect_policy,
+        .happy_eyeballs => options.mqtt.address_connect_policy,
+    };
     options.mqtt = mqtt_options;
     options.mqtt.network_connect_timeout = network_connect_timeout;
     options.mqtt.address_resolver = address_resolver;
+    options.mqtt.address_connect_policy = address_connect_policy;
     return options;
 }
 
@@ -1458,22 +1469,47 @@ test "MQTT TLS reconnect resolver inherits with connector override" {
     };
     const from_client = reconnectOptions(
         .{ .mqtt = .{ .client_id = "configured" } },
-        .{ .client_id = "owned", .address_resolver = inherited },
+        .{
+            .client_id = "owned",
+            .address_resolver = inherited,
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(10),
+            } },
+        },
     );
     try std.testing.expectEqual(
         @intFromPtr(inherited.context),
         @intFromPtr(from_client.mqtt.address_resolver.?.context),
     );
+    try std.testing.expectEqual(
+        @as(i64, 10 * std.time.ns_per_ms),
+        from_client.mqtt.address_connect_policy.happy_eyeballs
+            .attempt_delay.nanoseconds,
+    );
     const from_connector = reconnectOptions(
         .{ .mqtt = .{
             .client_id = "configured",
             .address_resolver = override,
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(20),
+            } },
         } },
-        .{ .client_id = "owned", .address_resolver = inherited },
+        .{
+            .client_id = "owned",
+            .address_resolver = inherited,
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(10),
+            } },
+        },
     );
     try std.testing.expectEqual(
         @intFromPtr(override.context),
         @intFromPtr(from_connector.mqtt.address_resolver.?.context),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 20 * std.time.ns_per_ms),
+        from_connector.mqtt.address_connect_policy.happy_eyeballs
+            .attempt_delay.nanoseconds,
     );
 }
 

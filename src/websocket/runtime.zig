@@ -68,6 +68,7 @@ pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
     SocketOptionFailed,
     SocketOptionUnsupported,
     CookieHeaderConflict,
+    InvalidAddressConnectPolicy,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = common.Limits;
@@ -2015,6 +2016,8 @@ pub const CookieHandshakeOptions = cookie_handshake.Options;
 pub const HttpProxyOptions = http1_runtime.ProxyOptions;
 pub const RedirectPolicy = redirect.Policy;
 pub const AddressResolver = address_resolver.Resolver;
+pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
+pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
 
 pub const RedirectProxy = struct {
     uri: []const u8,
@@ -4008,6 +4011,10 @@ pub const Client = struct {
         if (effective_proxy_options.address_resolver == null) {
             effective_proxy_options.address_resolver = options.address_resolver;
         }
+        if (effective_proxy_options.address_connect_policy == null) {
+            effective_proxy_options.address_connect_policy =
+                options.address_connect_policy;
+        }
         const stream = if (deadline) |absolute|
             try http1_runtime.Client.connectTunnelViaProxyUriWithDeadline(
                 allocator,
@@ -4361,6 +4368,9 @@ fn connectUriEndpointBefore(
     options: ConnectOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(
+        options.address_connect_policy,
+    );
     const connect_deadline = if (deadline) |absolute|
         try deadline_policy.capTimeout(
             io,
@@ -4374,24 +4384,55 @@ fn connectUriEndpointBefore(
             tcp_connect.ipWithDeadline(io, address, absolute)
         else
             tcp_connect.ip(io, address, null),
-        .host => |host| if (options.address_resolver) |resolver| blk: {
-            const addresses = try resolver.resolve(
-                resolver.context,
-                allocator,
-                io,
-                endpoint.tls_host,
-                endpoint.port,
-                connect_deadline,
-            );
+        .host => |host| blk: {
+            if (options.address_resolver == null and
+                options.address_connect_policy == .ordered)
+            {
+                break :blk if (connect_deadline) |absolute|
+                    tcp_connect.hostWithDeadline(
+                        io,
+                        host,
+                        endpoint.port,
+                        absolute,
+                    )
+                else
+                    tcp_connect.host(io, host, endpoint.port, null);
+            }
+            const addresses = if (options.address_resolver) |resolver|
+                try resolver.resolve(
+                    resolver.context,
+                    allocator,
+                    io,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    connect_deadline,
+                )
+            else
+                try address_resolver.resolveSystem(
+                    allocator,
+                    io,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    connect_deadline,
+                );
             defer allocator.free(addresses);
             break :blk if (connect_deadline) |absolute|
-                tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+                tcp_connect.resolvedWithPolicyAndDeadline(
+                    allocator,
+                    io,
+                    addresses,
+                    absolute,
+                    options.address_connect_policy,
+                )
             else
-                tcp_connect.resolved(io, addresses, null);
-        } else if (connect_deadline) |absolute|
-            tcp_connect.hostWithDeadline(io, host, endpoint.port, absolute)
-        else
-            tcp_connect.host(io, host, endpoint.port, null),
+                tcp_connect.resolvedWithPolicy(
+                    allocator,
+                    io,
+                    addresses,
+                    null,
+                    options.address_connect_policy,
+                );
+        },
     };
 }
 
@@ -4403,6 +4444,9 @@ fn connectNamedEndpointBefore(
     options: ConnectOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!net.Stream {
+    try tcp_connect.validateAddressConnectPolicy(
+        options.address_connect_policy,
+    );
     const connect_deadline = if (deadline) |absolute|
         try deadline_policy.capTimeout(
             io,
@@ -4418,24 +4462,47 @@ fn connectNamedEndpointBefore(
             tcp_connect.ip(io, address, null);
     } else |_| {}
     const host_name = try net.HostName.init(host);
-    const resolver = options.address_resolver orelse
+    const resolver = options.address_resolver;
+    if (resolver == null and options.address_connect_policy == .ordered) {
         return if (connect_deadline) |absolute|
             tcp_connect.hostWithDeadline(io, host_name, port, absolute)
         else
             tcp_connect.host(io, host_name, port, null);
-    const addresses = try resolver.resolve(
-        resolver.context,
-        allocator,
-        io,
-        host,
-        port,
-        connect_deadline,
-    );
+    }
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            connect_deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            connect_deadline,
+        );
     defer allocator.free(addresses);
     return if (connect_deadline) |absolute|
-        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+        tcp_connect.resolvedWithPolicyAndDeadline(
+            allocator,
+            io,
+            addresses,
+            absolute,
+            options.address_connect_policy,
+        )
     else
-        tcp_connect.resolved(io, addresses, null);
+        tcp_connect.resolvedWithPolicy(
+            allocator,
+            io,
+            addresses,
+            null,
+            options.address_connect_policy,
+        );
 }
 
 pub const ConnectOptions = struct {
@@ -4478,6 +4545,9 @@ pub const ConnectOptions = struct {
     /// connect deadline while HTTP authority, TLS SNI, and certificate identity
     /// remain bound to the configured host.
     address_resolver: ?AddressResolver = null,
+    /// Explicit address-attempt policy. Ordered sequential fallback remains the
+    /// default; Happy Eyeballs uses bounded staggered racing.
+    address_connect_policy: AddressConnectPolicy = .ordered,
     limits: Limits = .{},
     /// Backward-compatible mTLS shorthand. `vail_tls` takes precedence when
     /// both are supplied.

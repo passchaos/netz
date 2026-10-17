@@ -11,6 +11,7 @@ const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 const address_resolver = @import("../../internal/address_resolver.zig");
+const tcp_connect = @import("../../internal/tcp_connect.zig");
 
 pub const Protocol = enum {
     http1,
@@ -35,6 +36,8 @@ pub const CleartextProtocol = enum {
 };
 
 pub const AddressResolver = address_resolver.Resolver;
+pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
+pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
 
 pub const Header = struct {
     name: []const u8,
@@ -67,6 +70,10 @@ pub const Options = struct {
     /// Literal IP URI hosts bypass it. Returned addresses are attempted under
     /// one connect deadline while TLS identity remains bound to the URI host.
     address_resolver: ?AddressResolver = null,
+    /// Explicit multi-address connection strategy. `.ordered` preserves the
+    /// resolver's exact sequential fallback; `.happy_eyeballs` stable-
+    /// interleaves address families and races them with a bounded stagger.
+    address_connect_policy: AddressConnectPolicy = .ordered,
     tcp_nodelay: bool = true,
     http1_limits: http1_runtime.Limits = .{},
     http2_limits: http2_runtime.Limits = .{},

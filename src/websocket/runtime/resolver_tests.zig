@@ -90,7 +90,12 @@ test "WebSocket URI resolver falls back and bypasses IP literals" {
         allocator,
         io,
         resolved_uri,
-        .{ .address_resolver = resolver_option },
+        .{
+            .address_resolver = resolver_option,
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromSeconds(5),
+            } },
+        },
         .fromSeconds(3),
     );
     resolved.close();

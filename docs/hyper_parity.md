@@ -1598,6 +1598,14 @@ The standard-library TLS client initializer and low-level complete-request /
 request-aware-response stream adapters likewise expose relative-timeout and
 absolute-deadline pairs, allowing protocol upgrade adapters to choose either
 budget form without duplicating timestamp conversion.
+The shared TCP `AddressConnectPolicy` keeps ordered sequential fallback as the
+default. Opt-in Happy Eyeballs stable-interleaves IPv6/IPv4 results, starts the
+first address immediately, defaults to a 250-ms stagger and two concurrent
+attempts, and advances immediately after a retryable path failure. System and
+application resolvers use the same policy. One caller/connect deadline bounds
+the complete race; external cancellation joins every attempt, fatal resource
+errors fail fast, and any successful unselected socket is closed. The ordered
+path remains allocation-free.
 HTTP/2 direct-address, hostname, Unix and TLS constructors expose the same
 contract through the complete SETTINGS bootstrap. TLS paths preserve the outer
 deadline across DNS/TCP and TLS while all paths retain stricter phase limits.

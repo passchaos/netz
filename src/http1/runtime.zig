@@ -53,6 +53,7 @@ pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error
     TooManyInformationalResponses,
     PostHandshakeTlsUnavailable,
     WriteInProgress,
+    InvalidAddressConnectPolicy,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
     net.HostName.ValidateError || net.HostName.ConnectError ||
@@ -242,24 +243,56 @@ fn connectProxyUriBefore(
             try tcp_connect.ipWithDeadline(io, address, absolute)
         else
             try tcp_connect.ip(io, address, null),
-        .host => |host| if (proxy_options.address_resolver) |resolver| blk: {
-            const addresses = try resolver.resolve(
-                resolver.context,
-                allocator,
-                io,
-                endpoint.tls_host,
-                endpoint.port,
-                connect_deadline,
-            );
+        .host => |host| blk: {
+            const policy = proxy_options.address_connect_policy orelse
+                tcp_connect.AddressConnectPolicy.ordered;
+            try tcp_connect.validateAddressConnectPolicy(policy);
+            if (proxy_options.address_resolver == null and policy == .ordered) {
+                break :blk if (connect_deadline) |absolute|
+                    try tcp_connect.hostWithDeadline(
+                        io,
+                        host,
+                        endpoint.port,
+                        absolute,
+                    )
+                else
+                    try tcp_connect.host(io, host, endpoint.port, null);
+            }
+            const addresses = if (proxy_options.address_resolver) |resolver|
+                try resolver.resolve(
+                    resolver.context,
+                    allocator,
+                    io,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    connect_deadline,
+                )
+            else
+                try address_resolver.resolveSystem(
+                    allocator,
+                    io,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    connect_deadline,
+                );
             defer allocator.free(addresses);
             break :blk if (connect_deadline) |absolute|
-                try tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+                try tcp_connect.resolvedWithPolicyAndDeadline(
+                    allocator,
+                    io,
+                    addresses,
+                    absolute,
+                    policy,
+                )
             else
-                try tcp_connect.resolved(io, addresses, null);
-        } else if (connect_deadline) |absolute|
-            try tcp_connect.hostWithDeadline(io, host, endpoint.port, absolute)
-        else
-            try tcp_connect.host(io, host, endpoint.port, null),
+                try tcp_connect.resolvedWithPolicy(
+                    allocator,
+                    io,
+                    addresses,
+                    null,
+                    policy,
+                );
+        },
     };
     return Client.adoptStream(
         allocator,
@@ -407,6 +440,8 @@ pub const VailTlsClientOptions = struct {
 };
 
 pub const AddressResolver = address_resolver.Resolver;
+pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
+pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
 
 /// HTTP forward-proxy policy shared by one-shot cleartext and CONNECT-tunneled
 /// URI requests. These fields are sent only to the proxy: for HTTPS they are
@@ -417,6 +452,10 @@ pub const ProxyOptions = struct {
     /// hosts bypass it; CONNECT continues to carry the origin authority text so
     /// proxy-side origin resolution and TLS identity remain unchanged.
     address_resolver: ?AddressResolver = null,
+    /// Optional proxy-specific multi-address policy. Null lets protocol
+    /// adapters inherit their origin policy; direct HTTP proxy helpers use
+    /// ordered fallback.
+    address_connect_policy: ?AddressConnectPolicy = null,
 };
 
 pub const RedirectPolicy = uri_redirect.Policy;

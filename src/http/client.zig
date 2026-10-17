@@ -12,6 +12,7 @@ const http2 = @import("../http2/mod.zig");
 const http2_runtime = @import("../http2/runtime.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const address_resolver = @import("../internal/address_resolver.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const uri_redirect = @import("../http1/runtime/redirect.zig");
@@ -20,13 +21,18 @@ const header_mapping = @import("client/header_mapping.zig");
 const redirect = @import("client/redirect.zig");
 
 pub const Error = http1_runtime.Error || http2_runtime.Error ||
-    uri_redirect.Error || error{InvalidClientOptions};
+    uri_redirect.Error || error{
+    InvalidAddressConnectPolicy,
+    InvalidClientOptions,
+};
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 pub const Protocol = types.Protocol;
 pub const ProtocolPolicy = types.ProtocolPolicy;
 pub const CleartextProtocol = types.CleartextProtocol;
 pub const AddressResolver = types.AddressResolver;
+pub const AddressConnectPolicy = types.AddressConnectPolicy;
+pub const HappyEyeballsOptions = types.HappyEyeballsOptions;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const RequestOptions = types.RequestOptions;
@@ -251,6 +257,9 @@ pub const Client = struct {
         if (options.connect_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.InvalidClientOptions;
         }
+        try tcp_connect.validateAddressConnectPolicy(
+            options.address_connect_policy,
+        );
         return .{ .allocator = allocator, .io = io, .options = options };
     }
 
@@ -442,29 +451,47 @@ pub const Client = struct {
                 tcp_connect.ip(self.io, address, null),
             .host => {},
         }
-        const resolver = self.options.address_resolver orelse {
+        const resolver = self.options.address_resolver;
+        if (resolver == null and self.options.address_connect_policy == .ordered) {
             return if (deadline) |absolute|
                 endpoint.connectWithDeadline(self.io, absolute)
             else
                 endpoint.connect(self.io);
-        };
-        const addresses = try resolver.resolve(
-            resolver.context,
-            self.allocator,
-            self.io,
-            endpoint.tls_host,
-            endpoint.port,
-            deadline,
-        );
+        }
+        const addresses = if (resolver) |configured|
+            try configured.resolve(
+                configured.context,
+                self.allocator,
+                self.io,
+                endpoint.tls_host,
+                endpoint.port,
+                deadline,
+            )
+        else
+            try address_resolver.resolveSystem(
+                self.allocator,
+                self.io,
+                endpoint.tls_host,
+                endpoint.port,
+                deadline,
+            );
         defer self.allocator.free(addresses);
         return if (deadline) |absolute|
-            tcp_connect.resolvedWithDeadline(
+            tcp_connect.resolvedWithPolicyAndDeadline(
+                self.allocator,
                 self.io,
                 addresses,
                 absolute,
+                self.options.address_connect_policy,
             )
         else
-            tcp_connect.resolved(self.io, addresses, null);
+            tcp_connect.resolvedWithPolicy(
+                self.allocator,
+                self.io,
+                addresses,
+                null,
+                self.options.address_connect_policy,
+            );
     }
 
     pub fn requestUri(

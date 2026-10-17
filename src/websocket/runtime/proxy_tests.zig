@@ -192,6 +192,9 @@ test "WebSocket WS URI connects through HTTP CONNECT proxy" {
                 .context = &resolver,
                 .resolve = Resolver.resolve,
             },
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromSeconds(5),
+            } },
         },
         .{ .headers = &.{.{
             .name = "Proxy-Authorization",
