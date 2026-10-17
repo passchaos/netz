@@ -34777,6 +34777,7 @@ test {
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_request_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_dispatcher_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_handshake_progress_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool/alt_svc_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");

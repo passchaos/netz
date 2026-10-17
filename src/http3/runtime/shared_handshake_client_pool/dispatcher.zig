@@ -115,6 +115,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             active_connections: std.atomic.Value(usize) = .init(0),
             active_requests: std.atomic.Value(usize) = .init(0),
             completed_requests: u64 = 0,
+            connect_progress_failure: ?RequestError = null,
         };
 
         pub const Sender = struct {
@@ -640,9 +641,19 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
         }
 
         fn admitQueued(state: *State) RequestError!void {
+            return admitQueuedMode(state, true);
+        }
+
+        fn admitQueuedMode(
+            state: *State,
+            allow_new_connections: bool,
+        ) RequestError!void {
             while (true) {
                 state.mutex.lockUncancelable(state.io);
-                const command = firstAdmissibleCommand(state) orelse {
+                const command = firstAdmissibleCommand(
+                    state,
+                    allow_new_connections,
+                ) orelse {
                     state.mutex.unlock(state.io);
                     return;
                 };
@@ -667,6 +678,16 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         state,
                         command,
                     ) catch |err| {
+                        if (state.connect_progress_failure) |progress_err| {
+                            state.connect_progress_failure = null;
+                            complete(
+                                state,
+                                command,
+                                null,
+                                progress_err,
+                            );
+                            return progress_err;
+                        }
                         if (err == error.ConnectionLimitReached) {
                             requeueFront(state, command);
                             return;
@@ -745,8 +766,12 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             }
         }
 
-        fn firstAdmissibleCommand(state: *State) ?*Command {
-            const has_free_connection = firstFreeConnection(state) != null;
+        fn firstAdmissibleCommand(
+            state: *State,
+            allow_new_connections: bool,
+        ) ?*Command {
+            const has_free_connection = allow_new_connections and
+                firstFreeConnection(state) != null;
             var command = state.head;
             while (command) |candidate| : (command = candidate.next) {
                 if (has_free_connection or
@@ -795,13 +820,14 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         );
                         defer prepared.deinit();
                         const lease = state.pool
-                            .acquireUriAltSvcEarlyReclaiming(
+                            .acquireUriForRequestDriver(
                             command.uri,
                             target,
-                            &prepared,
                             command.deadline,
                             &command.budget_waiter,
                             reclaimer,
+                            &prepared,
+                            connectProgress(state),
                         ) catch |err| return @errorCast(err);
                         if (lease.early_disposition) |disposition| {
                             command.early_metadata = .{
@@ -814,34 +840,64 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         }
                         return lease;
                     }
-                    return state.pool.acquireUriAltSvcReclaiming(
+                    return state.pool.acquireUriForRequestDriver(
                         command.uri,
                         target,
                         command.deadline,
                         &command.budget_waiter,
                         reclaimer,
+                        null,
+                        connectProgress(state),
                     ) catch |err| return @errorCast(err);
                 }
-                return if (command.deadline) |deadline|
-                    state.pool.acquireUriAltSvcWithDeadline(
-                        command.uri,
-                        target,
-                        deadline,
-                    ) catch |err| return @errorCast(err)
-                else
-                    state.pool.acquireUriAltSvc(
-                        command.uri,
-                        target,
-                    ) catch |err| return @errorCast(err);
-            }
-            return if (command.deadline) |deadline|
-                state.pool.acquireUriWithDeadline(
+                return state.pool.acquireUriForRequestDriver(
                     command.uri,
-                    deadline,
-                ) catch |err| return @errorCast(err)
-            else
-                state.pool.acquireUri(command.uri) catch |err|
-                    return @errorCast(err);
+                    target,
+                    command.deadline,
+                    null,
+                    null,
+                    null,
+                    connectProgress(state),
+                ) catch |err| return @errorCast(err);
+            }
+            return state.pool.acquireUriForRequestDriver(
+                command.uri,
+                null,
+                command.deadline,
+                null,
+                null,
+                null,
+                connectProgress(state),
+            ) catch |err| return @errorCast(err);
+        }
+
+        fn connectProgress(state: *State) Pool.ConnectProgress {
+            return .{
+                .context = state,
+                .drive = driveEstablishedDuringConnect,
+            };
+        }
+
+        fn driveEstablishedDuringConnect(context: *anyopaque) anyerror!void {
+            const state: *State = @ptrCast(@alignCast(context));
+            driveEstablishedDuringConnectFallible(state) catch |err| {
+                const typed: RequestError = @errorCast(err);
+                state.connect_progress_failure = typed;
+                return typed;
+            };
+        }
+
+        fn driveEstablishedDuringConnectFallible(
+            state: *State,
+        ) RequestError!void {
+            processControl(state);
+            try admitQueuedMode(state, false);
+            try progressTransactions(state);
+            while (try state.pool.poll()) |event_value| {
+                var event = event_value;
+                defer event.deinit(state.pool.allocator);
+                try processEvent(state, &event);
+            }
         }
 
         fn requeueFront(state: *State, command: *Command) void {

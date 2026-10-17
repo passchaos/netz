@@ -55,7 +55,8 @@ pub fn Options(comptime Runtime: type) type {
         peer_settings_observer: ?owning_pool.PeerSettingsObserver = null,
         handshake_inbox_capacity: usize = 32,
         /// Maximum delay before the endpoint owner checks handshake worker
-        /// completion again. QUIC timers can wake it earlier.
+        /// completion and established-route progress again. QUIC packets,
+        /// transport timers, and successful handshakes can wake it earlier.
         handshake_poll_interval: std.Io.Duration = .fromMilliseconds(5),
     };
 }
@@ -96,6 +97,17 @@ pub fn Pool(comptime Runtime: type) type {
         const ConnectRoute = union(enum) {
             origin,
             alt_svc: http3.AltSvcTarget,
+        };
+
+        /// Cooperative established-route work driven while this pool's sole
+        /// endpoint owner is waiting for a new connection handshake.
+        pub const ConnectProgress = struct {
+            context: *anyopaque,
+            drive: *const fn (context: *anyopaque) anyerror!void,
+
+            fn run(self: ConnectProgress) !void {
+                try self.drive(self.context);
+            }
         };
 
         const Entry = struct {
@@ -521,6 +533,7 @@ pub fn Pool(comptime Runtime: type) type {
                     null,
                     null,
                     null,
+                    null,
                 ) catch |err| return @errorCast(err);
             }
         };
@@ -715,6 +728,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
+                null,
             );
         }
 
@@ -750,6 +764,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
+                null,
             );
         }
 
@@ -771,6 +786,7 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 null,
                 .{ .alt_svc = target },
+                null,
                 null,
                 null,
                 null,
@@ -811,6 +827,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
+                null,
             );
         }
 
@@ -842,6 +859,7 @@ pub fn Pool(comptime Runtime: type) type {
                 waiter,
                 reclaimer,
                 null,
+                null,
             );
         }
 
@@ -856,6 +874,27 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             waiter: *connection_budget.Waiter,
             reclaimer: connection_budget.Reclaimer,
+        ) !Lease {
+            return self.acquireUriAltSvcEarlyReclaimingBefore(
+                uri_text,
+                target,
+                early_request,
+                deadline,
+                waiter,
+                reclaimer,
+                null,
+            );
+        }
+
+        fn acquireUriAltSvcEarlyReclaimingBefore(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            early_request: *const Runtime.PreparedEarlyRequest,
+            deadline: ?std.Io.Clock.Timestamp,
+            waiter: *connection_budget.Waiter,
+            reclaimer: connection_budget.Reclaimer,
+            progress: ?ConnectProgress,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const absolute = if (deadline) |value|
@@ -884,6 +923,7 @@ pub fn Pool(comptime Runtime: type) type {
                     waiter,
                     reclaimer,
                     null,
+                    progress,
                 );
             };
             var early_lease = (try automatic.cache.beginEarlyData(
@@ -898,6 +938,7 @@ pub fn Pool(comptime Runtime: type) type {
                 waiter,
                 reclaimer,
                 null,
+                progress,
             );
             defer early_lease.deinit();
             return self.acquireUriBefore(
@@ -914,6 +955,55 @@ pub fn Pool(comptime Runtime: type) type {
                     .server_id = automatic.server_id,
                     .now_ms = automatic.now_ms,
                 },
+                progress,
+            );
+        }
+
+        /// Request-dispatcher acquisition path. The callback never reads the
+        /// endpoint; it only consumes events already routed by `connectOne`,
+        /// preserving the pool's single-reader invariant during handshakes.
+        pub fn acquireUriForRequestDriver(
+            self: *Self,
+            uri_text: []const u8,
+            target: ?http3.AltSvcTarget,
+            deadline: ?std.Io.Clock.Timestamp,
+            waiter: ?*connection_budget.Waiter,
+            reclaimer: ?connection_budget.Reclaimer,
+            early_request: ?*const Runtime.PreparedEarlyRequest,
+            progress: ConnectProgress,
+        ) !Lease {
+            if (early_request) |prepared| {
+                return self.acquireUriAltSvcEarlyReclaimingBefore(
+                    uri_text,
+                    target orelse return error.InvalidHeader,
+                    prepared,
+                    deadline,
+                    waiter orelse return error.InvalidPoolOptions,
+                    reclaimer orelse return error.InvalidPoolOptions,
+                    progress,
+                );
+            }
+            if (self.closed) return error.PoolClosed;
+            const absolute = if (deadline) |value|
+                try deadline_policy.capTimeout(
+                    self.io,
+                    value,
+                    self.options.client.connect_timeout,
+                )
+            else
+                deadline_policy.fromTimeout(
+                    self.io,
+                    self.options.client.connect_timeout,
+                ) catch return error.HandshakeTimeout;
+            return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                if (target) |value| .{ .alt_svc = value } else .origin,
+                waiter,
+                reclaimer,
+                null,
+                progress,
             );
         }
 
@@ -934,6 +1024,7 @@ pub fn Pool(comptime Runtime: type) type {
             shared_waiter: ?*connection_budget.Waiter,
             reclaimer: ?connection_budget.Reclaimer,
             early: ?EarlyConnectContext,
+            progress: ?ConnectProgress,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -1027,6 +1118,7 @@ pub fn Pool(comptime Runtime: type) type {
                     },
                     next_early,
                     early_path_failed,
+                    progress,
                 ) catch |err| {
                     last_error = err;
                     if (shouldTryNextAddress(err)) {
@@ -1117,6 +1209,7 @@ pub fn Pool(comptime Runtime: type) type {
             alpn: ?[]const u8,
             early: ?EarlyConnectContext,
             disable_auto_resumption: bool,
+            progress: ?ConnectProgress,
         ) !Connected {
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
@@ -1190,6 +1283,7 @@ pub fn Pool(comptime Runtime: type) type {
             );
 
             while (true) {
+                if (progress) |observer| try observer.run();
                 const poll_deadline = deadline_policy.earlier(
                     deadline,
                     .fromNow(self.io, .{
