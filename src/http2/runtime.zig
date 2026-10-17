@@ -1,5 +1,6 @@
 const std = @import("std");
 const http2 = @import("mod.zig");
+const http3 = @import("../http3/mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
 const frame_io = @import("runtime/frame/io.zig");
@@ -107,6 +108,13 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     PostHandshakeTlsUnavailable,
     InvalidServeOptions,
     SocketOptionFailed,
+    InvalidTarget,
+    InvalidUriTemplate,
+    MissingTemplateVariable,
+    DuplicateTemplateVariable,
+    InvalidTemplateExpansion,
+    PayloadTooLarge,
+    UnexpectedContextId,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
 pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
@@ -8750,6 +8758,121 @@ pub const Connection = struct {
         }
     }
 
+    pub fn openConnectUdp(
+        self: *Connection,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        path_storage: []u8,
+    ) Error!ConnectUdpSession {
+        return self.openConnectUdpUntil(
+            template,
+            target,
+            variables,
+            path_storage,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn openConnectUdpWithTimeout(
+        self: *Connection,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        path_storage: []u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ConnectUdpSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openConnectUdpWithDeadline(
+            template,
+            target,
+            variables,
+            path_storage,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn openConnectUdpWithDeadline(
+        self: *Connection,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        path_storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ConnectUdpSession {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openConnectUdpUntil(
+            template,
+            target,
+            variables,
+            path_storage,
+            deadline,
+        );
+    }
+
+    fn openConnectUdpUntil(
+        self: *Connection,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        path_storage: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ConnectUdpSession {
+        try target.validate();
+        if (!std.mem.eql(u8, template.scheme, "https")) {
+            return error.InvalidUriTemplate;
+        }
+        const request_path = try template.expandRequestTargetInto(
+            path_storage,
+            target.host,
+            target.port,
+            variables,
+        );
+        const headers = [_]http2.Hpack.HeaderField{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        var response = if (deadline) |absolute|
+            try self.openExtendedConnectWithDeadline(.{
+                .method = "CONNECT",
+                .path = request_path,
+                .scheme = template.scheme,
+                .protocol = http3.connect_udp.protocol,
+                .authority = template.authority,
+                .headers = &headers,
+            }, absolute)
+        else
+            try self.openExtendedConnect(.{
+                .method = "CONNECT",
+                .path = request_path,
+                .scheme = template.scheme,
+                .protocol = http3.connect_udp.protocol,
+                .authority = template.authority,
+                .headers = &headers,
+            });
+        var response_owned = true;
+        defer if (response_owned) response.deinit(self.allocator);
+        http3.connect_udp.validateResponseHead(
+            response.status,
+            response.headers,
+        ) catch |err| {
+            response.tunnel.abort(deadline);
+            return err;
+        };
+        const tunnel = response.tunnel;
+        response.deinit(self.allocator);
+        response_owned = false;
+        return ConnectUdpSession.init(
+            self.allocator,
+            self.io,
+            tunnel,
+            .{},
+        );
+    }
+
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         var attempt = try self.openExtendedConnectAttemptUntil(options, null);
         errdefer attempt.deinit(self.allocator);
@@ -8931,6 +9054,101 @@ pub const Connection = struct {
         // the peer accepts with a 2xx response.
         try self.writeHeaders(stream_id, fields.items, false);
         return self.readExtendedConnectResponse(stream_id);
+    }
+
+    pub fn readConnectUdpRequest(
+        self: *Connection,
+    ) Error!ExtendedConnectRequest {
+        var connect_request = try self.readExtendedConnectRequest(
+            http3.connect_udp.protocol,
+        );
+        errdefer connect_request.deinit(self.allocator);
+        try http3.connect_udp.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        return connect_request;
+    }
+
+    pub fn readConnectUdpRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readConnectUdpRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readConnectUdpRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        var connect_request = try self.readExtendedConnectRequestWithDeadline(
+            http3.connect_udp.protocol,
+            deadline,
+        );
+        errdefer connect_request.deinit(self.allocator);
+        try http3.connect_udp.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        return connect_request;
+    }
+
+    pub fn acceptConnectUdpDefault(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        target_host_storage: []u8,
+    ) Error!AcceptedConnectUdp {
+        const target = try http3.connect_udp.parseDefaultPath(
+            connect_request.path,
+            target_host_storage,
+        );
+        return .{
+            .target = target,
+            .session = try self.acceptConnectUdpForTarget(
+                connect_request,
+                target,
+            ),
+        };
+    }
+
+    pub fn acceptConnectUdpForTarget(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        target: http3.connect_udp.Target,
+    ) Error!ConnectUdpSession {
+        try http3.connect_udp.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        try target.validate();
+        const response_headers = [_]http2.Hpack.HeaderField{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        const tunnel = try self.acceptExtendedConnect(
+            connect_request,
+            &response_headers,
+        );
+        return ConnectUdpSession.init(
+            self.allocator,
+            self.io,
+            tunnel,
+            .{},
+        );
     }
 
     pub fn readExtendedConnectRequest(self: *Connection, expected_protocol: []const u8) Error!ExtendedConnectRequest {
@@ -19920,6 +20138,17 @@ pub const ExtendedConnectAttempt = struct {
         self.* = undefined;
         return response;
     }
+};
+
+pub const ConnectUdpSession = http3.connect_udp.CapsuleSession(
+    http2.ErrorCode,
+    Tunnel,
+    TunnelWriteProgress,
+);
+
+pub const AcceptedConnectUdp = struct {
+    target: http3.connect_udp.Target,
+    session: ConnectUdpSession,
 };
 
 pub const OwnedTunnelData = struct {
@@ -37345,6 +37574,7 @@ test {
     _ = @import("runtime/request_writer_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/refusal_tests.zig");
+    _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

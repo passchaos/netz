@@ -16,6 +16,7 @@ pub const Error = wire.Error || error{
     InvalidFrame,
     InvalidHeader,
 } || std.mem.Allocator.Error;
+pub const ParseError = wire.Error || error{IntegerOverflow};
 
 pub const CapsuleType = struct {
     pub const datagram: u64 = 0x00;
@@ -29,7 +30,7 @@ pub const protocol_header: qpack.HeaderField = .{
     .value = header_value_true,
 };
 
-pub fn protocolEnabled(headers: []const qpack.HeaderField) Error!bool {
+pub fn protocolEnabled(headers: anytype) error{InvalidHeader}!bool {
     var found = false;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(header.name, header_name)) continue;
@@ -75,7 +76,7 @@ pub fn isReservedCapsuleType(capsule_type: u64) bool {
     return capsule_type >= 0x17 and (capsule_type - 0x17) % 0x29 == 0;
 }
 
-pub fn parse(bytes: []const u8) Error!Parsed {
+pub fn parse(bytes: []const u8) ParseError!Parsed {
     var cursor = wire.Cursor.init(bytes);
     const capsule_type = try quic.varint.decode(&cursor);
     const value_len = try quic.varint.decode(&cursor);

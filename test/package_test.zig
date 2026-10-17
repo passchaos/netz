@@ -637,6 +637,41 @@ test "public modules are reachable" {
         netz.http1.runtime.Server,
         "acceptWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "ConnectUdpSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "AcceptedConnectUdp",
+    ));
+    inline for (&.{
+        "openConnectUdp",
+        "openConnectUdpWithTimeout",
+        "openConnectUdpWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http1.runtime.Client,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "readConnectUdpRequest",
+        "readConnectUdpRequestWithTimeout",
+        "readConnectUdpRequestWithDeadline",
+        "acceptConnectUdpDefault",
+        "acceptConnectUdpForTarget",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http1.runtime.Connection,
+            decl,
+        ));
+    }
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
+        "writeSlicesWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(netz.http1.runtime.Tunnel, "abort"));
     try std.testing.expect(@hasDecl(netz.http1, "client_pool"));
     try std.testing.expect(@hasDecl(netz.http1.client_pool, "Pool"));
     try std.testing.expect(@hasField(
@@ -759,6 +794,29 @@ test "public modules are reachable" {
         netz.http2.runtime,
         "BatchCancellationObserver",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "ConnectUdpSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "AcceptedConnectUdp",
+    ));
+    inline for (&.{
+        "openConnectUdp",
+        "openConnectUdpWithTimeout",
+        "openConnectUdpWithDeadline",
+        "readConnectUdpRequest",
+        "readConnectUdpRequestWithTimeout",
+        "readConnectUdpRequestWithDeadline",
+        "acceptConnectUdpDefault",
+        "acceptConnectUdpForTarget",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.Connection,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "isReusable",

@@ -183,6 +183,39 @@ pub const Template = struct {
         return out[0..written];
     }
 
+    /// Expand the complete absolute URI for HTTP/1.x Upgrade requests.
+    /// HTTP/2 and HTTP/3 carry these components in pseudo-header fields and
+    /// should continue to use `expandRequestTargetInto` for `:path`.
+    pub fn expandUriInto(
+        self: Template,
+        out: []u8,
+        target_host: []const u8,
+        target_port: u16,
+        variables: []const Variable,
+    ) Error![]u8 {
+        const prefix_len = self.source.len - self.request_template.len;
+        const request_target_len = try self.expandedLen(
+            target_host,
+            target_port,
+            variables,
+        );
+        const needed = std.math.add(
+            usize,
+            prefix_len,
+            request_target_len,
+        ) catch return error.IntegerOverflow;
+        if (out.len < needed) return error.BufferTooShort;
+        @memcpy(out[0..prefix_len], self.source[0..prefix_len]);
+        const request_target = try self.expandRequestTargetInto(
+            out[prefix_len..needed],
+            target_host,
+            target_port,
+            variables,
+        );
+        std.debug.assert(request_target.len == request_target_len);
+        return out[0..needed];
+    }
+
     fn expandInternal(
         self: Template,
         out: ?[]u8,
@@ -417,6 +450,15 @@ test "CONNECT-UDP URI Template expands RFC 9298 examples" {
     try std.testing.expectEqualStrings(
         "/.well-known/masque/udp/2001%3Adb8%3A%3A42/443/",
         try path_template.expandRequestTargetInto(
+            &storage,
+            target_host,
+            target_port,
+            &.{},
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        "https://example.org/.well-known/masque/udp/2001%3Adb8%3A%3A42/443/",
+        try path_template.expandUriInto(
             &storage,
             target_host,
             target_port,

@@ -839,18 +839,23 @@ at 19.44%/4.26%, ahead of public scalar inversion at 2.98%; the latter is no
 longer an independent implementation gap.
 
 The generic RFC 9297 HTTP Datagram association now also has a typed RFC 9298
-CONNECT-UDP layer. It implements the default MASQUE URI Template with strict
-target validation and IPv6 percent encoding, Extended CONNECT plus
-Capsule-Protocol validation, generic Context ID framing, Context ID 0 UDP
-payloads, and the 65,527-byte UDP ceiling. Its reusable typed session preserves
-absolute deadlines across skipped unknown contexts and aborts malformed input
-with H3_MESSAGE_ERROR. A real authenticated HTTP/3 exchange proves negotiated
-SETTINGS ordering and bidirectional payload routing. Configured Level-3 URI
-Templates support the RFC 9298-legal simple, form-query and continuation
-operators plus extra scalar variables; forbidden Level-2/3 operators and all
-Level-4 modifiers fail during compilation. A second Session in the same real
-exchange uses a query template and application-selected server target, rather
-than treating custom templates as the default path.
+CONNECT-UDP layer across HTTP/1.1, HTTP/2, and HTTP/3. It implements the default
+MASQUE URI Template with strict target validation and IPv6 percent encoding,
+version-correct Upgrade or Extended CONNECT negotiation, Capsule-Protocol
+validation, generic Context ID framing, Context ID 0 UDP payloads, and the
+65,527-byte UDP ceiling. HTTP/3 preserves absolute deadlines across skipped
+unknown contexts and aborts malformed input with H3_MESSAGE_ERROR. HTTP/2 and
+HTTP/1.1 use a shared incremental DATAGRAM Capsule stream with bounded partial
+input, unknown capsule/context skipping, and exact timed-write progress; errors
+reset the H2 stream or abort the H1 connection. Real regressions cover H1
+absolute-URI GET/101 negotiation and fragmented reads across a timeout, H2 DATA
+fragmentation plus flow-control timeout/resume, and authenticated H3 SETTINGS
+ordering and bidirectional routing. Configured Level-3 URI Templates support the
+RFC 9298-legal simple, form-query and continuation operators plus extra scalar
+variables; forbidden Level-2/3 operators and all Level-4 modifiers fail during
+compilation. A second H3 Session in the same real exchange uses a query template
+and application-selected server target, rather than treating custom templates
+as the default path.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |

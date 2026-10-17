@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const http1 = @import("mod.zig");
+const http3 = @import("../http3/mod.zig");
 const runtime_write = @import("runtime/write.zig");
+const connect_udp_runtime = @import("runtime/connect_udp.zig");
 const uri_redirect = @import("runtime/redirect.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
@@ -54,6 +56,14 @@ pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error
     PostHandshakeTlsUnavailable,
     WriteInProgress,
     InvalidAddressConnectPolicy,
+    InvalidTarget,
+    InvalidUriTemplate,
+    MissingTemplateVariable,
+    DuplicateTemplateVariable,
+    InvalidTemplateExpansion,
+    PayloadTooLarge,
+    UnexpectedContextId,
+    ExcessiveLoad,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
     net.HostName.ValidateError || net.HostName.ConnectError ||
@@ -1727,6 +1737,19 @@ const RuntimeTransport = union(enum) {
                 try shutdownAfterTlsCloseNotify(conn.io, conn.stream);
             },
         };
+    }
+
+    /// Abort both directions without releasing transport-owned TLS state.
+    /// The owning Client/Connection still performs the eventual deinit, while
+    /// the shutdown ensures no more HTTP/1 bytes can be misinterpreted after
+    /// an upgraded protocol error.
+    fn abort(self: RuntimeTransport) void {
+        switch (self) {
+            .tcp => |tcp| tcp.stream.shutdown(tcp.io, .both) catch {},
+            .tls_client => |conn| conn.stream.shutdown(conn.io, .both) catch {},
+            .tls_vail => |conn| conn.stream.shutdown(conn.io, .both) catch {},
+            .tls_server => |conn| conn.stream.shutdown(conn.io, .both) catch {},
+        }
     }
 
     fn close(self: RuntimeTransport) void {
@@ -5002,6 +5025,110 @@ pub const Client = struct {
         };
     }
 
+    /// Open RFC 9298 CONNECT-UDP over the HTTP/1.1 Upgrade mapping. The
+    /// request target is the expanded absolute URI, matching the RFC's proxy
+    /// form, and no Capsule bytes are sent until the validated 101 response.
+    pub fn openConnectUdp(
+        self: *Client,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        uri_storage: []u8,
+    ) Error!ConnectUdpSession {
+        return self.openConnectUdpUntil(
+            template,
+            target,
+            variables,
+            uri_storage,
+            null,
+        );
+    }
+
+    pub fn openConnectUdpWithTimeout(
+        self: *Client,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        uri_storage: []u8,
+        timeout: std.Io.Duration,
+    ) Error!ConnectUdpSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openConnectUdpWithDeadline(
+            template,
+            target,
+            variables,
+            uri_storage,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn openConnectUdpWithDeadline(
+        self: *Client,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        uri_storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectUdpSession {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openConnectUdpUntil(
+            template,
+            target,
+            variables,
+            uri_storage,
+            deadline,
+        );
+    }
+
+    fn openConnectUdpUntil(
+        self: *Client,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        uri_storage: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectUdpSession {
+        try target.validate();
+        const expected_scheme: []const u8 = if (self.tls_conn != null or
+            self.tls_vail_conn != null) "https" else "http";
+        if (!std.ascii.eqlIgnoreCase(template.scheme, expected_scheme)) {
+            return error.InvalidUriTemplate;
+        }
+        const request_target = try template.expandUriInto(
+            uri_storage,
+            target.host,
+            target.port,
+            variables,
+        );
+        const headers = [_]http1.Header{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        if (deadline) |absolute| {
+            std.debug.assert(self.response_deadline == null);
+            self.response_deadline = absolute;
+        }
+        defer if (deadline != null) {
+            self.response_deadline = null;
+        };
+        try self.writeUpgradeRequest(
+            request_target,
+            template.authority,
+            http3.connect_udp.protocol,
+            &headers,
+        );
+        const tunnel = try self.finishUpgradeInternal(
+            http3.connect_udp.protocol,
+            true,
+        );
+        return ConnectUdpSession.init(
+            self.allocator,
+            self.io,
+            ConnectUdpTunnel.init(self.allocator, tunnel),
+            .{},
+        );
+    }
+
     /// Relative-timeout wrapper for the complete Upgrade handshake.
     pub fn openUpgradeWithTimeout(
         self: *Client,
@@ -5049,6 +5176,17 @@ pub const Client = struct {
         protocol: []const u8,
         headers: []const http1.Header,
     ) Error!Tunnel {
+        try self.writeUpgradeRequest(target, host, protocol, headers);
+        return self.finishUpgrade(protocol);
+    }
+
+    fn writeUpgradeRequest(
+        self: *Client,
+        target: []const u8,
+        host: ?[]const u8,
+        protocol: []const u8,
+        headers: []const http1.Header,
+    ) Error!void {
         try self.writer_state.ensureAvailable();
         try validateUpgradeProtocol(protocol);
         try rejectUpgradeManagedHeaders(headers);
@@ -5073,7 +5211,6 @@ pub const Client = struct {
             .host = host orelse self.default_host,
             .headers = upgrade_headers.items,
         });
-        return self.finishUpgrade(protocol);
     }
 
     /// Relative-timeout wrapper for an already-written Upgrade request.
@@ -5108,6 +5245,14 @@ pub const Client = struct {
         self: *Client,
         protocol: []const u8,
     ) Error!Tunnel {
+        return self.finishUpgradeInternal(protocol, false);
+    }
+
+    fn finishUpgradeInternal(
+        self: *Client,
+        protocol: []const u8,
+        require_capsule_protocol: bool,
+    ) Error!Tunnel {
         try self.writer_state.ensureAvailable();
         try validateUpgradeProtocol(protocol);
         self.beginResponseHeadSequence();
@@ -5127,13 +5272,36 @@ pub const Client = struct {
             return err;
         };
         errdefer response.deinit(self.allocator);
-        const selected = response.response.upgradeProtocol() orelse
+        const selected = response.response.upgradeProtocol() orelse {
+            if (require_capsule_protocol) {
+                self.writer_state.phase = .unusable;
+                self.transport().abort();
+            }
             return error.InvalidResponse;
+        };
         if (!std.ascii.eqlIgnoreCase(selected, protocol) or
             response.response.body.len != 0 or
             response.response.trailers.len != 0)
         {
+            if (require_capsule_protocol) {
+                self.writer_state.phase = .unusable;
+                self.transport().abort();
+            }
             return error.InvalidResponse;
+        }
+        if (require_capsule_protocol) {
+            const enabled = http3.capsule.protocolEnabled(
+                response.response.headers,
+            ) catch {
+                self.writer_state.phase = .unusable;
+                self.transport().abort();
+                return error.InvalidResponse;
+            };
+            if (!enabled) {
+                self.writer_state.phase = .unusable;
+                self.transport().abort();
+                return error.InvalidResponse;
+            }
         }
         response.deinit(self.allocator);
         self.writer_state.phase = .unusable;
@@ -5436,6 +5604,100 @@ pub const Connection = struct {
             }
             return err;
         };
+    }
+
+    /// Read and validate the RFC 9298 HTTP/1.1 Upgrade request. The returned
+    /// request remains owned by the caller so authentication and target policy
+    /// can run before the connection is switched to the Capsule Protocol.
+    pub fn readConnectUdpRequest(self: *Connection) Error!OwnedRequest {
+        var request = try self.readRequest(.{});
+        errdefer request.deinit(self.allocator);
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_udp.protocol,
+            if (self.tls_server_conn == null) "http" else "https",
+            request.request,
+        );
+        return request;
+    }
+
+    pub fn readConnectUdpRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readConnectUdpRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readConnectUdpRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedRequest {
+        var request = try self.readRequestWithDeadline(.{}, deadline);
+        errdefer request.deinit(self.allocator);
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_udp.protocol,
+            if (self.tls_server_conn == null) "http" else "https",
+            request.request,
+        );
+        return request;
+    }
+
+    pub fn acceptConnectUdpDefault(
+        self: *Connection,
+        request: http1.Request,
+        target_host_storage: []u8,
+    ) Error!AcceptedConnectUdp {
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_udp.protocol,
+            if (self.tls_server_conn == null) "http" else "https",
+            request,
+        );
+        const target = try http3.connect_udp.parseDefaultPath(
+            try connect_udp_runtime.requestPath(request.target),
+            target_host_storage,
+        );
+        return .{
+            .target = target,
+            .session = try self.acceptConnectUdpForTarget(request, target),
+        };
+    }
+
+    /// Accept a request after application-specific URI-template routing has
+    /// selected and authorized its target. General Level-3 templates are not
+    /// assumed to be reversibly decodable by the transport layer.
+    pub fn acceptConnectUdpForTarget(
+        self: *Connection,
+        request: http1.Request,
+        target: http3.connect_udp.Target,
+    ) Error!ConnectUdpSession {
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_udp.protocol,
+            if (self.tls_server_conn == null) "http" else "https",
+            request,
+        );
+        try target.validate();
+        const response_headers = [_]http1.Header{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        const tunnel = try self.acceptUpgrade(
+            request,
+            http3.connect_udp.protocol,
+            &response_headers,
+        );
+        return ConnectUdpSession.init(
+            self.allocator,
+            self.io,
+            ConnectUdpTunnel.init(self.allocator, tunnel),
+            .{},
+        );
     }
 
     /// Read a request while delivering body bytes without aggregation.
@@ -6117,6 +6379,8 @@ fn rejectUpgradeManagedHeaders(headers: []const http1.Header) Error!void {
     }
 }
 
+pub const TunnelWriteProgress = connect_udp_runtime.WriteProgress;
+
 pub const Tunnel = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -6174,6 +6438,35 @@ pub const Tunnel = struct {
         };
     }
 
+    /// Write borrowed slices under one absolute deadline while reporting the
+    /// exact plaintext prefix committed to the transport. A timeout is
+    /// resumable from that prefix; every other transport failure closes the
+    /// write half because replay safety can no longer be established.
+    pub fn writeSlicesWithDeadline(
+        self: *Tunnel,
+        slices: []const []const u8,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        progress.* = .{};
+        if (self.write_closed) return error.ConnectionClosed;
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        for (slices) |slice| {
+            if (slice.len == 0) continue;
+            var part_committed: usize = 0;
+            self.transport().writeAllWithDeadline(
+                slice,
+                &part_committed,
+                deadline,
+            ) catch |err| {
+                progress.committed_bytes += part_committed;
+                if (err != error.Timeout) self.write_closed = true;
+                return err;
+            };
+            progress.committed_bytes += part_committed;
+        }
+    }
+
     /// Finish the tunnel's write half while preserving buffered and future
     /// reads. TLS transports send close_notify before shutting down the
     /// underlying socket write direction. The transition is fail-closed: once
@@ -6182,6 +6475,14 @@ pub const Tunnel = struct {
         if (self.write_closed) return error.ConnectionClosed;
         self.write_closed = true;
         try self.transport().closeWrite();
+    }
+
+    /// Terminate an upgraded connection after a protocol error. Ownership of
+    /// allocations and the socket remains with the parent Client/Connection,
+    /// whose normal `close` call performs final cleanup.
+    pub fn abort(self: *Tunnel) void {
+        self.write_closed = true;
+        self.transport().abort();
     }
 
     pub fn read(self: *Tunnel, buffer: []u8) Error!usize {
@@ -6243,6 +6544,19 @@ pub const Tunnel = struct {
             self.tls_server_conn orelse return null;
         return connection.keyUpdateCounts();
     }
+};
+
+pub const ConnectUdpTunnel = connect_udp_runtime.TunnelAdapter(Tunnel);
+
+pub const ConnectUdpSession = http3.connect_udp.CapsuleSession(
+    connect_udp_runtime.ResetCode,
+    ConnectUdpTunnel,
+    TunnelWriteProgress,
+);
+
+pub const AcceptedConnectUdp = struct {
+    target: http3.connect_udp.Target,
+    session: ConnectUdpSession,
 };
 
 pub const OwnedRequest = struct {
@@ -13780,4 +14094,5 @@ test {
     _ = @import("runtime/tls_close_tests.zig");
     _ = @import("runtime/tls_server_api_tests.zig");
     _ = @import("runtime/date_tests.zig");
+    _ = @import("runtime/connect_udp_tests.zig");
 }

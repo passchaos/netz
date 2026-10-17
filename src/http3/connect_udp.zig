@@ -9,6 +9,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
 const capsule = @import("capsule.zig");
+const capsule_session = @import("connect_udp/capsule_session.zig");
 const session_module = @import("connect_udp/session.zig");
 const template_module = @import("connect_udp/template.zig");
 
@@ -26,6 +27,10 @@ pub fn Protocol(comptime Http3: type) type {
             PayloadTooLarge,
             UnexpectedContextId,
         };
+        pub const ContextDatagramError = wire.Error || error{
+            PayloadTooLarge,
+            UnexpectedContextId,
+        };
 
         pub const UriTemplate = template_module.Template;
         pub const Variable = template_module.Variable;
@@ -34,7 +39,7 @@ pub fn Protocol(comptime Http3: type) type {
             host: []const u8,
             port: u16,
 
-            pub fn validate(self: Target) Error!void {
+            pub fn validate(self: Target) error{InvalidTarget}!void {
                 if (self.host.len == 0 or self.port == 0 or
                     std.mem.indexOfScalar(u8, self.host, '%') != null)
                 {
@@ -117,7 +122,7 @@ pub fn Protocol(comptime Http3: type) type {
         pub fn parseDefaultPath(
             path: []const u8,
             host_out: []u8,
-        ) Error!Target {
+        ) error{ BufferTooShort, InvalidTarget }!Target {
             if (!std.mem.startsWith(u8, path, default_path_prefix) or
                 path.len <= default_path_prefix.len + 2 or
                 path[path.len - 1] != '/')
@@ -222,7 +227,7 @@ pub fn Protocol(comptime Http3: type) type {
             if (request.body.len != 0 or request.trailers.len != 0) {
                 return error.InvalidHeader;
             }
-            try validateRequestMetadata(
+            try validateRequestFields(
                 request.method,
                 request.path,
                 request.scheme,
@@ -245,7 +250,7 @@ pub fn Protocol(comptime Http3: type) type {
             request: Http3.DecodedRequestHead,
         ) Error!void {
             if (request.content_length != null) return error.InvalidHeader;
-            return validateRequestMetadata(
+            return validateRequestFields(
                 request.method,
                 request.path,
                 request.scheme,
@@ -254,13 +259,13 @@ pub fn Protocol(comptime Http3: type) type {
             );
         }
 
-        fn validateRequestMetadata(
+        pub fn validateRequestFields(
             method: []const u8,
             path: []const u8,
             scheme: []const u8,
             authority: ?[]const u8,
-            headers: []const Http3.Qpack.HeaderField,
-        ) Error!void {
+            headers: anytype,
+        ) error{InvalidHeader}!void {
             if (!std.mem.eql(u8, method, "CONNECT") or
                 !std.mem.eql(u8, scheme, "https") or
                 path.len == 0 or path[0] != '/' or
@@ -306,8 +311,8 @@ pub fn Protocol(comptime Http3: type) type {
 
         pub fn validateResponseHead(
             status: u16,
-            headers: []const Http3.Qpack.HeaderField,
-        ) Error!void {
+            headers: anytype,
+        ) error{ InvalidHeader, InvalidStatus }!void {
             if (status < 200 or status >= 300) return error.InvalidStatus;
             if (!try capsule.protocolEnabled(headers)) {
                 return error.InvalidHeader;
@@ -324,7 +329,7 @@ pub fn Protocol(comptime Http3: type) type {
             context_id: u62,
             payload: []const u8,
 
-            pub fn parse(bytes: []const u8) Error!ContextDatagram {
+            pub fn parse(bytes: []const u8) ContextDatagramError!ContextDatagram {
                 var cursor = wire.Cursor.init(bytes);
                 const value = try quic.varint.decode(&cursor);
                 const context_id: u62 = @intCast(value);
@@ -337,7 +342,7 @@ pub fn Protocol(comptime Http3: type) type {
                 return .{ .context_id = context_id, .payload = payload };
             }
 
-            pub fn encodedLen(self: ContextDatagram) Error!usize {
+            pub fn encodedLen(self: ContextDatagram) ContextDatagramError!usize {
                 if (self.context_id == udp_context_id and
                     self.payload.len > max_udp_payload_size)
                 {
@@ -353,7 +358,7 @@ pub fn Protocol(comptime Http3: type) type {
             pub fn writeInto(
                 self: ContextDatagram,
                 out: []u8,
-            ) Error![]u8 {
+            ) ContextDatagramError![]u8 {
                 const needed = try self.encodedLen();
                 if (out.len < needed) return error.BufferTooShort;
                 const prefix = try quic.varint.encodeInto(
@@ -367,7 +372,9 @@ pub fn Protocol(comptime Http3: type) type {
                 return out[0..needed];
             }
 
-            pub fn udpPayload(self: ContextDatagram) Error![]const u8 {
+            pub fn udpPayload(
+                self: ContextDatagram,
+            ) error{UnexpectedContextId}![]const u8 {
                 if (self.context_id != udp_context_id) {
                     return error.UnexpectedContextId;
                 }
@@ -378,7 +385,7 @@ pub fn Protocol(comptime Http3: type) type {
         pub fn writeUdpPayloadInto(
             out: []u8,
             payload: []const u8,
-        ) Error![]u8 {
+        ) ContextDatagramError![]u8 {
             return (ContextDatagram{
                 .context_id = udp_context_id,
                 .payload = payload,
@@ -413,6 +420,22 @@ pub fn Protocol(comptime Http3: type) type {
         /// Unknown extension contexts are dropped as RFC 9298 permits.
         pub fn Session(comptime Transport: type) type {
             return session_module.Session(Http3, @This(), Transport);
+        }
+
+        pub const CapsuleSessionOptions = capsule_session.Options;
+
+        pub fn CapsuleSession(
+            comptime ResetCode: type,
+            comptime Tunnel: type,
+            comptime WriteProgress: type,
+        ) type {
+            return capsule_session.Session(
+                ResetCode,
+                capsule,
+                @This(),
+                Tunnel,
+                WriteProgress,
+            );
         }
 
         fn isUnreserved(byte: u8) bool {
