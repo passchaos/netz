@@ -75,6 +75,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mo
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_copy --frame=datagram --warmup=500 --iterations=10000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_borrowed --frame=datagram --warmup=500 --iterations=10000
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-io-deadline -Doptimize=ReleaseFast -- --samples=5 --warmup=2000 --iterations=50000
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
 
@@ -86,6 +87,39 @@ operation and 84,658-85,518 operations/s on CPU 0. This is an internal hot-path
 guard for the shared vail record stream, not a cross-library performance claim.
 
 ## Current netz results
+
+### zio linked deadline I/O
+
+`bench-io-deadline` measures zio only through its public `std.Io` boundary.
+The ready shape queues one UDP datagram before each receive. The parked shape
+uses a second task on the same single-executor runtime; a bounded queue wakes
+that sender only after the receiver is about to submit, so the receive must
+park before natural I/O completion. Both shapes compare otherwise-identical
+untimed and one-second-deadline operations and validate every payload.
+
+Five CPU-0 process samples per arm were run in alternating order on
+2026-10-17. Each process reported the median of five internal order-alternated
+50,000-operation samples after 2,000 warmups. Both fixed binaries used Netz
+commit `73e3d553`; the baseline used zio parent `1b258ef`, while the candidate
+used zio `3c2365b` with linked runtime deadlines and timer construction delayed
+until the operation proves it must park. Their SHA-256 values were
+`df3ca1ef1dbcb687961f1243036e959639ffc55f6cd8f2caf687b5f38da6041c`
+and `c0dbd8840ac42e927d1f1aec4a6580d032a2d5413bc46a24878e52e3e9dbd7fc`.
+
+```text
+process-median ns/op       parent untimed  parent timed  linked untimed  linked timed
+ready                            2717.49       2878.82         2713.90       2902.19
+parked                           2773.03       2930.34         2761.29       2789.95
+```
+
+For parked I/O, the per-process median deadline increment fell from 155.16 ns
+to 25.92 ns (83.3% lower), and absolute timed latency fell 4.79%; every linked
+sample was below every parent timed sample. The already-ready timed path moved
+from 2878.82 to 2902.19 ns/op (0.81% higher), with its normalized deadline
+increment moving from 164.13 to 187.31 ns. The optimization therefore targets
+the real park/wakeup path rather than claiming a universal ready-I/O win.
+"Linked" here means the runtime completion and its timer share one rendezvous
+and timer-heap lifecycle; it is not Linux `IORING_OP_LINK_TIMEOUT`.
 
 ### Shared HTTP Content-Encoding decode
 

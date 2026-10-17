@@ -2584,14 +2584,15 @@ implementation (io_uring with automatic epoll fallback on Linux, plus portable
 backends elsewhere) and reports initialization failure rather than silently
 changing execution models. The dependency is pinned to the project-maintained
 `passchaos/zio` Zig-0.16 branch at v0.19.1 commit
-`494418768cded358e1b3b73eae89e276de2fd13e`. It includes the multi-message UDP
+`3c2365b88c9b6fef5ba709c36c6b2f8ceb77a789`. It includes the multi-message UDP
 receive support required by shared-endpoint batching and treats unsupported
 `MADV_NOHUGEPAGE` as the optional kernel hint it is, without Debug-build stack
 traces. It also exposes coroutine-stack capacity and committed high-water
 metrics without adding work to ordinary context switches. Timed runtime I/O
 preserves already-ready operations as a timer-free inline path; blocking
 operations link directly to their deadline timer so natural completion can
-remove it without completing a generic race-group sibling. Neither zio nor
+remove it without completing a generic race-group sibling; timer state itself
+is constructed only after the operation proves it must park. Neither zio nor
 OS-specific rings leak into the HTTP, WebSocket, QUIC, or other protocol APIs.
 All runnable non-benchmark examples construct this backend and schedule local
 concurrent work through `std.Io.async`; benchmark and low-level white-box code
