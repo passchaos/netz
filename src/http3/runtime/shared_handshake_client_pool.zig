@@ -110,13 +110,25 @@ pub fn Pool(comptime Runtime: type) type {
         };
 
         const ConnectCompletion = union(enum) {
-            client: Client,
+            client: struct {
+                value: Client,
+                disposition: ?Runtime.EarlyRequestDisposition = null,
+            },
             failure: Runtime.Error,
         };
 
         const Connected = struct {
             handle: Handle,
             client: *Client,
+            disposition: ?Runtime.EarlyRequestDisposition = null,
+        };
+
+        const EarlyConnectContext = struct {
+            request: *const Runtime.PreparedEarlyRequest,
+            cache: *quic.resumption.Cache,
+            lease: *quic.resumption.EarlyDataLease,
+            server_id: []const u8,
+            now_ms: u64,
         };
 
         const IdleReuse = struct {
@@ -133,6 +145,9 @@ pub fn Pool(comptime Runtime: type) type {
             local_cid: *const [8]u8,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?owning_pool.RedirectConnectContext,
+            alpn: ?[]const u8,
+            early: ?EarlyConnectContext,
+            disable_auto_resumption: bool,
 
             fn connect(self: *@This()) ConnectCompletion {
                 var options = self.pool.options.client;
@@ -151,11 +166,50 @@ pub fn Pool(comptime Runtime: type) type {
                         self.uri_endpoint.authority,
                     );
                 }
+                if (self.disable_auto_resumption) {
+                    options.handshake.auto_resumption = null;
+                }
+                if (self.alpn) |alpn| {
+                    options.handshake.alpn_protocols = &.{alpn};
+                }
                 options.handshake.original_destination_connection_id =
                     self.original_dcid;
                 options.handshake.local_connection_id = self.local_cid;
                 if (options.handshake.server_name == null) {
                     options.handshake.server_name = self.uri_endpoint.tls_host;
+                }
+                if (self.early) |early| {
+                    options.handshake.auto_resumption = null;
+                    options.handshake.resumption_server_id = early.server_id;
+                    options.handshake.resumption_now_ms = early.now_ms;
+                    const result = if (self.deadline) |absolute|
+                        Client.connectFromWithEarlyRequestWithDeadline(
+                            self.pool.endpoint,
+                            self.source,
+                            self.peer,
+                            options,
+                            early.request,
+                            early.cache,
+                            early.lease,
+                            absolute,
+                        )
+                    else
+                        Client.connectFromWithEarlyRequest(
+                            self.pool.endpoint,
+                            self.source,
+                            self.peer,
+                            options,
+                            early.request,
+                            early.cache,
+                            early.lease,
+                        );
+                    return if (result) |value|
+                        .{ .client = .{
+                            .value = value.client,
+                            .disposition = value.disposition,
+                        } }
+                    else |err|
+                        .{ .failure = err };
                 }
                 const result = if (self.deadline) |absolute|
                     Client.connectFromWithDeadline(
@@ -173,7 +227,7 @@ pub fn Pool(comptime Runtime: type) type {
                         options,
                     );
                 return if (result) |value|
-                    .{ .client = value }
+                    .{ .client = .{ .value = value } }
                 else |err|
                     .{ .failure = err };
             }
@@ -186,6 +240,8 @@ pub fn Pool(comptime Runtime: type) type {
             /// Present only when this lease uses a connection authenticated for
             /// another origin through RFC 9412 coalescing.
             request_origin_key: ?http3.OriginKey = null,
+            early_disposition: ?Runtime.EarlyRequestDisposition = null,
+            early_stream_id: ?u62 = null,
             active: bool = true,
 
             pub fn connectionHandle(self: Lease) Handle {
@@ -464,6 +520,7 @@ pub fn Pool(comptime Runtime: type) type {
                     .origin,
                     null,
                     null,
+                    null,
                 ) catch |err| return @errorCast(err);
             }
         };
@@ -657,6 +714,7 @@ pub fn Pool(comptime Runtime: type) type {
                 .origin,
                 null,
                 null,
+                null,
             );
         }
 
@@ -691,6 +749,7 @@ pub fn Pool(comptime Runtime: type) type {
                 .origin,
                 null,
                 null,
+                null,
             );
         }
 
@@ -712,6 +771,7 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 null,
                 .{ .alt_svc = target },
+                null,
                 null,
                 null,
             );
@@ -750,6 +810,7 @@ pub fn Pool(comptime Runtime: type) type {
                 .{ .alt_svc = target },
                 null,
                 null,
+                null,
             );
         }
 
@@ -780,6 +841,79 @@ pub fn Pool(comptime Runtime: type) type {
                 .{ .alt_svc = target },
                 waiter,
                 reclaimer,
+                null,
+            );
+        }
+
+        /// Offer one prepared request in 0-RTT only when acquisition creates a
+        /// new connection. An idle/shared reuse remains an ordinary 1-RTT
+        /// lease and returns no early-data disposition.
+        pub fn acquireUriAltSvcEarlyReclaiming(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            early_request: *const Runtime.PreparedEarlyRequest,
+            deadline: ?std.Io.Clock.Timestamp,
+            waiter: *connection_budget.Waiter,
+            reclaimer: connection_budget.Reclaimer,
+        ) !Lease {
+            if (self.closed) return error.PoolClosed;
+            const absolute = if (deadline) |value|
+                try deadline_policy.capTimeout(
+                    self.io,
+                    value,
+                    self.options.client.connect_timeout,
+                )
+            else
+                deadline_policy.fromTimeout(
+                    self.io,
+                    self.options.client.connect_timeout,
+                ) catch return error.HandshakeTimeout;
+            const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+            var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
+            defer endpoint.deinit();
+            try validateConnectRoute(endpoint, .{ .alt_svc = target });
+            var options = self.options.client;
+            scopeAutoResumption(&options, endpoint.authority);
+            const automatic = options.handshake.auto_resumption orelse {
+                return self.acquireUriBefore(
+                    uri_text,
+                    absolute,
+                    null,
+                    .{ .alt_svc = target },
+                    waiter,
+                    reclaimer,
+                    null,
+                );
+            };
+            var early_lease = (try automatic.cache.beginEarlyData(
+                automatic.server_id,
+                target.alpn,
+                automatic.now_ms,
+            )) orelse return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                .{ .alt_svc = target },
+                waiter,
+                reclaimer,
+                null,
+            );
+            defer early_lease.deinit();
+            return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                .{ .alt_svc = target },
+                waiter,
+                reclaimer,
+                .{
+                    .request = early_request,
+                    .cache = automatic.cache,
+                    .lease = &early_lease,
+                    .server_id = automatic.server_id,
+                    .now_ms = automatic.now_ms,
+                },
             );
         }
 
@@ -799,6 +933,7 @@ pub fn Pool(comptime Runtime: type) type {
             route: ConnectRoute,
             shared_waiter: ?*connection_budget.Waiter,
             reclaimer: ?connection_budget.Reclaimer,
+            early: ?EarlyConnectContext,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -875,20 +1010,41 @@ pub fn Pool(comptime Runtime: type) type {
             };
             defer self.allocator.free(addresses);
             var last_error: ?anyerror = null;
+            var next_early = early;
+            var early_path_failed = false;
             for (addresses) |peer| {
                 if (!sameAddressFamily(self.options.local_address, peer)) {
                     continue;
                 }
-                const connected = self.connectOne(
+                var connected = self.connectOne(
                     &endpoint,
                     peer,
                     deadline,
                     redirect,
+                    switch (route) {
+                        .origin => null,
+                        .alt_svc => |target| target.alpn,
+                    },
+                    next_early,
+                    early_path_failed,
                 ) catch |err| {
                     last_error = err;
-                    if (shouldTryNextAddress(err)) continue;
+                    if (shouldTryNextAddress(err)) {
+                        // An early packet might already have reached this
+                        // address. Every remaining address is therefore a
+                        // normal handshake followed by one safe 1-RTT replay.
+                        if (next_early != null) {
+                            next_early = null;
+                            early_path_failed = true;
+                        }
+                        continue;
+                    }
                     return err;
                 };
+                if (early_path_failed) {
+                    std.debug.assert(connected.disposition == null);
+                    connected.disposition = .rejected;
+                }
                 errdefer {
                     _ = self.dispatcher.unregisterConnection(
                         connected.handle,
@@ -922,6 +1078,11 @@ pub fn Pool(comptime Runtime: type) type {
                     .pool = self,
                     .handle = connected.handle,
                     .was_reused = false,
+                    .early_disposition = connected.disposition,
+                    .early_stream_id = if (connected.disposition != null)
+                        early.?.request.stream_id
+                    else
+                        null,
                 };
             }
             return last_error orelse error.AddressFamilyUnsupported;
@@ -953,6 +1114,9 @@ pub fn Pool(comptime Runtime: type) type {
             peer: std.Io.net.IpAddress,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?owning_pool.RedirectConnectContext,
+            alpn: ?[]const u8,
+            early: ?EarlyConnectContext,
+            disable_auto_resumption: bool,
         ) !Connected {
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
@@ -994,6 +1158,9 @@ pub fn Pool(comptime Runtime: type) type {
                 .local_cid = &local_cid,
                 .deadline = deadline,
                 .redirect = redirect,
+                .alpn = alpn,
+                .early = early,
+                .disable_auto_resumption = disable_auto_resumption,
             };
             const Wake = union(enum) {
                 connected: ConnectCompletion,
@@ -1008,7 +1175,7 @@ pub fn Pool(comptime Runtime: type) type {
                 var wake = wake_value;
                 switch (wake) {
                     .connected => |*completion| switch (completion.*) {
-                        .client => |*value| value.deinit(),
+                        .client => |*value| value.value.deinit(),
                         .failure => {},
                     },
                     .endpoint => |*result| if (result.*) |*event| {
@@ -1053,7 +1220,7 @@ pub fn Pool(comptime Runtime: type) type {
                             }
                             const connected = try self.allocator.create(Client);
                             errdefer self.allocator.destroy(connected);
-                            connected.* = client_value;
+                            connected.* = client_value.value;
                             errdefer connected.deinit();
                             try connected.ensureSettingsSentOnce();
                             try connected.bindDispatcher();
@@ -1066,6 +1233,7 @@ pub fn Pool(comptime Runtime: type) type {
                             return .{
                                 .handle = pending_handle,
                                 .client = connected,
+                                .disposition = client_value.disposition,
                             };
                         },
                     },

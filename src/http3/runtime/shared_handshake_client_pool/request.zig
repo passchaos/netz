@@ -57,6 +57,39 @@ pub fn Transaction(
             uri: []const u8,
             request: Runtime.UriRequestOptions,
         ) OperationError!Self {
+            var self = try initState(pool, lease, uri, request);
+            errdefer self.deinit();
+            try self.progress();
+            return self;
+        }
+
+        /// Attach response processing to the request stream already committed
+        /// by an accepted 0-RTT handshake. No request bytes are sent here.
+        pub fn initAcceptedEarly(
+            pool: *Pool,
+            lease: *Pool.Lease,
+            uri: []const u8,
+            request: Runtime.UriRequestOptions,
+        ) OperationError!Self {
+            const stream_id = lease.early_stream_id orelse
+                return error.UnexpectedEarlyData;
+            if (lease.early_disposition == null or
+                lease.early_disposition.? != .accepted)
+            {
+                return error.UnexpectedEarlyData;
+            }
+            var self = try initState(pool, lease, uri, request);
+            self.stream_id = stream_id;
+            self.send_phase = .response;
+            return self;
+        }
+
+        fn initState(
+            pool: *Pool,
+            lease: *Pool.Lease,
+            uri: []const u8,
+            request: Runtime.UriRequestOptions,
+        ) OperationError!Self {
             if (!lease.active) return error.InvalidLease;
             const route = try route_key.Key.init(uri, null, null);
             const requested_origin = route.origin();
@@ -77,15 +110,13 @@ pub fn Transaction(
                     requested_origin.host,
                 ) catch return error.InvalidOrigin;
             }
-            var self = Self{
+            const self = Self{
                 .pool = pool,
                 .lease = lease,
                 .uri = uri,
                 .route = route,
                 .request = request,
             };
-            errdefer self.deinit();
-            try self.progress();
             return self;
         }
 

@@ -12,6 +12,7 @@
 const std = @import("std");
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
+const early_data = @import("../../../http/early_data.zig");
 const authority = @import("../handshake_client_pool/shared/authority.zig");
 const route_key = @import("../handshake_client_pool/shared/route.zig");
 const receive_race = @import("dispatcher/receive.zig");
@@ -43,6 +44,19 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
 
         const Self = @This();
         pub const RequestError = Pool.ReceiveOperationError || Error;
+        pub const EarlyRequestMetadata = struct {
+            disposition: Runtime.EarlyRequestDisposition,
+            retry_reason: Runtime.EarlyDataRetryReason,
+        };
+        pub const EarlyRequestResult = struct {
+            response: Pool.OwnedResponse,
+            early_data: ?EarlyRequestMetadata = null,
+        };
+        const EarlyRequestConfig = struct {
+            options: Runtime.PreparedEarlyRequestOptions,
+            local_settings: http3.Settings,
+            remembered_peer_settings: http3.Settings,
+        };
         const CommandState = enum { idle, queued, in_flight, completed };
 
         const Command = struct {
@@ -51,6 +65,8 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             alt_svc: ?http3.AltSvcTarget,
             deadline: ?std.Io.Clock.Timestamp,
             reclaimer: ?connection_budget.Reclaimer = null,
+            early_config: ?EarlyRequestConfig = null,
+            early_metadata: ?EarlyRequestMetadata = null,
             budget_waiter: connection_budget.Waiter = .{},
             route: route_key.Key,
             previous: ?*Command = null,
@@ -247,6 +263,41 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 );
             }
 
+            /// Offer this request in 0-RTT only if admission creates a new
+            /// connection with a usable scoped ticket. Reuse remains 1-RTT.
+            pub fn requestAltSvcEarlyReclaiming(
+                self: Sender,
+                uri: []const u8,
+                target: http3.AltSvcTarget,
+                request_options: Runtime.UriRequestOptions,
+                early_options: Runtime.PreparedEarlyRequestOptions,
+                local_settings: http3.Settings,
+                remembered_peer_settings: http3.Settings,
+                deadline: ?std.Io.Clock.Timestamp,
+                reclaimer: connection_budget.Reclaimer,
+            ) RequestError!EarlyRequestResult {
+                if (deadline) |absolute| {
+                    if (absolute.clock != .awake or absolute.durationFromNow(
+                        self.state.io,
+                    ).raw.nanoseconds <= 0) return error.Timeout;
+                }
+                var metadata: ?EarlyRequestMetadata = null;
+                const response = try self.requestBeforeConfigured(
+                    uri,
+                    request_options,
+                    target,
+                    deadline,
+                    reclaimer,
+                    .{
+                        .options = early_options,
+                        .local_settings = local_settings,
+                        .remembered_peer_settings = remembered_peer_settings,
+                    },
+                    &metadata,
+                );
+                return .{ .response = response, .early_data = metadata };
+            }
+
             fn requestBefore(
                 self: Sender,
                 uri: []const u8,
@@ -255,14 +306,37 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 deadline: ?std.Io.Clock.Timestamp,
                 reclaimer: ?connection_budget.Reclaimer,
             ) RequestError!Pool.OwnedResponse {
+                return self.requestBeforeConfigured(
+                    uri,
+                    request_options,
+                    alt_svc,
+                    deadline,
+                    reclaimer,
+                    null,
+                    null,
+                );
+            }
+
+            fn requestBeforeConfigured(
+                self: Sender,
+                uri: []const u8,
+                request_options: Runtime.UriRequestOptions,
+                alt_svc: ?http3.AltSvcTarget,
+                deadline: ?std.Io.Clock.Timestamp,
+                reclaimer: ?connection_budget.Reclaimer,
+                early_config: ?EarlyRequestConfig,
+                early_metadata: ?*?EarlyRequestMetadata,
+            ) RequestError!Pool.OwnedResponse {
                 var command: Command = .{
                     .uri = uri,
                     .request = request_options,
                     .alt_svc = alt_svc,
                     .deadline = deadline,
                     .reclaimer = reclaimer,
+                    .early_config = early_config,
                     .route = try route_key.Key.init(uri, alt_svc, null),
                 };
+                if (early_metadata) |output| output.* = null;
                 try enqueue(self.state, &command);
                 const wait_err = waitForCompletion(
                     self.state,
@@ -276,7 +350,11 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     discardResult(self.state, &command);
                     return err;
                 }
-                return takeResult(self.state, &command);
+                const response = try takeResult(self.state, &command);
+                if (early_metadata) |output| {
+                    output.* = command.early_metadata;
+                }
+                return response;
             }
         };
 
@@ -617,17 +695,45 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 if (canceled) {
                     complete(state, command, null, error.Canceled);
                     if (connection.command_count == 0) {
-                        releaseConnection(state, index, false);
+                        // An accepted early request was already committed by
+                        // the handshake. Without a transaction there is no
+                        // owner for its eventual response, so fail closed on
+                        // this connection instead of pooling an orphan stream.
+                        const early_request_in_flight = if (command.early_metadata) |metadata|
+                            metadata.disposition == .accepted
+                        else
+                            false;
+                        releaseConnection(
+                            state,
+                            index,
+                            early_request_in_flight,
+                        );
                     }
                     continue;
                 }
                 command.connection_index = index;
-                command.transaction = Pool.RequestTransaction.init(
-                    state.pool,
-                    &connection.lease,
-                    command.uri,
-                    command.request,
-                ) catch |err| {
+                command.transaction = (if (command.early_metadata) |metadata|
+                    if (metadata.disposition == .accepted)
+                        Pool.RequestTransaction.initAcceptedEarly(
+                            state.pool,
+                            &connection.lease,
+                            command.uri,
+                            command.request,
+                        )
+                    else
+                        Pool.RequestTransaction.init(
+                            state.pool,
+                            &connection.lease,
+                            command.uri,
+                            command.request,
+                        )
+                else
+                    Pool.RequestTransaction.init(
+                        state.pool,
+                        &connection.lease,
+                        command.uri,
+                        command.request,
+                    )) catch |err| {
                     command.connection_index = null;
                     complete(state, command, null, err);
                     if (connection.command_count == 0) {
@@ -658,6 +764,56 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
         ) RequestError!Pool.Lease {
             if (command.alt_svc) |target| {
                 if (command.reclaimer) |reclaimer| {
+                    if (command.early_config) |config| {
+                        const uri = std.Uri.parse(command.uri) catch
+                            return error.InvalidUri;
+                        var endpoint = try Runtime.uriEndpoint(
+                            state.allocator,
+                            uri,
+                        );
+                        defer endpoint.deinit();
+                        const path = try Runtime.uriRequestTargetAlloc(
+                            state.allocator,
+                            uri,
+                        );
+                        defer state.allocator.free(path);
+                        var prepared = try Runtime.PreparedEarlyRequest
+                            .initWithOptions(
+                            state.allocator,
+                            .{
+                                .method = command.request.method,
+                                .path = path,
+                                .scheme = "https",
+                                .authority = endpoint.authority,
+                                .headers = command.request.headers,
+                                .body = command.request.body,
+                                .trailers = command.request.trailers,
+                            },
+                            config.local_settings,
+                            config.remembered_peer_settings,
+                            config.options,
+                        );
+                        defer prepared.deinit();
+                        const lease = state.pool
+                            .acquireUriAltSvcEarlyReclaiming(
+                            command.uri,
+                            target,
+                            &prepared,
+                            command.deadline,
+                            &command.budget_waiter,
+                            reclaimer,
+                        ) catch |err| return @errorCast(err);
+                        if (lease.early_disposition) |disposition| {
+                            command.early_metadata = .{
+                                .disposition = disposition,
+                                .retry_reason = if (disposition == .accepted)
+                                    .none
+                                else
+                                    .early_data_rejected,
+                            };
+                        }
+                        return lease;
+                    }
                     return state.pool.acquireUriAltSvcReclaiming(
                         command.uri,
                         target,
@@ -799,7 +955,72 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                             }
                             return;
                         };
-                        if (maybe_response) |response| {
+                        if (maybe_response) |response_value| {
+                            var response = response_value;
+                            if (command.early_metadata) |*metadata| {
+                                if (metadata.disposition == .accepted and
+                                    metadata.retry_reason == .none and
+                                    response.response.status ==
+                                        early_data.too_early_status)
+                                {
+                                    response.deinit();
+                                    metadata.retry_reason = .too_early;
+                                    command.transaction = null;
+                                    if (command.deadline) |deadline| {
+                                        if (deadline.durationFromNow(
+                                            state.io,
+                                        ).raw.nanoseconds <= 0) {
+                                            removeConnectionCommand(
+                                                state,
+                                                connection,
+                                                index,
+                                            );
+                                            command.connection_index = null;
+                                            complete(
+                                                state,
+                                                command,
+                                                null,
+                                                error.Timeout,
+                                            );
+                                            refreshAuthority(state, connection);
+                                            if (connection.command_count == 0) {
+                                                releaseConnection(
+                                                    state,
+                                                    connection_index,
+                                                    false,
+                                                );
+                                            }
+                                            return;
+                                        }
+                                    }
+                                    command.transaction = Pool.RequestTransaction
+                                        .init(
+                                        state.pool,
+                                        &connection.lease,
+                                        command.uri,
+                                        command.request,
+                                    ) catch |err| {
+                                        removeConnectionCommand(
+                                            state,
+                                            connection,
+                                            index,
+                                        );
+                                        command.connection_index = null;
+                                        complete(state, command, null, err);
+                                        refreshAuthority(state, connection);
+                                        if (connection.command_count == 0) {
+                                            releaseConnection(
+                                                state,
+                                                connection_index,
+                                                true,
+                                            );
+                                        }
+                                        return;
+                                    };
+                                    refreshAuthority(state, connection);
+                                    return;
+                                }
+                            }
                             command.transaction = null;
                             removeConnectionCommand(state, connection, index);
                             command.connection_index = null;

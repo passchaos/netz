@@ -11839,12 +11839,130 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Complete a typed 0-RTT handshake on a caller-owned endpoint while
+    /// consuming only the supplied CID-routed datagram source.
+    pub fn connectFromWithEarlyRequest(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    ) Error!EarlyHandshakeClient {
+        return connectFromWithEarlyRequestBefore(
+            endpoint,
+            source,
+            server,
+            options,
+            early_request,
+            cache,
+            lease,
+            try connectDeadline(endpoint.io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectFromWithEarlyRequestWithDeadline(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        return connectFromWithEarlyRequestBefore(
+            endpoint,
+            source,
+            server,
+            options,
+            early_request,
+            cache,
+            lease,
+            try cappedConnectDeadline(
+                endpoint.io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn connectFromWithEarlyRequestBefore(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        if (options.handshake.early_data != null) {
+            return error.InvalidEarlyDataLease;
+        }
+        if (options.session.max_concurrent_request_streams == 0) {
+            return error.ExcessiveLoad;
+        }
+        if (!std.meta.eql(
+            early_request.local_settings,
+            options.session.local_settings,
+        )) {
+            return error.InvalidSetting;
+        }
+        try early_request.validateTransportLimits(
+            .{ .quic = endpoint.limits },
+            options,
+            lease,
+        );
+        var early_options = options;
+        early_options.handshake.early_data = early_request.offer(cache, lease);
+        var client = try connectFromBeforeInternal(
+            endpoint,
+            source,
+            server,
+            early_options,
+            deadline,
+            early_request,
+        );
+        errdefer client.deinit();
+        const disposition = try client.adoptEarlyRequest(early_request);
+        if (options.handshake.resumption_server_id) |server_id| {
+            if (options.handshake.resumption_now_ms) |now_ms| {
+                try client.configureSessionTicketCache(
+                    cache,
+                    server_id,
+                    now_ms,
+                );
+            }
+        }
+        return .{ .client = client, .disposition = disposition };
+    }
+
     fn connectFromBefore(
         endpoint: *quic.runtime.Endpoint,
         source: quic.runtime.DatagramSource,
         server: net.IpAddress,
         options: HandshakeClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectFromBeforeInternal(
+            endpoint,
+            source,
+            server,
+            options,
+            deadline,
+            null,
+        );
+    }
+
+    fn connectFromBeforeInternal(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options.session);
         var established = if (deadline) |absolute|
@@ -11870,7 +11988,7 @@ pub const HandshakeClient = struct {
             server,
             established,
             options.session,
-            null,
+            accepted_early_request,
         );
         errdefer client.deinit();
         if (options.handshake.auto_resumption) |automatic| {

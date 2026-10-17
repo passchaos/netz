@@ -99,17 +99,15 @@ pub const Pool = struct {
             options.max_total_connections,
         );
         errdefer shared_budget.deinit();
-        const http3_state = if (options.http3) |http3_options| blk: {
-            var effective = http3_options;
-            effective.shared_endpoint = effective.shared_endpoint and
-                effective.early_data == null;
-            break :blk try h3_support.State.create(
+        const http3_state = if (options.http3) |http3_options|
+            try h3_support.State.create(
                 allocator,
                 io,
-                effective,
+                http3_options,
                 shared_budget,
-            );
-        } else null;
+            )
+        else
+            null;
         errdefer if (http3_state) |state| state.deinit();
         return .{
             .allocator = allocator,

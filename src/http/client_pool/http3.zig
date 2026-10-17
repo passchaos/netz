@@ -45,8 +45,8 @@ pub const Options = struct {
     shared_requests: runtime.HandshakeClientPoolSharedOptions = .{
         .max_connection_drivers = 4,
     },
-    /// Use one UDP endpoint for ordinary non-0-RTT requests. The unified pool
-    /// currently falls back to owning endpoints when 0-RTT is configured.
+    /// Use one UDP endpoint for ordinary and 0-RTT requests. The endpoint's
+    /// sole dispatcher owner handles handshake promotion and request replay.
     shared_endpoint: bool = true,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
@@ -276,6 +276,31 @@ pub const State = struct {
         else
             self.rememberedPeerSettings(origin);
         if (remembered) |settings| {
+            if (self.shared_dispatcher) |*dispatcher| {
+                const sender = dispatcher.sender();
+                var result = try sender.requestAltSvcEarlyReclaiming(
+                    uri_text,
+                    alternative.target(),
+                    options,
+                    early_options.?.preparation,
+                    self.options.handshake.session.local_settings,
+                    settings,
+                    deadline,
+                    reclaimer,
+                );
+                const owned: runtime.OwnedHandshakeResponse = .{
+                    .stream_bytes = result.response.stream_bytes,
+                    .response = result.response.response,
+                };
+                result.response = undefined;
+                return .{
+                    .response = owned,
+                    .early_data = if (result.early_data) |metadata| .{
+                        .disposition = metadata.disposition,
+                        .retry_reason = metadata.retry_reason,
+                    } else null,
+                };
+            }
             const result = try self.pool.requestUriAltSvcEarlyReclaiming(
                 uri_text,
                 alternative.target(),

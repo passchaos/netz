@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const quic = @import("../../quic/mod.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
 test "HTTP/3 shared endpoint dispatcher drives routes and isolated deadlines" {
@@ -357,4 +358,375 @@ test "HTTP/3 shared endpoint dispatcher drives routes and isolated deadlines" {
     try std.testing.expectEqual(@as(usize, 2), pool.connectionCount());
     try std.testing.expectEqual(@as(usize, 2), pool.routeCount());
     try std.testing.expectEqual(@as(usize, 2), pool.idleCount());
+}
+
+const SharedEarlyScenario = struct {
+    reject_early_data: bool = false,
+    initial_status: u16 = 425,
+    retry_status: u16 = 201,
+};
+
+fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const ticket = "shared-endpoint-early-ticket";
+    const psk = [_]u8{0xc1} ** 32;
+    const server_id = "localhost:9443";
+    var cache = try quic.resumption.Cache.init(allocator, 2);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = server_id,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1_000,
+        .lifetime_seconds = 3_600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+
+    const limits: runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const server_cid = [_]u8{ 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9 };
+    var server_options = runtime.HandshakeServerOptions{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xca} ** 32,
+            .x25519_secret_key = [_]u8{0xcb} ** 32,
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 41,
+                .issued_at_ms = 1_000,
+                .lifetime_seconds = 3_600,
+                .now_ms = 1_500,
+            },
+            .early_data = .{
+                .accept = true,
+                .replay_filter = &replay_filter,
+                .replay_key = "shared-endpoint-early-request",
+            },
+        },
+    };
+    if (scenario.reject_early_data) {
+        server_options.handshake.cipher_suites =
+            &.{.chacha20_poly1305_sha256};
+    }
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        server_options,
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        server: *runtime.HandshakeServer,
+        scenario: SharedEarlyScenario,
+        client_port: ?u16 = null,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn expectRequest(
+            self: *@This(),
+            request: *const runtime.OwnedHandshakeRequest,
+            expected_stream_id: u62,
+            expected_early: bool,
+        ) !void {
+            try std.testing.expectEqual(expected_stream_id, request.stream_id);
+            try std.testing.expectEqual(expected_early, request.was_early_data);
+            try std.testing.expectEqualStrings(
+                "/shared-early",
+                request.request.path,
+            );
+            try std.testing.expectEqualStrings(
+                "shared request body",
+                request.request.body,
+            );
+            try std.testing.expectEqualStrings(
+                "complete",
+                request.request.trailers[0].value,
+            );
+            self.requests += 1;
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.acceptWithTimeout(.fromSeconds(5));
+            defer session.deinit();
+            try std.testing.expectEqual(
+                if (self.scenario.reject_early_data)
+                    quic.zero_rtt.handshake.Status.rejected
+                else
+                    quic.zero_rtt.handshake.Status.accepted,
+                session.established.early_data_status,
+            );
+            var first = try session.receiveRequestWithTimeout(.fromSeconds(5));
+            defer first.deinit(self.server.allocator);
+            self.client_port = switch (first.from) {
+                .ip4 => |address| address.port,
+                .ip6 => |address| address.port,
+            };
+            try self.expectRequest(
+                &first,
+                0,
+                !self.scenario.reject_early_data,
+            );
+            if (self.scenario.reject_early_data) {
+                try session.sendResponse(first.stream_id, .{
+                    .status = self.scenario.retry_status,
+                    .request_method = first.request.method,
+                    .body = "rejected replay",
+                });
+            } else {
+                try session.sendResponse(first.stream_id, .{
+                    .status = self.scenario.initial_status,
+                    .request_method = first.request.method,
+                    .body = if (self.scenario.initial_status == 425)
+                        ""
+                    else
+                        "accepted early",
+                });
+                if (self.scenario.initial_status == 425) {
+                    var retry = try session.receiveRequestWithTimeout(
+                        .fromSeconds(5),
+                    );
+                    defer retry.deinit(self.server.allocator);
+                    try self.expectRequest(&retry, 4, false);
+                    try session.sendResponse(retry.stream_id, .{
+                        .status = self.scenario.retry_status,
+                        .request_method = retry.request.method,
+                        .body = if (self.scenario.retry_status == 425)
+                            "still too early"
+                        else
+                            "accepted replay",
+                    });
+                }
+            }
+
+            var reused = try session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            defer reused.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(u62, if (!self.scenario.reject_early_data and
+                    self.scenario.initial_status == 425) 8 else 4),
+                reused.stream_id,
+            );
+            try std.testing.expect(!reused.was_early_data);
+            try std.testing.expectEqualStrings(
+                "/shared-reuse",
+                reused.request.path,
+            );
+            self.requests += 1;
+            try session.sendResponse(reused.stream_id, .{
+                .status = 200,
+                .request_method = reused.request.method,
+                .body = "reused one-rtt",
+            });
+        }
+    };
+    var worker = Worker{ .server = &server, .scenario = scenario };
+    const server_thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+
+    var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .limits = limits,
+        .max_connections = 1,
+        .client = .{
+            .handshake = .{
+                .original_destination_connection_id = &.{},
+                .local_connection_id = &.{},
+                .random = [_]u8{0xcc} ** 32,
+                .x25519_secret_key = [_]u8{0xcd} ** 32,
+                .auto_resumption = .{
+                    .cache = &cache,
+                    .server_id = "replaced-by-origin",
+                    .now_ms = 1_500,
+                },
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 4096,
+                    .enable_pacing = false,
+                },
+            },
+            .connect_timeout = .fromSeconds(3),
+        },
+    });
+    defer pool.deinit();
+    var dispatcher = try runtime.SharedHandshakeClientPoolRequestDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_active_connections = 1 },
+    );
+    var dispatcher_active = true;
+    defer if (dispatcher_active) dispatcher.deinit();
+    const sender = dispatcher.sender();
+    var driver = try std.Io.concurrent(
+        io,
+        runtime.SharedHandshakeClientPoolRequestDispatcher.run,
+        .{&dispatcher},
+    );
+    var driver_active = true;
+    defer if (driver_active) {
+        dispatcher.close();
+        driver.cancel(io) catch {};
+        driver.await(io) catch {};
+    };
+
+    const target: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "127.0.0.1",
+        .origin_host = "localhost",
+        .port = server.address().ip4.port,
+    };
+    const NoReclaim = struct {
+        fn reclaim(_: *anyopaque) bool {
+            return false;
+        }
+    };
+    var reclaimer_context: u8 = 0;
+    var result = try sender.requestAltSvcEarlyReclaiming(
+        "https://localhost:9443/shared-early",
+        target,
+        .{
+            .headers = &.{.{ .name = "x-early", .value = "original" }},
+            .body = "shared request body",
+            .trailers = &.{.{ .name = "x-finished", .value = "complete" }},
+        },
+        .{},
+        .{},
+        .{},
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) }),
+        .{ .context = &reclaimer_context, .reclaim = NoReclaim.reclaim },
+    );
+    defer result.response.deinit();
+    try std.testing.expect(result.early_data != null);
+    try std.testing.expectEqual(
+        if (scenario.reject_early_data)
+            runtime.EarlyRequestDisposition.rejected
+        else
+            runtime.EarlyRequestDisposition.accepted,
+        result.early_data.?.disposition,
+    );
+    try std.testing.expectEqual(
+        if (scenario.reject_early_data)
+            runtime.EarlyDataRetryReason.early_data_rejected
+        else if (scenario.initial_status == 425)
+            runtime.EarlyDataRetryReason.too_early
+        else
+            runtime.EarlyDataRetryReason.none,
+        result.early_data.?.retry_reason,
+    );
+    try std.testing.expectEqual(
+        if (!scenario.reject_early_data and scenario.initial_status != 425)
+            scenario.initial_status
+        else
+            scenario.retry_status,
+        result.response.response.status,
+    );
+    try std.testing.expectEqualStrings(
+        if (scenario.reject_early_data)
+            "rejected replay"
+        else if (scenario.initial_status != 425)
+            "accepted early"
+        else if (scenario.retry_status == 425)
+            "still too early"
+        else
+            "accepted replay",
+        result.response.response.body,
+    );
+
+    // A fresh ticket must remain unused when the established connection can
+    // be reused: 0-RTT is a new-connection optimization, never a request mode
+    // on an existing QUIC session.
+    try cache.store(.{
+        .server_id = server_id,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1_000,
+        .lifetime_seconds = 3_600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var reused = try sender.requestAltSvcEarlyReclaiming(
+        "https://localhost:9443/shared-reuse",
+        target,
+        .{},
+        .{},
+        .{},
+        .{},
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) }),
+        .{ .context = &reclaimer_context, .reclaim = NoReclaim.reclaim },
+    );
+    defer reused.response.deinit();
+    try std.testing.expect(reused.early_data == null);
+    try std.testing.expectEqual(@as(u16, 200), reused.response.response.status);
+    try std.testing.expectEqualStrings(
+        "reused one-rtt",
+        reused.response.response.body,
+    );
+    const cache_stats = cache.stats();
+    try std.testing.expectEqual(@as(usize, 0), cache_stats.active_early_data_leases);
+    try std.testing.expectEqual(@as(usize, 1), cache_stats.reusable_early_data_tickets);
+
+    dispatcher.close();
+    try driver.await(io);
+    driver_active = false;
+    dispatcher.deinit();
+    dispatcher_active = false;
+    server_thread.join();
+    server_joined = true;
+    if (worker.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, if (!scenario.reject_early_data and
+            scenario.initial_status == 425) 3 else 2),
+        worker.requests,
+    );
+    try std.testing.expectEqual(pool.address().ip4.port, worker.client_port.?);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+}
+
+test "HTTP/3 shared endpoint dispatcher retries accepted 425 once" {
+    try runSharedEarlyScenario(.{});
+}
+
+test "HTTP/3 shared endpoint dispatcher returns retry 425 without looping" {
+    try runSharedEarlyScenario(.{ .retry_status = 425 });
+}
+
+test "HTTP/3 shared endpoint dispatcher replays TLS-rejected early data" {
+    try runSharedEarlyScenario(.{
+        .reject_early_data = true,
+        .retry_status = 202,
+    });
 }

@@ -345,6 +345,13 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
         server: *http3_runtime.HandshakeServer,
         store: *quic.resumption.ticket.ServerStore,
         accepts: usize = 0,
+        client_addresses: [5]?std.Io.net.IpAddress = .{
+            null,
+            null,
+            null,
+            null,
+            null,
+        },
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -362,6 +369,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             );
             var learned = try first.receiveRequestWithTimeout(.fromSeconds(5));
             defer learned.deinit(self.server.allocator);
+            self.client_addresses[0] = learned.from;
             try std.testing.expectEqualStrings("/learn-settings", learned.request.path);
             try std.testing.expect(!learned.was_early_data);
             _ = try first.established.issueSessionTicket(
@@ -391,6 +399,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             );
             var early = try second.receiveRequestWithTimeout(.fromSeconds(5));
             defer early.deinit(self.server.allocator);
+            self.client_addresses[1] = early.from;
             try std.testing.expectEqualStrings("/early", early.request.path);
             try std.testing.expect(early.was_early_data);
             try second.sendResponse(early.stream_id, .{
@@ -433,6 +442,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
                 .fromSeconds(5),
             );
             defer replayed.deinit(self.server.allocator);
+            self.client_addresses[2] = replayed.from;
             try std.testing.expectEqualStrings(
                 "/transport-rejected",
                 replayed.request.path,
@@ -466,6 +476,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             );
             var unsafe = try fourth.receiveRequestWithTimeout(.fromSeconds(5));
             defer unsafe.deinit(self.server.allocator);
+            self.client_addresses[3] = unsafe.from;
             try std.testing.expectEqualStrings("POST", unsafe.request.method);
             try std.testing.expectEqualStrings("/unsafe", unsafe.request.path);
             try std.testing.expect(!unsafe.was_early_data);
@@ -498,6 +509,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
                 .fromSeconds(5),
             );
             defer opted_out.deinit(self.server.allocator);
+            self.client_addresses[4] = opted_out.from;
             try std.testing.expectEqualStrings(
                 "/opt-out",
                 opted_out.request.path,
@@ -699,6 +711,12 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     if (tcp_worker.err) |err| return err;
     if (h3_worker.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 5), h3_worker.accepts);
+    for (h3_worker.client_addresses[1..]) |address| {
+        try std.testing.expectEqual(
+            h3_worker.client_addresses[0],
+            address,
+        );
+    }
 }
 
 test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
