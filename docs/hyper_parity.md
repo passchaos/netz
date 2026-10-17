@@ -1621,6 +1621,18 @@ server, cleartext/TLS combinations exchange 513- and 777-byte payloads, cross
 multi-byte QUIC-varint and fragmented-stream boundaries, skip unknown Capsule
 types and Context IDs, validate H2 ENABLE_CONNECT_PROTOCOL, and keep HTTP/1.1's
 legacy-compatible optional ALPN distinct from mandatory H2 ALPN.
+Above those Sessions, `http3.connect_udp.relay` now provides one shared,
+policy-neutral UDP forwarding loop for H1, H2, and H3. Applications still resolve
+and authorize the target and retain ownership of the bound UDP socket and
+Session. The relay filters packets from any other source, preserves empty
+datagrams, exposes saturating directional/drop statistics, supports bounded
+target-side UDP buffers with explicit truncation drop-or-fail policy, and
+returns typed peer-close, cancellation, absolute-deadline, or datagram-limit
+reasons. Its cancel-safe select settles the losing Session/UDP read before a
+flow-controlled H2 write, preventing two owners from racing the H2 reader.
+Real H1, H2, and H3 loopback UDP echo tests cover bidirectional payloads, empty UDP,
+spoofed-source drops, truncation policy, half-close, external cancellation,
+deadline expiry, and continued Session use after canceled reads.
 The authenticated H3 client now also provides the execution primitive needed
 by a cloneable request sender: one connection accepts an owned-response batch
 whose members retain independent awake-clock deadlines and optional active

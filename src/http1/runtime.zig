@@ -14095,4 +14095,5 @@ test {
     _ = @import("runtime/tls_server_api_tests.zig");
     _ = @import("runtime/date_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
+    _ = @import("runtime/connect_udp_relay_tests.zig");
 }

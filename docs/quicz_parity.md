@@ -861,6 +861,15 @@ non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both
 versions, including H2 Extended CONNECT settings, H1 Upgrade, multi-byte
 Capsule lengths, fragmentation, and unknown extension skipping.
+The version-independent CONNECT-UDP layer also exposes a caller-owned UDP relay:
+target resolution and authorization remain application policy, while the relay
+preserves datagram boundaries, filters unexpected sources, handles empty and
+truncated packets, reports directional/drop counters, and terminates on typed
+peer-close, cancellation, deadline, or forwarding-limit reasons. One
+cancel-safe select serializes Session ownership so H2 flow-control writes do not
+race an independent reader. H3 typed Sessions now match H1/H2 caller-buffer
+receive and retain complete payloads across short-output retries; real H1/H2/H3
+UDP echo regressions exercise the forwarding lifecycle.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |

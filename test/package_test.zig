@@ -646,6 +646,7 @@ test "public modules are reachable" {
         "AcceptedConnectUdp",
     ));
     inline for (&.{
+        "maxPayloadSize",
         "receiveInto",
         "receiveIntoWithTimeout",
         "receiveIntoWithDeadline",
@@ -813,6 +814,7 @@ test "public modules are reachable" {
         "AcceptedConnectUdp",
     ));
     inline for (&.{
+        "maxPayloadSize",
         "receiveInto",
         "receiveIntoWithTimeout",
         "receiveIntoWithDeadline",
@@ -3260,6 +3262,23 @@ test "public modules are reachable" {
         netz.http3.connect_udp,
         "ReceivedUdpPayload",
     ));
+    try std.testing.expect(@hasDecl(netz.http3.connect_udp, "relay"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp.relay,
+        "Options",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp.relay,
+        "EndReason",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp.relay,
+        "Stats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp.relay,
+        "run",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.connect_udp,
         "UriTemplate",
@@ -3272,6 +3291,21 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "ConnectUdpServerSession",
     ));
+    inline for (&.{
+        "maxPayloadSize",
+        "receiveInto",
+        "receiveIntoWithTimeout",
+        "receiveIntoWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.ConnectUdpClientSession,
+            decl,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.ConnectUdpServerSession,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "startConnectUdp",

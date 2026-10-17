@@ -85,6 +85,10 @@ pub fn Session(
             return self.tunnel.stream_id;
         }
 
+        pub fn maxPayloadSize(_: *const Self) ?usize {
+            return ConnectUdp.max_udp_payload_size;
+        }
+
         pub fn writeInProgress(self: *const Self) bool {
             return self.pending_send != null;
         }

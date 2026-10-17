@@ -33,10 +33,17 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
         },
     );
     defer server.deinit();
+    var echo_socket = try std.Io.net.IpAddress.bind(
+        &.{ .ip4 = .loopback(0) },
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    defer echo_socket.close(io);
 
     const ServerWorker = struct {
         server: *runtime.HandshakeServer,
         accepted: *std.Io.Event,
+        target: std.Io.net.IpAddress,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -86,24 +93,105 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
                     event.message.stream_id,
                 );
                 defer udp.deinit();
-                var incoming = try udp.receiveWithTimeout(.fromSeconds(2));
-                defer incoming.deinit(self.server.allocator);
-                try std.testing.expectEqualStrings(
-                    if (index == 0) "client-udp" else "client-custom",
-                    incoming.payload,
-                );
-                try udp.sendWithTimeout(
-                    if (index == 0) "server-udp" else "server-custom",
-                    .fromSeconds(2),
-                );
+                if (index == 0) {
+                    var relay_socket = try std.Io.net.IpAddress.bind(
+                        &.{ .ip4 = .loopback(0) },
+                        self.server.quic_server.endpoint.io,
+                        .{ .mode = .dgram, .protocol = .udp },
+                    );
+                    defer relay_socket.close(
+                        self.server.quic_server.endpoint.io,
+                    );
+                    var session_storage: [4096]u8 = undefined;
+                    var udp_storage: [4096]u8 = undefined;
+                    const relayed = try http3.connect_udp.relay.run(
+                        runtime.ConnectUdpServerSession,
+                        self.server.quic_server.endpoint.io,
+                        &udp,
+                        &relay_socket,
+                        &self.target,
+                        &session_storage,
+                        &udp_storage,
+                        .{
+                            .deadline = .fromNow(
+                                self.server.quic_server.endpoint.io,
+                                .{
+                                    .raw = .fromSeconds(2),
+                                    .clock = .awake,
+                                },
+                            ),
+                            .max_forwarded_datagrams = 2,
+                        },
+                    );
+                    try std.testing.expectEqual(
+                        http3.connect_udp.relay.EndReason.datagram_limit,
+                        relayed.reason,
+                    );
+                    try std.testing.expectEqual(
+                        @as(u64, 1),
+                        relayed.stats.session_to_udp_datagrams,
+                    );
+                    try std.testing.expectEqual(
+                        @as(u64, 1),
+                        relayed.stats.udp_to_session_datagrams,
+                    );
+                } else {
+                    var incoming = try udp.receiveWithTimeout(.fromSeconds(2));
+                    defer incoming.deinit(self.server.allocator);
+                    try std.testing.expectEqualStrings(
+                        "client-custom",
+                        incoming.payload,
+                    );
+                    try udp.sendWithTimeout(
+                        "server-custom",
+                        .fromSeconds(2),
+                    );
+                }
             }
         }
     };
     var accepted: std.Io.Event = .unset;
-    var worker = ServerWorker{ .server = &server, .accepted = &accepted };
+    var worker = ServerWorker{
+        .server = &server,
+        .accepted = &accepted,
+        .target = echo_socket.address,
+    };
     const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{&worker});
     var joined = false;
     defer if (!joined) thread.join();
+
+    const Echo = struct {
+        socket: *std.Io.net.Socket,
+        io: std.Io,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var storage: [http3.connect_udp.max_udp_payload_size]u8 = undefined;
+            const message = try self.socket.receiveTimeout(
+                self.io,
+                &storage,
+                .{ .duration = .{
+                    .raw = .fromSeconds(5),
+                    .clock = .awake,
+                } },
+            );
+            try std.testing.expect(message.data.len > 1);
+            for (message.data) |byte| {
+                try std.testing.expectEqual(@as(u8, 0x5a), byte);
+            }
+            try self.socket.send(self.io, &message.from, message.data);
+        }
+    };
+    var echo = Echo{ .socket = &echo_socket, .io = io };
+    const echo_thread = try std.Thread.spawn(.{}, Echo.run, .{&echo});
+    var echo_joined = false;
+    defer if (!echo_joined) echo_thread.join();
 
     var client = try runtime.HandshakeClient.connect(
         allocator,
@@ -205,10 +293,22 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
         .payload = "ignored-extension",
     }).writeInto(&extension_storage);
     try client.sendConnectDatagram(stream_id, extension);
-    try udp.sendWithDeadline("client-udp", deadline);
+    var maximum_payload_storage: [4096]u8 = undefined;
+    @memset(&maximum_payload_storage, 0x5a);
+    const maximum_payload = maximum_payload_storage[0..udp.maxPayloadSize().?];
+    try udp.sendWithDeadline(maximum_payload, deadline);
+    var short_incoming: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        udp.receiveIntoWithDeadline(&short_incoming, deadline),
+    );
     var incoming = try udp.receiveWithDeadline(deadline);
     defer incoming.deinit(allocator);
-    try std.testing.expectEqualStrings("server-udp", incoming.payload);
+    try std.testing.expectEqualSlices(
+        u8,
+        maximum_payload,
+        incoming.payload,
+    );
 
     accepted.reset();
     const template = try http3.connect_udp.UriTemplate.compile(
@@ -231,8 +331,11 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
     );
     defer custom.deinit();
     try custom.sendWithDeadline("client-custom", deadline);
-    var custom_incoming = try custom.receiveWithDeadline(deadline);
-    defer custom_incoming.deinit(allocator);
+    var custom_storage: [64]u8 = undefined;
+    const custom_incoming = try custom.receiveIntoWithDeadline(
+        &custom_storage,
+        deadline,
+    );
     try std.testing.expectEqualStrings(
         "server-custom",
         custom_incoming.payload,
@@ -240,5 +343,8 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
 
     thread.join();
     joined = true;
+    echo_thread.join();
+    echo_joined = true;
     if (worker.err) |err| return err;
+    if (echo.err) |err| return err;
 }

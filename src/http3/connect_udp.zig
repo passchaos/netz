@@ -10,6 +10,7 @@ const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
 const capsule = @import("capsule.zig");
 const capsule_session = @import("connect_udp/capsule_session.zig");
+const relay_module = @import("connect_udp/relay.zig");
 const session_module = @import("connect_udp/session.zig");
 const template_module = @import("connect_udp/template.zig");
 
@@ -428,6 +429,7 @@ pub fn Protocol(comptime Http3: type) type {
         }
 
         pub const CapsuleSessionOptions = capsule_session.Options;
+        pub const relay = relay_module.Relay(@This());
 
         pub fn CapsuleSession(
             comptime ResetCode: type,

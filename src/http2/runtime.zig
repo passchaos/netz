@@ -37575,6 +37575,7 @@ test {
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/refusal_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
+    _ = @import("runtime/connect_udp_relay_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

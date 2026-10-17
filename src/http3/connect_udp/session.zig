@@ -15,8 +15,15 @@ pub fn Session(
         transport: *Transport,
         stream_id: u62,
         send_scratch: std.ArrayList(u8) = .empty,
+        receive_scratch: std.ArrayList(u8) = .empty,
+        pending_receive: ?PendingReceive = null,
 
         const Self = @This();
+
+        const PendingReceive = struct {
+            offset: usize,
+            len: usize,
+        };
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -34,6 +41,7 @@ pub fn Session(
 
         pub fn deinit(self: *Self) void {
             self.send_scratch.deinit(self.allocator);
+            self.receive_scratch.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -123,6 +131,7 @@ pub fn Session(
         }
 
         pub fn receive(self: *Self) !ConnectUdp.OwnedUdpPayload {
+            if (try self.takePendingOwned()) |payload| return payload;
             while (true) {
                 const raw = try self.transport.receiveConnectDatagram(
                     self.stream_id,
@@ -147,6 +156,7 @@ pub fn Session(
             deadline: std.Io.Clock.Timestamp,
         ) !ConnectUdp.OwnedUdpPayload {
             _ = try deadline_policy.usableAwake(self.io, deadline);
+            if (try self.takePendingOwned()) |payload| return payload;
             while (true) {
                 const raw = try self.transport
                     .receiveConnectDatagramWithDeadline(
@@ -155,6 +165,110 @@ pub fn Session(
                 );
                 if (try self.adopt(raw)) |payload| return payload;
             }
+        }
+
+        /// Receive one Context ID 0 UDP payload into caller storage. A short
+        /// output retains the complete datagram for a later owning or
+        /// caller-buffer retry.
+        pub fn receiveInto(
+            self: *Self,
+            out: []u8,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            return self.receiveIntoUntil(out, null);
+        }
+
+        pub fn receiveIntoWithTimeout(
+            self: *Self,
+            out: []u8,
+            timeout: std.Io.Duration,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveIntoWithDeadline(out, .fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        pub fn receiveIntoWithDeadline(
+            self: *Self,
+            out: []u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.receiveIntoUntil(out, deadline);
+        }
+
+        fn receiveIntoUntil(
+            self: *Self,
+            out: []u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            if (try self.copyPendingInto(out)) |payload| return payload;
+            const maximum = self.transport.maxConnectDatagramPayloadSize(
+                self.stream_id,
+            ) orelse return error.DatagramUnavailable;
+            try self.receive_scratch.resize(self.allocator, maximum);
+            while (true) {
+                const raw = if (deadline) |absolute|
+                    try self.transport.receiveConnectDatagramIntoWithDeadline(
+                        self.stream_id,
+                        self.receive_scratch.items,
+                        absolute,
+                    )
+                else
+                    try self.transport.receiveConnectDatagramInto(
+                        self.stream_id,
+                        self.receive_scratch.items,
+                    );
+                const datagram = ConnectUdp.ContextDatagram.parse(raw) catch |err| {
+                    try self.transport.cancelRequest(
+                        self.stream_id,
+                        Http3.ApplicationErrorCode.message_error,
+                    );
+                    return err;
+                };
+                if (datagram.context_id != ConnectUdp.udp_context_id) continue;
+                const offset = @intFromPtr(datagram.payload.ptr) -
+                    @intFromPtr(self.receive_scratch.items.ptr);
+                self.pending_receive = .{
+                    .offset = offset,
+                    .len = datagram.payload.len,
+                };
+                return (try self.copyPendingInto(out)).?;
+            }
+        }
+
+        fn copyPendingInto(
+            self: *Self,
+            out: []u8,
+        ) !?ConnectUdp.ReceivedUdpPayload {
+            const pending = self.pending_receive orelse return null;
+            if (out.len < pending.len) return error.BufferTooShort;
+            @memcpy(
+                out[0..pending.len],
+                self.receive_scratch.items[pending.offset..][0..pending.len],
+            );
+            self.pending_receive = null;
+            return .{
+                .stream_id = self.stream_id,
+                .payload = out[0..pending.len],
+            };
+        }
+
+        fn takePendingOwned(
+            self: *Self,
+        ) !?ConnectUdp.OwnedUdpPayload {
+            const pending = self.pending_receive orelse return null;
+            const owned = try self.allocator.dupe(
+                u8,
+                self.receive_scratch.items[pending.offset..][0..pending.len],
+            );
+            self.pending_receive = null;
+            return .{
+                .stream_id = self.stream_id,
+                .storage = owned,
+                .payload = owned,
+            };
         }
     };
 }
