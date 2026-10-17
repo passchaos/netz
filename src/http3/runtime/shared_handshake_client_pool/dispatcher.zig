@@ -75,6 +75,8 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             abandoned: bool = false,
             cancel_requested: bool = false,
             connection_index: ?usize = null,
+            pending_acquire: ?*Pool.PendingRequestAcquire = null,
+            prepared_early: ?Runtime.PreparedEarlyRequest = null,
             transaction: ?Pool.RequestTransaction = null,
             response: ?Pool.OwnedResponse = null,
             err: ?RequestError = null,
@@ -83,6 +85,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
 
         const Connection = struct {
             active: bool = false,
+            pending: bool = false,
             lease: Pool.Lease = undefined,
             route: route_key.Key = undefined,
             primary_allowed: bool = true,
@@ -92,9 +95,10 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             command_count: usize = 0,
 
             fn accepts(self: *const Connection, command: *const Command) bool {
-                return (self.primary_allowed and
-                    self.route.eql(&command.route)) or
-                    self.authority.allows(&command.route);
+                return !self.pending and
+                    ((self.primary_allowed and
+                        self.route.eql(&command.route)) or
+                        self.authority.allows(&command.route));
             }
         };
 
@@ -115,7 +119,6 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             active_connections: std.atomic.Value(usize) = .init(0),
             active_requests: std.atomic.Value(usize) = .init(0),
             completed_requests: u64 = 0,
-            connect_progress_failure: ?RequestError = null,
         };
 
         pub const Sender = struct {
@@ -463,6 +466,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             }
             while (true) {
                 processControl(state);
+                try progressPendingConnections(state);
                 try admitQueued(state);
                 try progressTransactions(state);
                 if (isClosed(state)) {
@@ -616,6 +620,11 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     else
                         false;
                     if (!canceled and !expired and !closed) continue;
+                    if (command.pending_acquire) |pending| {
+                        pending.deinit();
+                        command.pending_acquire = null;
+                    }
+                    clearPreparedEarly(command);
                     if (command.transaction) |*transaction| {
                         transaction.deinit();
                     }
@@ -635,25 +644,18 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     );
                 }
                 if (connection.command_count == 0) {
-                    releaseConnection(state, connection_index, false);
+                    if (connection.pending)
+                        releasePendingConnection(state, connection_index)
+                    else
+                        releaseConnection(state, connection_index, false);
                 }
             }
         }
 
         fn admitQueued(state: *State) RequestError!void {
-            return admitQueuedMode(state, true);
-        }
-
-        fn admitQueuedMode(
-            state: *State,
-            allow_new_connections: bool,
-        ) RequestError!void {
             while (true) {
                 state.mutex.lockUncancelable(state.io);
-                const command = firstAdmissibleCommand(
-                    state,
-                    allow_new_connections,
-                ) orelse {
+                const command = firstAdmissibleCommand(state) orelse {
                     state.mutex.unlock(state.io);
                     return;
                 };
@@ -674,20 +676,10 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         requeueFront(state, command);
                         return;
                     }
-                    const acquired = acquireForCommand(
+                    const acquired = beginAcquireForCommand(
                         state,
                         command,
                     ) catch |err| {
-                        if (state.connect_progress_failure) |progress_err| {
-                            state.connect_progress_failure = null;
-                            complete(
-                                state,
-                                command,
-                                null,
-                                progress_err,
-                            );
-                            return progress_err;
-                        }
                         if (err == error.ConnectionLimitReached) {
                             requeueFront(state, command);
                             return;
@@ -697,14 +689,27 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     };
                     const index = connection_index.?;
                     state.connections[index].active = true;
-                    state.connections[index].lease = acquired;
                     state.connections[index].route = command.route;
                     state.connections[index].primary_allowed = true;
                     state.connections[index].authority = .{};
                     state.connections[index].authority_generation = 0;
                     state.connections[index].command_count = 0;
                     _ = state.active_connections.fetchAdd(1, .acq_rel);
-                    refreshAuthority(state, &state.connections[index]);
+                    switch (acquired) {
+                        .lease => |lease| {
+                            state.connections[index].pending = false;
+                            state.connections[index].lease = lease;
+                            applyEarlyMetadata(command, lease);
+                            refreshAuthority(
+                                state,
+                                &state.connections[index],
+                            );
+                        },
+                        .pending => |pending| {
+                            state.connections[index].pending = true;
+                            command.pending_acquire = pending;
+                        },
+                    }
                 }
                 const index = connection_index.?;
                 const connection = &state.connections[index];
@@ -714,6 +719,11 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     state.closed;
                 state.mutex.unlock(state.io);
                 if (canceled) {
+                    if (command.pending_acquire) |pending| {
+                        pending.deinit();
+                        command.pending_acquire = null;
+                    }
+                    clearPreparedEarly(command);
                     complete(state, command, null, error.Canceled);
                     if (connection.command_count == 0) {
                         // An accepted early request was already committed by
@@ -724,37 +734,27 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                             metadata.disposition == .accepted
                         else
                             false;
-                        releaseConnection(
-                            state,
-                            index,
-                            early_request_in_flight,
-                        );
+                        if (connection.pending)
+                            releasePendingConnection(state, index)
+                        else
+                            releaseConnection(
+                                state,
+                                index,
+                                early_request_in_flight,
+                            );
                     }
                     continue;
                 }
                 command.connection_index = index;
-                command.transaction = (if (command.early_metadata) |metadata|
-                    if (metadata.disposition == .accepted)
-                        Pool.RequestTransaction.initAcceptedEarly(
-                            state.pool,
-                            &connection.lease,
-                            command.uri,
-                            command.request,
-                        )
-                    else
-                        Pool.RequestTransaction.init(
-                            state.pool,
-                            &connection.lease,
-                            command.uri,
-                            command.request,
-                        )
-                else
-                    Pool.RequestTransaction.init(
-                        state.pool,
-                        &connection.lease,
-                        command.uri,
-                        command.request,
-                    )) catch |err| {
+                if (connection.pending) {
+                    addConnectionCommand(state, connection, command);
+                    continue;
+                }
+                command.transaction = initCommandTransaction(
+                    state,
+                    connection,
+                    command,
+                ) catch |err| {
                     command.connection_index = null;
                     complete(state, command, null, err);
                     if (connection.command_count == 0) {
@@ -766,14 +766,15 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             }
         }
 
-        fn firstAdmissibleCommand(
-            state: *State,
-            allow_new_connections: bool,
-        ) ?*Command {
-            const has_free_connection = allow_new_connections and
-                firstFreeConnection(state) != null;
+        fn firstAdmissibleCommand(state: *State) ?*Command {
+            const has_free_connection = firstFreeConnection(state) != null;
             var command = state.head;
             while (command) |candidate| : (command = candidate.next) {
+                // One pending handshake owns this exact route. Preserve
+                // multiplexing by waiting for its promotion instead of
+                // creating duplicate connections merely because another
+                // driver slot is free.
+                if (findPendingConnection(state, candidate) != null) continue;
                 if (has_free_connection or
                     findConnection(state, candidate) != null)
                 {
@@ -783,122 +784,124 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             return null;
         }
 
-        fn acquireForCommand(
+        fn findPendingConnection(
+            state: *State,
+            command: *const Command,
+        ) ?usize {
+            for (state.connections, 0..) |*connection, index| {
+                if (connection.active and connection.pending and
+                    connection.route.eql(&command.route))
+                {
+                    return index;
+                }
+            }
+            return null;
+        }
+
+        fn beginAcquireForCommand(
             state: *State,
             command: *Command,
-        ) RequestError!Pool.Lease {
-            if (command.alt_svc) |target| {
-                if (command.reclaimer) |reclaimer| {
-                    if (command.early_config) |config| {
-                        const uri = std.Uri.parse(command.uri) catch
-                            return error.InvalidUri;
-                        var endpoint = try Runtime.uriEndpoint(
-                            state.allocator,
-                            uri,
-                        );
-                        defer endpoint.deinit();
-                        const path = try Runtime.uriRequestTargetAlloc(
-                            state.allocator,
-                            uri,
-                        );
-                        defer state.allocator.free(path);
-                        var prepared = try Runtime.PreparedEarlyRequest
-                            .initWithOptions(
-                            state.allocator,
-                            .{
-                                .method = command.request.method,
-                                .path = path,
-                                .scheme = "https",
-                                .authority = endpoint.authority,
-                                .headers = command.request.headers,
-                                .body = command.request.body,
-                                .trailers = command.request.trailers,
-                            },
-                            config.local_settings,
-                            config.remembered_peer_settings,
-                            config.options,
-                        );
-                        defer prepared.deinit();
-                        const lease = state.pool
-                            .acquireUriForRequestDriver(
-                            command.uri,
-                            target,
-                            command.deadline,
-                            &command.budget_waiter,
-                            reclaimer,
-                            &prepared,
-                            connectProgress(state),
-                        ) catch |err| return @errorCast(err);
-                        if (lease.early_disposition) |disposition| {
-                            command.early_metadata = .{
-                                .disposition = disposition,
-                                .retry_reason = if (disposition == .accepted)
-                                    .none
-                                else
-                                    .early_data_rejected,
-                            };
-                        }
-                        return lease;
-                    }
-                    return state.pool.acquireUriForRequestDriver(
-                        command.uri,
-                        target,
-                        command.deadline,
-                        &command.budget_waiter,
-                        reclaimer,
-                        null,
-                        connectProgress(state),
-                    ) catch |err| return @errorCast(err);
-                }
-                return state.pool.acquireUriForRequestDriver(
-                    command.uri,
-                    target,
-                    command.deadline,
-                    null,
-                    null,
-                    null,
-                    connectProgress(state),
-                ) catch |err| return @errorCast(err);
+        ) RequestError!Pool.DriverAcquire {
+            var early_request: ?*const Runtime.PreparedEarlyRequest = null;
+            if (command.early_config) |config| {
+                const uri = std.Uri.parse(command.uri) catch
+                    return error.InvalidUri;
+                var endpoint = try Runtime.uriEndpoint(
+                    state.allocator,
+                    uri,
+                );
+                defer endpoint.deinit();
+                const path = try Runtime.uriRequestTargetAlloc(
+                    state.allocator,
+                    uri,
+                );
+                defer state.allocator.free(path);
+                command.prepared_early = try Runtime.PreparedEarlyRequest
+                    .initWithOptions(
+                    state.allocator,
+                    .{
+                        .method = command.request.method,
+                        .path = path,
+                        .scheme = "https",
+                        .authority = endpoint.authority,
+                        .headers = command.request.headers,
+                        .body = command.request.body,
+                        .trailers = command.request.trailers,
+                    },
+                    config.local_settings,
+                    config.remembered_peer_settings,
+                    config.options,
+                );
+                early_request = &command.prepared_early.?;
             }
-            return state.pool.acquireUriForRequestDriver(
+            const result = state.pool.beginUriForRequestDriver(
                 command.uri,
-                null,
+                command.alt_svc,
                 command.deadline,
-                null,
-                null,
-                null,
-                connectProgress(state),
-            ) catch |err| return @errorCast(err);
-        }
-
-        fn connectProgress(state: *State) Pool.ConnectProgress {
-            return .{
-                .context = state,
-                .drive = driveEstablishedDuringConnect,
-                .activity = &state.activity,
+                if (command.reclaimer != null)
+                    &command.budget_waiter
+                else
+                    null,
+                command.reclaimer,
+                early_request,
+                &state.activity,
+            ) catch |err| {
+                clearPreparedEarly(command);
+                return @errorCast(err);
             };
-        }
-
-        fn driveEstablishedDuringConnect(context: *anyopaque) anyerror!void {
-            const state: *State = @ptrCast(@alignCast(context));
-            driveEstablishedDuringConnectFallible(state) catch |err| {
-                const typed: RequestError = @errorCast(err);
-                state.connect_progress_failure = typed;
-                return typed;
-            };
-        }
-
-        fn driveEstablishedDuringConnectFallible(
-            state: *State,
-        ) RequestError!void {
-            processControl(state);
-            try admitQueuedMode(state, false);
-            try progressTransactions(state);
-            while (try state.pool.poll()) |event_value| {
-                var event = event_value;
-                defer event.deinit(state.pool.allocator);
-                try processEvent(state, &event);
+            switch (result) {
+                .lease => clearPreparedEarly(command),
+                .pending => |pending| if (!pending.usesEarlyRequest()) {
+                    clearPreparedEarly(command);
+                },
             }
+            return result;
+        }
+
+        fn clearPreparedEarly(command: *Command) void {
+            if (command.prepared_early) |*prepared| prepared.deinit();
+            command.prepared_early = null;
+        }
+
+        fn applyEarlyMetadata(command: *Command, lease: Pool.Lease) void {
+            if (lease.early_disposition) |disposition| {
+                command.early_metadata = .{
+                    .disposition = disposition,
+                    .retry_reason = if (disposition == .accepted)
+                        .none
+                    else
+                        .early_data_rejected,
+                };
+            }
+        }
+
+        fn initCommandTransaction(
+            state: *State,
+            connection: *Connection,
+            command: *Command,
+        ) RequestError!Pool.RequestTransaction {
+            return if (command.early_metadata) |metadata|
+                if (metadata.disposition == .accepted)
+                    Pool.RequestTransaction.initAcceptedEarly(
+                        state.pool,
+                        &connection.lease,
+                        command.uri,
+                        command.request,
+                    )
+                else
+                    Pool.RequestTransaction.init(
+                        state.pool,
+                        &connection.lease,
+                        command.uri,
+                        command.request,
+                    )
+            else
+                Pool.RequestTransaction.init(
+                    state.pool,
+                    &connection.lease,
+                    command.uri,
+                    command.request,
+                );
         }
 
         fn requeueFront(state: *State, command: *Command) void {
@@ -957,9 +960,82 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             std.debug.assert(previous != 0);
         }
 
+        fn progressPendingConnections(state: *State) RequestError!void {
+            for (state.connections, 0..) |*connection, connection_index| {
+                if (!connection.active or !connection.pending) continue;
+                std.debug.assert(connection.command_count == 1);
+                const command = connection.commands[0].?;
+                const pending = command.pending_acquire.?;
+                const maybe_lease = pending.poll() catch |err| {
+                    pending.deinit();
+                    command.pending_acquire = null;
+                    clearPreparedEarly(command);
+                    removeConnectionCommand(state, connection, 0);
+                    command.connection_index = null;
+                    complete(state, command, null, @errorCast(err));
+                    releasePendingConnection(state, connection_index);
+                    continue;
+                };
+                const lease = maybe_lease orelse continue;
+                pending.deinit();
+                command.pending_acquire = null;
+                clearPreparedEarly(command);
+                connection.pending = false;
+                connection.lease = lease;
+                applyEarlyMetadata(command, lease);
+                refreshAuthority(state, connection);
+
+                state.mutex.lockUncancelable(state.io);
+                const closed = state.closed;
+                const canceled = command.cancel_requested or
+                    command.abandoned or closed;
+                state.mutex.unlock(state.io);
+                const expired = if (command.deadline) |deadline|
+                    deadline.durationFromNow(state.io).raw.nanoseconds <= 0
+                else
+                    false;
+                if (canceled or expired) {
+                    removeConnectionCommand(state, connection, 0);
+                    command.connection_index = null;
+                    complete(
+                        state,
+                        command,
+                        null,
+                        if (closed)
+                            error.SharedEndpointDriverClosed
+                        else if (expired)
+                            error.Timeout
+                        else
+                            error.Canceled,
+                    );
+                    const early_request_in_flight = if (command.early_metadata) |metadata|
+                        metadata.disposition == .accepted
+                    else
+                        false;
+                    releaseConnection(
+                        state,
+                        connection_index,
+                        early_request_in_flight,
+                    );
+                    continue;
+                }
+                command.transaction = initCommandTransaction(
+                    state,
+                    connection,
+                    command,
+                ) catch |err| {
+                    removeConnectionCommand(state, connection, 0);
+                    command.connection_index = null;
+                    complete(state, command, null, err);
+                    releaseConnection(state, connection_index, true);
+                    continue;
+                };
+            }
+        }
+
         fn progressTransactions(state: *State) RequestError!void {
             for (state.connections, 0..) |*connection, connection_index| {
-                if (!connection.active) continue;
+                if (!connection.active or connection.pending) continue;
                 var index: usize = 0;
                 while (index < connection.command_count) {
                     const command = connection.commands[index].?;
@@ -1153,7 +1229,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
 
         fn findConnectionHandle(state: *State, handle: usize) ?usize {
             for (state.connections, 0..) |connection, index| {
-                if (connection.active and
+                if (connection.active and !connection.pending and
                     connection.lease.connectionHandle() == handle)
                 {
                     return index;
@@ -1163,6 +1239,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
         }
 
         fn refreshAuthority(state: *State, connection: *Connection) void {
+            std.debug.assert(!connection.pending);
             const generation = connection.lease.client().peerOriginGeneration();
             if (generation == connection.authority_generation) return;
             const next = authority.Snapshot.build(
@@ -1185,10 +1262,26 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
         ) void {
             const connection = &state.connections[index];
             std.debug.assert(connection.active);
+            std.debug.assert(!connection.pending);
             std.debug.assert(connection.command_count == 0);
             connection.authority.deinit();
             if (discard) connection.lease.discard() else connection.lease.release();
             connection.active = false;
+            connection.pending = false;
+            connection.primary_allowed = true;
+            connection.authority_generation = 0;
+            const previous = state.active_connections.fetchSub(1, .acq_rel);
+            std.debug.assert(previous != 0);
+        }
+
+        fn releasePendingConnection(state: *State, index: usize) void {
+            const connection = &state.connections[index];
+            std.debug.assert(connection.active);
+            std.debug.assert(connection.pending);
+            std.debug.assert(connection.command_count == 0);
+            connection.authority.deinit();
+            connection.active = false;
+            connection.pending = false;
             connection.primary_allowed = true;
             connection.authority_generation = 0;
             const previous = state.active_connections.fetchSub(1, .acq_rel);
@@ -1204,13 +1297,21 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             while (connection.command_count != 0) {
                 const command_index = connection.command_count - 1;
                 const command = connection.commands[command_index].?;
+                if (command.pending_acquire) |pending| {
+                    pending.deinit();
+                    command.pending_acquire = null;
+                }
+                clearPreparedEarly(command);
                 if (command.transaction) |*transaction| transaction.deinit();
                 command.transaction = null;
                 removeConnectionCommand(state, connection, command_index);
                 command.connection_index = null;
                 complete(state, command, null, err);
             }
-            releaseConnection(state, index, true);
+            if (connection.pending)
+                releasePendingConnection(state, index)
+            else
+                releaseConnection(state, index, true);
         }
 
         fn failAllActive(state: *State, err: RequestError) void {

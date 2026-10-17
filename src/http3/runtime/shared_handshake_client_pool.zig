@@ -54,9 +54,9 @@ pub fn Options(comptime Runtime: type) type {
         shared_connection_budget: ?*connection_budget.Budget = null,
         peer_settings_observer: ?owning_pool.PeerSettingsObserver = null,
         handshake_inbox_capacity: usize = 32,
-        /// Maximum delay before the endpoint owner checks handshake worker
-        /// completion and established-route progress again. QUIC packets,
-        /// transport timers, and successful handshakes can wake it earlier.
+        /// Maximum delay before a synchronous endpoint owner checks handshake
+        /// worker completion again. QUIC timers can wake it earlier. The
+        /// request dispatcher uses completion events instead of polling.
         handshake_poll_interval: std.Io.Duration = .fromMilliseconds(5),
     };
 }
@@ -89,6 +89,7 @@ pub fn Pool(comptime Runtime: type) type {
         connection_count_snapshot: std.atomic.Value(usize) = .init(0),
         leased_count_snapshot: std.atomic.Value(usize) = .init(0),
         idle_count_snapshot: std.atomic.Value(usize) = .init(0),
+        pending_acquisitions: usize = 0,
         closed: bool = false,
 
         const Self = @This();
@@ -97,23 +98,6 @@ pub fn Pool(comptime Runtime: type) type {
         const ConnectRoute = union(enum) {
             origin,
             alt_svc: http3.AltSvcTarget,
-        };
-
-        /// Cooperative established-route work driven while this pool's sole
-        /// endpoint owner is waiting for a new connection handshake.
-        pub const ConnectProgress = struct {
-            context: *anyopaque,
-            drive: *const fn (context: *anyopaque) anyerror!void,
-            activity: *std.Io.Event,
-
-            fn run(self: ConnectProgress) !void {
-                try self.drive(self.context);
-            }
-        };
-
-        const ConnectOwnerTurn = union(enum) {
-            endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
-            activity: std.Io.Cancelable!void,
         };
 
         const Entry = struct {
@@ -147,6 +131,34 @@ pub fn Pool(comptime Runtime: type) type {
             lease: *quic.resumption.EarlyDataLease,
             server_id: []const u8,
             now_ms: u64,
+        };
+
+        const PendingEarlyConnect = struct {
+            request: *const Runtime.PreparedEarlyRequest,
+            cache: *quic.resumption.Cache,
+            lease: quic.resumption.EarlyDataLease,
+            server_id: []const u8,
+            now_ms: u64,
+
+            fn context(self: *@This()) EarlyConnectContext {
+                return .{
+                    .request = self.request,
+                    .cache = self.cache,
+                    .lease = &self.lease,
+                    .server_id = self.server_id,
+                    .now_ms = self.now_ms,
+                };
+            }
+
+            fn deinit(self: *@This()) void {
+                self.lease.deinit();
+                self.* = undefined;
+            }
+        };
+
+        pub const DriverAcquire = union(enum) {
+            lease: Lease,
+            pending: *PendingRequestAcquire,
         };
 
         const IdleReuse = struct {
@@ -248,6 +260,281 @@ pub fn Pool(comptime Runtime: type) type {
                     .{ .client = .{ .value = value } }
                 else |err|
                     .{ .failure = err };
+            }
+        };
+
+        const PendingConnectAttempt = struct {
+            owner: *PendingRequestAcquire,
+            handle: Handle,
+            inbox: *quic.handshake_inbox.Inbox,
+            inbox_registered: bool = true,
+            original_dcid: [8]u8,
+            local_cid: [8]u8,
+            worker: ConnectWorker = undefined,
+            future: std.Io.Future(void) = undefined,
+            future_active: bool = false,
+            completion: ConnectCompletion = undefined,
+            completion_owned: bool = false,
+            done: std.Io.Event = .unset,
+            offered_early: bool,
+
+            fn init(
+                owner: *PendingRequestAcquire,
+                peer: std.Io.net.IpAddress,
+                early: ?EarlyConnectContext,
+                disable_auto_resumption: bool,
+            ) !*@This() {
+                const pool = owner.pool;
+                const self = try pool.allocator.create(@This());
+                errdefer pool.allocator.destroy(self);
+                var original_dcid: [8]u8 = undefined;
+                var local_cid: [8]u8 = undefined;
+                try std.Io.randomSecure(pool.io, &original_dcid);
+                try std.Io.randomSecure(pool.io, &local_cid);
+                const inbox = try pool.allocator.create(
+                    quic.handshake_inbox.Inbox,
+                );
+                var inbox_initialized = false;
+                errdefer {
+                    if (inbox_initialized) inbox.deinit();
+                    pool.allocator.destroy(inbox);
+                }
+                inbox.* = try quic.handshake_inbox.Inbox.init(
+                    pool.allocator,
+                    pool.io,
+                    &.{&local_cid},
+                    peer,
+                    pool.options.handshake_inbox_capacity,
+                );
+                inbox_initialized = true;
+                const handle = pool.reserveHandle();
+                try pool.dispatcher.registerPendingHandshake(handle, inbox);
+                errdefer _ = pool.dispatcher.unregisterPendingHandshake(
+                    handle,
+                ) catch false;
+                self.* = .{
+                    .owner = owner,
+                    .handle = handle,
+                    .inbox = inbox,
+                    .original_dcid = original_dcid,
+                    .local_cid = local_cid,
+                    .offered_early = early != null,
+                };
+                self.worker = .{
+                    .pool = pool,
+                    .source = inbox.datagramSource(),
+                    .peer = peer,
+                    .uri_endpoint = &owner.uri_endpoint,
+                    .original_dcid = &self.original_dcid,
+                    .local_cid = &self.local_cid,
+                    .deadline = owner.deadline,
+                    .redirect = null,
+                    .alpn = switch (owner.route) {
+                        .origin => null,
+                        .alt_svc => |target| target.alpn,
+                    },
+                    .early = early,
+                    .disable_auto_resumption = disable_auto_resumption,
+                };
+                self.future = try std.Io.concurrent(
+                    pool.io,
+                    PendingConnectAttempt.run,
+                    .{self},
+                );
+                self.future_active = true;
+                return self;
+            }
+
+            fn run(self: *@This()) void {
+                self.completion = self.worker.connect();
+                self.completion_owned = true;
+                self.done.set(self.owner.pool.io);
+                self.owner.completion_event.set(self.owner.pool.io);
+            }
+
+            fn takeCompletion(self: *@This()) ?ConnectCompletion {
+                if (!self.done.isSet()) return null;
+                if (self.future_active) {
+                    self.future.await(self.owner.pool.io);
+                    self.future_active = false;
+                }
+                std.debug.assert(self.completion_owned);
+                const completion = self.completion;
+                self.completion_owned = false;
+                return completion;
+            }
+
+            fn deinit(self: *@This()) void {
+                const pool = self.owner.pool;
+                if (self.future_active) {
+                    self.future.cancel(pool.io);
+                    self.future_active = false;
+                }
+                if (self.completion_owned) switch (self.completion) {
+                    .client => |*value| value.value.deinit(),
+                    .failure => {},
+                };
+                if (self.inbox_registered) {
+                    _ = pool.dispatcher.unregisterPendingHandshake(
+                        self.handle,
+                    ) catch false;
+                }
+                self.inbox.deinit();
+                pool.allocator.destroy(self.inbox);
+                pool.allocator.destroy(self);
+            }
+        };
+
+        pub const PendingRequestAcquire = struct {
+            pool: *Self,
+            uri_endpoint: Runtime.UriEndpoint,
+            route: ConnectRoute,
+            addresses: []std.Io.net.IpAddress,
+            next_address: usize = 0,
+            deadline: ?std.Io.Clock.Timestamp,
+            completion_event: *std.Io.Event,
+            early: ?PendingEarlyConnect = null,
+            early_path_failed: bool = false,
+            last_error: ?anyerror = null,
+            attempt: ?*PendingConnectAttempt = null,
+            reservation_active: bool = true,
+
+            pub fn usesEarlyRequest(self: *const @This()) bool {
+                return self.early != null;
+            }
+
+            pub fn poll(self: *@This()) !?Lease {
+                const attempt = self.attempt orelse
+                    return error.InvalidLease;
+                const completion = attempt.takeCompletion() orelse return null;
+                switch (completion) {
+                    .failure => |err| {
+                        const offered_early = attempt.offered_early;
+                        attempt.deinit();
+                        self.attempt = null;
+                        self.last_error = err;
+                        if (!shouldTryNextAddress(err)) return err;
+                        if (offered_early) self.early_path_failed = true;
+                        try self.startNextAttempt();
+                        return null;
+                    },
+                    .client => |client_value| {
+                        var connected_value = client_value;
+                        if (self.early_path_failed) {
+                            std.debug.assert(
+                                connected_value.disposition == null,
+                            );
+                            connected_value.disposition = .rejected;
+                        }
+                        return try self.promote(
+                            attempt,
+                            connected_value,
+                        );
+                    },
+                }
+            }
+
+            fn startNextAttempt(self: *@This()) !void {
+                while (self.next_address < self.addresses.len) {
+                    const peer = self.addresses[self.next_address];
+                    self.next_address += 1;
+                    if (!sameAddressFamily(
+                        self.pool.options.local_address,
+                        peer,
+                    )) continue;
+                    const early_context: ?EarlyConnectContext =
+                        if (!self.early_path_failed)
+                            if (self.early) |*early| early.context() else null
+                        else
+                            null;
+                    self.attempt = try PendingConnectAttempt.init(
+                        self,
+                        peer,
+                        early_context,
+                        self.early_path_failed,
+                    );
+                    return;
+                }
+                return self.last_error orelse
+                    error.AddressFamilyUnsupported;
+            }
+
+            fn promote(
+                self: *@This(),
+                attempt: *PendingConnectAttempt,
+                client_value: @FieldType(ConnectCompletion, "client"),
+            ) !Lease {
+                const pool = self.pool;
+                const connected = try pool.allocator.create(Client);
+                errdefer pool.allocator.destroy(connected);
+                connected.* = client_value.value;
+                errdefer connected.deinit();
+                try connected.ensureSettingsSentOnce();
+                try connected.bindDispatcher();
+                try pool.dispatcher.promotePendingHandshake(
+                    attempt.handle,
+                    attempt.handle,
+                    &connected.established.connection,
+                );
+                attempt.inbox_registered = false;
+                var promoted = true;
+                errdefer if (promoted) {
+                    _ = pool.dispatcher.unregisterConnection(
+                        attempt.handle,
+                    ) catch false;
+                };
+                const origin = try http3.requestOrigin(
+                    "https",
+                    self.uri_endpoint.authority,
+                );
+                const origin_key = try http3.originKeyFromOrigin(
+                    pool.allocator,
+                    origin,
+                );
+                errdefer {
+                    var key = origin_key;
+                    key.deinit();
+                }
+                const entry = try pool.allocator.create(Entry);
+                errdefer pool.allocator.destroy(entry);
+                entry.* = .{
+                    .handle = attempt.handle,
+                    .client = connected,
+                    .origin_key = origin_key,
+                };
+                pool.entries.putAssumeCapacityNoClobber(
+                    attempt.handle,
+                    entry,
+                );
+                _ = pool.connection_count_snapshot.fetchAdd(1, .acq_rel);
+                _ = pool.leased_count_snapshot.fetchAdd(1, .acq_rel);
+                self.reservation_active = false;
+                promoted = false;
+                const handle = attempt.handle;
+                attempt.deinit();
+                self.attempt = null;
+                return .{
+                    .pool = pool,
+                    .handle = handle,
+                    .was_reused = false,
+                    .early_disposition = client_value.disposition,
+                    .early_stream_id = if (client_value.disposition != null)
+                        self.early.?.request.stream_id
+                    else
+                        null,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                const pool = self.pool;
+                if (self.attempt) |attempt| attempt.deinit();
+                if (self.early) |*early| early.deinit();
+                pool.allocator.free(self.addresses);
+                self.uri_endpoint.deinit();
+                if (self.reservation_active) pool.releaseShared(1);
+                std.debug.assert(pool.pending_acquisitions != 0);
+                pool.pending_acquisitions -= 1;
+                pool.allocator.destroy(self);
             }
         };
 
@@ -539,7 +826,6 @@ pub fn Pool(comptime Runtime: type) type {
                     null,
                     null,
                     null,
-                    null,
                 ) catch |err| return @errorCast(err);
             }
         };
@@ -672,6 +958,7 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            std.debug.assert(self.pending_acquisitions == 0);
             var iterator = self.entries.valueIterator();
             while (iterator.next()) |entry| {
                 std.debug.assert(!entry.*.leased);
@@ -734,7 +1021,6 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
-                null,
             );
         }
 
@@ -770,7 +1056,6 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
-                null,
             );
         }
 
@@ -792,7 +1077,6 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 null,
                 .{ .alt_svc = target },
-                null,
                 null,
                 null,
                 null,
@@ -833,7 +1117,6 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
-                null,
             );
         }
 
@@ -865,7 +1148,6 @@ pub fn Pool(comptime Runtime: type) type {
                 waiter,
                 reclaimer,
                 null,
-                null,
             );
         }
 
@@ -888,7 +1170,6 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 waiter,
                 reclaimer,
-                null,
             );
         }
 
@@ -900,7 +1181,6 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             waiter: *connection_budget.Waiter,
             reclaimer: connection_budget.Reclaimer,
-            progress: ?ConnectProgress,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const absolute = if (deadline) |value|
@@ -929,7 +1209,6 @@ pub fn Pool(comptime Runtime: type) type {
                     waiter,
                     reclaimer,
                     null,
-                    progress,
                 );
             };
             var early_lease = (try automatic.cache.beginEarlyData(
@@ -944,7 +1223,6 @@ pub fn Pool(comptime Runtime: type) type {
                 waiter,
                 reclaimer,
                 null,
-                progress,
             );
             defer early_lease.deinit();
             return self.acquireUriBefore(
@@ -961,14 +1239,13 @@ pub fn Pool(comptime Runtime: type) type {
                     .server_id = automatic.server_id,
                     .now_ms = automatic.now_ms,
                 },
-                progress,
             );
         }
 
-        /// Request-dispatcher acquisition path. The callback never reads the
-        /// endpoint; it only consumes events already routed by `connectOne`,
-        /// preserving the pool's single-reader invariant during handshakes.
-        pub fn acquireUriForRequestDriver(
+        /// Begin a request-dispatcher acquisition without taking endpoint
+        /// receive ownership. Pending handshake workers consume only their
+        /// CID-routed inboxes; the request dispatcher remains the sole reader.
+        pub fn beginUriForRequestDriver(
             self: *Self,
             uri_text: []const u8,
             target: ?http3.AltSvcTarget,
@@ -976,19 +1253,8 @@ pub fn Pool(comptime Runtime: type) type {
             waiter: ?*connection_budget.Waiter,
             reclaimer: ?connection_budget.Reclaimer,
             early_request: ?*const Runtime.PreparedEarlyRequest,
-            progress: ConnectProgress,
-        ) !Lease {
-            if (early_request) |prepared| {
-                return self.acquireUriAltSvcEarlyReclaimingBefore(
-                    uri_text,
-                    target orelse return error.InvalidHeader,
-                    prepared,
-                    deadline,
-                    waiter orelse return error.InvalidPoolOptions,
-                    reclaimer orelse return error.InvalidPoolOptions,
-                    progress,
-                );
-            }
+            completion_event: *std.Io.Event,
+        ) !DriverAcquire {
             if (self.closed) return error.PoolClosed;
             const absolute = if (deadline) |value|
                 try deadline_policy.capTimeout(
@@ -1001,16 +1267,139 @@ pub fn Pool(comptime Runtime: type) type {
                     self.io,
                     self.options.client.connect_timeout,
                 ) catch return error.HandshakeTimeout;
-            return self.acquireUriBefore(
-                uri_text,
-                absolute,
-                null,
-                if (target) |value| .{ .alt_svc = value } else .origin,
-                waiter,
-                reclaimer,
-                null,
-                progress,
+            const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+            var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
+            var endpoint_owned = true;
+            defer if (endpoint_owned) endpoint.deinit();
+            const route: ConnectRoute = if (target) |value|
+                .{ .alt_svc = value }
+            else
+                .origin;
+            try validateConnectRoute(endpoint, route);
+            const origin = try http3.requestOrigin(
+                uri.scheme,
+                endpoint.authority,
             );
+            self.pruneExpired();
+            if (self.takeIdle(origin)) |reused| {
+                const request_origin_key: ?http3.OriginKey =
+                    if (reused.exact_origin)
+                        null
+                    else
+                        http3.originKeyFromOrigin(
+                            self.allocator,
+                            origin,
+                        ) catch |err| {
+                            reused.entry.leased = false;
+                            _ = self.leased_count_snapshot.fetchSub(
+                                1,
+                                .acq_rel,
+                            );
+                            _ = self.idle_count_snapshot.fetchAdd(
+                                1,
+                                .acq_rel,
+                            );
+                            return err;
+                        };
+                _ = self.total_reused.fetchAdd(1, .monotonic);
+                return .{ .lease = .{
+                    .pool = self,
+                    .handle = reused.entry.handle,
+                    .was_reused = true,
+                    .request_origin_key = request_origin_key,
+                } };
+            }
+            _ = self.total_misses.fetchAdd(1, .monotonic);
+            if (self.options.max_connections != 0 and
+                self.entries.count() + self.pending_acquisitions >=
+                    self.options.max_connections)
+            {
+                const displaced = self.oldestIdleHandle() orelse
+                    return error.ConnectionLimitReached;
+                self.dropEntry(displaced);
+            }
+            var reservation_active = false;
+            if (self.options.shared_connection_budget) |budget| {
+                if (reclaimer) |value|
+                    try budget.tryReserveReclaiming(waiter, value)
+                else
+                    try budget.tryReserve(waiter);
+                reservation_active = true;
+            }
+            errdefer if (reservation_active) self.releaseShared(1);
+            const reserved_slots = std.math.add(
+                usize,
+                self.pending_acquisitions,
+                1,
+            ) catch return error.OutOfMemory;
+            try self.entries.ensureUnusedCapacity(
+                self.allocator,
+                std.math.cast(u32, reserved_slots) orelse
+                    return error.OutOfMemory,
+            );
+            const addresses = switch (route) {
+                .origin => try Runtime.resolveEndpointBefore(
+                    endpoint,
+                    self.allocator,
+                    self.io,
+                    absolute,
+                ),
+                .alt_svc => |value| try Runtime
+                    .resolveHostPortAddressesBefore(
+                    self.allocator,
+                    self.io,
+                    value.connect_host,
+                    value.port,
+                    absolute,
+                ),
+            };
+            var addresses_owned = true;
+            defer if (addresses_owned) self.allocator.free(addresses);
+
+            var early: ?PendingEarlyConnect = null;
+            defer if (early) |*value| value.deinit();
+            if (early_request) |prepared| {
+                const alt_svc = target orelse return error.InvalidHeader;
+                var options = self.options.client;
+                scopeAutoResumption(&options, endpoint.authority);
+                if (options.handshake.auto_resumption) |automatic| {
+                    if (try automatic.cache.beginEarlyData(
+                        automatic.server_id,
+                        alt_svc.alpn,
+                        automatic.now_ms,
+                    )) |lease| {
+                        early = .{
+                            .request = prepared,
+                            .cache = automatic.cache,
+                            .lease = lease,
+                            .server_id = automatic.server_id,
+                            .now_ms = automatic.now_ms,
+                        };
+                    }
+                }
+            }
+
+            const pending = try self.allocator.create(PendingRequestAcquire);
+            pending.* = .{
+                .pool = self,
+                .uri_endpoint = endpoint,
+                .route = route,
+                .addresses = addresses,
+                .deadline = absolute,
+                .completion_event = completion_event,
+                .early = early,
+                .reservation_active = reservation_active,
+            };
+            endpoint_owned = false;
+            addresses_owned = false;
+            early = null;
+            reservation_active = false;
+            self.pending_acquisitions += 1;
+            pending.startNextAttempt() catch |err| {
+                pending.deinit();
+                return err;
+            };
+            return .{ .pending = pending };
         }
 
         pub fn cancelConnectionBudgetWaiter(
@@ -1030,7 +1419,6 @@ pub fn Pool(comptime Runtime: type) type {
             shared_waiter: ?*connection_budget.Waiter,
             reclaimer: ?connection_budget.Reclaimer,
             early: ?EarlyConnectContext,
-            progress: ?ConnectProgress,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -1124,7 +1512,6 @@ pub fn Pool(comptime Runtime: type) type {
                     },
                     next_early,
                     early_path_failed,
-                    progress,
                 ) catch |err| {
                     last_error = err;
                     if (shouldTryNextAddress(err)) {
@@ -1206,128 +1593,6 @@ pub fn Pool(comptime Runtime: type) type {
             }
         }
 
-        fn waitForConnectOwnerTurn(
-            self: *Self,
-            deadline: std.Io.Clock.Timestamp,
-            progress: ?ConnectProgress,
-        ) ConnectOwnerTurn {
-            const observer = progress orelse return .{ .endpoint = self.receiveTransportWithDeadline(deadline) };
-            const Wake = union(enum) {
-                endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
-                activity: std.Io.Cancelable!void,
-            };
-            var storage: [2]Wake = undefined;
-            var select: std.Io.Select(Wake) = .init(self.io, &storage);
-            select.async(
-                .endpoint,
-                Self.receiveTransportWithDeadline,
-                .{ self, deadline },
-            );
-            select.async(
-                .activity,
-                std.Io.Event.wait,
-                .{ observer.activity, self.io },
-            );
-
-            var endpoint_event: ?quic.endpoint_dispatcher.Event = null;
-            var endpoint_error: ?quic.endpoint_dispatcher.ReceiveError = null;
-            var activity_completed = false;
-            var activity_error: ?std.Io.Cancelable = null;
-            if (select.await()) |first| {
-                consumeConnectOwnerWake(
-                    self,
-                    first,
-                    &endpoint_event,
-                    &endpoint_error,
-                    &activity_completed,
-                    &activity_error,
-                );
-            } else |err| {
-                activity_error = err;
-            }
-            while (select.cancel()) |wake| {
-                consumeConnectOwnerWake(
-                    self,
-                    wake,
-                    &endpoint_event,
-                    &endpoint_error,
-                    &activity_completed,
-                    &activity_error,
-                );
-            }
-            if (endpoint_event) |event| {
-                return .{ .endpoint = event };
-            }
-            if (endpoint_error) |err| {
-                return .{ .endpoint = err };
-            }
-            if (activity_error) |err| {
-                return .{ .activity = err };
-            }
-            if (activity_completed) return .{ .activity = {} };
-            return .{ .activity = error.Canceled };
-        }
-
-        fn consumeConnectOwnerWake(
-            self: *Self,
-            wake: anytype,
-            endpoint_event: *?quic.endpoint_dispatcher.Event,
-            endpoint_error: *?quic.endpoint_dispatcher.ReceiveError,
-            activity_completed: *bool,
-            activity_error: *?std.Io.Cancelable,
-        ) void {
-            switch (wake) {
-                .endpoint => |result| if (result) |event_value| {
-                    if (endpoint_event.* == null) {
-                        endpoint_event.* = event_value;
-                    } else {
-                        var duplicate = event_value;
-                        duplicate.deinit(self.allocator);
-                    }
-                } else |err| {
-                    if (err != error.Canceled) endpoint_error.* = err;
-                },
-                .activity => |result| if (result) {
-                    activity_completed.* = true;
-                } else |err| {
-                    if (err != error.Canceled) activity_error.* = err;
-                },
-            }
-        }
-
-        fn deinitConnectOwnerTurn(
-            self: *Self,
-            turn: *ConnectOwnerTurn,
-        ) void {
-            switch (turn.*) {
-                .endpoint => |*result| if (result.*) |*event| {
-                    event.deinit(self.allocator);
-                } else |_| {},
-                .activity => {},
-            }
-        }
-
-        fn drainConnectOwnerWakes(
-            self: *Self,
-            select: anytype,
-            progress: ?ConnectProgress,
-        ) !void {
-            while (select.cancel()) |wake_value| {
-                var wake = wake_value;
-                switch (wake) {
-                    .owner => |*turn| switch (turn.*) {
-                        .endpoint => |*result| if (result.*) |*event| {
-                            defer event.deinit(self.allocator);
-                            try self.applyEndpointProgress(event);
-                        } else |_| {},
-                        .activity => {},
-                    },
-                    .connected => unreachable,
-                }
-            }
-            if (progress) |observer| try observer.run();
-        }
-
         fn connectOne(
             self: *Self,
             uri_endpoint: *const Runtime.UriEndpoint,
@@ -1337,7 +1602,6 @@ pub fn Pool(comptime Runtime: type) type {
             alpn: ?[]const u8,
             early: ?EarlyConnectContext,
             disable_auto_resumption: bool,
-            progress: ?ConnectProgress,
         ) !Connected {
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
@@ -1385,7 +1649,7 @@ pub fn Pool(comptime Runtime: type) type {
             };
             const Wake = union(enum) {
                 connected: ConnectCompletion,
-                owner: ConnectOwnerTurn,
+                endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
             };
             var wake_storage: [2]Wake = undefined;
             var select: std.Io.Select(Wake) = .init(
@@ -1399,7 +1663,9 @@ pub fn Pool(comptime Runtime: type) type {
                         .client => |*value| value.value.deinit(),
                         .failure => {},
                     },
-                    .owner => |*turn| self.deinitConnectOwnerTurn(turn),
+                    .endpoint => |*result| if (result.*) |*event| {
+                        event.deinit(self.allocator);
+                    } else |_| {},
                 }
             };
             try select.concurrent(
@@ -1409,7 +1675,6 @@ pub fn Pool(comptime Runtime: type) type {
             );
 
             while (true) {
-                if (progress) |observer| try observer.run();
                 const poll_deadline = deadline_policy.earlier(
                     deadline,
                     .fromNow(self.io, .{
@@ -1418,28 +1683,26 @@ pub fn Pool(comptime Runtime: type) type {
                     }),
                 ).?;
                 select.async(
-                    .owner,
-                    Self.waitForConnectOwnerTurn,
-                    .{ self, poll_deadline, progress },
+                    .endpoint,
+                    Self.receiveTransportWithDeadline,
+                    .{ self, poll_deadline },
                 );
                 switch (try select.await()) {
                     .connected => |completion| switch (completion) {
-                        .failure => |err| {
-                            try self.drainConnectOwnerWakes(
-                                &select,
-                                progress,
-                            );
-                            return err;
-                        },
+                        .failure => |err| return err,
                         .client => |client_value| {
                             // Stop the competing endpoint wait before changing
                             // dispatcher routes during promotion. A completed
-                            // receive may carry an authenticated packet for an
-                            // established sibling and must be applied first.
-                            try self.drainConnectOwnerWakes(
-                                &select,
-                                progress,
-                            );
+                            // receive may still carry owned diagnostic bytes.
+                            while (select.cancel()) |wake_value| {
+                                var wake = wake_value;
+                                switch (wake) {
+                                    .endpoint => |*result| if (result.*) |*event| {
+                                        event.deinit(self.allocator);
+                                    } else |_| {},
+                                    .connected => unreachable,
+                                }
+                            }
                             const connected = try self.allocator.create(Client);
                             errdefer self.allocator.destroy(connected);
                             connected.* = client_value.value;
@@ -1459,19 +1722,13 @@ pub fn Pool(comptime Runtime: type) type {
                             };
                         },
                     },
-                    .owner => |turn| switch (turn) {
-                        .activity => |result| {
-                            try result;
-                            continue;
-                        },
-                        .endpoint => |result| {
-                            var event = result catch |err| switch (err) {
-                                error.Timeout => continue,
-                                else => return err,
-                            };
-                            defer event.deinit(self.allocator);
-                            try self.applyEndpointProgress(&event);
-                        },
+                    .endpoint => |result| {
+                        var event = result catch |err| switch (err) {
+                            error.Timeout => continue,
+                            else => return err,
+                        };
+                        defer event.deinit(self.allocator);
+                        try self.applyEndpointProgress(&event);
                     },
                 }
             }
