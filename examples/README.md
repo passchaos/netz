@@ -939,3 +939,9 @@ successful unselected socket is closed before return. Literal IPs bypass both
 resolution and racing. HTTP/3 and WebTransport retain their existing ordered
 QUIC-handshake fallback; transport-level QUIC racing requires a separate
 connection-state design and is not implied by the TCP policy.
+For blackholed UDP routes, `HandshakeClientOptions.address_attempt_timeout`
+can bound each sequential QUIC/TLS address attempt while the total
+`connect_timeout` or caller deadline remains unchanged. This applies to owning
+HTTP/3/WebSocket/WebTransport clients and ordinary/shared HTTP/3 pools. If a
+0-RTT packet may have reached a timed-out address, fallback proceeds at 1-RTT
+and reports early data rejected so the safe request is replayed exactly once.

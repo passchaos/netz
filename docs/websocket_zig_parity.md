@@ -210,6 +210,10 @@ Authenticated transport tests cover 103 followed by body/trailers, automatic
 Content-Length, split DATA without Content-Length, legacy draining, body-limit
 cancellation, explicit server rejection and dropped pending requests, and a
 successful sibling request on both reused client and server sessions.
+HTTP/3 WebSocket URI connects inherit HTTP/3's optional per-address handshake
+timeout. A silent UDP route can therefore fail within its own phase budget and
+fall through to the next address while the original WebSocket handshake
+deadline, SNI, and `:authority` remain unchanged.
 
 HTTP/1 URI clients now optionally follow bounded 300/301/302/303/307/308
 responses rather than forcing applications to reconstruct each Upgrade from a

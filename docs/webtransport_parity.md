@@ -515,9 +515,13 @@ wtransport's current resolver trait, which returns only the first address,
 the contract preserves an allocator-owned ordered address set for fallback.
 A real URI handshake regression uses an otherwise unresolvable hostname,
 requires the caller deadline in the resolver callback, and completes through
-the returned loopback address. A real silent-UDP test verifies the WebTransport
-adapter reaches its deadline instead of waiting for the lower-level multi-PTO
-default. `connectUriWithDeadline` also
+the returned loopback address. An optional HTTP/3 `address_attempt_timeout`
+gives each resolved UDP route a fresh QUIC/TLS phase budget without renewing the
+total caller/connect deadline; the same regression now places a silent UDP
+endpoint first and requires fallback to the authenticated server. A separate
+silent-only test verifies the WebTransport adapter reaches its total deadline
+instead of waiting for the lower-level multi-PTO default.
+`connectUriWithDeadline` also
 accepts an existing absolute awake-clock budget from an application workflow
 and preserves it through the final Extended CONNECT response rather than
 ending the budget after QUIC/TLS establishment. Direct-address handshake

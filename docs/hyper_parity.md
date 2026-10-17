@@ -1553,6 +1553,14 @@ intermediate response, and leaves unrelated response/push/unrouted events
 untouched. Same- and cross-origin TLS tests cover lease release/reacquisition,
 credential isolation and final idle routing; the same quic-go gate requires
 this third two-request redirect to use one shared-endpoint connection.
+Multi-address HTTP/3 connects may additionally set
+`HandshakeClientOptions.address_attempt_timeout`. Each resolved UDP route gets
+a fresh QUIC/TLS phase budget, but the original caller/`connect_timeout`
+timestamp remains the hard upper bound across all fallbacks. Owning clients,
+ordinary pools, and dispatcher-shared pools use the same rule. Silent-first
+tests complete through the next address, including a shared-endpoint 0-RTT
+attempt whose possible early packet forces the ordinary fallback to report
+`rejected` and replay safely over 1-RTT.
 It now also exposes explicit Alt-Svc acquisition without changing that reader
 ownership: only the advertised DNS/UDP target changes, while SNI, certificate
 policy, request authority, pool key, and automatic resumption/ticket collection

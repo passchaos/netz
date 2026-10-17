@@ -214,11 +214,16 @@ pub fn Pool(comptime Runtime: type) type {
                 if (options.handshake.server_name == null) {
                     options.handshake.server_name = self.uri_endpoint.tls_host;
                 }
+                const attempt_deadline = Runtime.addressAttemptDeadline(
+                    self.pool.io,
+                    self.deadline,
+                    options.address_attempt_timeout,
+                ) catch |err| return .{ .failure = err };
                 if (self.early) |early| {
                     options.handshake.auto_resumption = null;
                     options.handshake.resumption_server_id = early.server_id;
                     options.handshake.resumption_now_ms = early.now_ms;
-                    const result = if (self.deadline) |absolute|
+                    const result = if (attempt_deadline) |absolute|
                         Client.connectFromWithEarlyRequestWithDeadline(
                             self.pool.endpoint,
                             self.source,
@@ -247,7 +252,7 @@ pub fn Pool(comptime Runtime: type) type {
                     else |err|
                         .{ .failure = err };
                 }
-                const result = if (self.deadline) |absolute|
+                const result = if (attempt_deadline) |absolute|
                     Client.connectFromWithDeadline(
                         self.pool.endpoint,
                         self.source,

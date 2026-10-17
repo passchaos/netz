@@ -362,6 +362,7 @@ test "HTTP/3 shared endpoint dispatcher drives routes and isolated deadlines" {
 
 const SharedEarlyScenario = struct {
     reject_early_data: bool = false,
+    silent_first: bool = false,
     initial_status: u16 = 425,
     retry_status: u16 = 201,
 };
@@ -436,6 +437,13 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
         server_options,
     );
     defer server.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
 
     const Worker = struct {
         server: *runtime.HandshakeServer,
@@ -477,7 +485,9 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             var session = try self.server.acceptWithTimeout(.fromSeconds(5));
             defer session.deinit();
             try std.testing.expectEqual(
-                if (self.scenario.reject_early_data)
+                if (self.scenario.silent_first)
+                    quic.zero_rtt.handshake.Status.not_offered
+                else if (self.scenario.reject_early_data)
                     quic.zero_rtt.handshake.Status.rejected
                 else
                     quic.zero_rtt.handshake.Status.accepted,
@@ -492,7 +502,8 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             try self.expectRequest(
                 &first,
                 0,
-                !self.scenario.reject_early_data,
+                !self.scenario.reject_early_data and
+                    !self.scenario.silent_first,
             );
             if (self.scenario.reject_early_data) {
                 try session.sendResponse(first.stream_id, .{
@@ -556,6 +567,8 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
     const EarlyResolver = struct {
         cache: *quic.resumption.Cache,
         address: std.Io.net.IpAddress,
+        silent_address: std.Io.net.IpAddress,
+        silent_first: bool,
         observed_unleased_ticket: std.atomic.Value(bool) = .init(false),
 
         fn resolve(
@@ -581,15 +594,22 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             self.observed_unleased_ticket.store(true, .release);
             const addresses = try resolve_allocator.alloc(
                 std.Io.net.IpAddress,
-                1,
+                if (self.silent_first) 2 else 1,
             );
-            addresses[0] = self.address;
+            if (self.silent_first) {
+                addresses[0] = self.silent_address;
+                addresses[1] = self.address;
+            } else {
+                addresses[0] = self.address;
+            }
             return addresses;
         }
     };
     var resolver = EarlyResolver{
         .cache = &cache,
         .address = server.address(),
+        .silent_address = silent.address(),
+        .silent_first = scenario.silent_first,
     };
 
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
@@ -613,6 +633,10 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
                 },
             },
             .connect_timeout = .fromSeconds(3),
+            .address_attempt_timeout = if (scenario.silent_first)
+                .fromMilliseconds(30)
+            else
+                null,
             .address_resolver = .{
                 .context = &resolver,
                 .resolve = EarlyResolver.resolve,
@@ -673,14 +697,14 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
     );
     try std.testing.expect(result.early_data != null);
     try std.testing.expectEqual(
-        if (scenario.reject_early_data)
+        if (scenario.reject_early_data or scenario.silent_first)
             runtime.EarlyRequestDisposition.rejected
         else
             runtime.EarlyRequestDisposition.accepted,
         result.early_data.?.disposition,
     );
     try std.testing.expectEqual(
-        if (scenario.reject_early_data)
+        if (scenario.reject_early_data or scenario.silent_first)
             runtime.EarlyDataRetryReason.early_data_rejected
         else if (scenario.initial_status == 425)
             runtime.EarlyDataRetryReason.too_early
@@ -774,5 +798,13 @@ test "HTTP/3 shared endpoint dispatcher replays TLS-rejected early data" {
     try runSharedEarlyScenario(.{
         .reject_early_data = true,
         .retry_status = 202,
+    });
+}
+
+test "HTTP/3 shared endpoint replays early data after address timeout" {
+    try runSharedEarlyScenario(.{
+        .silent_first = true,
+        .initial_status = 200,
+        .retry_status = 200,
     });
 }

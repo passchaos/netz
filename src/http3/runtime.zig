@@ -650,6 +650,20 @@ pub const resolveHostPortAddressesBefore =
     client_uri.resolveHostPortAddressesBefore;
 pub const AddressResolver = address_resolver.Resolver;
 
+/// Compose one address-specific handshake budget with the caller/connection
+/// deadline. The phase timeout restarts for each address but can never extend
+/// the total URI connection budget.
+pub fn addressAttemptDeadline(
+    io: std.Io,
+    total: ?std.Io.Clock.Timestamp,
+    timeout: ?std.Io.Duration,
+) Error!?std.Io.Clock.Timestamp {
+    return deadline_policy.earlier(
+        total,
+        try connectDeadline(io, timeout),
+    );
+}
+
 /// Resolve one URI endpoint through the application resolver when configured.
 /// Literal IPs deliberately retain the parser-owned bypass so URI authority
 /// and TLS identity never become coupled to the returned transport address.
@@ -5813,6 +5827,11 @@ pub const HandshakeClientOptions = struct {
     /// budget; direct-address and caller-owned-endpoint entry points begin it
     /// immediately before the handshake.
     connect_timeout: ?std.Io.Duration = null,
+    /// Optional per-resolved-address QUIC/TLS handshake budget. Each fallback
+    /// address receives a fresh phase budget, capped by the total
+    /// `connect_timeout` or caller deadline. Null preserves the existing
+    /// handshake-recovery policy.
+    address_attempt_timeout: ?std.Io.Duration = null,
     /// Optional application resolver shared by direct URI connections,
     /// redirects, Alt-Svc routes, and pools. Literal IP route hosts bypass it;
     /// QUIC/TLS authentication remains bound to the URI origin.
@@ -12297,7 +12316,12 @@ pub const HandshakeClient = struct {
             if (!sameIpAddressFamily(local_address, server)) continue;
             attempted = true;
             var attempt_options = options;
-            if (deadline) |absolute| {
+            const attempt_deadline = try addressAttemptDeadline(
+                io,
+                deadline,
+                options.address_attempt_timeout,
+            );
+            if (attempt_deadline) |absolute| {
                 attempt_options.handshake.handshake_recovery =
                     try handshakeRecoveryBefore(
                         io,
@@ -12339,7 +12363,12 @@ pub const HandshakeClient = struct {
             if (!sameIpAddressFamily(local_address, server)) continue;
             attempted = true;
             var attempt_options = options;
-            if (deadline) |absolute| {
+            const attempt_deadline = try addressAttemptDeadline(
+                io,
+                deadline,
+                options.address_attempt_timeout,
+            );
+            if (attempt_deadline) |absolute| {
                 attempt_options.handshake.handshake_recovery =
                     try handshakeRecoveryBefore(
                         io,
@@ -12357,7 +12386,7 @@ pub const HandshakeClient = struct {
                 early_request,
                 cache,
                 lease,
-                deadline,
+                attempt_deadline,
             ) catch |err| {
                 if (!shouldTryNextResolvedAddress(err)) return err;
                 // A protected early packet might have reached this address.

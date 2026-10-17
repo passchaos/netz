@@ -638,6 +638,13 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
         } },
     );
     defer server.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
 
     const Shared = struct {
         server: *h3.Server,
@@ -705,6 +712,7 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
 
     const port = server.address().getPort();
     const Resolver = struct {
+        silent_address: std.Io.net.IpAddress,
         address: std.Io.net.IpAddress,
         calls: std.atomic.Value(u8) = .init(0),
 
@@ -724,14 +732,18 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
             }
             const addresses = try resolve_allocator.alloc(
                 std.Io.net.IpAddress,
-                1,
+                2,
             );
-            addresses[0] = self.address;
+            addresses[0] = self.silent_address;
+            addresses[1] = self.address;
             _ = self.calls.fetchAdd(1, .acq_rel);
             return addresses;
         }
     };
-    var resolver = Resolver{ .address = server.address() };
+    var resolver = Resolver{
+        .silent_address = silent.address(),
+        .address = server.address(),
+    };
     const authority = try std.fmt.allocPrint(
         allocator,
         "ws-h3.resolver.test:{d}",
@@ -772,6 +784,7 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
                     .context = &resolver,
                     .resolve = Resolver.resolve,
                 },
+                .address_attempt_timeout = .fromMilliseconds(30),
             },
         },
         .fromSeconds(2),

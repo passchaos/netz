@@ -112,3 +112,33 @@ test "HTTP3 application resolver maps its deadline timeout" {
         timeout_resolver.calls.load(.acquire),
     );
 }
+
+test "HTTP3 address attempt timeout cannot extend total deadline" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const total = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    });
+    const capped = (try runtime.addressAttemptDeadline(
+        io,
+        total,
+        .fromSeconds(5),
+    )).?;
+    try std.testing.expectEqual(total, capped);
+    const shorter = (try runtime.addressAttemptDeadline(
+        io,
+        total,
+        .fromMilliseconds(10),
+    )).?;
+    try std.testing.expect(std.Io.Clock.Timestamp.compare(
+        shorter,
+        .lt,
+        total,
+    ));
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        runtime.addressAttemptDeadline(io, total, .zero),
+    );
+}

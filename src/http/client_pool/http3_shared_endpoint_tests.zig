@@ -3,6 +3,7 @@ const http = @import("../mod.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
+const quic = @import("../../quic/mod.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
 test "unified HTTP pool shares one UDP endpoint across H3 origins" {
@@ -73,6 +74,13 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
         } },
     );
     defer h3_b.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
     const alt_a = try std.fmt.allocPrint(
         allocator,
         "h3=\":{d}\"; ma=60",
@@ -193,6 +201,7 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
 
     const Resolver = struct {
         addresses: [4]std.Io.net.IpAddress,
+        silent_address: std.Io.net.IpAddress,
         calls: std.atomic.Value(u8) = .init(0),
 
         fn resolve(
@@ -211,9 +220,10 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
                 if (address.getPort() != port) continue;
                 const result = try resolve_allocator.alloc(
                     std.Io.net.IpAddress,
-                    1,
+                    2,
                 );
-                result[0] = address;
+                result[0] = self.silent_address;
+                result[1] = address;
                 _ = self.calls.fetchAdd(1, .acq_rel);
                 return result;
             }
@@ -225,7 +235,7 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
         tcp_b.address(),
         h3_a.address(),
         h3_b.address(),
-    } };
+    }, .silent_address = silent.address() };
 
     var pool = try http.Pool.init(allocator, io, .{
         .client = .{
@@ -239,13 +249,16 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
         },
         .http3 = .{
             .limits = limits,
-            .handshake = .{ .handshake = .{
-                .original_destination_connection_id = &.{},
-                .local_connection_id = &.{},
-                .server_auth = .{
-                    .pinned_ecdsa_p256_public_key = public_key,
+            .handshake = .{
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = public_key,
+                    },
                 },
-            } },
+                .address_attempt_timeout = .fromMilliseconds(30),
+            },
             .idle = .{
                 .max_idle_per_origin = 1,
                 .max_idle_total = 2,

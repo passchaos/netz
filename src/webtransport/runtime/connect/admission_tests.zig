@@ -117,6 +117,13 @@ test "WebTransport server admission exposes request and response metadata" {
         } },
     );
     defer server.deinit();
+    var silent = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent.deinit();
 
     const Shared = struct {
         server: *runtime.HandshakeServer,
@@ -202,6 +209,7 @@ test "WebTransport server admission exposes request and response metadata" {
     defer if (!joined) thread.join();
 
     const Resolver = struct {
+        silent_address: std.Io.net.IpAddress,
         address: std.Io.net.IpAddress,
         calls: std.atomic.Value(u8) = .init(0),
 
@@ -221,14 +229,18 @@ test "WebTransport server admission exposes request and response metadata" {
             }
             const addresses = try resolve_allocator.alloc(
                 std.Io.net.IpAddress,
-                1,
+                2,
             );
-            addresses[0] = self.address;
+            addresses[0] = self.silent_address;
+            addresses[1] = self.address;
             _ = self.calls.fetchAdd(1, .acq_rel);
             return addresses;
         }
     };
-    var resolver = Resolver{ .address = server.address() };
+    var resolver = Resolver{
+        .silent_address = silent.address(),
+        .address = server.address(),
+    };
     const uri = try std.fmt.allocPrint(
         allocator,
         "https://webtransport.resolver.test:{d}/authorized?room=7",
@@ -257,6 +269,7 @@ test "WebTransport server admission exposes request and response metadata" {
                     .context = &resolver,
                     .resolve = Resolver.resolve,
                 },
+                .address_attempt_timeout = .fromMilliseconds(30),
             },
         },
         operation_timeout,
