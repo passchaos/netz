@@ -50,6 +50,8 @@ taskset -c 0 zig build bench-quic-connection-router -Doptimize=ReleaseFast -- \
   --iterations=10000000
 taskset -c 0 zig build bench-quic-endpoint-timers -Doptimize=ReleaseFast -- \
   --iterations=2000000
+taskset -c 0 zig build bench-io-deadline -Doptimize=ReleaseFast -- \
+  --samples=5 --warmup=2000 --iterations=50000
 taskset -c 0 zig build bench-quic-endpoint-pending -Doptimize=ReleaseFast -- \
   --iterations=2000000
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \

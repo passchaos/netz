@@ -2953,6 +2953,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark shared-endpoint timer scheduler scaling",
         },
         .{
+            .exe_name = "netz-bench-io-deadline",
+            .path = "examples/bench_io_deadline.zig",
+            .run_step = "bench-io-deadline",
+            .description = "Benchmark zio-backed timed I/O deadline overhead",
+        },
+        .{
             .exe_name = "netz-bench-quic-endpoint-pending",
             .path = "examples/bench_quic_endpoint_pending.zig",
             .run_step = "bench-quic-endpoint-pending",
