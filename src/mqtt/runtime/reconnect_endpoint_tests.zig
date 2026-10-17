@@ -50,7 +50,39 @@ test "MQTT reconnect client owns hostname and URI targets" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    const hostname = try allocator.dupe(u8, "localhost");
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "reconnect.mqtt.resolver.test") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
+    const resolver_option: runtime.AddressResolver = .{
+        .context = &resolver,
+        .resolve = Resolver.resolve,
+    };
+    const hostname = try allocator.dupe(u8, "reconnect.mqtt.resolver.test");
     defer allocator.free(hostname);
     var host_shutdown: std.Io.Event = .unset;
     var host_client = try reconnect.Client.initHost(
@@ -62,6 +94,7 @@ test "MQTT reconnect client owns hostname and URI targets" {
             .protocol = .v5,
             .client_id = "owned-host",
             .network_connect_timeout = .fromSeconds(1),
+            .address_resolver = resolver_option,
         },
         .{
             .initial_delay = .fromMilliseconds(1),
@@ -75,7 +108,7 @@ test "MQTT reconnect client owns hostname and URI targets" {
 
     const uri = try std.fmt.allocPrint(
         allocator,
-        "mqtt://localhost:{d}",
+        "mqtt://reconnect.mqtt.resolver.test:{d}",
         .{server.address().ip4.port},
     );
     defer allocator.free(uri);
@@ -88,6 +121,7 @@ test "MQTT reconnect client owns hostname and URI targets" {
             .protocol = .v5,
             .client_id = "owned-uri",
             .network_connect_timeout = .fromSeconds(1),
+            .address_resolver = resolver_option,
         },
         .{
             .initial_delay = .fromMilliseconds(1),
@@ -102,6 +136,7 @@ test "MQTT reconnect client owns hostname and URI targets" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 4), resolver.calls.load(.acquire));
 }
 
 fn connectAndDisconnectTwice(client: *reconnect.Client) !void {

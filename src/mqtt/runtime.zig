@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mqtt = @import("mod.zig");
 const redirect = @import("redirect.zig");
 const websocket = @import("../websocket/mod.zig");
@@ -59,6 +60,7 @@ pub const Error = packet_transport.Error || error{
 pub const disconnectReasonForProtocolViolation =
     protocol_error.disconnectReason;
 pub const TcpKeepAlive = socket_options.TcpKeepAlive;
+pub const AddressResolver = network_endpoint.AddressResolver;
 
 /// MQTT 3.1 reserves the complete CONNACK acknowledgement byte. Mosquitto
 /// uses bit 0 as the later Session Present field; callers must opt into that
@@ -1724,10 +1726,12 @@ pub const Client = struct {
         options: ConnectOptions,
     ) Error!ConnectAttempt {
         const stream = try network_endpoint.connectHost(
+            allocator,
             io,
             host,
             port,
             options.network_connect_timeout,
+            options.address_resolver,
         );
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
@@ -1744,11 +1748,13 @@ pub const Client = struct {
         options: ConnectOptions,
     ) Error!ConnectAttempt {
         const stream = try network_endpoint.connectHostBound(
+            allocator,
             io,
             host,
             port,
             local_address,
             options.network_connect_timeout,
+            options.address_resolver,
         );
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
@@ -1770,10 +1776,12 @@ pub const Client = struct {
             options.network_connect_timeout,
         );
         const stream = try network_endpoint.connectHostWithDeadline(
+            allocator,
             io,
             host,
             port,
             network_deadline,
+            options.address_resolver,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -1800,11 +1808,13 @@ pub const Client = struct {
             options.network_connect_timeout,
         );
         const stream = try network_endpoint.connectHostBoundWithDeadline(
+            allocator,
             io,
             host,
             port,
             local_address,
             network_deadline,
+            options.address_resolver,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -1976,10 +1986,12 @@ pub const Client = struct {
             options.network_connect_timeout,
         );
         const stream = try network_endpoint.connectTargetWithDeadline(
+            allocator,
             io,
             &target,
             .tcp,
             network_deadline,
+            options.address_resolver,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -2298,10 +2310,12 @@ fn connectTargetAttempt(
     options: ConnectOptions,
 ) Error!ConnectAttempt {
     const stream = try network_endpoint.connectTarget(
+        allocator,
         io,
         &target,
         .tcp,
         options.network_connect_timeout,
+        options.address_resolver,
     );
     return connectStreamAttempt(allocator, io, stream, options, true);
 }
@@ -2422,6 +2436,13 @@ pub const ConnectOptions = struct {
     /// Absolute budget for opening the underlying network transport. MQTT's
     /// CONNECT/CONNACK exchange keeps the independent `connect_timeout` above.
     network_connect_timeout: ?std.Io.Duration = null,
+    /// Optional resolver shared by TCP/TLS/WebSocket hostname and URI connects,
+    /// redirects, and reconnect attempts. Literal IP targets bypass it.
+    /// Returned addresses affect only network routing; authority and TLS
+    /// identity stay bound to the configured host. The resolver context is
+    /// borrowed and must outlive any reconnect client initialized from this
+    /// options value.
+    address_resolver: ?AddressResolver = null,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     /// Baseline broker publish capabilities to enforce when MQTT 5 CONNACK
@@ -8148,7 +8169,11 @@ test "MQTT Connection allocates Topic Alias tables by direction" {
     try std.testing.expect(connection.outgoing_topic_aliases != null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 32), @sizeOf(topic_alias.Table));
+        const table_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 32,
+            .ReleaseFast, .ReleaseSmall => 24,
+        };
+        try std.testing.expectEqual(table_size, @sizeOf(topic_alias.Table));
         try std.testing.expectEqual(
             @sizeOf(?*topic_alias.Table),
             @sizeOf(@FieldType(Connection, "incoming_topic_aliases")),
@@ -8733,7 +8758,7 @@ test "MQTT client follows bounded Server Reference CONNACK" {
     };
     const reference = try std.fmt.allocPrint(
         allocator,
-        "127.0.0.1:{d}",
+        "redirect-b.mqtt.resolver.test:{d}",
         .{destination.address().ip4.port},
     );
     defer allocator.free(reference);
@@ -8748,10 +8773,51 @@ test "MQTT client follows bounded Server Reference CONNACK" {
 
     const initial_uri = try std.fmt.allocPrint(
         allocator,
-        "mqtt://127.0.0.1:{d}",
+        "mqtt://redirect-a.mqtt.resolver.test:{d}",
         .{redirector.address().ip4.port},
     );
     defer allocator.free(initial_uri);
+    const Resolver = struct {
+        redirect_address: net.IpAddress,
+        destination_address: net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) AddressResolver.ResolveError![]net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const address = if (std.mem.eql(
+                u8,
+                host,
+                "redirect-a.mqtt.resolver.test",
+            ))
+                self.redirect_address
+            else if (std.mem.eql(
+                u8,
+                host,
+                "redirect-b.mqtt.resolver.test",
+            ))
+                self.destination_address
+            else
+                return error.UnknownHostName;
+            if (address.getPort() != port or deadline == null) {
+                return error.Timeout;
+            }
+            const addresses = try resolve_allocator.alloc(net.IpAddress, 1);
+            addresses[0] = address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{
+        .redirect_address = redirector.address(),
+        .destination_address = destination.address(),
+    };
     var result = try Client.connectUriFollowingRedirects(
         allocator,
         io,
@@ -8759,6 +8825,11 @@ test "MQTT client follows bounded Server Reference CONNACK" {
         .{
             .protocol = .v5,
             .client_id = "redirect-client",
+            .network_connect_timeout = .fromSeconds(3),
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
             .limits = .{ .max_packet_size = 4096 },
         },
         .{ .max_redirects = 1 },
@@ -8768,6 +8839,7 @@ test "MQTT client follows bounded Server Reference CONNACK" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 }
 
 test "MQTT connection enforces outgoing inflight limit before writing" {

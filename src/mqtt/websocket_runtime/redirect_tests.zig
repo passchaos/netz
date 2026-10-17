@@ -1,4 +1,5 @@
 const std = @import("std");
+const mqtt_runtime = @import("../runtime.zig");
 const mqtt_ws = @import("../websocket_runtime.zig");
 const mqtt_reconnect = @import("../reconnect.zig");
 const websocket_runtime = @import("../../websocket/runtime.zig");
@@ -10,10 +11,19 @@ fn wsUri(
     port: u16,
     path: []const u8,
 ) ![]u8 {
+    return wsUriHost(allocator, "127.0.0.1", port, path);
+}
+
+fn wsUriHost(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    path: []const u8,
+) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "ws://127.0.0.1:{d}{s}",
-        .{ port, path },
+        "ws://{s}:{d}{s}",
+        .{ host, port, path },
     );
 }
 
@@ -306,8 +316,9 @@ test "MQTT HTTP redirect reconnect connector restarts chain" {
         .{},
     );
     defer destination.deinit();
-    const destination_uri = try wsUri(
+    const destination_uri = try wsUriHost(
         allocator,
+        "redirect-b.ws.mqtt.resolver.test",
         destination.address().getPort(),
         "/mqtt",
     );
@@ -360,15 +371,66 @@ test "MQTT HTTP redirect reconnect connector restarts chain" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    const initial_uri = try wsUri(
+    const initial_uri = try wsUriHost(
         allocator,
+        "redirect-a.ws.mqtt.resolver.test",
         redirector.address().getPort(),
         "/start",
     );
     defer allocator.free(initial_uri);
+    const Resolver = struct {
+        redirect_address: std.Io.net.IpAddress,
+        destination_address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) mqtt_runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const address = if (std.mem.eql(
+                u8,
+                host,
+                "redirect-a.ws.mqtt.resolver.test",
+            ))
+                self.redirect_address
+            else if (std.mem.eql(
+                u8,
+                host,
+                "redirect-b.ws.mqtt.resolver.test",
+            ))
+                self.destination_address
+            else
+                return error.UnknownHostName;
+            if (address.getPort() != port or deadline == null) {
+                return error.Timeout;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{
+        .redirect_address = redirector.address(),
+        .destination_address = destination.address(),
+    };
+    var options = connectOptions("placeholder");
+    options.mqtt.network_connect_timeout = .fromSeconds(3);
+    options.mqtt.address_resolver = .{
+        .context = &resolver,
+        .resolve = Resolver.resolve,
+    };
     var connector = mqtt_ws.HttpRedirectReconnectConnector{
         .uri = initial_uri,
-        .options = connectOptions("placeholder"),
+        .options = options,
     };
     var shutdown: std.Io.Event = .unset;
     var client = try mqtt_reconnect.Client.initConnector(
@@ -394,6 +456,7 @@ test "MQTT HTTP redirect reconnect connector restarts chain" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 4), resolver.calls.load(.acquire));
 }
 
 test "MQTT HTTP and nested redirect timeouts reject before I/O" {

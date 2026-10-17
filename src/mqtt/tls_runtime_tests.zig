@@ -966,8 +966,43 @@ test "MQTT reconnect client reuses TLS hostname and URI connectors" {
 
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "localhost") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const tls_options: mqtt_tls.ConnectOptions = .{
-        .mqtt = .{ .client_id = "connector-placeholder" },
+        .mqtt = .{
+            .client_id = "connector-placeholder",
+            .network_connect_timeout = .fromSeconds(3),
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
+        },
         .tls = .{ .ca_bundle = .{
             .bundle = &ca_bundle,
             .lock = &ca_lock,
@@ -1018,6 +1053,7 @@ test "MQTT reconnect client reuses TLS hostname and URI connectors" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 }
 
 test "MQTT TLS URI reconnect connector preserves validation and network timeout" {

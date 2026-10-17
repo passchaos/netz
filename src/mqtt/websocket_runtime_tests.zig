@@ -457,10 +457,42 @@ test "MQTT WSS client connects and reconnects through hostname" {
 
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "localhost") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const options: mqtt_ws.ConnectOptions = .{
         .mqtt = .{
             .client_id = "placeholder",
             .network_connect_timeout = .fromSeconds(1),
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
         },
         .target = "/mqtt",
         .tls = .{ .ca_bundle = .{
@@ -536,6 +568,7 @@ test "MQTT WSS client connects and reconnects through hostname" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 3), resolver.calls.load(.acquire));
 }
 
 test "MQTT WSS server consumes PROXY v2 before TLS and Upgrade" {
@@ -1290,16 +1323,51 @@ test "MQTT reconnect client reuses WebSocket connector" {
     var joined = false;
     defer if (!joined) thread.join();
 
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "reconnect.ws.resolver.test") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const uri = try std.fmt.allocPrint(
         allocator,
-        "ws://127.0.0.1:{d}/mqtt",
+        "ws://reconnect.ws.resolver.test:{d}/mqtt",
         .{server.address().ip4.port},
     );
     defer allocator.free(uri);
     var connector = mqtt_ws.ReconnectConnector{
         .uri = uri,
         .options = .{
-            .mqtt = .{ .client_id = "connector-placeholder" },
+            .mqtt = .{
+                .client_id = "connector-placeholder",
+                .network_connect_timeout = .fromSeconds(3),
+                .address_resolver = .{
+                    .context = &resolver,
+                    .resolve = Resolver.resolve,
+                },
+            },
             .max_head_bytes = max_packet_size,
         },
     };
@@ -1334,6 +1402,7 @@ test "MQTT reconnect client reuses WebSocket connector" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 }
 
 fn testReconnectClientAutomaticallyResumesWssTicket(

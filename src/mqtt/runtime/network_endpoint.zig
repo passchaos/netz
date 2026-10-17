@@ -8,74 +8,173 @@
 const std = @import("std");
 const redirect = @import("../redirect.zig");
 const tcp_connect = @import("../../internal/tcp_connect.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
+const address_resolver = @import("../../internal/address_resolver.zig");
 
 const net = std.Io.net;
 
 pub const Error = net.HostName.ValidateError ||
-    net.HostName.ConnectError || net.IpAddress.ConnectError || error{
+    net.HostName.ConnectError || net.IpAddress.ConnectError ||
+    address_resolver.Error || error{
     InvalidServerReference,
     UnsupportedRedirectScheme,
 };
 
+pub const AddressResolver = address_resolver.Resolver;
+
 pub fn connectHost(
+    allocator: std.mem.Allocator,
     io: std.Io,
     host: []const u8,
     port: u16,
     timeout: ?std.Io.Duration,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return tcp_connect.ip(io, address, timeout);
+    } else |_| {}
     const host_name = try net.HostName.init(host);
-    return tcp_connect.host(io, host_name, port, timeout);
+    const configured = resolver orelse
+        return tcp_connect.host(io, host_name, port, timeout);
+    const deadline = try deadline_policy.fromTimeout(io, timeout);
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        host,
+        port,
+        deadline,
+    );
+    defer allocator.free(addresses);
+    return if (deadline) |absolute|
+        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+    else
+        tcp_connect.resolved(io, addresses, null);
 }
 
 pub fn connectHostWithDeadline(
+    allocator: std.mem.Allocator,
     io: std.Io,
     host: []const u8,
     port: u16,
     deadline: std.Io.Clock.Timestamp,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return tcp_connect.ipWithDeadline(io, address, deadline);
+    } else |_| {}
     const host_name = try net.HostName.init(host);
-    return tcp_connect.hostWithDeadline(io, host_name, port, deadline);
+    const configured = resolver orelse
+        return tcp_connect.hostWithDeadline(io, host_name, port, deadline);
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        host,
+        port,
+        deadline,
+    );
+    defer allocator.free(addresses);
+    return tcp_connect.resolvedWithDeadline(io, addresses, deadline);
 }
 
 pub fn connectHostBound(
+    allocator: std.mem.Allocator,
     io: std.Io,
     host: []const u8,
     port: u16,
     local_address: net.IpAddress,
     timeout: ?std.Io.Duration,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return tcp_connect.ipBound(
+            io,
+            address,
+            local_address,
+            timeout,
+        );
+    } else |_| {}
     const host_name = try net.HostName.init(host);
-    return tcp_connect.hostBound(
+    const configured = resolver orelse
+        return tcp_connect.hostBound(
+            io,
+            host_name,
+            port,
+            local_address,
+            timeout,
+        );
+    const deadline = try deadline_policy.fromTimeout(io, timeout);
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
         io,
-        host_name,
+        host,
         port,
-        local_address,
-        timeout,
+        deadline,
     );
+    defer allocator.free(addresses);
+    return if (deadline) |absolute|
+        tcp_connect.resolvedBoundWithDeadline(
+            io,
+            addresses,
+            local_address,
+            absolute,
+        )
+    else
+        tcp_connect.resolvedBound(io, addresses, local_address, null);
 }
 
 pub fn connectHostBoundWithDeadline(
+    allocator: std.mem.Allocator,
     io: std.Io,
     host: []const u8,
     port: u16,
     local_address: net.IpAddress,
     deadline: std.Io.Clock.Timestamp,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return tcp_connect.ipBoundWithDeadline(
+            io,
+            address,
+            local_address,
+            deadline,
+        );
+    } else |_| {}
     const host_name = try net.HostName.init(host);
-    return tcp_connect.hostBoundWithDeadline(
+    const configured = resolver orelse
+        return tcp_connect.hostBoundWithDeadline(
+            io,
+            host_name,
+            port,
+            local_address,
+            deadline,
+        );
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
         io,
-        host_name,
+        host,
         port,
+        deadline,
+    );
+    defer allocator.free(addresses);
+    return tcp_connect.resolvedBoundWithDeadline(
+        io,
+        addresses,
         local_address,
         deadline,
     );
 }
 
 pub fn connectTarget(
+    allocator: std.mem.Allocator,
     io: std.Io,
     target: *const redirect.Target,
     expected_transport: redirect.Transport,
     timeout: ?std.Io.Duration,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
     if (target.transport != expected_transport) {
         return error.UnsupportedRedirectScheme;
@@ -106,14 +205,31 @@ pub fn connectTarget(
     // callers to have obtained it from `redirect.parse`.
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
-    return tcp_connect.host(io, host_name, target.port, timeout);
+    const configured = resolver orelse
+        return tcp_connect.host(io, host_name, target.port, timeout);
+    const deadline = try deadline_policy.fromTimeout(io, timeout);
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        target.host,
+        target.port,
+        deadline,
+    );
+    defer allocator.free(addresses);
+    return if (deadline) |absolute|
+        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+    else
+        tcp_connect.resolved(io, addresses, null);
 }
 
 pub fn connectTargetWithDeadline(
+    allocator: std.mem.Allocator,
     io: std.Io,
     target: *const redirect.Target,
     expected_transport: redirect.Transport,
     deadline: std.Io.Clock.Timestamp,
+    resolver: ?AddressResolver,
 ) Error!net.Stream {
     if (target.transport != expected_transport) {
         return error.UnsupportedRedirectScheme;
@@ -138,7 +254,18 @@ pub fn connectTargetWithDeadline(
     } else |_| {}
     const host_name = net.HostName.init(target.host) catch
         return error.InvalidServerReference;
-    return tcp_connect.hostWithDeadline(io, host_name, target.port, deadline);
+    const configured = resolver orelse
+        return tcp_connect.hostWithDeadline(io, host_name, target.port, deadline);
+    const addresses = try configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        target.host,
+        target.port,
+        deadline,
+    );
+    defer allocator.free(addresses);
+    return tcp_connect.resolvedWithDeadline(io, addresses, deadline);
 }
 
 /// Return host text suitable for TLS SNI and certificate verification. URI

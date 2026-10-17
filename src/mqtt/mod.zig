@@ -5743,6 +5743,7 @@ test {
     _ = @import("runtime/protocol_version_tests.zig");
     _ = @import("protocol_version_codec_tests.zig");
     _ = @import("runtime/tcp_endpoint_tests.zig");
+    _ = @import("runtime/resolver_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");
     _ = @import("runtime/reconnect_snapshot_tests.zig");

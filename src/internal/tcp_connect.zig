@@ -22,6 +22,8 @@ pub const BoundHostConnectError = net.HostName.LookupError ||
     BoundConnectError;
 pub const ResolvedConnectError = net.HostName.LookupError ||
     net.IpAddress.ConnectError;
+pub const ResolvedBoundConnectError = net.HostName.LookupError ||
+    BoundConnectError;
 
 pub fn ip(
     io: std.Io,
@@ -148,6 +150,56 @@ fn resolvedBefore(
             ipWithDeadline(io, address, absolute)
         else
             ip(io, address, null);
+        return stream catch |err| {
+            if (!shouldTryNextResolvedAddress(err)) return err;
+            last_error = err;
+            continue;
+        };
+    }
+    return last_error orelse error.NoAddressReturned;
+}
+
+/// Try caller-resolved addresses in order after binding each candidate socket
+/// to `local_address`. All candidates share one optional absolute deadline.
+pub fn resolvedBound(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    timeout: ?std.Io.Duration,
+) ResolvedBoundConnectError!net.Stream {
+    const deadline = if (timeout) |duration|
+        (try deadline_policy.fromTimeout(io, duration)).?
+    else
+        null;
+    return resolvedBoundBefore(io, addresses, local_address, deadline);
+}
+
+pub fn resolvedBoundWithDeadline(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) ResolvedBoundConnectError!net.Stream {
+    return resolvedBoundBefore(
+        io,
+        addresses,
+        local_address,
+        try deadline_policy.usableAwake(io, deadline),
+    );
+}
+
+fn resolvedBoundBefore(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    local_address: net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+) ResolvedBoundConnectError!net.Stream {
+    var last_error: ?BoundConnectError = null;
+    for (addresses) |address| {
+        const stream = if (deadline) |absolute|
+            ipBoundWithDeadline(io, address, local_address, absolute)
+        else
+            ipBound(io, address, local_address, null);
         return stream catch |err| {
             if (!shouldTryNextResolvedAddress(err)) return err;
             last_error = err;
@@ -504,6 +556,42 @@ test "TCP bound connect uses the requested IPv4 source" {
         &stream.socket.address.ip4.bytes,
     );
     try std.testing.expect(stream.socket.address.ip4.port != 0);
+}
+
+test "TCP resolved bound connect falls back under one deadline" {
+    var backend = try zio.Runtime.init(std.testing.allocator, .{});
+    defer backend.deinit();
+    const io = backend.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    var unavailable = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    const unavailable_address = unavailable.socket.address;
+    unavailable.deinit(io);
+
+    const local = net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 2 },
+        .port = 0,
+    } };
+    var stream = try resolvedBoundWithDeadline(
+        io,
+        &.{ unavailable_address, listener.socket.address },
+        local,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer stream.close(io);
+    const accepted = try listener.accept(io);
+    defer accepted.close(io);
+    try std.testing.expectEqualSlices(
+        u8,
+        &local.ip4.bytes,
+        &accepted.socket.address.ip4.bytes,
+    );
 }
 
 test "TCP bound connect uses the requested IPv6 source" {

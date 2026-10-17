@@ -412,11 +412,47 @@ test "MQTT WebSocket proxy reconnect connector reopens CONNECT tunnel" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var proxy_uri_buffer: [64]u8 = undefined;
+    const Resolver = struct {
+        address: net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) mqtt_runtime.AddressResolver.ResolveError![]net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "proxy.mqtt.resolver.test") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(net.IpAddress, 1);
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = proxy.socket.address };
+    var proxy_uri_buffer: [96]u8 = undefined;
+    const proxy_uri = try std.fmt.bufPrint(
+        &proxy_uri_buffer,
+        "http://proxy.mqtt.resolver.test:{d}",
+        .{proxy.socket.address.getPort()},
+    );
+    var options = connectOptions("placeholder");
+    options.mqtt.network_connect_timeout = .fromSeconds(3);
+    options.mqtt.address_resolver = .{
+        .context = &resolver,
+        .resolve = Resolver.resolve,
+    };
     var connector = mqtt_ws.ProxyReconnectConnector{
-        .proxy_uri = try proxyUri(&proxy_uri_buffer, &proxy),
+        .proxy_uri = proxy_uri,
         .uri = "ws://reconnect.example/mqtt",
-        .options = connectOptions("placeholder"),
+        .options = options,
         .proxy_options = proxyOptions(),
     };
     var shutdown: std.Io.Event = .unset;
@@ -444,6 +480,7 @@ test "MQTT WebSocket proxy reconnect connector reopens CONNECT tunnel" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 }
 
 test "MQTT WSS proxy reconnect resumes TLS 1.3 session" {

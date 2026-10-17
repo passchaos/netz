@@ -3351,9 +3351,56 @@ fn reconnectOptions(
 ) ConnectOptions {
     var options = configured;
     const network_connect_timeout = options.mqtt.network_connect_timeout;
+    const address_resolver = options.mqtt.address_resolver orelse
+        mqtt_options.address_resolver;
     options.mqtt = mqtt_options;
     options.mqtt.network_connect_timeout = network_connect_timeout;
+    options.mqtt.address_resolver = address_resolver;
     return options;
+}
+
+test "MQTT WebSocket reconnect resolver inherits with connector override" {
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]net.IpAddress {
+            return error.UnknownHostName;
+        }
+    };
+    var inherited_context: u8 = 0;
+    var override_context: u8 = 0;
+    const inherited: runtime.AddressResolver = .{
+        .context = &inherited_context,
+        .resolve = Resolver.resolve,
+    };
+    const override: runtime.AddressResolver = .{
+        .context = &override_context,
+        .resolve = Resolver.resolve,
+    };
+    const from_client = reconnectOptions(
+        .{ .mqtt = .{ .client_id = "configured" } },
+        .{ .client_id = "owned", .address_resolver = inherited },
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(inherited.context),
+        @intFromPtr(from_client.mqtt.address_resolver.?.context),
+    );
+    const from_connector = reconnectOptions(
+        .{ .mqtt = .{
+            .client_id = "configured",
+            .address_resolver = override,
+        } },
+        .{ .client_id = "owned", .address_resolver = inherited },
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(override.context),
+        @intFromPtr(from_connector.mqtt.address_resolver.?.context),
+    );
 }
 
 fn reconnectOptionsWithTlsTickets(
@@ -3410,15 +3457,36 @@ test "MQTT WebSocket limits preserve TCP socket policy" {
     );
     try std.testing.expectEqual(@as(?u32, null), defaults.tcp_user_timeout_ms);
 
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]net.IpAddress {
+            return error.UnknownHostName;
+        }
+    };
+    var resolver_context: u8 = 0;
     const client = websocketConnectOptions(.{
         .mqtt = .{
             .client_id = "socket-policy",
             .limits = .{ .tcp_user_timeout_ms = 54_321 },
+            .address_resolver = .{
+                .context = &resolver_context,
+                .resolve = Resolver.resolve,
+            },
         },
     });
     try std.testing.expectEqual(
         @as(?u32, 54_321),
         client.tcp_user_timeout_ms,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&resolver_context),
+        @intFromPtr(client.address_resolver.?.context),
     );
 
     const ocsp = websocketConnectOptions(.{
@@ -3464,6 +3532,7 @@ fn websocketConnectOptions(
         .tcp_keepalive = options.mqtt.limits.tcp_keepalive,
         .tcp_user_timeout_ms = options.mqtt.limits.tcp_user_timeout_ms,
         .connect_timeout = options.mqtt.network_connect_timeout,
+        .address_resolver = options.mqtt.address_resolver,
         .tls_handshake_timeout = options.tls_handshake_timeout,
         .limits = websocketLimits(
             options.mqtt.limits,

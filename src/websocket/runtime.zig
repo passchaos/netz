@@ -2592,12 +2592,13 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.host(
+        const stream = try connectNamedEndpointBefore(
+            allocator,
             io,
-            host_name,
+            host,
             port,
-            options.connect_timeout,
+            options,
+            null,
         );
         errdefer stream.close(io);
         const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
@@ -2645,16 +2646,13 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithDeadline(
+        const stream = try connectNamedEndpointBefore(
+            allocator,
             io,
-            host_name,
+            host,
             port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                options.connect_timeout,
-            ),
+            options,
+            deadline,
         );
         errdefer stream.close(io);
         const default_host = try std.fmt.allocPrint(
@@ -2742,12 +2740,13 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!ConnectAttempt {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.host(
+        const stream = try connectNamedEndpointBefore(
+            allocator,
             io,
-            host_name,
+            host,
             port,
-            options.connect_timeout,
+            options,
+            null,
         );
         var attempt = try connectTlsStreamAttempt(
             allocator,
@@ -2792,16 +2791,13 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithDeadline(
+        const stream = try connectNamedEndpointBefore(
+            allocator,
             io,
-            host_name,
+            host,
             port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                options.connect_timeout,
-            ),
+            options,
+            deadline,
         );
         var attempt = try connectTlsStreamAttemptBefore(
             allocator,
@@ -4399,6 +4395,49 @@ fn connectUriEndpointBefore(
     };
 }
 
+fn connectNamedEndpointBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    options: ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    const connect_deadline = if (deadline) |absolute|
+        try deadline_policy.capTimeout(
+            io,
+            absolute,
+            options.connect_timeout,
+        )
+    else
+        try deadline_policy.fromTimeout(io, options.connect_timeout);
+    if (net.IpAddress.parse(host, port)) |address| {
+        return if (connect_deadline) |absolute|
+            tcp_connect.ipWithDeadline(io, address, absolute)
+        else
+            tcp_connect.ip(io, address, null);
+    } else |_| {}
+    const host_name = try net.HostName.init(host);
+    const resolver = options.address_resolver orelse
+        return if (connect_deadline) |absolute|
+            tcp_connect.hostWithDeadline(io, host_name, port, absolute)
+        else
+            tcp_connect.host(io, host_name, port, null);
+    const addresses = try resolver.resolve(
+        resolver.context,
+        allocator,
+        io,
+        host,
+        port,
+        connect_deadline,
+    );
+    defer allocator.free(addresses);
+    return if (connect_deadline) |absolute|
+        tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+    else
+        tcp_connect.resolved(io, addresses, null);
+}
+
 pub const ConnectOptions = struct {
     /// HTTP Host authority for the WebSocket opening handshake.  `connectHost`
     /// defaults this to its resolved host name when left empty.
@@ -4434,10 +4473,10 @@ pub const ConnectOptions = struct {
     /// Absolute budget for DNS resolution plus all TCP connection attempts.
     /// TLS and HTTP Upgrade retain their separate handshake policies.
     connect_timeout: ?std.Io.Duration = null,
-    /// Optional resolver shared by WS/WSS URI connects and every redirect hop.
-    /// Literal IP URI hosts bypass it. Returned addresses share one connect
-    /// deadline while HTTP authority, TLS SNI, and certificate identity remain
-    /// bound to the URI host.
+    /// Optional resolver shared by WS/WSS hostname and URI connects plus every
+    /// redirect hop. Literal IP targets bypass it. Returned addresses share one
+    /// connect deadline while HTTP authority, TLS SNI, and certificate identity
+    /// remain bound to the configured host.
     address_resolver: ?AddressResolver = null,
     limits: Limits = .{},
     /// Backward-compatible mTLS shorthand. `vail_tls` takes precedence when

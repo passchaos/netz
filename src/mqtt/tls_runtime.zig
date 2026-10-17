@@ -433,12 +433,13 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.host(
+        const stream = try network_endpoint.connectHost(
+            allocator,
             io,
-            host_name,
+            host,
             port,
             options.mqtt.network_connect_timeout,
+            options.mqtt.address_resolver,
         );
         return connectStreamAttempt(
             allocator,
@@ -460,11 +461,13 @@ pub const Client = struct {
         options: ConnectOptions,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const stream = try network_endpoint.connectHostBound(
+            allocator,
             io,
             host,
             port,
             local_address,
             options.mqtt.network_connect_timeout,
+            options.mqtt.address_resolver,
         );
         return connectStreamAttempt(
             allocator,
@@ -564,17 +567,18 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-        const host_name = try net.HostName.init(host);
         const network_deadline = try deadline_policy.capTimeout(
             io,
             deadline,
             options.mqtt.network_connect_timeout,
         );
-        const stream = try tcp_connect.hostWithDeadline(
+        const stream = try network_endpoint.connectHostWithDeadline(
+            allocator,
             io,
-            host_name,
+            host,
             port,
             network_deadline,
+            options.mqtt.address_resolver,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -601,11 +605,13 @@ pub const Client = struct {
             options.mqtt.network_connect_timeout,
         );
         const stream = try network_endpoint.connectHostBoundWithDeadline(
+            allocator,
             io,
             host,
             port,
             local_address,
             network_deadline,
+            options.mqtt.address_resolver,
         );
         return connectStreamAttemptBefore(
             allocator,
@@ -869,10 +875,12 @@ pub const Client = struct {
         const tls_host = network_endpoint.tlsHost(&target) catch
             return error.InvalidUri;
         const stream = network_endpoint.connectTarget(
+            allocator,
             io,
             &target,
             .tls,
             options.mqtt.network_connect_timeout,
+            options.mqtt.address_resolver,
         ) catch |err| return switch (err) {
             error.UnsupportedRedirectScheme => error.UnsupportedScheme,
             error.InvalidServerReference => error.InvalidUri,
@@ -982,10 +990,12 @@ pub const Client = struct {
             options.mqtt.network_connect_timeout,
         );
         const stream = network_endpoint.connectTargetWithDeadline(
+            allocator,
             io,
             &target,
             .tls,
             network_deadline,
+            options.mqtt.address_resolver,
         ) catch |err| return switch (err) {
             error.UnsupportedRedirectScheme => error.UnsupportedScheme,
             error.InvalidServerReference => error.InvalidUri,
@@ -1406,16 +1416,65 @@ pub const UriReconnectConnector = struct {
 
 /// MQTT CONNECT state belongs to the reconnecting client, while the connector
 /// retains network policy. In particular, copying reconnect-owned options must
-/// not silently replace the timeout selected for DNS/TCP establishment.
+/// not silently replace the timeout selected for DNS/TCP establishment. An
+/// explicit connector resolver wins; otherwise the reconnect-owned resolver is
+/// inherited so generic client configuration is not silently discarded.
 fn reconnectOptions(
     configured: ConnectOptions,
     mqtt_options: mqtt_runtime.ConnectOptions,
 ) ConnectOptions {
     var options = configured;
     const network_connect_timeout = options.mqtt.network_connect_timeout;
+    const address_resolver = options.mqtt.address_resolver orelse
+        mqtt_options.address_resolver;
     options.mqtt = mqtt_options;
     options.mqtt.network_connect_timeout = network_connect_timeout;
+    options.mqtt.address_resolver = address_resolver;
     return options;
+}
+
+test "MQTT TLS reconnect resolver inherits with connector override" {
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) mqtt_runtime.AddressResolver.ResolveError![]net.IpAddress {
+            return error.UnknownHostName;
+        }
+    };
+    var inherited_context: u8 = 0;
+    var override_context: u8 = 0;
+    const inherited: mqtt_runtime.AddressResolver = .{
+        .context = &inherited_context,
+        .resolve = Resolver.resolve,
+    };
+    const override: mqtt_runtime.AddressResolver = .{
+        .context = &override_context,
+        .resolve = Resolver.resolve,
+    };
+    const from_client = reconnectOptions(
+        .{ .mqtt = .{ .client_id = "configured" } },
+        .{ .client_id = "owned", .address_resolver = inherited },
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(inherited.context),
+        @intFromPtr(from_client.mqtt.address_resolver.?.context),
+    );
+    const from_connector = reconnectOptions(
+        .{ .mqtt = .{
+            .client_id = "configured",
+            .address_resolver = override,
+        } },
+        .{ .client_id = "owned", .address_resolver = inherited },
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(override.context),
+        @intFromPtr(from_connector.mqtt.address_resolver.?.context),
+    );
 }
 
 fn reconnectOptionsWithTlsTickets(

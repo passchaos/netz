@@ -7,6 +7,7 @@
 //! selection, downstream acknowledgements, and connection cleanup.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mqtt = @import("mod.zig");
 const netz_runtime = @import("../runtime.zig");
 const owned_properties = @import("owned_properties.zig");
@@ -1166,7 +1167,11 @@ test "MQTT broker capacity slots keep connection state out of line" {
     );
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 96), @sizeOf(ClientSlot));
-        try std.testing.expectEqual(@as(usize, 152), @sizeOf(ClientBuffers));
+        const buffers_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 152,
+            .ReleaseFast, .ReleaseSmall => 144,
+        };
+        try std.testing.expectEqual(buffers_size, @sizeOf(ClientBuffers));
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(ClientSlot, "state")),
@@ -1728,8 +1733,14 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
 test "MQTT live overlap merge uses the current queue tail" {
     const allocator = std.testing.allocator;
     var slot: ClientSlot = .{};
-    defer slot.clearBuffers(allocator);
     const buffers = try slot.ensureBuffers(allocator);
+    defer {
+        // This test compares pointer identity only; its stack Publications do
+        // not own reference-counted allocations and must not be released.
+        buffers.queue.clearRetainingCapacity();
+        buffers.queue_head = 0;
+        slot.clearBuffers(allocator);
+    }
     try buffers.queue.ensureTotalCapacityPrecise(allocator, 4);
 
     var prior_publication: Publication = undefined;
