@@ -45,6 +45,10 @@ pub const Options = struct {
     shared_requests: runtime.HandshakeClientPoolSharedOptions = .{
         .max_connection_drivers = 4,
     },
+    /// Use one UDP endpoint for ordinary non-0-RTT requests. The unified pool
+    /// currently falls back to owning endpoints when a cross-transport global
+    /// connection budget or 0-RTT is configured.
+    shared_endpoint: bool = true,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
@@ -57,6 +61,9 @@ pub const State = struct {
     pool: runtime.HandshakeClientPool,
     dispatcher: runtime.HandshakeClientPoolSharedDispatcher,
     driver: DriverState,
+    shared_pool: ?runtime.SharedHandshakeClientPool,
+    shared_dispatcher: ?runtime.SharedHandshakeClientPoolRequestDispatcher,
+    shared_driver: ?DriverState,
     cache: alt_svc_cache.Cache,
     settings_mutex: std.Io.Mutex = .init,
     settings: remembered_settings.Cache,
@@ -74,6 +81,18 @@ pub const State = struct {
         }
     };
 
+    const SharedDriver = struct {
+        fn run(self: *State) void {
+            const dispatcher = if (self.shared_dispatcher) |*value|
+                value
+            else
+                return;
+            dispatcher.run() catch {
+                dispatcher.close();
+            };
+        }
+    };
+
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -87,6 +106,9 @@ pub const State = struct {
         self.options = options;
         self.settings_mutex = .init;
         self.closed = false;
+        self.shared_pool = null;
+        self.shared_dispatcher = null;
+        self.shared_driver = null;
         self.connector = .{ .options = options.handshake };
         self.cache = try .init(allocator, io, options.alt_svc);
         errdefer self.cache.deinit();
@@ -116,13 +138,51 @@ pub const State = struct {
         );
         errdefer self.dispatcher.deinit();
         self.driver = .{};
+        if (options.shared_endpoint) {
+            self.shared_pool = try .init(allocator, io, .{
+                .local_address = options.local_address,
+                .limits = options.limits,
+                .client = options.handshake,
+                .idle = options.idle,
+                .max_connections = options.max_connections,
+                .shared_connection_budget = shared_connection_budget,
+                .peer_settings_observer = .{
+                    .context = self,
+                    .observe = observePeerSettings,
+                },
+            });
+            errdefer {
+                self.shared_pool.?.deinit();
+                self.shared_pool = null;
+            }
+            self.shared_dispatcher = try .init(
+                allocator,
+                io,
+                &self.shared_pool.?,
+                .{
+                    .max_queued_requests = options.shared_requests.max_queued_requests,
+                    .max_active_connections = options.shared_requests.max_connection_drivers,
+                    .max_requests_per_connection = options.shared_requests.max_batch_requests,
+                },
+            );
+            errdefer {
+                self.shared_dispatcher.?.deinit();
+                self.shared_dispatcher = null;
+            }
+            self.shared_driver = .{};
+        }
         self.driver.future = io.async(Driver.run, .{self});
+        if (self.shared_driver) |*driver| {
+            driver.future = io.async(SharedDriver.run, .{self});
+        }
         return self;
     }
 
     pub fn deinit(self: *State) void {
         const allocator = self.allocator;
         self.close();
+        if (self.shared_dispatcher) |*dispatcher| dispatcher.deinit();
+        if (self.shared_pool) |*pool| pool.deinit();
         self.dispatcher.deinit();
         self.pool.deinit();
         self.cache.deinit();
@@ -132,8 +192,11 @@ pub const State = struct {
     }
 
     pub fn close(self: *State) void {
+        if (self.shared_dispatcher) |*dispatcher| dispatcher.close();
         self.dispatcher.close();
+        if (self.shared_pool) |*pool| pool.close();
         self.pool.close();
+        if (self.shared_driver) |*driver| driver.future.await(self.io);
         self.driver.future.await(self.io);
         self.cache.clear();
         self.settings_mutex.lockUncancelable(self.io);
@@ -143,7 +206,19 @@ pub const State = struct {
     }
 
     pub fn evictOldestIdle(self: *State) bool {
-        return self.pool.evictOldestIdle();
+        if (self.pool.evictOldestIdle()) return true;
+        if (self.shared_pool) |*pool| return pool.evictOldestIdle();
+        return false;
+    }
+
+    pub fn connectionCount(self: *State) usize {
+        return self.pool.connectionCount() +
+            if (self.shared_pool) |*pool| pool.connectionCount() else 0;
+    }
+
+    pub fn idleCount(self: *State) usize {
+        return self.pool.idleCount() +
+            if (self.shared_pool) |*pool| pool.idleCount() else 0;
     }
 
     pub fn rememberedPeerSettings(
@@ -219,6 +294,39 @@ pub const State = struct {
                     .retry_reason = metadata.retry_reason,
                 } else null,
             };
+        }
+        if (!crossed_origin) {
+            if (self.shared_dispatcher) |*dispatcher| {
+                const sender = dispatcher.sender();
+                var may_retry = http_method.isIdempotent(options.method);
+                while (true) {
+                    var response = (if (deadline) |absolute|
+                        sender.requestAltSvcWithDeadline(
+                            uri_text,
+                            alternative.target(),
+                            options,
+                            absolute,
+                        )
+                    else
+                        sender.requestAltSvc(
+                            uri_text,
+                            alternative.target(),
+                            options,
+                        )) catch |err| {
+                        if (may_retry and retryableSharedRequestError(err)) {
+                            may_retry = false;
+                            continue;
+                        }
+                        return err;
+                    };
+                    const owned: runtime.OwnedHandshakeResponse = .{
+                        .stream_bytes = response.stream_bytes,
+                        .response = response.response,
+                    };
+                    response = undefined;
+                    return .{ .response = owned };
+                }
+            }
         }
         if (!crossed_origin) {
             const sender = self.dispatcher.sender();

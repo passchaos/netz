@@ -51,6 +51,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
 
         const RouteTurn = struct {
             key: route_key.Key = undefined,
+            primary_allowed: bool = true,
             authority: authority.Snapshot = .{},
             authority_generation: u64 = 0,
             activity: std.Io.Event = .unset,
@@ -421,7 +422,8 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             route: *const RouteTurn,
             command: *const Command,
         ) bool {
-            return route.key.eql(&command.route_key) or
+            return (route.primary_allowed and
+                route.key.eql(&command.route_key)) or
                 route.authority.allows(&command.route_key);
         }
 
@@ -466,6 +468,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 };
                 route.* = .{
                     .key = first.route_key,
+                    .primary_allowed = true,
                     .authority = .{},
                     .authority_generation = 0,
                     .activity = .unset,
@@ -668,6 +671,9 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             route.authority = if (state.closed) .{} else next;
             if (!state.closed) {
                 next_owned = false;
+                route.primary_allowed = !lease.client().peerOriginExcluded(
+                    route.key.origin(),
+                );
                 if (built_ok) route.authority_generation = generation;
                 var command = state.head;
                 while (command) |candidate| : (command = candidate.next) {

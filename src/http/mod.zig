@@ -85,5 +85,6 @@ test {
     _ = @import("client_pool_http3_tests.zig");
     _ = @import("client_pool/http3_origin_tests.zig");
     _ = @import("client_pool/http3_shared_tests.zig");
+    _ = @import("client_pool/http3_shared_endpoint_tests.zig");
     _ = @import("cookie_session_tests.zig");
 }

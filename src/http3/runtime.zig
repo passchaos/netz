@@ -17808,6 +17808,13 @@ pub const HandshakeClient = struct {
         return self.control.peerOriginKnown(origin);
     }
 
+    pub fn peerOriginExcluded(
+        self: HandshakeClient,
+        origin: http3.Origin,
+    ) bool {
+        return self.control.peerOriginExcluded(origin);
+    }
+
     pub fn peerOriginSetAllows(
         self: HandshakeClient,
         initial_origin: http3.Origin,
@@ -18944,6 +18951,18 @@ pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
 pub const SharedHandshakeClientPoolError =
     @import("runtime/shared_handshake_client_pool.zig").Error;
+pub const SharedHandshakeClientPoolRequestDispatcher =
+    SharedHandshakeClientPool.RequestDispatcher;
+pub const SharedHandshakeClientPoolRequestSender =
+    SharedHandshakeClientPoolRequestDispatcher.Sender;
+pub const SharedHandshakeClientPoolRequestDispatcherOptions =
+    @import("runtime/shared_handshake_client_pool/dispatcher.zig").Options;
+pub const SharedHandshakeClientPoolRequestDispatcherStats =
+    @import("runtime/shared_handshake_client_pool/dispatcher.zig").Stats;
+pub const SharedHandshakeClientPoolRequestDispatcherError =
+    @import("runtime/shared_handshake_client_pool/dispatcher.zig").Error;
+pub const SharedHandshakeClientPoolRequestError =
+    SharedHandshakeClientPoolRequestDispatcher.RequestError;
 
 pub const OwnedHandshakeRequest = struct {
     from: net.IpAddress,
@@ -34638,6 +34657,8 @@ test {
     _ = @import("runtime/handshake_client_pool/shared_authority_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_request_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_dispatcher_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool/alt_svc_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");

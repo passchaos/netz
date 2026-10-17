@@ -884,6 +884,7 @@ pub fn Pool(comptime Runtime: type) type {
                 reuse.requested_origin,
                 requested_origin,
             ));
+            if (client.peerOriginExcluded(requested_origin)) return false;
             const allowed = client.peerOriginSetAllows(
                 connection_origin,
                 requested_origin,

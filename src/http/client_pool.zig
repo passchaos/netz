@@ -22,7 +22,9 @@ const tls_stream = @import("../tls/mod.zig").stream;
 
 pub const Error = client.Error || http3_runtime.Error ||
     http3_runtime.HandshakeClientPoolError ||
-    http3_runtime.HandshakeClientPoolSharedError || alt_svc_cache.Error || error{
+    http3_runtime.HandshakeClientPoolSharedError ||
+    http3_runtime.SharedHandshakeClientPoolRequestError ||
+    alt_svc_cache.Error || error{
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,
@@ -97,15 +99,18 @@ pub const Pool = struct {
             options.max_total_connections,
         );
         errdefer shared_budget.deinit();
-        const http3_state = if (options.http3) |http3_options|
-            try h3_support.State.create(
+        const http3_state = if (options.http3) |http3_options| blk: {
+            var effective = http3_options;
+            effective.shared_endpoint = effective.shared_endpoint and
+                options.max_total_connections == 0 and
+                effective.early_data == null;
+            break :blk try h3_support.State.create(
                 allocator,
                 io,
-                http3_options,
+                effective,
                 shared_budget,
-            )
-        else
-            null;
+            );
+        } else null;
         errdefer if (http3_state) |state| state.deinit();
         return .{
             .allocator = allocator,
@@ -368,12 +373,12 @@ pub const Pool = struct {
 
     pub fn http3ConnectionCount(self: *Pool) usize {
         const state = self.http3 orelse return 0;
-        return state.pool.connectionCount();
+        return state.connectionCount();
     }
 
     pub fn http3IdleCount(self: *Pool) usize {
         const state = self.http3 orelse return 0;
-        return state.pool.idleCount();
+        return state.idleCount();
     }
 
     pub fn http3RememberedSettingsStats(

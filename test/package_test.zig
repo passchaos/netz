@@ -3603,6 +3603,32 @@ test "public modules are reachable" {
         netz.http3.runtime.SharedHandshakeClientPool.Lease,
         "observeResponseStatus",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.SharedHandshakeClientPool,
+        "RequestTransaction",
+    ));
+    inline for (&.{
+        "SharedHandshakeClientPoolRequestDispatcher",
+        "SharedHandshakeClientPoolRequestSender",
+        "SharedHandshakeClientPoolRequestDispatcherOptions",
+        "SharedHandshakeClientPoolRequestDispatcherStats",
+        "SharedHandshakeClientPoolRequestDispatcherError",
+        "SharedHandshakeClientPoolRequestError",
+    }) |decl| try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        decl,
+    ));
+    inline for (&.{
+        "request",
+        "requestWithTimeout",
+        "requestWithDeadline",
+        "requestAltSvc",
+        "requestAltSvcWithTimeout",
+        "requestAltSvcWithDeadline",
+    }) |decl| try std.testing.expect(@hasDecl(
+        netz.http3.runtime.SharedHandshakeClientPoolRequestSender,
+        decl,
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));
     try std.testing.expect(@hasDecl(

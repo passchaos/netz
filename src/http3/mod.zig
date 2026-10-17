@@ -1544,6 +1544,10 @@ pub const ControlState = struct {
         return originListContains(self.peer_origins.items, origin);
     }
 
+    pub fn peerOriginExcluded(self: ControlState, origin: Origin) bool {
+        return originListContains(self.peer_origin_exclusions.items, origin);
+    }
+
     /// Return null until the first ORIGIN frame initializes authority policy.
     /// Once initialized, the RFC 8336 Origin Set always includes the initial
     /// connection origin plus every valid advertised addition. Certificate
@@ -5704,6 +5708,9 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
         try requestOrigin("https", "cdn.example.com:8443"),
     );
     try std.testing.expectEqual(@as(u64, 2), control.peerOriginGeneration());
+    try std.testing.expect(control.peerOriginExcluded(
+        try requestOrigin("https", "cdn.example.com:8443"),
+    ));
     try control.removePeerOrigin(
         allocator,
         try requestOrigin("https", "cdn.example.com:8443"),
@@ -5746,6 +5753,23 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
     try std.testing.expect(uninitialized.peerOriginSetAllows(
         try requestOrigin("https", "initial.example"),
         try requestOrigin("https", "missing.example"),
+    ) == null);
+    try uninitialized.removePeerOrigin(
+        allocator,
+        try requestOrigin("https", "initial.example"),
+    );
+    try std.testing.expect(uninitialized.peerOriginExcluded(
+        try requestOrigin("https", "initial.example"),
+    ));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        uninitialized.peerOriginGeneration(),
+    );
+    // Policy remains uninitialized, but pool reuse consults the independent
+    // exclusion before applying the normal unknown-origin fallback.
+    try std.testing.expect(uninitialized.peerOriginSetAllows(
+        try requestOrigin("https", "initial.example"),
+        try requestOrigin("https", "initial.example"),
     ) == null);
 
     var empty: std.ArrayList(u8) = .empty;

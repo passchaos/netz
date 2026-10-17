@@ -9,9 +9,12 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const owned_receive_race = @import("../../quic/owned_receive_race.zig");
+const connection_budget = @import("../../internal/connection_budget.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const owning_pool = @import("handshake_client_pool.zig");
+const shared_dispatcher = @import("shared_handshake_client_pool/dispatcher.zig");
 const shared_redirect = @import("shared_handshake_client_pool/redirect.zig");
+const shared_request = @import("shared_handshake_client_pool/request.zig");
 
 const supported_versions = [_]u32{
     quic.Version.version_1.wireValue(),
@@ -48,6 +51,8 @@ pub fn Options(comptime Runtime: type) type {
         /// unbounded. The current implementation performs one acquisition at
         /// a time on the endpoint owner.
         max_connections: usize = 32,
+        shared_connection_budget: ?*connection_budget.Budget = null,
+        peer_settings_observer: ?owning_pool.PeerSettingsObserver = null,
         handshake_inbox_capacity: usize = 32,
         /// Maximum delay before the endpoint owner checks handshake worker
         /// completion again. QUIC timers can wake it earlier.
@@ -76,10 +81,13 @@ pub fn Pool(comptime Runtime: type) type {
         ) = .empty,
         next_handle: quic.endpoint_dispatcher.ConnectionHandle = 1,
         last_event_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
-        total_reused: u64 = 0,
-        total_misses: u64 = 0,
-        total_dropped: u64 = 0,
+        total_reused: std.atomic.Value(u64) = .init(0),
+        total_misses: std.atomic.Value(u64) = .init(0),
+        total_dropped: std.atomic.Value(u64) = .init(0),
         release_sequence: u64 = 0,
+        connection_count_snapshot: std.atomic.Value(usize) = .init(0),
+        leased_count_snapshot: std.atomic.Value(usize) = .init(0),
+        idle_count_snapshot: std.atomic.Value(usize) = .init(0),
         closed: bool = false,
 
         const Self = @This();
@@ -195,6 +203,11 @@ pub fn Pool(comptime Runtime: type) type {
                 return self.pool.entries.get(self.handle).?.origin_key.origin();
             }
 
+            pub fn connectionOrigin(self: *const Lease) http3.Origin {
+                std.debug.assert(self.active);
+                return self.pool.entries.get(self.handle).?.origin_key.origin();
+            }
+
             /// Apply RFC 8336's 421 removal before returning this connection to
             /// the pool. Failure discards the connection so an unrecorded
             /// exclusion can never authorize a later request.
@@ -243,6 +256,12 @@ pub fn Pool(comptime Runtime: type) type {
                     stream_id,
                     application_error_code,
                 );
+            }
+
+            pub fn tryCancelPush(self: *Lease, push_id: u64) !void {
+                if (!self.active) return error.InvalidLease;
+                defer self.pool.refresh(self.handle) catch {};
+                try self.client().tryCancelPush(push_id);
             }
 
             pub fn trySendRequestBody(
@@ -405,6 +424,20 @@ pub fn Pool(comptime Runtime: type) type {
 
         pub const RedirectOperationError =
             Runtime.RedirectTimeoutError || Error;
+        pub const RequestOperationError = Runtime.Error || Error ||
+            quic.endpoint_dispatcher.Error;
+        pub const ReceiveOperationError = RequestOperationError ||
+            std.Io.Timeout.Error || std.Io.ConcurrentError;
+        pub const OwnedResponse = shared_request.OwnedResponse;
+        pub const RequestTransaction = shared_request.Transaction(
+            Runtime,
+            Self,
+            RequestOperationError,
+        );
+        pub const RequestDispatcher = shared_dispatcher.Dispatcher(
+            Self,
+            Runtime,
+        );
 
         const RedirectAdapter = struct {
             pub fn acquire(
@@ -727,9 +760,14 @@ pub fn Pool(comptime Runtime: type) type {
                             origin,
                         ) catch |err| {
                             reused.entry.leased = false;
+                            _ = self.leased_count_snapshot.fetchSub(
+                                1,
+                                .acq_rel,
+                            );
+                            _ = self.idle_count_snapshot.fetchAdd(1, .acq_rel);
                             return err;
                         };
-                self.total_reused +|= 1;
+                _ = self.total_reused.fetchAdd(1, .monotonic);
                 return .{
                     .pool = self,
                     .handle = reused.entry.handle,
@@ -737,7 +775,7 @@ pub fn Pool(comptime Runtime: type) type {
                     .request_origin_key = request_origin_key,
                 };
             }
-            self.total_misses +|= 1;
+            _ = self.total_misses.fetchAdd(1, .monotonic);
             if (self.options.max_connections != 0 and
                 self.entries.count() >= self.options.max_connections)
             {
@@ -745,6 +783,12 @@ pub fn Pool(comptime Runtime: type) type {
                     return error.ConnectionLimitReached;
                 self.dropEntry(displaced);
             }
+            var reservation_active = false;
+            if (self.options.shared_connection_budget) |budget| {
+                try budget.tryReserve(null);
+                reservation_active = true;
+            }
+            errdefer if (reservation_active) self.releaseShared(1);
             // Reserve the stable map slot before a successful handshake can
             // become visible. This prevents an allocation failure after
             // dispatcher promotion from tearing down a live route.
@@ -808,6 +852,9 @@ pub fn Pool(comptime Runtime: type) type {
                     connected.handle,
                     entry,
                 );
+                _ = self.connection_count_snapshot.fetchAdd(1, .acq_rel);
+                _ = self.leased_count_snapshot.fetchAdd(1, .acq_rel);
+                reservation_active = false;
                 return .{
                     .pool = self,
                     .handle = connected.handle,
@@ -1643,7 +1690,7 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         pub fn connectionCount(self: *const Self) usize {
-            return self.entries.count();
+            return self.connection_count_snapshot.load(.acquire);
         }
 
         pub fn routeCount(self: *const Self) usize {
@@ -1655,28 +1702,40 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         pub fn leasedCount(self: *const Self) usize {
-            var count: usize = 0;
-            var iterator = self.entries.valueIterator();
-            while (iterator.next()) |entry| count += @intFromBool(entry.*.leased);
-            return count;
+            return self.leased_count_snapshot.load(.acquire);
         }
 
         pub fn idleCount(self: *const Self) usize {
-            return self.entries.count() - self.leasedCount();
+            return self.idle_count_snapshot.load(.acquire);
         }
 
         pub fn stats(self: *const Self) http3.origin_pool.Stats {
             return .{
                 .idle = self.idleCount(),
-                .total_reused = self.total_reused,
-                .total_misses = self.total_misses,
-                .total_dropped = self.total_dropped,
+                .total_reused = self.total_reused.load(.acquire),
+                .total_misses = self.total_misses.load(.acquire),
+                .total_dropped = self.total_dropped.load(.acquire),
             };
+        }
+
+        pub fn evictOldestIdle(self: *Self) bool {
+            const handle = self.oldestIdleHandle() orelse return false;
+            self.dropEntry(handle);
+            return true;
         }
 
         fn release(self: *Self, handle: Handle) void {
             const entry = self.entries.get(handle) orelse unreachable;
             std.debug.assert(entry.leased);
+            if (self.options.peer_settings_observer) |observer| {
+                if (entry.client.peerSettings()) |settings| {
+                    observer.observe(
+                        observer.context,
+                        entry.origin_key.origin(),
+                        settings,
+                    );
+                }
+            }
             if (self.closed or !entry.client.isReusable() or
                 self.options.idle.max_idle_per_origin == 0 or
                 self.options.idle.max_idle_total == 0)
@@ -1695,6 +1754,9 @@ pub fn Pool(comptime Runtime: type) type {
                 if (self.oldestIdleHandle()) |oldest| self.dropEntry(oldest);
             }
             entry.leased = false;
+            const previous = self.leased_count_snapshot.fetchSub(1, .acq_rel);
+            std.debug.assert(previous != 0);
+            _ = self.idle_count_snapshot.fetchAdd(1, .acq_rel);
             entry.pooled_at_ms = nowMillis(self.io);
             entry.release_sequence = self.release_sequence;
             self.release_sequence +%= 1;
@@ -1709,6 +1771,7 @@ pub fn Pool(comptime Runtime: type) type {
                 if (entry.leased) continue;
                 if (!entry.client.isReusable()) continue;
                 const connection_origin = entry.origin_key.origin();
+                if (entry.client.peerOriginExcluded(origin)) continue;
                 const allowed = entry.client.peerOriginSetAllows(
                     connection_origin,
                     origin,
@@ -1738,6 +1801,9 @@ pub fn Pool(comptime Runtime: type) type {
             }
             const entry = exact orelse coalesced orelse return null;
             entry.leased = true;
+            _ = self.leased_count_snapshot.fetchAdd(1, .acq_rel);
+            const idle = self.idle_count_snapshot.fetchSub(1, .acq_rel);
+            std.debug.assert(idle != 0);
             return .{
                 .entry = entry,
                 .exact_origin = exact != null,
@@ -1851,6 +1917,21 @@ pub fn Pool(comptime Runtime: type) type {
         fn dropEntry(self: *Self, handle: Handle) void {
             const removed = self.entries.fetchRemove(handle) orelse return;
             const entry = removed.value;
+            const connections = self.connection_count_snapshot.fetchSub(
+                1,
+                .acq_rel,
+            );
+            std.debug.assert(connections != 0);
+            if (entry.leased) {
+                const leased = self.leased_count_snapshot.fetchSub(
+                    1,
+                    .acq_rel,
+                );
+                std.debug.assert(leased != 0);
+            } else {
+                const idle = self.idle_count_snapshot.fetchSub(1, .acq_rel);
+                std.debug.assert(idle != 0);
+            }
             if (entry.registered) {
                 _ = self.dispatcher.unregisterConnection(handle) catch false;
             }
@@ -1859,7 +1940,13 @@ pub fn Pool(comptime Runtime: type) type {
             self.allocator.destroy(entry.client);
             entry.origin_key.deinit();
             self.allocator.destroy(entry);
-            self.total_dropped +|= 1;
+            _ = self.total_dropped.fetchAdd(1, .monotonic);
+            self.releaseShared(1);
+        }
+
+        fn releaseShared(self: *Self, count: usize) void {
+            const budget = self.options.shared_connection_budget orelse return;
+            budget.release(count);
         }
 
         fn reserveHandle(self: *Self) Handle {
