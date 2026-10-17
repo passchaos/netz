@@ -521,6 +521,13 @@ total caller/connect deadline; the same regression now places a silent UDP
 endpoint first and requires fallback to the authenticated server. A separate
 silent-only test verifies the WebTransport adapter reaches its total deadline
 instead of waiting for the lower-level multi-PTO default.
+Owning WebTransport URI connects also pass through HTTP/3's opt-in QUIC Happy
+Eyeballs policy. Their silent-first regression now retains a two-second first
+attempt budget but starts the live route after 20 ms, proving the Extended
+CONNECT adapter uses a concurrent winner rather than sequential timeout
+fallback. Dual-family callers supply `alternate_local_address`; authority,
+certificate policy, and the end-to-end WebTransport deadline remain tied to
+the original URI.
 `connectUriWithDeadline` also
 accepts an existing absolute awake-clock budget from an application workflow
 and preserves it through the final Extended CONNECT response rather than

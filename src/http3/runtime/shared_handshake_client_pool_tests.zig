@@ -833,6 +833,41 @@ test "HTTP/3 shared pool validates migration endpoint options" {
         }),
     );
 
+    try std.testing.expectError(
+        error.InvalidPoolOptions,
+        runtime.SharedHandshakeClientPool.init(allocator, io, .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .migration_local_address = .{ .ip6 = .loopback(0) },
+            .client = .{
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+                    },
+                },
+                .address_connect_policy = .{ .happy_eyeballs = .{} },
+            },
+        }),
+    );
+
+    try std.testing.expectError(
+        error.InvalidPoolOptions,
+        runtime.SharedHandshakeClientPool.init(allocator, io, .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .client = .{
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+                    },
+                },
+                .alternate_local_address = .{ .ip6 = .loopback(0) },
+            },
+        }),
+    );
+
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
         .local_address = .{ .ip4 = .loopback(0) },
         .client = .{ .handshake = .{

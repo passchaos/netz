@@ -269,7 +269,11 @@ test "WebTransport server admission exposes request and response metadata" {
                     .context = &resolver,
                     .resolve = Resolver.resolve,
                 },
-                .address_attempt_timeout = .fromMilliseconds(30),
+                .address_attempt_timeout = .fromSeconds(2),
+                .address_connect_policy = .{ .happy_eyeballs = .{
+                    .attempt_delay = .fromMilliseconds(20),
+                    .max_in_flight = 2,
+                } },
             },
         },
         operation_timeout,

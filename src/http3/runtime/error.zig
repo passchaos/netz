@@ -23,6 +23,7 @@ pub const Error = http3.Error || quic.runtime.Error ||
     InvalidDispatcherState,
     ConcurrentRead,
     UnsafeEarlyDataMethod,
+    InvalidAddressConnectPolicy,
 };
 
 /// Failures produced by a handshake worker after admission has transferred

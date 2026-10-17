@@ -1561,6 +1561,16 @@ ordinary pools, and dispatcher-shared pools use the same rule. Silent-first
 tests complete through the next address, including a shared-endpoint 0-RTT
 attempt whose possible early packet forces the ordinary fallback to report
 `rejected` and replay safely over 1-RTT.
+Owning clients and the ordinary pool can additionally opt into
+`address_connect_policy = .happy_eyeballs`. They stable-interleave eligible
+IPv6/IPv4 routes, start independent QUIC endpoints with the configured stagger,
+and bound concurrent sockets. `alternate_local_address` explicitly supplies
+the other-family bind. Each later attempt receives fresh connection IDs and
+handshake entropy; only the first can consume resumption or send 0-RTT. A
+later winner therefore reports early data rejected and replays the safe request
+once over 1-RTT. Cancellation drains every attempt and deinitializes successful
+losers. The dispatcher-shared pool rejects this policy until its pending-route
+promotion accepts established connections from both owned UDP endpoints.
 It now also exposes explicit Alt-Svc acquisition without changing that reader
 ownership: only the advertised DNS/UDP target changes, while SNI, certificate
 policy, request authority, pool key, and automatic resumption/ticket collection

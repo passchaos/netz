@@ -1037,10 +1037,16 @@ pub fn Pool(comptime Runtime: type) type {
             io: std.Io,
             options: Options(Runtime),
         ) !Self {
+            const ordered_address_connect = switch (options.client.address_connect_policy) {
+                .ordered => true,
+                .happy_eyeballs => false,
+            };
             if (options.idle.max_idle_per_origin >
                 options.idle.max_idle_total or
                 options.handshake_inbox_capacity == 0 or
-                options.handshake_poll_interval.nanoseconds <= 0)
+                options.handshake_poll_interval.nanoseconds <= 0 or
+                !ordered_address_connect or
+                options.client.alternate_local_address != null)
             {
                 return error.InvalidPoolOptions;
             }

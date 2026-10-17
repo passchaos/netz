@@ -10157,6 +10157,22 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClientOptions,
         "address_attempt_timeout",
     ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.HandshakeClientOptions,
+        "address_connect_policy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.HandshakeClientOptions,
+        "alternate_local_address",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "AddressConnectPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HappyEyeballsOptions",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "AddressConnectPolicy"));
     try std.testing.expect(@hasDecl(netz.http, "HappyEyeballsOptions"));
     try std.testing.expect(@hasDecl(

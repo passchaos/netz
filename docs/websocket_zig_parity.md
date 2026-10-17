@@ -214,6 +214,11 @@ HTTP/3 WebSocket URI connects inherit HTTP/3's optional per-address handshake
 timeout. A silent UDP route can therefore fail within its own phase budget and
 fall through to the next address while the original WebSocket handshake
 deadline, SNI, and `:authority` remain unchanged.
+They also inherit the opt-in QUIC Happy Eyeballs policy. A real silent-first
+regression gives the first route a two-second phase budget but launches the
+second independent QUIC handshake after 20 ms and completes without waiting
+for that budget. TLS identity, URI authority, total deadline, cancellation,
+and loser endpoint cleanup remain owned by the HTTP/3 connector.
 
 HTTP/1 URI clients now optionally follow bounded 300/301/302/303/307/308
 responses rather than forcing applications to reconstruct each Upgrade from a

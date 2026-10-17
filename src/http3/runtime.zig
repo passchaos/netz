@@ -3,6 +3,7 @@ const RuntimeModule = @This();
 const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
+const happy_eyeballs = @import("../internal/happy_eyeballs.zig");
 const http_method = @import("../internal/http_method.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
@@ -649,6 +650,8 @@ pub const resolveEndpointBefore = client_uri.resolveEndpointBefore;
 pub const resolveHostPortAddressesBefore =
     client_uri.resolveHostPortAddressesBefore;
 pub const AddressResolver = address_resolver.Resolver;
+pub const AddressConnectPolicy = happy_eyeballs.Policy;
+pub const HappyEyeballsOptions = happy_eyeballs.Options;
 
 /// Compose one address-specific handshake budget with the caller/connection
 /// deadline. The phase timeout restarts for each address but can never extend
@@ -5832,6 +5835,15 @@ pub const HandshakeClientOptions = struct {
     /// `connect_timeout` or caller deadline. Null preserves the existing
     /// handshake-recovery policy.
     address_attempt_timeout: ?std.Io.Duration = null,
+    /// Resolver-address scheduling for owning and ordinary-pool URI connects.
+    /// Ordered preserves resolver order. Happy Eyeballs stable-interleaves
+    /// families and overlaps independent QUIC handshakes after a delay.
+    address_connect_policy: AddressConnectPolicy = .ordered,
+    /// Optional bind address for the family opposite the entry point's
+    /// `local_address`. It makes dual-family URI racing explicit instead of
+    /// silently discarding DNS results that the primary UDP socket cannot
+    /// reach. The two bind addresses must use different families.
+    alternate_local_address: ?net.IpAddress = null,
     /// Optional application resolver shared by direct URI connections,
     /// redirects, Alt-Svc routes, and pools. Literal IP route hosts bypass it;
     /// QUIC/TLS authentication remains bound to the URI origin.
@@ -12291,14 +12303,20 @@ pub const HandshakeClient = struct {
         );
     }
 
-    /// Try every DNS result that can be reached from `local_address`.
-    ///
-    /// Public HTTP/3 origins often publish many CDN anycast addresses.  A
-    /// single edge can temporarily black-hole UDP/443, which otherwise surfaces
-    /// as a QUIC `HandshakeTimeout` even though another address from the same
-    /// DNS answer is healthy.  This helper keeps protocol/authentication errors
-    /// fail-fast, but treats path-level failures as per-address and falls back
-    /// to the next resolved endpoint before giving up.
+    const ResolvedEarlyConnect = struct {
+        request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    };
+
+    const ResolvedConnectResult = struct {
+        client: HandshakeClient,
+        disposition: ?EarlyRequestDisposition = null,
+    };
+
+    /// Try every reachable DNS result under the configured ordered or
+    /// RFC 8305-style staggered policy. Protocol/authentication failures remain
+    /// fatal across the origin, while path failures can advance another route.
     fn connectAnyResolvedAddress(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -12308,42 +12326,18 @@ pub const HandshakeClient = struct {
         options: HandshakeClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeClient {
-        if (servers.len == 0) return error.NoAddressReturned;
-
-        var attempted = false;
-        var last_err: ?Error = null;
-        for (servers) |server| {
-            if (!sameIpAddressFamily(local_address, server)) continue;
-            attempted = true;
-            var attempt_options = options;
-            const attempt_deadline = try addressAttemptDeadline(
-                io,
-                deadline,
-                options.address_attempt_timeout,
-            );
-            if (attempt_deadline) |absolute| {
-                attempt_options.handshake.handshake_recovery =
-                    try handshakeRecoveryBefore(
-                        io,
-                        absolute,
-                        options.handshake.handshake_recovery,
-                    );
-            }
-            return connect(
-                allocator,
-                io,
-                local_address,
-                server,
-                limits,
-                attempt_options,
-            ) catch |err| {
-                last_err = err;
-                if (shouldTryNextResolvedAddress(err)) continue;
-                return err;
-            };
-        }
-        if (!attempted) return error.AddressFamilyUnsupported;
-        return last_err orelse error.NoAddressReturned;
+        const connected = try connectAnyResolvedAddressInternal(
+            allocator,
+            io,
+            local_address,
+            servers,
+            limits,
+            options,
+            deadline,
+            null,
+        );
+        std.debug.assert(connected.disposition == null);
+        return connected.client;
     }
 
     fn connectAnyResolvedAddressWithEarlyRequest(
@@ -12358,59 +12352,311 @@ pub const HandshakeClient = struct {
         lease: *quic.resumption.EarlyDataLease,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!EarlyHandshakeClient {
-        var attempted = false;
-        for (servers, 0..) |server, index| {
-            if (!sameIpAddressFamily(local_address, server)) continue;
-            attempted = true;
-            var attempt_options = options;
-            const attempt_deadline = try addressAttemptDeadline(
+        const connected = try connectAnyResolvedAddressInternal(
+            allocator,
+            io,
+            local_address,
+            servers,
+            limits,
+            options,
+            deadline,
+            .{ .request = early_request, .cache = cache, .lease = lease },
+        );
+        return .{
+            .client = connected.client,
+            .disposition = connected.disposition orelse unreachable,
+        };
+    }
+
+    fn connectAnyResolvedAddressInternal(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        servers: []const net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        early: ?ResolvedEarlyConnect,
+    ) Error!ResolvedConnectResult {
+        if (servers.len == 0) return error.NoAddressReturned;
+        try validateResolvedAddressPolicy(local_address, options);
+        return switch (options.address_connect_policy) {
+            .ordered => connectResolvedAddressesOrdered(
+                allocator,
                 io,
+                local_address,
+                servers,
+                limits,
+                options,
                 deadline,
-                options.address_attempt_timeout,
-            );
-            if (attempt_deadline) |absolute| {
-                attempt_options.handshake.handshake_recovery =
-                    try handshakeRecoveryBefore(
-                        io,
-                        absolute,
-                        options.handshake.handshake_recovery,
-                    );
+                early,
+            ),
+            .happy_eyeballs => |policy| connectResolvedAddressesRacing(
+                allocator,
+                io,
+                local_address,
+                servers,
+                limits,
+                options,
+                deadline,
+                early,
+                policy,
+            ),
+        };
+    }
+
+    fn connectResolvedAddressesOrdered(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        primary_local_address: net.IpAddress,
+        servers: []const net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        early: ?ResolvedEarlyConnect,
+    ) Error!ResolvedConnectResult {
+        var attempted = false;
+        var attempt_index: usize = 0;
+        var early_path_failed = false;
+        var last_err: ?Error = null;
+        for (servers) |server| {
+            const local_address = localAddressForResolvedPeer(
+                primary_local_address,
+                options.alternate_local_address,
+                server,
+            ) orelse continue;
+            attempted = true;
+            const attempt_early = if (!early_path_failed) early else null;
+            return connectResolvedAddressAttempt(
+                allocator,
+                io,
+                local_address,
+                server,
+                limits,
+                options,
+                deadline,
+                attempt_early,
+                early != null and attempt_early == null,
+                attempt_index != 0,
+            ) catch |err| {
+                last_err = err;
+                if (!shouldTryNextResolvedAddress(err)) return err;
+                if (attempt_early != null) early_path_failed = true;
+                attempt_index += 1;
+                continue;
+            };
+        }
+        if (!attempted) return error.AddressFamilyUnsupported;
+        return last_err orelse error.NoAddressReturned;
+    }
+
+    fn connectResolvedAddressesRacing(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        primary_local_address: net.IpAddress,
+        servers: []const net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        early: ?ResolvedEarlyConnect,
+        policy: HappyEyeballsOptions,
+    ) Error!ResolvedConnectResult {
+        try happy_eyeballs.validate(policy);
+        const stack_address_capacity: usize = 8;
+        var eligible_count: usize = 0;
+        for (servers) |server| {
+            if (localAddressForResolvedPeer(
+                primary_local_address,
+                options.alternate_local_address,
+                server,
+            ) != null) eligible_count += 1;
+        }
+        if (eligible_count == 0) return error.AddressFamilyUnsupported;
+
+        var eligible_stack: [stack_address_capacity]net.IpAddress = undefined;
+        const eligible_heap = if (eligible_count > eligible_stack.len)
+            try allocator.alloc(net.IpAddress, eligible_count)
+        else
+            null;
+        defer if (eligible_heap) |storage| allocator.free(storage);
+        const eligible = eligible_heap orelse eligible_stack[0..eligible_count];
+        var eligible_index: usize = 0;
+        for (servers) |server| {
+            if (localAddressForResolvedPeer(
+                primary_local_address,
+                options.alternate_local_address,
+                server,
+            ) == null) continue;
+            eligible[eligible_index] = server;
+            eligible_index += 1;
+        }
+
+        const RaceContext = struct {
+            allocator: std.mem.Allocator,
+            primary_local_address: net.IpAddress,
+            limits: Limits,
+            options: HandshakeClientOptions,
+            deadline: ?std.Io.Clock.Timestamp,
+            early: ?ResolvedEarlyConnect,
+
+            fn connect(
+                self: @This(),
+                io_value: std.Io,
+                server: net.IpAddress,
+                index: usize,
+            ) Error!ResolvedConnectResult {
+                return connectResolvedAddressAttempt(
+                    self.allocator,
+                    io_value,
+                    localAddressForResolvedPeer(
+                        self.primary_local_address,
+                        self.options.alternate_local_address,
+                        server,
+                    ).?,
+                    server,
+                    self.limits,
+                    self.options,
+                    self.deadline,
+                    if (index == 0) self.early else null,
+                    self.early != null and index != 0,
+                    index != 0,
+                );
             }
-            return connectWithEarlyRequestBefore(
+
+            fn deinitConnected(
+                _: @This(),
+                connected: *ResolvedConnectResult,
+            ) void {
+                connected.client.deinit();
+            }
+        };
+        return happy_eyeballs.race(
+            Error,
+            ResolvedConnectResult,
+            allocator,
+            io,
+            eligible,
+            policy,
+            null,
+            null,
+            RaceContext{
+                .allocator = allocator,
+                .primary_local_address = primary_local_address,
+                .limits = limits,
+                .options = options,
+                .deadline = deadline,
+                .early = early,
+            },
+            RaceContext.connect,
+            RaceContext.deinitConnected,
+            shouldTryNextResolvedAddress,
+        );
+    }
+
+    fn connectResolvedAddressAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        early: ?ResolvedEarlyConnect,
+        fallback_from_early: bool,
+        fresh_identity: bool,
+    ) Error!ResolvedConnectResult {
+        var attempt_options = options;
+        var original_dcid: [8]u8 = undefined;
+        var local_cid: [8]u8 = undefined;
+        if (fresh_identity) {
+            try std.Io.randomSecure(io, &original_dcid);
+            try std.Io.randomSecure(io, &local_cid);
+            attempt_options.handshake.original_destination_connection_id =
+                &original_dcid;
+            attempt_options.handshake.local_connection_id = &local_cid;
+            attempt_options.handshake.retry_source_connection_id = &.{};
+            attempt_options.handshake.address_validation_token = &.{};
+            attempt_options.handshake.resumption_session = null;
+            attempt_options.handshake.resumption_server_id = null;
+            attempt_options.handshake.auto_resumption = null;
+            attempt_options.handshake.random = null;
+            attempt_options.handshake.x25519_secret_key = null;
+            attempt_options.handshake.p256_secret_key = null;
+            attempt_options.handshake.p384_secret_key = null;
+            attempt_options.handshake.x25519_mlkem768_secret_key = null;
+            attempt_options.handshake.x25519_mlkem768_seed = null;
+            attempt_options.handshake.nist_hybrid_key_material = .{};
+            attempt_options.handshake.early_data = null;
+        }
+        const attempt_deadline = try addressAttemptDeadline(
+            io,
+            deadline,
+            options.address_attempt_timeout,
+        );
+        if (attempt_deadline) |absolute| {
+            attempt_options.handshake.handshake_recovery =
+                try handshakeRecoveryBefore(
+                    io,
+                    absolute,
+                    options.handshake.handshake_recovery,
+                );
+        }
+        if (early) |early_context| {
+            const connected = try connectWithEarlyRequestBefore(
                 allocator,
                 io,
                 local_address,
                 server,
                 limits,
                 attempt_options,
-                early_request,
-                cache,
-                lease,
+                early_context.request,
+                early_context.cache,
+                early_context.lease,
                 attempt_deadline,
-            ) catch |err| {
-                if (!shouldTryNextResolvedAddress(err)) return err;
-                // A protected early packet might have reached this address.
-                // Continue only with an ordinary handshake; the caller will
-                // replay the safe request over 1-RTT after `.rejected`.
-                const client = connectAnyResolvedAddress(
-                    allocator,
-                    io,
-                    local_address,
-                    servers[index + 1 ..],
-                    limits,
-                    options,
-                    deadline,
-                ) catch |fallback_err| switch (fallback_err) {
-                    error.AddressFamilyUnsupported,
-                    error.NoAddressReturned,
-                    => return err,
-                    else => return fallback_err,
-                };
-                return .{ .client = client, .disposition = .rejected };
+            );
+            return .{
+                .client = connected.client,
+                .disposition = connected.disposition,
             };
         }
-        if (!attempted) return error.AddressFamilyUnsupported;
-        return error.NoAddressReturned;
+        return .{
+            .client = try connect(
+                allocator,
+                io,
+                local_address,
+                server,
+                limits,
+                attempt_options,
+            ),
+            .disposition = if (fallback_from_early) .rejected else null,
+        };
+    }
+
+    fn validateResolvedAddressPolicy(
+        primary_local_address: net.IpAddress,
+        options: HandshakeClientOptions,
+    ) Error!void {
+        switch (options.address_connect_policy) {
+            .ordered => {},
+            .happy_eyeballs => |policy| try happy_eyeballs.validate(policy),
+        }
+        if (options.alternate_local_address) |alternate| {
+            if (sameIpAddressFamily(primary_local_address, alternate)) {
+                return error.InvalidAddressConnectPolicy;
+            }
+        }
+    }
+
+    fn localAddressForResolvedPeer(
+        primary: net.IpAddress,
+        alternate: ?net.IpAddress,
+        peer: net.IpAddress,
+    ) ?net.IpAddress {
+        if (sameIpAddressFamily(primary, peer)) return primary;
+        if (alternate) |candidate| {
+            if (sameIpAddressFamily(candidate, peer)) return candidate;
+        }
+        return null;
     }
 
     fn sameIpAddressFamily(a: net.IpAddress, b: net.IpAddress) bool {
@@ -34877,6 +35123,7 @@ test {
     _ = @import("runtime/client/tests/protected.zig");
     _ = @import("runtime/client/tests/deadline.zig");
     _ = @import("runtime/client/resolver_tests.zig");
+    _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");

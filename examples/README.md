@@ -936,11 +936,18 @@ interleaves IPv6/IPv4 results, starts the first immediately, defaults to a
 failure, and keeps one absolute caller/connect deadline over the complete race.
 External cancellation waits for every connect task to settle, and every
 successful unselected socket is closed before return. Literal IPs bypass both
-resolution and racing. HTTP/3 and WebTransport retain their existing ordered
-QUIC-handshake fallback; transport-level QUIC racing requires a separate
-connection-state design and is not implied by the TCP policy.
+resolution and racing.
+Owning HTTP/3 URI clients and the ordinary HTTP/3 pool expose the same opt-in
+policy through `HandshakeClientOptions.address_connect_policy`. Each QUIC
+attempt owns an independent endpoint and connection IDs; dual-family callers
+provide the opposite-family bind through `alternate_local_address`. WebSocket
+H3 and WebTransport URI clients inherit this behavior. Only the first attempt
+may resume or send 0-RTT, so a later winner reports rejection and the safe
+request is replayed once. The dispatcher-shared HTTP/3 pool currently rejects
+this policy instead of silently degrading it to ordered fallback; completing
+cross-endpoint route promotion remains separate work.
 For blackholed UDP routes, `HandshakeClientOptions.address_attempt_timeout`
-can bound each sequential QUIC/TLS address attempt while the total
+can bound each QUIC/TLS address attempt while the total
 `connect_timeout` or caller deadline remains unchanged. This applies to owning
 HTTP/3/WebSocket/WebTransport clients and ordinary/shared HTTP/3 pools. If a
 0-RTT packet may have reached a timed-out address, fallback proceeds at 1-RTT
