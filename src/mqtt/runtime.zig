@@ -1109,6 +1109,36 @@ pub const TrafficCounters = struct {
         _ = self.messages_sent.fetchAdd(1, .monotonic);
         _ = self.bytes_sent.fetchAdd(@intCast(bytes), .monotonic);
     }
+
+    /// Update one connection-owned receive direction. Connection reads have a
+    /// single protocol owner, while snapshots may load these values from
+    /// another task; atomic load/store preserves that observation boundary
+    /// without paying for a multi-writer read-modify-write operation.
+    fn recordReceivedExclusive(self: *TrafficCounters, bytes: usize) void {
+        self.messages_received.store(
+            self.messages_received.load(.monotonic) +% 1,
+            .monotonic,
+        );
+        self.bytes_received.store(
+            self.bytes_received.load(.monotonic) +% @as(u64, @intCast(bytes)),
+            .monotonic,
+        );
+    }
+
+    /// Update one connection-owned send direction. Public Connections require
+    /// one writer, and broker Connections enforce that ownership with their
+    /// writer mutex. Aggregate sinks remain multi-writer and still use the
+    /// `fetchAdd` path above.
+    fn recordSentExclusive(self: *TrafficCounters, bytes: usize) void {
+        self.messages_sent.store(
+            self.messages_sent.load(.monotonic) +% 1,
+            .monotonic,
+        );
+        self.bytes_sent.store(
+            self.bytes_sent.load(.monotonic) +% @as(u64, @intCast(bytes)),
+            .monotonic,
+        );
+    }
 };
 
 pub const AcceptedClient = struct {
@@ -6670,12 +6700,12 @@ pub const Connection = struct {
     }
 
     fn recordPacketReceived(self: *Connection, bytes: usize) void {
-        self.traffic.recordReceived(bytes);
+        self.traffic.recordReceivedExclusive(bytes);
         if (self.traffic_sink) |counters| counters.recordReceived(bytes);
     }
 
     fn recordPacketSent(self: *Connection, bytes: usize) void {
-        self.traffic.recordSent(bytes);
+        self.traffic.recordSentExclusive(bytes);
         if (self.traffic_sink) |counters| counters.recordSent(bytes);
     }
 
@@ -7499,6 +7529,26 @@ test "MQTT runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "MQTT exclusive traffic updates preserve wrapping counter semantics" {
+    var counters: TrafficCounters = .{};
+    counters.messages_received.store(std.math.maxInt(u64), .monotonic);
+    counters.bytes_received.store(std.math.maxInt(u64) - 1, .monotonic);
+    counters.messages_sent.store(std.math.maxInt(u64), .monotonic);
+    counters.bytes_sent.store(std.math.maxInt(u64) - 2, .monotonic);
+
+    counters.recordReceivedExclusive(2);
+    counters.recordSentExclusive(3);
+    try std.testing.expectEqualDeep(
+        TrafficStats{
+            .messages_received = 0,
+            .messages_sent = 0,
+            .bytes_received = 0,
+            .bytes_sent = 0,
+        },
+        counters.stats(),
+    );
 }
 
 test "MQTT runtime counts complete control packets and wire bytes" {
