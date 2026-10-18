@@ -98,6 +98,8 @@ class SourceLockTests(unittest.TestCase):
                     "9cf95f158aabeff60e96c2dcff2f33c48415507725b383201e143ef832620966",
                 "broker/02-subpub-recover-subscriptions.py":
                     "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
+                "broker/02-subpub-qos2-1322.py":
+                    "0244e0d8ca34f68dbb3870c18032789be20a790c29bedd57fb44b9ce58c4c247",
                 "broker/02-subpub-qos0-subscription-id.py":
                     "4ec4e803697b4051d1c63a1d3c78bad40400af6794795b904423930903d863ee",
                 "broker/02-subpub-qos0-queued-bytes.py":
@@ -142,6 +144,8 @@ class SourceLockTests(unittest.TestCase):
                     "5bd529a2ca44c64967bf4276e70b6bf9262c38f0bb0860b375829593a31a73ca",
                 "broker/03-publish-qos2-max-inflight.py":
                     "37d431fc2c663fd3d35b083c829a3b73125322a356f2122e17ad851c94705256",
+                "broker/03-publish-qos2-reuse-mid.py":
+                    "4d787f8435594c7235d4cfbe2fb5b7cf99e762c3711da033049c3c77c932d9af",
                 "broker/03-publish-b2c-disconnect-qos1.py":
                     "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
                 "broker/03-publish-b2c-disconnect-qos2.py":
@@ -194,6 +198,8 @@ class SourceLockTests(unittest.TestCase):
                     "20de02ef6d3b1c451af58e38514518e1e1df81288958ce2d2a8470840d9999be",
                 "broker/07-will-properties.py":
                     "78e27c3406d1af3517a3a09190a2e3b95ff1c91ec503ce798e2e4184eb8db0f3",
+                "broker/07-will-reconnect-1273.py":
+                    "338bf64e205dde74f1b334ff89afa1db11146ca668f60039de8dc1d9a50a9200",
                 "broker/07-will-takeover.py":
                     "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
                 "broker/09-auth-bad-method.py":

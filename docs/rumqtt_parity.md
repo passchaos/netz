@@ -3774,7 +3774,7 @@ creates exactly one independent downstream QoS 2 transaction.
 The nineteenth scenario verifies Mosquitto's PUBREL idempotence boundary:
 repeating a completed PUBREL and sending an unknown Packet Identifier both
 return PUBCOMP, while the subscriber observes no duplicate Application Message.
-Two companion MQTT 3.1.1/5 scenarios start from Mosquitto's
+Two companion source-locked MQTT 3.1.1/5 scenarios start from Mosquitto's
 `03-publish-qos2-reuse-mid.py` but retain MQTT 5 section 4.3.3's receiver
 semantics instead of Mosquitto's replacement extension. A second non-DUP
 PUBLISH reuses an identifier that is still waiting for PUBREL and carries a
@@ -4075,7 +4075,7 @@ Identifier and DUP=1. After PUBREC and a second abrupt disconnect, the next
 Session resume starts directly with PUBREL for that identifier instead of
 replaying the Application Message. PUBCOMP followed by PINGRESP proves the
 second-stage transaction is retired.
-Two more scenarios directly port Mosquitto issue 1322's
+Two more source-locked scenarios directly port Mosquitto issue 1322's
 `02-subpub-qos2-1322.py` for MQTT 3.1.1 and MQTT 5. A durable publisher
 completes five QoS 2 transactions using Packet Identifier 1 on five successive
 Network Connections while a second topic gains a subscriber midway through.
@@ -4141,7 +4141,7 @@ The delayed-Will reconnect case directly ports Mosquitto's
 Will for a durable Session, reconnecting the same Client ID after one second
 reports Session Present, and a subscriber receives PINGRESP after the original
 deadline instead of the canceled Will.
-Two companion cases directly port Mosquitto issue 1273's
+Two companion source-locked cases directly port Mosquitto issue 1273's
 `07-will-reconnect-1273.py` for MQTT 3.1.1 and MQTT 5. A durable client sends a
 normal DISCONNECT after installing a Will, reconnects with the same Client ID
 and a replacement Will, and receives Session Present. Exact live PUBLISH bytes
