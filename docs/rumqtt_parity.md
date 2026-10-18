@@ -4711,6 +4711,21 @@ proxy evidence for the entire suite.
    TLS, and WebSocket, and all 1,825 source-locked Mosquitto sequences passed.
    Keep Alive timing, large-packet progress renewal, and timeout-resumable
    framing remain unchanged.
+   Connection traffic counters now follow their actual ownership boundary too.
+   The single protocol reader and externally serialized writer update private
+   atomic snapshots with load/store instead of multi-writer RMW. Broker
+   aggregation is deferred: live `stats()` combines active slot snapshots with
+   the retired lifetime total, while unregister and pre-admission close flush
+   a final delta once. The ordinary public immediate sink remains unchanged.
+   Twelve clean fixed-binary durable QoS 2 serial pairs completed 40,000 exact
+   deliveries per arm. Broker cycles improved by a 1.032222
+   baseline/candidate median with 12/12 wins, instructions by 1.000876 with
+   12/12, throughput by 1.006236 with 10/12, and p50 by 1.010936 with 11/12;
+   p99 was neutral at 1.001168. A four-pair five-shape control kept fanout,
+   balanced, and 4-KiB throughput neutral while publishers-32 improved 2.19%.
+   Exact live/offline statistics, Debug/ReleaseFast focused MQTT tests, and all
+   1,825 Mosquitto packet sequences pass. This is a synchronization-cost result,
+   not closure of the broader serial or RSS gap.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

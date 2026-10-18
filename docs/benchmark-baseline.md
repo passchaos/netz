@@ -8205,6 +8205,43 @@ across TCP, TLS, and WebSocket, and the source-locked Mosquitto gate passed all
 1,825 packet sequences. MQTT's 1.5x Keep Alive limit, zero-disable behavior,
 large-packet progress renewal, and resumable fragmented reads are unchanged.
 
+MQTT traffic accounting now separates its concurrency domains as well. Each
+Connection has one protocol reader and one externally serialized writer, so
+its private received/sent counters use atomic load/store for snapshot safety
+instead of four multi-writer read-modify-write operations per Control Packet.
+The public immediate aggregate sink retains `fetchAdd` semantics. The broker
+uses a deferred sink: `stats()` adds active Connection snapshots to the
+already-retired lifetime total under the state mutex, and unregister or an
+unadmitted Connection close flushes its final delta exactly once. This keeps
+live, rejected, and closed-connection totals while removing the shared broker
+counter updates from steady-state packet processing.
+
+A baseline 100,000-publish profile exposed all four local-plus-sink atomic
+updates in `recordPacketReceived`; the final profile no longer contains those
+per-packet RMW sequences. The retained clean-tree comparison used twelve
+CPU-0/client, CPU-1/broker order-alternated fixed-binary pairs, 2,000 warmups,
+40,000 measured durable QoS 2 serial publishes, window one, 256-byte payloads,
+and 3,600-second Sessions. Baseline broker, candidate broker, and fixed driver
+SHA-256 values were respectively
+`db90fff072e4d64b42657da515c470f15edcefb780a284a3fa060c1740950638`,
+`b952fd18010b0379f44516c98714ff209d1ae83dc86bcd4f419d18e9561e8407`,
+and
+`9b4753e76193e5a3c41b21a7f2171cc55f1185b17ffe5045c85e0227112795b9`.
+All 24 arms completed 40,000 exact deliveries and checksum 10,780,000. Broker
+cycles improved by a 1.032222 baseline/candidate paired median (12/12 wins),
+instructions by 1.000876 (12/12), throughput by 1.006236 (10/12), and p50 by
+1.010936 (11/12). P99 was effectively neutral at 1.001168 with 7/12 wins.
+
+A separate four-pair standard-shape control kept throughput neutral for
+fanout-32, balanced-32x32, and 4-KiB traffic, while publishers-32 improved by
+a 1.021864 median; cycles improved in all serial, publishers-32, and 4-KiB
+pairs. The shorter serial timing samples were noisy despite 4/4 cycle and
+instruction wins, so the longer twelve-pair result above is the supported
+serial conclusion and no general all-shape throughput claim is made. Debug and
+ReleaseFast focused MQTT gates, exact live/offline broker statistics, and all
+1,825 source-locked Mosquitto packet sequences pass. Artifacts are retained
+under `zig-out/mqtt-traffic-counter-ab`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
