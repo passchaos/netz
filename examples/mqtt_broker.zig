@@ -41,6 +41,7 @@ const Config = struct {
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     interop_test_authentication: bool = false,
+    interop_authenticated_username_acl: bool = false,
     deny_publish_topic: ?[]const u8 = null,
     deny_subscribe_filter: ?[]const u8 = null,
     deny_unsubscribe_filter: ?[]const u8 = null,
@@ -320,7 +321,10 @@ pub fn main(init: std.process.Init) !void {
                 interop_authentication.handler()
             else
                 null,
-            .access_control = access_control,
+            .access_control = if (config.interop_authenticated_username_acl)
+                interop_authentication.usernameAccessControl()
+            else
+                access_control,
             .problem_information = problem_information[0..problem_information_count],
             .session = .{
                 .max_queued_payload_bytes_per_session = config.max_session_queued_payload_bytes,
@@ -777,6 +781,12 @@ fn parseArgs(
             "--interop-test-authentication",
         )) {
             config.interop_test_authentication = true;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--interop-authenticated-username-acl",
+        )) {
+            config.interop_authenticated_username_acl = true;
         } else if (std.mem.startsWith(
             u8,
             arg,
@@ -988,6 +998,18 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     if ((config.username == null) != (config.password == null)) {
+        return error.InvalidArgument;
+    }
+    if (config.interop_authenticated_username_acl and
+        (!config.interop_test_authentication or
+            config.username != null or
+            config.deny_publish_topic != null or
+            config.deny_subscribe_filter != null or
+            config.deny_unsubscribe_filter != null or
+            config.deny_delivery_topic != null or
+            config.deny_will_topic != null or
+            config.deny_retained_source_client_id != null))
+    {
         return error.InvalidArgument;
     }
     if ((config.server_reference == null) !=

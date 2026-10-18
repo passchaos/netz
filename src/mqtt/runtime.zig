@@ -1607,6 +1607,26 @@ pub const PendingAcceptedClient = struct {
         return self.authentication_rejection_reason;
     }
 
+    /// Replace the wire username with a deep-owned identity established by
+    /// the authentication mechanism. The password is cleared, and the
+    /// identity becomes immutable once the policy authorizes or rejects the
+    /// connection.
+    pub fn setAuthenticatedUsername(
+        self: *PendingAcceptedClient,
+        username: []const u8,
+    ) Error!void {
+        if (self.connection.authentication.phase != .authenticating or
+            self.authentication_authorized or
+            self.authentication_rejection_reason != null)
+        {
+            return error.InvalidAuthenticationState;
+        }
+        try self.connect.replaceUsername(
+            self.connection.allocator,
+            username,
+        );
+    }
+
     pub fn deinit(
         self: *PendingAcceptedClient,
         allocator: std.mem.Allocator,

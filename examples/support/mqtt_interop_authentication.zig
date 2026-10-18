@@ -13,6 +13,8 @@ const mirror_method = "mirror";
 const single_method = "single";
 const error_method = "error";
 const repeat_method = "repeat";
+const change_method = "change";
+const authenticated_username = "new_username";
 const initial_data = "step1";
 const server_challenge = "1pets";
 const client_response = "supercalifragilisticexpialidocious";
@@ -25,6 +27,17 @@ pub const Policy = struct {
             .context = self,
             .start = start,
             .handle = handle,
+        };
+    }
+
+    pub fn usernameAccessControl(
+        self: *Policy,
+    ) netz.mqtt.broker.AccessControlHandler {
+        return .{
+            .context = self,
+            .authorize_publish = authorizePublish,
+            .authorize_subscribe = authorizeSubscribe,
+            .authorize_delivery = authorizeDelivery,
         };
     }
 
@@ -55,6 +68,11 @@ pub const Policy = struct {
             } else {
                 try pending.rejectAuthentication(0x87);
             }
+            return;
+        }
+        if (std.mem.eql(u8, method, change_method)) {
+            try pending.setAuthenticatedUsername(authenticated_username);
+            try pending.authorizeAuthentication();
             return;
         }
         if (!std.mem.eql(u8, method, mirror_method)) {
@@ -138,5 +156,37 @@ pub const Policy = struct {
         if (!std.mem.eql(u8, expected, actual)) {
             return error.InvalidAuthenticationState;
         }
+    }
+
+    fn authorizePublish(
+        _: *anyopaque,
+        connect: netz.mqtt.Connect,
+        _: netz.mqtt.Publish,
+    ) bool {
+        return usernameMatches(connect.username);
+    }
+
+    fn authorizeSubscribe(
+        _: *anyopaque,
+        _: netz.mqtt.Connect,
+        _: netz.mqtt.Subscription,
+    ) bool {
+        // Match Mosquitto ACL behavior: accept the subscription and apply the
+        // authenticated identity again when a concrete delivery is routed.
+        return true;
+    }
+
+    fn authorizeDelivery(
+        _: *anyopaque,
+        delivery: netz.mqtt.broker.DeliveryAuthorization,
+    ) bool {
+        return usernameMatches(delivery.username);
+    }
+
+    fn usernameMatches(username: ?[]const u8) bool {
+        return if (username) |value|
+            std.mem.eql(u8, value, authenticated_username)
+        else
+            false;
     }
 };

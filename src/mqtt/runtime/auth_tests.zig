@@ -675,8 +675,71 @@ test "MQTT pending enhanced auth rejection is validated and bound" {
     );
     try std.testing.expectError(
         error.InvalidAuthenticationState,
+        pending.setAuthenticatedUsername("too-late"),
+    );
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
         pending.finish(.{ .reason_code = 0x8c }),
     );
+    pending.connection.authentication.deinit(allocator);
+    pending.connection = undefined;
+}
+
+test "MQTT pending authentication owns and freezes established username" {
+    const allocator = std.testing.allocator;
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+    };
+    try connection.authentication.beginConnect(
+        allocator,
+        &.{.{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "change",
+        } }},
+    );
+    var pending = runtime.PendingAcceptedClient{
+        .connection = connection,
+        .connect = .{
+            .packet = .{
+                .bytes = try allocator.alloc(u8, 0),
+                .fixed = undefined,
+            },
+            .connect = .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 0,
+                .client_id = "auth-identity",
+                .properties = try allocator.alloc(mqtt.Property, 0),
+                .username = "wire-user",
+                .password = "wire-password",
+            },
+        },
+    };
+    var username = "new_username".*;
+    try pending.setAuthenticatedUsername(&username);
+    username[0] = 'x';
+    try std.testing.expectEqualStrings(
+        "new_username",
+        pending.connect.connect.username.?,
+    );
+    try std.testing.expect(pending.connect.connect.password == null);
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        pending.setAuthenticatedUsername("bad\x00username"),
+    );
+    try std.testing.expectEqualStrings(
+        "new_username",
+        pending.connect.connect.username.?,
+    );
+    try pending.authorizeAuthentication();
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        pending.setAuthenticatedUsername("too-late"),
+    );
+
+    pending.connect.deinit(allocator);
     pending.connection.authentication.deinit(allocator);
     pending.connection = undefined;
 }

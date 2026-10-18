@@ -18,6 +18,7 @@ import tempfile
 import time
 
 from mqtt_vectors import (
+    authentication_username,
     bad_authentication_method,
     disconnect_forms,
     extended_authentication,
@@ -42,6 +43,7 @@ from mqtt_vectors import (
 BASE_SCENARIO_COUNT = 171
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
+    + authentication_username.SCENARIO_COUNT
     + bad_authentication_method.SCENARIO_COUNT
     + disconnect_forms.SCENARIO_COUNT
     + extended_authentication.SCENARIO_COUNT
@@ -6341,6 +6343,16 @@ def main() -> None:
         mqtt5_rc,
         NetzBroker,
         expect_packet,
+    )
+    authentication_username.run(
+        args.broker,
+        mqtt_packets,
+        mqtt5_props,
+        mqtt5_rc,
+        NetzBroker,
+        expected_connack,
+        expect_packet,
+        expect_packets_unordered,
     )
     extended_authentication.run(
         args.broker,

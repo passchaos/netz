@@ -5048,6 +5048,10 @@ test "public modules are reachable" {
         "authenticationRejectionReason",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "setAuthenticatedUsername",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "rejectReauthentication",
     ));
