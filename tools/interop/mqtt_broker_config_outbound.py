@@ -34,6 +34,20 @@ def _publish_contents(packet: bytes, protocol_level: int) -> tuple[str, bytes]:
     return topic, packet[cursor:end]
 
 
+def _connect_will_shape(packet: bytes) -> tuple[int, bool]:
+    if packet[0] != 0x10:
+        raise AssertionError(f"expected bridge CONNECT: {packet.hex()}")
+    _, cursor = _decode_varint(packet, 1)
+    protocol_name_size = int.from_bytes(packet[cursor:cursor + 2], "big")
+    cursor += 2 + protocol_name_size
+    if packet[cursor] != 5:
+        raise AssertionError(f"expected MQTT 5 bridge CONNECT: {packet.hex()}")
+    flags = packet[cursor + 1]
+    if flags & 0x04 == 0:
+        raise AssertionError(f"bridge CONNECT omitted notification Will: {packet.hex()}")
+    return (flags >> 3) & 0x03, flags & 0x20 != 0
+
+
 def _unsubscribe_filters(
     packet: bytes, protocol_level: int
 ) -> tuple[int, list[str]]:
@@ -224,6 +238,79 @@ def run_bridge_cipher_suite_case(broker: Path, directory: Path) -> None:
             raw.close()
         listener.close()
         if process is not None:
+            _stop(process, output)
+
+
+def run_bridge_connack_capability_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    remote_port, local_port = _distinct_ports(2)
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", remote_port))
+    listener.listen(3)
+    listener.settimeout(10)
+    config = directory / "bridge-connack-capabilities.conf"
+    config.write_text(
+        f"listener {local_port} 127.0.0.1\n"
+        "listener_allow_anonymous true\nmax_connections 1\n"
+        "connection connack-capabilities\n"
+        f"address 127.0.0.1:{remote_port}\n"
+        "topic # out 0\ncleansession false\n"
+        "bridge_protocol_version mqttv50\n"
+        "bridge_session_expiry_interval 0xFFFFFFFF\n"
+        "remote_clientid configured-capability-bridge\n"
+        "notification_topic bridge/capability/state\n"
+        "bridge_attempt_unsubscribe false\nrestart_timeout 1\n"
+    )
+    log = directory / "bridge-connack-capabilities.log"
+    process = output = peer = None
+    try:
+        process, output = _start_broker(
+            broker,
+            config,
+            log,
+            finite=False,
+        )
+
+        expected = (
+            ((1, True), b"\x00\x9b\x02\x24\x00"),
+            ((0, True), b"\x00\x9a\x02\x25\x00"),
+            ((0, False), b"\x00\x00\x00"),
+        )
+        for index, (will_shape, connack_body) in enumerate(expected):
+            peer, _ = listener.accept()
+            peer.settimeout(10)
+            connect = _read_packet(peer)
+            if _connect_will_shape(connect) != will_shape:
+                raise AssertionError(
+                    f"bridge Will attempt {index + 1} mismatch: "
+                    f"{_connect_will_shape(connect)!r} != {will_shape!r}"
+                )
+            peer.sendall(_packet(0x20, connack_body))
+            if index != len(expected) - 1:
+                peer.close()
+                peer = None
+
+        state = _read_packet(peer)
+        if _publish_contents(state, 5) != (
+            "bridge/capability/state",
+            b"1",
+        ):
+            raise AssertionError(
+                f"bridge capability state mismatch: {state.hex()}"
+            )
+        _wait_for_log(
+            process,
+            log,
+            "bridge connack-capabilities remote=",
+        )
+    finally:
+        if peer is not None:
+            peer.close()
+        listener.close()
+        if process is not None and output is not None:
             _stop(process, output)
 
 

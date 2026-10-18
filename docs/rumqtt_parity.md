@@ -289,9 +289,10 @@ bridges apply this only to the remote notification Will they generated:
 `0x9b` plus Maximum QoS lowers QoS, and `0x9a` plus Retain Available false
 clears RETAIN. At most two changed fields can cause immediate retries, so a
 repeated or unrelated refusal remains terminal and caller-supplied Wills are
-never silently modified. A real three-connection test observes QoS 1/Retain,
-QoS 0/Retain, then QoS 0/non-Retain before accepting the bridge and validating
-both online and offline state publications.
+never silently modified. A source-locked production-configuration process test
+observes QoS 1/Retain, QoS 0/Retain, then QoS 0/non-Retain before accepting the
+bridge and validating its online state publication; the in-process lifecycle
+test additionally verifies the offline notification and graceful disconnect.
 
 Mosquitto-compatible `try_private` defaults on for MQTT 3.1 and 3.1.1 bridges.
 Netz emits the private protocol-level marker, immediately retries a one-way
@@ -4812,10 +4813,11 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The process gate now additionally locks nine upstream sources:
+   semantics. The process gate now additionally locks eleven upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
-   bridge reload, mTLS identity reload, change-count autosave, listener
-   anonymous policy, and two password/ACL invalid-reload cases. The
+   bridge reload, bridge QoS/Retain CONNACK capability refusals, mTLS identity
+   reload, change-count autosave, listener anonymous policy, and two
+   password/ACL invalid-reload cases. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security

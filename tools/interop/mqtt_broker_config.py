@@ -30,6 +30,7 @@ from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
 from mqtt_broker_config_local_session import run_local_clean_session_case
 from mqtt_broker_config_outbound import (
     run_bridge_cipher_suite_case,
+    run_bridge_connack_capability_case,
     run_lazy_outbound_bridge_case,
     run_outbound_bridge_case,
     run_outbound_bridge_protocol_limits_case,
@@ -83,6 +84,10 @@ MOSQUITTO_PROCESS_SOURCES = {
         "cf19b5edbe4f06e0ca5ef275cbd7b10ea43488569224d1bdda1575c1b52799ab",
     "broker/06-bridge-config-reload.py":
         "6ad3507ff44b52ab06794335e5eca0071d633ffb38584aaea0d5a21ca4d1f997",
+    "broker/06-bridge-connack-qos-not-supported.py":
+        "61d209b427f5b77c1481e8d53fa2a74a520757e41c62d0347117f66c492d6157",
+    "broker/06-bridge-connack-retain-not-supported.py":
+        "48d1fc9b070e93f22f2441b1b3ce2a30e087cb21aeb60a1151a6c6fe2b12eae5",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
     "broker/11-persistence-autosave-changes.py":
@@ -108,6 +113,10 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-tls-identity-reload", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
+    selected.add_argument(
+        "--only-bridge-connack-capabilities",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -6930,6 +6939,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_bridge_connack_capabilities:
+            run_bridge_connack_capability_case(args.broker, directory)
+            print(
+                "MQTT bridge CONNACK capability integration passed: "
+                "will_qos=1->0 retain=true->false attempts=3 "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         run_missing_root_config_case(args.broker, directory)
         run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
@@ -6954,6 +6972,7 @@ def main() -> None:
         run_outbound_bridge_protocol_limits_case(args.broker, directory)
         run_private_bridge_server_case(args.broker, directory)
         run_bridge_cipher_suite_case(args.broker, directory)
+        run_bridge_connack_capability_case(args.broker, directory)
         run_bridge_ocsp_case(args.broker, directory)
         run_local_clean_session_case(args.broker, directory)
         run_lazy_outbound_bridge_case(args.broker, directory)
@@ -7030,6 +7049,7 @@ def main() -> None:
         "and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
+        "source-locked bridge CONNACK QoS/Retain notification-Will adaptation, "
         "source-locked immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "
         "and client continuity, mTLS, "
         "single-Session bidirectional bridge mapping, "
