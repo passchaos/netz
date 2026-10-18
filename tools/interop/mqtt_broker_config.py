@@ -98,6 +98,10 @@ MOSQUITTO_PROCESS_SOURCES = {
         "b885e25540dcae346bfc7347af8d0fbf87472d39e97c6436c7efc5ac5394997e",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
+    "broker/08-ssl-connect-cert-auth-crl.py":
+        "9797fddd5a99e88d31d1775cbfc045ec88a191be2a2023efa60efb8e1539b655",
+    "broker/08-ssl-connect-cert-auth-revoked.py":
+        "3e9e1c475ca6efee7d8c0c1b45d119aa8ebc1169f30c13c7605f54e915887b6c",
     "broker/09-acl-empty-file.py":
         "b5ff60d2bc8505f7fa8ea87d727b5993b7075916eee9a915fff337b42a50901e",
     "broker/09-pwfile-parse-invalid.py":
@@ -127,6 +131,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
     selected.add_argument("--only-tls-identity-reload", action="store_true")
+    selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -6598,6 +6603,35 @@ def run_capath_listener_case(broker: Path, directory: Path) -> None:
             )
 
 
+def ensure_signed_crl_server_identity(directory: Path) -> None:
+    paths = (
+        directory / "server-ca.crt",
+        directory / "server-ca.key",
+        directory / "mtls-server.crt",
+        directory / "mtls-server.key",
+    )
+    present = tuple(path.is_file() for path in paths)
+    if all(present):
+        return
+    if any(present):
+        raise AssertionError("incomplete shared CRL server identity fixture")
+    server_ca, server_ca_key = create_ca(
+        directory,
+        "server-ca",
+        "Server Root",
+    )
+    create_signed_certificate(
+        directory,
+        "mtls-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        101,
+        "serverAuth",
+        "DNS:localhost",
+    )
+
+
 def run_signed_crl_listener_case(
     broker: Path,
     directory: Path,
@@ -6605,6 +6639,7 @@ def run_signed_crl_listener_case(
 ) -> None:
     if algorithm not in ("rsa", "p384", "ed25519"):
         raise AssertionError(f"unsupported CRL fixture algorithm {algorithm}")
+    ensure_signed_crl_server_identity(directory)
     server_ca = directory / "server-ca.crt"
     server_certificate = directory / "mtls-server.crt"
     server_key = directory / "mtls-server.key"
@@ -7397,6 +7432,18 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_crl_listener:
+            run_signed_crl_listener_case(args.broker, directory, "rsa")
+            run_signed_crl_listener_case(args.broker, directory, "p384")
+            run_signed_crl_listener_case(args.broker, directory, "ed25519")
+            print(
+                "MQTT CRL listener integration passed: "
+                "upstream=good+revoked algorithms=rsa+p384+ed25519 "
+                "tampered=fail-before-listen "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_autosave_reload:
             run_autosave_reload_case(args.broker, directory)
             print(
@@ -7600,6 +7647,7 @@ def main() -> None:
         "with OpenSSL verification, "
         "optional/required client certificates, bounded listener/bridge capath trust, "
         "certificate CN/full-Subject identity mapping, "
+        "source-locked good/revoked client-CRL behavior plus "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic global/per-listener password/ACL path and content reload "
