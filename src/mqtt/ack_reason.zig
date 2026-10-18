@@ -69,3 +69,49 @@ test "MQTT ACK codecs enforce every packet-specific reason code" {
         }
     }
 }
+
+test "MQTT minimal acknowledgements default to success without properties" {
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| {
+        for ([_]mqtt.PacketType{
+            .puback,
+            .pubrec,
+            .pubrel,
+            .pubcomp,
+        }) |packet_type| {
+            const flags = packet_type.defaultFlags();
+            const packet = [_]u8{
+                (@as(u8, @intFromEnum(packet_type)) << 4) | flags,
+                2,
+                0x12,
+                0x34,
+            };
+            var parsed = try mqtt.AckPacket.parse(
+                std.testing.failing_allocator,
+                protocol,
+                &packet,
+            );
+            defer parsed.deinit(std.testing.failing_allocator);
+            try std.testing.expectEqual(packet_type, parsed.packet_type);
+            try std.testing.expectEqual(@as(u16, 0x1234), parsed.packet_id);
+            try std.testing.expectEqual(@as(u8, 0), parsed.reason_code);
+            try std.testing.expectEqual(@as(usize, 0), parsed.properties.len);
+        }
+    }
+
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        mqtt.AckPacket.parse(
+            std.testing.failing_allocator,
+            .v5,
+            &.{ 0x40, 0x02, 0x00, 0x00 },
+        ),
+    );
+
+    var duplicate_release = try mqtt.AckPacket.parse(
+        std.testing.failing_allocator,
+        .v3_1,
+        &.{ 0x6a, 0x02, 0x12, 0x34 },
+    );
+    defer duplicate_release.deinit(std.testing.failing_allocator);
+    try std.testing.expect(duplicate_release.dup);
+}

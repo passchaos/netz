@@ -1921,6 +1921,25 @@ pub const AckPacket = struct {
         flags: u4,
         payload_bytes: []const u8,
     ) Error!AckPacket {
+        // MQTT 3.1/3.1.1/5 permit every QoS acknowledgement to contain only its
+        // Packet Identifier. This is the dominant broker form: an omitted
+        // MQTT 5 reason means Success and also omits the Property Length.
+        // Decode that complete payload directly instead of constructing the
+        // general reason/property cursor path.
+        if (payload_bytes.len == 2) {
+            const packet_id = std.mem.readInt(
+                u16,
+                payload_bytes[0..2],
+                .big,
+            );
+            if (packet_id == 0) return error.InvalidPacketIdentifier;
+            return .{
+                .packet_type = packet_type,
+                .packet_id = packet_id,
+                .dup = protocol == .v3_1 and (flags & 0x08) != 0,
+            };
+        }
+
         var cursor = wire.Cursor.init(payload_bytes);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;

@@ -8372,6 +8372,46 @@ Serial and control result tables hash to
 and `a6ccde70321e832e8f4260b4a194849975e76d8f7792d497f34a59d194571480`;
 artifacts are retained under `zig-out/mqtt-packet-type-direct-ab`.
 
+The acknowledgement decoder now handles a complete two-byte payload directly.
+After packet-type and flag validation, an MQTT 3.1/3.1.1/5 PUBACK, PUBREC,
+PUBREL, or PUBCOMP containing only its non-zero Packet Identifier has an
+implicit Success reason and no properties, so it need not construct the
+general reason/property cursor path. Explicit reasons, an encoded Property
+Length, properties, trailing bytes, and short payloads retain the original
+decoder. MQTT 3.1 PUBREL also retains its retransmission bit. This follows
+Mosquitto's corresponding `remaining_length > 2` reason and `> 3` property
+split. `AckPacket.parsePayload` shrank from 788 to 760 ReleaseFast bytes; the
+whole broker ELF size was unchanged.
+
+Eight fixed-binary AB/BA pairs pinned the client and broker to otherwise-idle
+CPUs 10 and 11. Each arm used 5,000 warmups plus 100,000 measured durable QoS
+2 serial publishes, window one, a 256-byte payload, and a 3,600-second Session.
+Baseline broker SHA-256 was
+`5c981574d1a0720f164fb47c8a2b770c5ce95c4f8100ec21a29170088f8facdf`,
+candidate
+`be4de343460c12b7f0e46edb27a273da1c491715435850239d3f9be4b34677a6`,
+and the fixed driver
+`df965444715c19f38772a6c5b204f60ee5951605a08e0e84d14c2805350988d6`.
+All 16 arms completed exactly 100,000 deliveries with checksum 25,725,000.
+Broker instructions improved by a 1.002076 baseline/candidate paired median
+with 8/8 wins and a 1.000685-1.002602 range. Throughput, p50, p99, and cycles
+had respective improvement medians of 1.000965, 1.008389, 1.004639, and
+1.002379, but every range crossed 1.0, so no timing or cycle improvement is
+claimed.
+
+Two-pair publishers-32, balanced-32x32, and 4-KiB controls were neutral to
+positive in absolute timing and cycles. A longer four-pair fanout-32 control
+used 2,000 warmups, 20,000 publishes, and 640,000 exact deliveries per arm;
+its throughput, cycles, and instructions medians were 1.001766, 0.998633, and
+1.005615 with 2/4 wins and ranges crossing 1.0. It is therefore retained only
+as a no-stable-regression control, not a fanout performance claim. Debug and
+ReleaseFast exhaustive ACK gates cover all four packet types and 256 reason
+values plus the minimal form across all three protocol versions. The selected
+Mosquitto wire-vector gate passed 287 scenarios, and the source-locked packet
+sequence gate passed all 1,825 scenarios. Raw serial and control artifacts are
+under `zig-out/mqtt-ack-minimal-parse-ab`; their manifest hashes to
+`e49295cf0e95664c7fe2a16676fcaae7f82e28c3a19a9281fbcc14e6ed9c8987`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
