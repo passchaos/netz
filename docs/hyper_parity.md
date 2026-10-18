@@ -2370,8 +2370,9 @@ sibling reuse, and connection-error precedence.
    calls, cumulative allocated/freed bytes, live bytes, peak live bytes and
    size buckets through a shared thread-safe benchmark allocator; a two-stream
    64-KiB/8-KiB-window smoke observed 293 allocations and 288,461 peak live
-   bytes. Equal instrumentation is still needed on the Hyper harness before
-   making a memory ratio.
+   bytes. The Hyper harness now has matching process-wide allocation, free,
+   realloc, cumulative-byte, live-byte, peak and size-bucket instrumentation;
+   ratios below therefore bind only these equal workload/process scopes.
    On the full 10-stream/1-MiB/8-KiB-window shape, call-stack sampling showed
    WINDOW_UPDATE flow pumping allocating one 13-byte OwnedFrame per control
    frame. The server now consumes those frames directly from retained reader
@@ -2399,6 +2400,17 @@ sibling reuse, and connection-error precedence.
    less peak live memory. These process-wide counters include runtime setup and
    warmup in both implementations and are a matched workload result, not a
    universal allocator or RSS claim.
+   A current-state three-pair AB/BA refresh on 2026-10-18 used the same
+   10-stream/1-MiB/8-KiB-window shape with two warmups and five measured
+   batches per process. Every arm verified checksum 73,400,320. Netz measured
+   7.415-8.166 ms/batch versus Hyper's 11.884-12.048 ms, with a 1.581x paired
+   median latency advantage. Netz used exactly 222 allocation calls, 1,263,071
+   cumulative bytes and 1,204,818 peak bytes in every sample; Hyper used
+   15,575-15,799 calls, 87,793,118-89,223,473 cumulative bytes and
+   1,347,102-1,355,358 peak bytes. Against the median Hyper allocation sample,
+   that is 98.59% fewer calls, 98.57% fewer cumulative requested bytes and
+   11.10% lower peak. The short refresh confirms current behavior but does not
+   replace the longer twenty-iteration result above.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
    in h2spec v2.6.0 strict server mode (`H2SPEC=/absolute/path/to/h2spec zig
    build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-10-16).
