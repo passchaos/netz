@@ -4892,8 +4892,8 @@ proxy evidence for the entire suite.
    precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
-   upstream harness's remaining listener-reload/persistence semantics. The
-   process gate now additionally locks eighteen upstream sources:
+   upstream harness's remaining listener-reload semantics. The process gate
+   now additionally locks twenty-one upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous
@@ -4903,7 +4903,12 @@ proxy evidence for the entire suite.
    CRL process cases. The focused CRL gate maps those two exact upstream
    behaviors onto the stronger RSA, P-384 and Ed25519 listener matrix, including
    good-client CONNECT, revoked-client rejection and tampered-CRL failure before
-   any listener opens. The
+   any listener opens. Three persistence sources bind MQTT 5 durable outgoing
+   delivery, retained property bundles and downtime-expired queued messages to
+   a focused three-generation MQTT 3.1.1/5 restart gate. That gate additionally
+   verifies QoS 2 DUP/PUBREL restoration, Clean Start cleanup, retained
+   properties and expiry pruning rather than depending on Mosquitto's internal
+   database-count assertions. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security

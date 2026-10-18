@@ -108,6 +108,12 @@ MOSQUITTO_PROCESS_SOURCES = {
         "9e7293ab7d4272696f413f7a6e80e19e6b85453f33efb8caeb98ccb3e0030ec7",
     "broker/11-persistence-autosave-changes.py":
         "e375ec1114f56728f4c1dc62d7f510b26e936428805f444cb387e206bf3ccac1",
+    "broker/15-persist-client-msg-out-v5-0.py":
+        "2612901cb197a0c602ae6dc34b46d80a742f6b35cdc3757a81ddf10d77093b97",
+    "broker/15-persist-publish-properties-v5-0.py":
+        "3ed5230d2bf1284ced12f0afa4e162ebd170cf6185389e161b4b972f9eefe4e0",
+    "broker/15-persist-client-drop-expired-messages.py":
+        "57ccce9ffecef64400e7d0a438c973ede0f94cac9519fec65cc149137b90abb8",
     "broker/16-config-missing.py":
         "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
     "broker/23-security-password-file-reload.py":
@@ -133,6 +139,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-tls-identity-reload", action="store_true")
     selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
+    selected.add_argument("--only-persistence-restart", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
         "--only-bridge-connack-capabilities",
@@ -7453,6 +7460,20 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_persistence_restart:
+            run_persistent_session_clean_start_case(args.broker, directory)
+            run_outgoing_qos2_snapshot_case(args.broker, directory)
+            run_retained_property_persistence_case(args.broker, directory)
+            run_expired_message_persistence_case(args.broker, directory)
+            print(
+                "MQTT persistence restart integration passed: "
+                "upstream=outgoing+properties+expiry "
+                "mqttv311+mqttv5 generations=three qos=0+1+2 "
+                "retained-properties=true downtime-expiry=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_bridge_reload:
             run_bridge_reload_case(args.broker, directory)
             print(
@@ -7657,6 +7678,7 @@ def main() -> None:
         "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
         "Keep-Alive/Topic-Alias admission SIGHUP "
         "reload with topology rollback, "
+        "source-locked outgoing/property/expiry restart behavior plus "
         "dynamic persistence target enable/disable/path and time/change/disabled "
         "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
         "routing, QoS2 journal guard, snapshot ACL reauthorization, retained "
