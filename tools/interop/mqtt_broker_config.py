@@ -81,6 +81,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/01-connect-windows-line-endings.py":
         "cf19b5edbe4f06e0ca5ef275cbd7b10ea43488569224d1bdda1575c1b52799ab",
+    "broker/08-ssl-hup-disconnect.py":
+        "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
     "broker/16-config-missing.py":
         "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
     "broker/23-security-password-file-reload.py":
@@ -99,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
+    selected.add_argument("--only-tls-identity-reload", action="store_true")
     return parser.parse_args()
 
 
@@ -6603,6 +6606,7 @@ def run_mtls_subject_username_broker(
         raise RuntimeError(f"subject identity broker failed to start: {ready}")
 
     tcp = mqtt_tls_socket(tls_port, server_ca, client_certificate, client_key)
+    websocket: socket.socket | None = None
     try:
         tcp.sendall(connect_packet("wire-id", username="wrong-wire-user"))
         if connack_reason(read_mqtt_packet(tcp)) != 0:
@@ -6624,14 +6628,10 @@ def run_mtls_subject_username_broker(
             raise AssertionError(
                 "RFC2253 Subject did not become the effective Client ID"
             )
-        tcp.sendall(bytes.fromhex("e000"))
-    finally:
-        tcp.close()
 
-    websocket = websocket_connect(
-        wss_port, server_ca, client_certificate, client_key
-    )
-    try:
+        websocket = websocket_connect(
+            wss_port, server_ca, client_certificate, client_key
+        )
         send_websocket_binary(
             websocket,
             connect_packet("wss-wire-id", username="wrong-wire-user"),
@@ -6647,9 +6647,22 @@ def run_mtls_subject_username_broker(
         )
         if puback_reason(read_websocket_binary(websocket), 62) != 0x10:
             raise AssertionError("CN identity did not take precedence on WSS")
+
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "certificate identity reload",
+        )
+        mqtt_ping(tcp)
+        websocket_mqtt_ping(websocket)
+
+        tcp.sendall(bytes.fromhex("e000"))
         send_websocket_binary(websocket, bytes.fromhex("e000"))
     finally:
-        websocket.close()
+        tcp.close()
+        if websocket is not None:
+            websocket.close()
     if process.wait(timeout=5) != 0:
         raise RuntimeError(
             "certificate Subject identity broker failed: "
@@ -6883,6 +6896,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_tls_identity_reload:
+            run_mtls_subject_username_case(args.broker, directory)
+            print(
+                "MQTT TLS identity reload integration passed: "
+                "cn+subject=true tcp+wss=true live_ping_after_sighup=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         run_missing_root_config_case(args.broker, directory)
         run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
@@ -6965,6 +6987,7 @@ def main() -> None:
         "CRLF mqttv311+mqttv5, strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "source-locked Unix listener lifecycle, "
+        "source-locked mTLS CN/Subject SIGHUP continuity, "
         "source-locked global/listener anonymous policy precedence, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "

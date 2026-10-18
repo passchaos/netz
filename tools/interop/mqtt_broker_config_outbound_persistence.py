@@ -150,6 +150,7 @@ def run_outbound_bridge_persistent_queue_case(
             local_log,
             finite=False,
         )
+        _wait_for_log(local, local_log, "configured 1 listeners")
         _wait_for_log(local, local_log, "bridge persistent-queue remote=")
         local_observer = _connect_client(
             local_port,
@@ -223,6 +224,7 @@ def run_outbound_bridge_persistent_queue_case(
             local_log,
             finite=False,
         )
+        _wait_for_log(local, local_log, "configured 1 listeners")
         _wait_for_log(local, local_log, "bridge persistent-queue remote=")
         local_observer = _connect_client(
             local_port,
@@ -257,6 +259,7 @@ def run_outbound_bridge_persistent_queue_case(
             local_log,
             finite=False,
         )
+        _wait_for_log(local, local_log, "configured 1 listeners")
         _wait_for_log(local, local_log, "bridge persistent-queue remote=")
         local_observer = _connect_client(
             local_port,

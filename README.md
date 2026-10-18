@@ -1390,7 +1390,9 @@ Current protocol coverage includes:
   mTLS through strictly validated `cafile` and bounded TCP/TLS `capath` trust
   sources with `require_certificate`, plus owned certificate-CN
   or OpenSSL-compatible RFC 2253 full-Subject username mapping before all MQTT
-  authorization and Session policy, and bounded hashed
+  authorization and Session policy, with established TCP/WSS identity-mapped
+  Sessions remaining usable across atomic TLS/security SIGHUP generations, and
+  bounded hashed
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
