@@ -741,7 +741,9 @@ identifier with DUP, and another broker generation does the same. After PUBREC
 is persisted, the following generation resumes directly at PUBREL instead of
 replaying the Application Message. PUBCOMP plus a PING barrier is snapshotted,
 and a fifth generation proves the completed transaction cannot revive.
-The source-locked `15-persist-client-msg-out-v3-1-1.py` and
+The source-locked `15-persist-client-v3-1-1.py`,
+`15-persist-client-msg-out-v3-1-1.py`,
+`15-persist-client-msg-out-queue-v3-1-1.py`, and
 `15-persist-client-msg-out-clear-v3-1-1.py` production path now runs in MQTT
 3.1.1 and MQTT 5. An initial broker snapshots three durable
 subscriptions plus offline QoS 1/2 deliveries; the restored broker emits both

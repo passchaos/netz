@@ -258,6 +258,8 @@ class SourceLockTests(unittest.TestCase):
                     "2ffad66eeda21078788179587c8dbc7539415126d94c12044c03a57cb7b43ef9",
                 "broker/15-persist-client-msg-out-v3-1-1.py":
                     "f911432cea01d85406c320bfcad568497721f04a9a8234d69efc4a5870f6acec",
+                "broker/15-persist-client-msg-out-queue-v3-1-1.py":
+                    "77d0e5508814951169da6690f45bd35ea55657c7ecc8e732f7224d412f81d458",
                 "broker/15-persist-client-msg-out-dup-v3-1-1.py":
                     "8beea37623efc3f87a7d7624cf21ab95e3e4595cc3f7b09c516b08de6cb9582a",
                 "broker/15-persist-client-msg-out-v5-0.py":
@@ -272,6 +274,8 @@ class SourceLockTests(unittest.TestCase):
                     "0aa829459c023b2c6f1e4974be242c727cd74b22ebf2b8a49f14d4e996a53796",
                 "broker/15-persist-client-v5-0.py":
                     "ee9a351100d14decdfa6cd79b4b54a0e4fb1bfdaf2f1fef3b1f18be187f0c9a4",
+                "broker/15-persist-client-v3-1-1.py":
+                    "e4d14e6931ea49b637ae530906f7c78d89971675ab8deaf21879a4cc72a0ce2a",
                 "broker/15-persist-retain-clear.py":
                     "e5797091eab0e807f74223f25dc4759371614bf69ae60779fe8d999090488ef9",
                 "broker/15-persist-subscription-v3-1-1.py":
