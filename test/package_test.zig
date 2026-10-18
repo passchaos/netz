@@ -5038,6 +5038,15 @@ test "public modules are reachable" {
     ));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
     try std.testing.expect(@hasDecl(netz.mqtt, "AcceptedProtocolVersions"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "validateConnAckReason"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "rejectAuthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "authenticationRejectionReason",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));

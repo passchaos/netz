@@ -4684,6 +4684,14 @@ pub const Broker = struct {
                 return null;
             };
             try handler.start(handler.context, pending);
+            if (pending.authenticationRejectionReason()) |reason_code| {
+                try self.refuseResolvedConnect(
+                    pending,
+                    .{ .reason_code = reason_code },
+                    &pending_owned,
+                );
+                return null;
+            }
             if (!pending.authentication_authorized) {
                 return error.AuthenticationInProgress;
             }

@@ -2932,7 +2932,9 @@ fn validateUnsubAckReason(code: u8) Error!void {
     }
 }
 
-fn validateConnAckReason(protocol: ProtocolVersion, code: u8) Error!void {
+/// Validate one protocol-version-specific CONNACK reason code without
+/// allocating or encoding a packet.
+pub fn validateConnAckReason(protocol: ProtocolVersion, code: u8) Error!void {
     switch (protocol) {
         // MQTT 3.1.1 CONNACK uses the legacy "connect return code" table
         // (0-5). MQTT 5 replaced those numeric failures with the reason-code

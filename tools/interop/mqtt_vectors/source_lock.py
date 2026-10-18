@@ -159,6 +159,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "d9d68d5394b19240b48e7d82f93d13b56d0492d2c86d382e7d4af0f6d2098035",
     "broker/09-extended-auth-multistep-reauth.py":
         "450c8462e908762a120221f56eef9eba9b6b9124f9e7f9f639695d66def77a19",
+    "broker/09-extended-auth-single.py":
+        "8f6ed87224fa8785c6860f256693942659dd167b3a4957d66ce7cea784b66088",
     "broker/09-acl-change.py":
         "548ab0d7ba510dac77b47b2e1b606fcd6d1513cb953149b76e3e97cc643d3ebb",
     "broker/09-plugin-auth-acl-pub-prop.py":

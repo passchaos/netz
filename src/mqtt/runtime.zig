@@ -1180,6 +1180,7 @@ pub const PendingAcceptedClient = struct {
     admission_deadline: ?std.Io.Clock.Timestamp = null,
     protocol_allowed: bool = true,
     authentication_authorized: bool = false,
+    authentication_rejection_reason: ?u8 = null,
     authentication_data: ?[]u8 = null,
 
     pub fn finish(
@@ -1222,6 +1223,11 @@ pub const PendingAcceptedClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
+        if (self.authentication_rejection_reason) |reason_code| {
+            if (resolved.reason_code != reason_code) {
+                return error.InvalidAuthenticationState;
+            }
+        }
         try validateAssignedClientIdentifierForConnect(
             self.connection.protocol,
             self.client_id_was_empty,
@@ -1559,7 +1565,9 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         data: ?[]const u8,
     ) Error!void {
-        if (self.connection.authentication.phase != .authenticating) {
+        if (self.connection.authentication.phase != .authenticating or
+            self.authentication_rejection_reason != null)
+        {
             return error.InvalidAuthenticationState;
         }
         const owned = if (data) |value|
@@ -1571,6 +1579,32 @@ pub const PendingAcceptedClient = struct {
         }
         self.authentication_data = owned;
         self.authentication_authorized = true;
+    }
+
+    /// Stage a failed Enhanced Authentication decision for a stateful Broker.
+    /// The Broker sends a property-free failure CONNACK before discarding the
+    /// provisional connection, so no Session, Will, or routing state becomes
+    /// visible. A policy must choose either authorization or rejection once.
+    pub fn rejectAuthentication(
+        self: *PendingAcceptedClient,
+        reason_code: u8,
+    ) Error!void {
+        if (self.connection.authentication.phase != .authenticating or
+            self.authentication_authorized or
+            self.authentication_rejection_reason != null or
+            reason_code == 0)
+        {
+            return error.InvalidAuthenticationState;
+        }
+        try mqtt.validateConnAckReason(.v5, reason_code);
+        self.authentication_rejection_reason = reason_code;
+    }
+
+    /// Return the policy-staged failure reason, if authentication was rejected.
+    pub fn authenticationRejectionReason(
+        self: *const PendingAcceptedClient,
+    ) ?u8 {
+        return self.authentication_rejection_reason;
     }
 
     pub fn deinit(

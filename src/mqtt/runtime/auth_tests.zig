@@ -596,6 +596,57 @@ test "MQTT enhanced auth cannot finish before explicit authorization" {
     pending.connection = undefined;
 }
 
+test "MQTT pending enhanced auth rejection is validated and bound" {
+    const allocator = std.testing.allocator;
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+    };
+    try connection.authentication.beginConnect(
+        allocator,
+        &.{.{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "single",
+        } }},
+    );
+    var pending = runtime.PendingAcceptedClient{
+        .connection = connection,
+        .connect = .{
+            .packet = undefined,
+            .connect = .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 0,
+                .client_id = "auth-rejected",
+            },
+        },
+    };
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        pending.rejectAuthentication(0),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        pending.rejectAuthentication(0x8b),
+    );
+    try pending.rejectAuthentication(0x87);
+    try std.testing.expectEqual(
+        @as(?u8, 0x87),
+        pending.authenticationRejectionReason(),
+    );
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        pending.authorizeAuthentication(),
+    );
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        pending.finish(.{ .reason_code = 0x8c }),
+    );
+    pending.connection.authentication.deinit(allocator);
+    pending.connection = undefined;
+}
+
 test "MQTT client rejects an Authentication Method omitted from CONNECT" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

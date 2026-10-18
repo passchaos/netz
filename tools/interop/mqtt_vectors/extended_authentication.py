@@ -97,7 +97,7 @@ def run(
         executable,
         connections=1,
         ignore_errors=True,
-        extra_args=("--interop-mirror-authentication",),
+        extra_args=("--interop-test-authentication",),
     ) as broker:
         with broker.connect() as client:
             client.sendall(connect)

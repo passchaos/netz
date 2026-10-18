@@ -233,6 +233,93 @@ test "broker rejects unconfigured Enhanced Authentication with CONNACK" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker authentication policy rejects before Session admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        calls: usize = 0,
+
+        fn start(
+            context: *anyopaque,
+            pending: *runtime.PendingAcceptedClient,
+        ) broker_mod.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            try pending.rejectAuthentication(0x87);
+        }
+
+        fn handle(
+            _: *anyopaque,
+            _: *runtime.Connection,
+            _: mqtt.Auth,
+            _: bool,
+        ) broker_mod.Error!void {
+            return error.InvalidAuthenticationState;
+        }
+    };
+    var policy: Policy = .{};
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .authentication = .{
+                .context = &policy,
+                .start = Policy.start,
+                .handle = Policy.handle,
+            },
+        },
+    );
+    defer broker.deinit();
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "policy-rejected-auth",
+            .properties = &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = "single",
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "baddata",
+                } },
+            },
+        },
+    );
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        attempt.connack.connack.reason_code,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        attempt.connack.connack.properties.len,
+    );
+    try std.testing.expectEqual(@as(usize, 1), policy.calls);
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker administrative reauthorization is selective and suppresses Will" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

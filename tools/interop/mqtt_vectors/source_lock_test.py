@@ -16,6 +16,7 @@ import proxy_v1_bad
 import proxy_v2_bad
 import qos0_live_queue_scope
 import qos2_receive_maximum
+import single_step_authentication
 import source_lock
 import subscription_flip_flop
 import subscription_hierarchy
@@ -196,6 +197,8 @@ class SourceLockTests(unittest.TestCase):
                     "d9d68d5394b19240b48e7d82f93d13b56d0492d2c86d382e7d4af0f6d2098035",
                 "broker/09-extended-auth-multistep-reauth.py":
                     "450c8462e908762a120221f56eef9eba9b6b9124f9e7f9f639695d66def77a19",
+                "broker/09-extended-auth-single.py":
+                    "8f6ed87224fa8785c6860f256693942659dd167b3a4957d66ce7cea784b66088",
                 "broker/09-acl-change.py":
                     "548ab0d7ba510dac77b47b2e1b606fcd6d1513cb953149b76e3e97cc643d3ebb",
                 "broker/09-plugin-auth-acl-pub-prop.py":
@@ -309,6 +312,21 @@ class SourceLockTests(unittest.TestCase):
             "client-params-test",
         )
         self.assertEqual(extended_authentication.SCENARIO_COUNT, 1)
+        self.assertEqual(
+            single_step_authentication.METHODS,
+            ("error", "non-matching", "single", "single", "mirror"),
+        )
+        self.assertEqual(
+            single_step_authentication.CLIENT_IDS,
+            (
+                "client-params-test1",
+                "client-params-test2",
+                "client-params-test3",
+                "client-params-test5",
+                "client-params-test6",
+            ),
+        )
+        self.assertEqual(single_step_authentication.SCENARIO_COUNT, 5)
         self.assertEqual(persistent_incoming_qos2.SCENARIO_COUNT, 2)
         self.assertEqual(proxy_v1_bad.SCENARIO_COUNT, 22)
         self.assertEqual(proxy_v2_bad.SCENARIO_COUNT, 12)

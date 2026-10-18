@@ -3,8 +3,8 @@ const netz = @import("netz");
 const broker_config_runner = @import("mqtt_broker_config.zig");
 const CountingAllocator = @import("support/counting_allocator.zig")
     .CountingAllocator;
-const MirrorAuthentication = @import(
-    "support/mqtt_mirror_authentication.zig",
+const InteropAuthentication = @import(
+    "support/mqtt_interop_authentication.zig",
 ).Policy;
 
 const Config = struct {
@@ -40,7 +40,7 @@ const Config = struct {
     problem_user_property: ?[]const u8 = null,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
-    interop_mirror_authentication: bool = false,
+    interop_test_authentication: bool = false,
     deny_publish_topic: ?[]const u8 = null,
     deny_subscribe_filter: ?[]const u8 = null,
     deny_unsubscribe_filter: ?[]const u8 = null,
@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
         counting.allocator()
     else
         base_allocator;
-    var mirror_authentication = MirrorAuthentication{
+    var interop_authentication = InteropAuthentication{
         .allocator = allocator,
     };
 
@@ -316,8 +316,8 @@ pub fn main(init: std.process.Init) !void {
                 .max_changes = max_changes,
             } else null,
             .connect_authorization = authorization,
-            .authentication = if (config.interop_mirror_authentication)
-                mirror_authentication.handler()
+            .authentication = if (config.interop_test_authentication)
+                interop_authentication.handler()
             else
                 null,
             .access_control = access_control,
@@ -774,9 +774,9 @@ fn parseArgs(
         } else if (std.mem.eql(
             u8,
             arg,
-            "--interop-mirror-authentication",
+            "--interop-test-authentication",
         )) {
-            config.interop_mirror_authentication = true;
+            config.interop_test_authentication = true;
         } else if (std.mem.startsWith(
             u8,
             arg,
