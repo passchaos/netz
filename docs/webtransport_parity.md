@@ -1201,6 +1201,20 @@ handle routing, both-session progress and payload isolation.
    multiword duplicate/FIN tracking; a two-role 1-KiB-per-stream run completed
    all 256 streams and matched 262,144 bytes/checksum 33,423,360 in each
    direction.
+   A 2026-10-18 native ceiling run then raised every stream to 64 KiB and ran
+   ordinary loss, client-direction reordering, reliable-reset loss and
+   reliable-reset reordering three times each. The first loss attempt exposed
+   the benchmark's ordinary-reset loop using the single-attempt API: after the
+   congestion window filled, legal `CongestionLimited` backpressure escaped as
+   a fatal error. Ordinary resets now use `resetStreamWithDeadline`, sharing
+   the send phase's original absolute deadline while ACK/PTO progress makes the
+   next RESET_STREAM sendable, matching the already bounded reliable-reset and
+   FIN paths. All twelve reruns passed. Each mixed run verified 128 resets, 128
+   FINs and 8,454,144 bytes with its exact checksum; each all-FIN reorder run
+   verified 256 FINs and 16,777,216 bytes. This closes the maximum-concurrency
+   repeatability shape at three repetitions; multi-minute and heterogeneous
+   network distributions remain evidence work rather than a basic progress
+   bug.
 
 The whole-stream and caller-buffer incremental receive pollers enumerate QUIC
 receive streams through a fixed 256-ID stack page, but that page is not a

@@ -351,7 +351,14 @@ pub fn main(init: std.process.Init) !void {
                     send_deadline,
                 );
             } else {
-                try client.resetStream(stream_id, cancellation_code);
+                // Large reset sets can exhaust the current congestion window.
+                // Keep the whole send phase on its original absolute budget
+                // while ACK/PTO progress makes the next RESET_STREAM sendable.
+                try client.resetStreamWithDeadline(
+                    stream_id,
+                    cancellation_code,
+                    send_deadline,
+                );
             }
             offset.* = payload.len;
         }
