@@ -28,6 +28,7 @@ from mqtt_vectors import (
     persistent_subscriptions,
     proxy_v1_bad,
     proxy_v2_bad,
+    proxy_v2_lifecycle,
     qos0_live_queue_scope,
     qos2_receive_maximum,
     reauthentication_rejection,
@@ -52,6 +53,7 @@ SCENARIO_COUNT = (
     + persistent_subscriptions.SCENARIO_COUNT
     + proxy_v1_bad.SCENARIO_COUNT
     + proxy_v2_bad.SCENARIO_COUNT
+    + proxy_v2_lifecycle.SCENARIO_COUNT
     + qos0_live_queue_scope.SCENARIO_COUNT
     + qos2_receive_maximum.SCENARIO_COUNT
     + reauthentication_rejection.SCENARIO_COUNT
@@ -6390,6 +6392,10 @@ def main() -> None:
         expected_connack, expect_packet,
     )
     proxy_v2_bad.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    proxy_v2_lifecycle.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
     )

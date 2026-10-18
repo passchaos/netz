@@ -15,6 +15,7 @@ import persistent_incoming_qos2
 import persistent_subscriptions
 import proxy_v1_bad
 import proxy_v2_bad
+import proxy_v2_lifecycle
 import qos0_live_queue_scope
 import qos2_receive_maximum
 import reauthentication_rejection
@@ -275,6 +276,10 @@ class SourceLockTests(unittest.TestCase):
                     "c918b204464775d1e6430b6b31f13e1a4488b40da6a2c6edd6f8e3fc5bec0d22",
                 "broker/21-proxy-v2-bad-header.py":
                     "1450a24c04e3f88897d7e42ae63d8809fdb4bc642ca7844175602a1fa2706486",
+                "broker/21-proxy-v2-local.py":
+                    "502308b4cf3cc1f57f7924d0d3ca6f2106f4b2cf0f4af1549f1e822c59f1f894",
+                "broker/21-proxy-v2-lost-connection.py":
+                    "bc7512b035669d8bb8c910f53f573ae7227c5b466cf468633a96d7ee9bdfaade",
                 "broker/21-proxy-v2-long-tlv.py":
                     "40c392a92269836d6218e9a4694424b7f46c777cdcdeffb10437a3dcc62a28e2",
                 "broker/21-proxy-v2-websockets.py":
@@ -358,6 +363,15 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(persistent_incoming_qos2.SCENARIO_COUNT, 2)
         self.assertEqual(proxy_v1_bad.SCENARIO_COUNT, 22)
         self.assertEqual(proxy_v2_bad.SCENARIO_COUNT, 12)
+        self.assertEqual(
+            proxy_v2_lifecycle.LOCAL_HEADER,
+            proxy_v2_lifecycle.MAGIC + b"\x20\x00\x00\x00",
+        )
+        self.assertEqual(
+            len(proxy_v2_lifecycle.TRUNCATED_IPV4_HEADER),
+            28,
+        )
+        self.assertEqual(proxy_v2_lifecycle.SCENARIO_COUNT, 2)
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
         self.assertEqual(maximum_topic_hierarchy.MAXIMUM_TOPIC_BYTES, 65_535)
         self.assertEqual(maximum_topic_hierarchy.PROTOCOL_VERSIONS, (4, 5))

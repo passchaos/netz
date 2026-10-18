@@ -567,9 +567,17 @@ effective source address and any directly verified mTLS certificate chain.
 The same parser precedes MQTT TCP, TLS, WS, and WSS application handshakes; an
 optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
+A source-locked production-process pair covers Mosquitto's
+`21-proxy-v2-local.py` and `21-proxy-v2-lost-connection.py`. Netz intentionally
+diverges from the former's close behavior: the PROXY v2 specification requires
+`LOCAL` to be accepted while its forwarding address is ignored, so the exact
+upstream header proceeds through CONNECT and PING using the real transport
+peer. The truncated IPv4 case closes partway through its declared address
+block; a subsequent valid proxied CONNECT/PING proves that EOF retires only
+that peer and does not poison the finite production listener.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 285 curated raw
+deadline on every one of its finite broker processes, so all 287 curated raw
 scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
@@ -1946,7 +1954,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 285-scenario packet gate and MQTT 3.1/3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 287-scenario packet gate and MQTT 3.1/3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -1964,7 +1972,7 @@ real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
 masked client and unmasked server messages assembled from two parts. The full
-Netz test suite, 285-scenario
+Netz test suite, 287-scenario
 Mosquitto-derived wire gate, and MQTT 3.1/3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -3300,7 +3308,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 285-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 287-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -3557,7 +3565,7 @@ success/revocation pairs through the production configuration path. The
 P-384 and Ed25519 paths also reject authenticated signature mutations before
 any listener binds.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 285
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 287
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators. A complete source-locked port of
 `01-connect-disconnect-v5.py` sends all four legal normal-DISCONNECT encodings:
@@ -4172,7 +4180,7 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 285 curated scenarios pass. The MQTT 3.1 additions
+as a CONNACK property. All 287 curated scenarios pass. The MQTT 3.1 additions
 also verify successful 23-character ASCII and multibyte Client Identifiers and
 the required Identifier Rejected CONNACK for 24 characters. They additionally
 exercise retransmitted PUBREL, SUBSCRIBE, and UNSUBSCRIBE packets with the
@@ -4789,7 +4797,7 @@ proxy evidence for the entire suite.
    reductions but mixed neutral throughput, so no general all-shape speedup is
    claimed. Focused Debug/ReleaseFast gates pass 138 tests and all 1,825 source-
    locked Mosquitto sequences remain green.
-3. Expand the source-hash-locked process gate beyond its current 285 curated
+3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
    semantics. The process gate now additionally locks nine upstream sources:

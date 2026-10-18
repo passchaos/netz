@@ -235,6 +235,10 @@ MOSQUITTO_SOURCE_SHA256 = {
         "c918b204464775d1e6430b6b31f13e1a4488b40da6a2c6edd6f8e3fc5bec0d22",
     "broker/21-proxy-v2-bad-header.py":
         "1450a24c04e3f88897d7e42ae63d8809fdb4bc642ca7844175602a1fa2706486",
+    "broker/21-proxy-v2-local.py":
+        "502308b4cf3cc1f57f7924d0d3ca6f2106f4b2cf0f4af1549f1e822c59f1f894",
+    "broker/21-proxy-v2-lost-connection.py":
+        "bc7512b035669d8bb8c910f53f573ae7227c5b466cf468633a96d7ee9bdfaade",
     "broker/21-proxy-v2-long-tlv.py":
         "40c392a92269836d6218e9a4694424b7f46c777cdcdeffb10437a3dcc62a28e2",
     "broker/21-proxy-v2-websockets.py":
