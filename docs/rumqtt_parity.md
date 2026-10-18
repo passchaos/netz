@@ -4726,6 +4726,19 @@ proxy evidence for the entire suite.
    Exact live/offline statistics, Debug/ReleaseFast focused MQTT tests, and all
    1,825 Mosquitto packet sequences pass. This is a synchronization-cost result,
    not closure of the broader serial or RSS gap.
+   The broker caller-output reader now also constructs events directly from
+   the transport's single `OwnedPacket` type. Validation occurs in place and
+   the caller's event slot changes only after packet-specific parsing succeeds;
+   return-by-value compatibility remains. This removed one 48-byte run-loop
+   temporary, reduced its stack frame from `0xbb0` to `0xb80`, shrank the
+   function by 424 bytes and the broker ELF `.text` by 1,676 bytes. Twelve
+   clean serial pairs reduced broker instructions by a 1.006130
+   baseline/candidate median with 12/12 wins, raised throughput 1.010833 with
+   9/12, and reduced p50/p99 by 1.015487/1.013144 with 11/12 and 12/12 wins.
+   Cycles were neutral. Four-pair controls reduced instructions in every arm of
+   all five shapes, while throughput remained neutral to positive outside the
+   noisy short serial control. Focused Debug/ReleaseFast gates pass 136 tests
+   and the Mosquitto source-locked gate remains 1,825/1,825.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

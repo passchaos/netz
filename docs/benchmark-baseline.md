@@ -8242,6 +8242,39 @@ ReleaseFast focused MQTT gates, exact live/offline broker statistics, and all
 1,825 source-locked Mosquitto packet sequences pass. Artifacts are retained
 under `zig-out/mqtt-traffic-counter-ab`.
 
+The broker receive boundary now also uses the transport's `OwnedPacket`
+directly instead of converting it into an identical runtime struct, returning
+another validated temporary, and then materializing a `BrokerEvent`. The
+caller-output path validates that packet in place and writes the selected event
+variant only after all parsing and semantic checks succeed. Compatibility APIs
+still return an owned event by value, and failures leave caller output
+untouched. `ClientTask.runLoop` therefore reserves one fewer 48-byte packet:
+its ReleaseFast stack frame fell from `0xbb0` to `0xb80`, the function body
+shrunk 424 bytes, and the broker ELF `.text` fell 1,676 bytes.
+
+Twelve clean CPU-0/client, CPU-1/broker fixed-binary pairs reused the 2,000-
+warmup, 40,000-publish durable QoS 2 serial shape above. Baseline broker,
+candidate broker, and fixed driver SHA-256 values were respectively
+`b952fd18010b0379f44516c98714ff209d1ae83dc86bcd4f419d18e9561e8407`,
+`29c945aafe7556c5c92069a066b634f2b621d2cb40bc4f2aa38d98106e5fbefc`,
+and
+`9b4753e76193e5a3c41b21a7f2171cc55f1185b17ffe5045c85e0227112795b9`.
+All 24 arms completed 40,000 exact deliveries and checksum 10,780,000.
+Instructions improved by a 1.006130 baseline/candidate paired median with
+12/12 wins, throughput by 1.010833 with 9/12, p50 by 1.015487 with 11/12,
+and p99 by 1.013144 with 12/12. Cycles were near-neutral at 1.002869 with
+7/12 wins and are not claimed as an improvement.
+
+In the four-pair five-shape control, instructions improved in every pair for
+every shape: paired medians were 1.005747, 1.004677, 1.007291, 1.008551, and
+1.005011 for serial, publishers-32, fanout-32, balanced-32x32, and 4-KiB
+traffic. Throughput was neutral to positive outside the deliberately short,
+noisy serial control; the longer serial result above is the supported timing
+conclusion. The matched candidate profile no longer contains the targeted
+validated-packet reconstruction hotspot. Debug and ReleaseFast focused MQTT
+gates passed 136 tests, and all 1,825 source-locked Mosquitto packet sequences
+pass. Artifacts are retained under `zig-out/mqtt-broker-event-ab`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
