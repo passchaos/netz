@@ -3300,6 +3300,11 @@ pub const PublishWireLengths = struct {
     total: usize,
 };
 
+const PublishWirePlan = struct {
+    lengths: PublishWireLengths,
+    properties_len: usize,
+};
+
 pub fn writePublish(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -3310,19 +3315,20 @@ pub fn writePublish(
 ) !void {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
-    const lengths = try publishWireLengths(
+    const plan = try publishWirePlan(
         protocol,
         topic,
         payload,
         options,
     );
-    try list.ensureUnusedCapacity(allocator, lengths.total);
+    try list.ensureUnusedCapacity(allocator, plan.lengths.total);
     writePublishPrefixAssumeCapacity(
         list,
         protocol,
         topic,
         options,
         payload.len,
+        plan.properties_len,
     );
     list.appendSliceAssumeCapacity(payload);
 }
@@ -3442,29 +3448,30 @@ pub fn writePublishPrefix(
 ) !PublishWireLengths {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
-    const lengths = try publishWireLengths(
+    const plan = try publishWirePlan(
         protocol,
         topic,
         payload,
         options,
     );
-    try list.ensureUnusedCapacity(allocator, lengths.prefix);
+    try list.ensureUnusedCapacity(allocator, plan.lengths.prefix);
     writePublishPrefixAssumeCapacity(
         list,
         protocol,
         topic,
         options,
         payload.len,
+        plan.properties_len,
     );
-    return lengths;
+    return plan.lengths;
 }
 
-fn publishWireLengths(
+fn publishWirePlan(
     protocol: ProtocolVersion,
     topic: []const u8,
     payload: []const u8,
     options: PublishWriteOptions,
-) Error!PublishWireLengths {
+) Error!PublishWirePlan {
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
@@ -3515,7 +3522,10 @@ fn publishWireLengths(
     ) catch return error.IntegerOverflow;
     const total_len = std.math.add(usize, prefix_len, payload.len) catch
         return error.IntegerOverflow;
-    return .{ .prefix = prefix_len, .total = total_len };
+    return .{
+        .lengths = .{ .prefix = prefix_len, .total = total_len },
+        .properties_len = properties_len,
+    };
 }
 
 fn writePublishPrefixAssumeCapacity(
@@ -3524,13 +3534,11 @@ fn writePublishPrefixAssumeCapacity(
     topic: []const u8,
     options: PublishWriteOptions,
     remaining_payload_len: usize,
+    properties_len: usize,
 ) void {
     const variable_len = 2 + topic.len +
         if (options.qos == .at_most_once) @as(usize, 0) else 2;
-    const properties_len = if (protocol == .v5)
-        propertiesEncodedLen(options.properties) catch unreachable
-    else
-        0;
+    std.debug.assert(protocol == .v5 or properties_len == 0);
     const properties_wire_len = if (protocol == .v5)
         remainingLengthEncodedLen(properties_len) + properties_len
     else
