@@ -2411,6 +2411,16 @@ sibling reuse, and connection-error precedence.
    that is 98.59% fewer calls, 98.57% fewer cumulative requested bytes and
    11.10% lower peak. The short refresh confirms current behavior but does not
    replace the longer twenty-iteration result above.
+   The refresh's exact-size report showed seventy 408-byte allocations. A
+   conditional breakpoint on the fixed ReleaseFast binary traced every one to
+   `Hpack.decodeBlockOwnedWithDynamicTable` under the server's
+   `Connection.readRequest`; seventy is exactly seven total batches times ten
+   requests. This is the decoder's single combined field-descriptor/string
+   ownership block retained by each concurrent `OwnedRequest`, not a second
+   transient header copy. Removing it safely therefore requires an explicit
+   caller-storage/lifetime API; borrowing the connection's reused decode buffer
+   would trade away concurrent-request correctness for a misleading allocation
+   count.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
    in h2spec v2.6.0 strict server mode (`H2SPEC=/absolute/path/to/h2spec zig
    build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-10-16).
