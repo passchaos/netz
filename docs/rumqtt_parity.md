@@ -4870,6 +4870,17 @@ proxy evidence for the entire suite.
    reductions but mixed neutral throughput, so no general all-shape speedup is
    claimed. Focused Debug/ReleaseFast gates pass 138 tests and all 1,825 source-
    locked Mosquitto sequences remain green.
+   Inbound QoS 2 PUBREL release now also shares one awake-clock snapshot between
+   Message Expiry evaluation and route enqueue instead of looking up the same
+   executor clock twice inside one atomic release. Eight fixed-binary serial
+   pairs completed 40,000 exact deliveries per arm; broker instructions
+   improved by a 1.002510 baseline/candidate median with 8/8 wins and cycles by
+   1.007600 with 8/8 wins. Throughput and latency were mixed and receive no
+   improvement claim. Two-pair publishers, fanout, balanced and 4-KiB controls
+   improved instructions by 0.36-0.57% median while timing remained mixed.
+   Persistence, exactly-once release, expiry and PUBCOMP ordering are unchanged;
+   this is deterministic redundant-work removal, not closure of the broader
+   serial or RSS gap.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

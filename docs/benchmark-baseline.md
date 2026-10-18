@@ -8307,6 +8307,40 @@ Debug/ReleaseFast MQTT gates passed 138 tests and all 1,825 source-locked
 Mosquitto packet sequences pass. Artifacts are retained under
 `zig-out/mqtt-publish-plan-ab`.
 
+Inbound QoS 2 release now carries one awake-clock snapshot from Message Expiry
+evaluation into the same publication's route enqueue. The PUBREL path formerly
+called `cachedAwakeNow` once while rebuilding the pending PUBLISH and again
+inside `routeReleasedPublishMode`; both values belonged to one indivisible
+release transaction. Sharing the first timestamp removes the second executor
+lookup and also makes expiry and queued remaining lifetime use one exact
+instant. Persistence locking, pending-record removal, durable fanout commit,
+network dispatch and PUBCOMP ordering are unchanged.
+
+Eight CPU-0/client, CPU-1/broker fixed-binary pairs used alternating AB/BA
+order, 2,000 warmups, 40,000 measured durable QoS 2 serial publishes, window
+one, 256-byte payloads and 3,600-second Sessions. Baseline broker, candidate
+broker and fixed driver SHA-256 values were respectively
+`2b547dad2cfc4f2d2300fccb2723ef5fa1a1573a8285f51333c530594f1ba870`,
+`4476f64a7266e843166480e059bde502b34afb69051e367a64b4f5ba4bab9bd6`,
+and
+`df965444715c19f38772a6c5b204f60ee5951605a08e0e84d14c2805350988d6`.
+All 16 arms completed 40,000 deliveries with checksum 10,780,000. Broker
+instructions improved by a 1.002510 baseline/candidate paired median with 8/8
+wins and cycles by 1.007600 with 8/8 wins. Throughput, p50 and p99 were mixed,
+with median improvement ratios of 0.995647, 0.994381 and 0.992960; no timing
+improvement is claimed.
+
+Two-pair controls for publishers-32, fanout-32, balanced-32x32 and 4-KiB
+payloads reduced instructions by paired medians of 1.0039x, 1.0057x, 1.0036x
+and 1.0054x. Cycles and timing were mixed, including a deliberately noisy 4-KiB
+p99, so the retained result is only the deterministic removal of one clock
+lookup from each released QoS 2 Application Message. Result-table SHA-256
+values are `d644ad525235eb760b351e2d62927584c6922a0d8703efc5ff7b0b03dc804839`
+for serial and `3b4d56cb9ba61226ec1625176ec9d644a211546e22e8dc555f25570e19ba7b22`
+for controls. The zero-loss current profile report hashes to
+`58e97db685f41e1dcc1921f9fe4a185fe75141e0d5208b62dc2aedf9beed3083`;
+artifacts are retained under `zig-out/mqtt-qos2-release-clock-ab`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

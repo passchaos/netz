@@ -6318,9 +6318,12 @@ pub const Broker = struct {
         defer properties.deinit(self.allocator);
         var deferred_plan: ?RoutePlan = null;
         defer if (deferred_plan) |plan| plan.deinit(self.allocator);
+        // Expiry and the routed queue lifetime belong to one atomic PUBREL
+        // release, so both must observe the same awake-clock instant.
+        const now = netz_runtime.cachedAwakeNow(self.io);
         const maybe_publish = pending.asPublish(
             ack.packet_id,
-            netz_runtime.cachedAwakeNow(self.io),
+            now,
             &properties,
         ) catch |err| {
             self.state_mutex.lockUncancelable(self.io);
@@ -6342,6 +6345,7 @@ pub const Broker = struct {
                 delivery_policy.upgrade_outgoing_qos,
                 false,
                 false,
+                now,
                 &persistent_changed,
                 null,
                 &pending,
@@ -6393,6 +6397,7 @@ pub const Broker = struct {
             delivery_policy.upgrade_outgoing_qos,
             publish.qos,
         );
+        const now = netz_runtime.cachedAwakeNow(self.io);
         const deferred_plan = switch (mode) {
             inline else => |comptime_mode| try self.routeReleasedPublishMode(
                 comptime_mode,
@@ -6405,6 +6410,7 @@ pub const Broker = struct {
                 delivery_policy.upgrade_outgoing_qos,
                 acknowledge_qos1,
                 true,
+                now,
                 null,
                 prefixed_packet,
                 null,
@@ -6425,6 +6431,7 @@ pub const Broker = struct {
         upgrade_outgoing_qos: bool,
         acknowledge_qos1: bool,
         count_persistent_change: bool,
+        now: std.Io.Timestamp,
         outer_changed: ?*bool,
         prefixed_packet: ?*runtime.OwnedPacket,
         pending_qos2: ?*qos2_mod.Pending,
@@ -6449,7 +6456,7 @@ pub const Broker = struct {
             source_username,
             source_listener_id,
             upgrade_outgoing_qos,
-            netz_runtime.cachedAwakeNow(self.io),
+            now,
             &persistent_changed,
             null,
             prefixed_packet,
