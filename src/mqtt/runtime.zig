@@ -6058,7 +6058,7 @@ pub const Connection = struct {
         out: *BrokerEvent,
     ) Error!void {
         const timeout = keepAliveTimeout(self.keep_alive_seconds);
-        const packet = if (timeout) |value|
+        var packet = if (timeout) |value|
             try self.transport
                 .readPacketWithInactivityTimeoutIntoWithPrefix(
                 self.allocator,
@@ -6074,10 +6074,10 @@ pub const Connection = struct {
                 storage,
                 prefix_len,
             );
+        errdefer packet.deinit(self.allocator);
         self.recordPacketReceived(packet.bytes.len);
-        var validated = try self.finishReadPacket(packet);
-        errdefer validated.deinit(self.allocator);
-        out.* = try self.finishBrokerEvent(validated);
+        try self.validateReadPacket(&packet);
+        try self.finishBrokerEventInto(packet, out);
     }
 
     fn readBrokerEventInternal(
@@ -6109,17 +6109,27 @@ pub const Connection = struct {
         self: *Connection,
         packet: OwnedPacket,
     ) Error!BrokerEvent {
-        return switch (packet.fixed.packet_type) {
-            .auth => blk: {
+        var event: BrokerEvent = undefined;
+        try self.finishBrokerEventInto(packet, &event);
+        return event;
+    }
+
+    fn finishBrokerEventInto(
+        self: *Connection,
+        packet: OwnedPacket,
+        out: *BrokerEvent,
+    ) Error!void {
+        switch (packet.fixed.packet_type) {
+            .auth => {
                 const value = try self.parseIncomingAuth(
                     packet.bytes,
                 );
-                break :blk .{ .auth = .{
+                out.* = .{ .auth = .{
                     .packet = packet,
                     .auth = value,
                 } };
             },
-            .publish => blk: {
+            .publish => {
                 var value = try mqtt.Publish.parsePayload(
                     self.allocator,
                     self.protocol,
@@ -6130,12 +6140,12 @@ pub const Connection = struct {
                 try self.validateIncomingUtf8(value.topic);
                 try self.validateIncomingProperties(value.properties);
                 try self.commitIncomingPublish(&value);
-                break :blk .{ .publish = .{
+                out.* = .{ .publish = .{
                     .packet = packet,
                     .publish = value,
                 } };
             },
-            .subscribe => blk: {
+            .subscribe => {
                 var value = try mqtt.Subscribe.parse(
                     self.allocator,
                     self.protocol,
@@ -6150,12 +6160,12 @@ pub const Connection = struct {
                     value.subscriptions,
                     value.properties,
                 );
-                break :blk .{ .subscribe = .{
+                out.* = .{ .subscribe = .{
                     .packet = packet,
                     .subscribe = value,
                 } };
             },
-            .unsubscribe => blk: {
+            .unsubscribe => {
                 var value = try mqtt.Unsubscribe.parse(
                     self.allocator,
                     self.protocol,
@@ -6166,12 +6176,12 @@ pub const Connection = struct {
                     value.topic_filters,
                 );
                 try self.validateIncomingProperties(value.properties);
-                break :blk .{ .unsubscribe = .{
+                out.* = .{ .unsubscribe = .{
                     .packet = packet,
                     .unsubscribe = value,
                 } };
             },
-            .puback => blk: {
+            .puback => {
                 var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
@@ -6181,12 +6191,12 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
-                break :blk .{ .puback = .{
+                out.* = .{ .puback = .{
                     .packet = packet,
                     .ack = value,
                 } };
             },
-            .pubrec => blk: {
+            .pubrec => {
                 var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
@@ -6196,12 +6206,12 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
-                break :blk .{ .pubrec = .{
+                out.* = .{ .pubrec = .{
                     .packet = packet,
                     .ack = value,
                 } };
             },
-            .pubrel => blk: {
+            .pubrel => {
                 var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
@@ -6215,12 +6225,12 @@ pub const Connection = struct {
                 // see unknown/repeated identifiers so it can answer PUBCOMP
                 // 0x92 rather than converting an idempotent control packet
                 // into an immediate transport failure.
-                break :blk .{ .pubrel = .{
+                out.* = .{ .pubrel = .{
                     .packet = packet,
                     .ack = value,
                 } };
             },
-            .pubcomp => blk: {
+            .pubcomp => {
                 var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
@@ -6230,26 +6240,26 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
-                break :blk .{ .pubcomp = .{
+                out.* = .{ .pubcomp = .{
                     .packet = packet,
                     .ack = value,
                 } };
             },
-            .pingreq => blk: {
+            .pingreq => {
                 try mqtt.validatePing(packet.bytes, false);
-                break :blk .{ .pingreq = packet };
+                out.* = .{ .pingreq = packet };
             },
-            .disconnect => blk: {
+            .disconnect => {
                 const value = try self.parseIncomingDisconnect(
                     packet.bytes,
                 );
-                break :blk .{ .disconnect = .{
+                out.* = .{ .disconnect = .{
                     .packet = packet,
                     .disconnect = value,
                 } };
             },
-            else => error.UnexpectedPacket,
-        };
+            else => return error.UnexpectedPacket,
+        }
     }
 
     fn validateOutgoingTopicAlias(self: *Connection, topic: []const u8, properties: []const mqtt.Property) Error!void {
@@ -6847,12 +6857,10 @@ pub const Connection = struct {
         return null;
     }
 
-    fn finishReadPacket(
+    fn validateReadPacket(
         self: *Connection,
-        packet_value: packet_transport.OwnedPacket,
-    ) Error!OwnedPacket {
-        var packet = packet_value;
-        errdefer packet.deinit(self.allocator);
+        packet: *const OwnedPacket,
+    ) Error!void {
         // Validate wire syntax before semantic direction/state so a packet
         // that is wrong in both ways is still classified as Malformed Packet.
         try mqtt.validatePacketFlags(self.protocol, packet.fixed);
@@ -6865,12 +6873,16 @@ pub const Connection = struct {
             }
             return err;
         };
-        return .{
-            .bytes = packet.bytes,
-            .fixed = packet.fixed,
-            .owns_bytes = packet.owns_bytes,
-            .prefix_len = packet.prefix_len,
-        };
+    }
+
+    fn finishReadPacket(
+        self: *Connection,
+        packet_value: OwnedPacket,
+    ) Error!OwnedPacket {
+        var packet = packet_value;
+        errdefer packet.deinit(self.allocator);
+        try self.validateReadPacket(&packet);
+        return packet;
     }
 
     fn validateOutgoingPacketType(
@@ -7044,56 +7056,7 @@ pub const AcknowledgeOptions = struct {
     properties: []const mqtt.Property = &.{},
 };
 
-pub const OwnedPacket = struct {
-    bytes: []u8,
-    fixed: mqtt.FixedHeader,
-    /// False for explicit caller-buffer broker reads and after internal
-    /// ownership transfer. Otherwise the packet frees its bytes on deinit.
-    owns_bytes: bool = true,
-    /// Non-zero only for broker-oriented TCP reads that reserve aligned
-    /// storage before the wire packet for allocation ownership transfer.
-    prefix_len: u16 = 0,
-
-    /// Bytes covered by the already decoded MQTT Remaining Length.
-    pub fn remainingBytes(self: OwnedPacket) []const u8 {
-        std.debug.assert(self.fixed.header_len <= self.bytes.len);
-        std.debug.assert(
-            self.fixed.remaining_len == self.bytes.len - self.fixed.header_len,
-        );
-        return self.bytes[self.fixed.header_len..];
-    }
-
-    pub fn contains(self: OwnedPacket, bytes: []const u8) bool {
-        const packet_start = @intFromPtr(self.bytes.ptr);
-        const bytes_start = @intFromPtr(bytes.ptr);
-        if (bytes_start < packet_start) return false;
-        const offset = bytes_start - packet_start;
-        return offset <= self.bytes.len and
-            bytes.len <= self.bytes.len - offset;
-    }
-
-    pub fn prefixedAllocation(
-        self: OwnedPacket,
-    ) ?packet_transport.PrefixedPacketAllocation {
-        if (!self.owns_bytes or self.prefix_len == 0) return null;
-        const allocation_len = self.bytes.len + @as(usize, self.prefix_len);
-        const allocation_ptr: [*]u8 = @ptrFromInt(
-            @intFromPtr(self.bytes.ptr) - @as(usize, self.prefix_len),
-        );
-        return @alignCast(allocation_ptr[0..allocation_len]);
-    }
-
-    pub fn deinit(self: *OwnedPacket, allocator: std.mem.Allocator) void {
-        if (self.owns_bytes) {
-            if (self.prefixedAllocation()) |allocation| {
-                allocator.free(allocation);
-            } else {
-                allocator.free(self.bytes);
-            }
-        }
-        self.* = undefined;
-    }
-};
+pub const OwnedPacket = packet_transport.OwnedPacket;
 
 pub const OwnedConnect = struct {
     packet: OwnedPacket,

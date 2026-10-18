@@ -966,8 +966,29 @@ fn readStreamExactWithDeadline(
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
+    /// False for explicit caller-buffer reads and after ownership transfer.
     owns_bytes: bool = true,
+    /// Non-zero when an aligned broker allocation reserves a transferable
+    /// prefix immediately before the packet bytes.
     prefix_len: u16 = 0,
+
+    /// Bytes covered by the already decoded MQTT Remaining Length.
+    pub fn remainingBytes(self: OwnedPacket) []const u8 {
+        std.debug.assert(self.fixed.header_len <= self.bytes.len);
+        std.debug.assert(
+            self.fixed.remaining_len == self.bytes.len - self.fixed.header_len,
+        );
+        return self.bytes[self.fixed.header_len..];
+    }
+
+    pub fn contains(self: OwnedPacket, bytes: []const u8) bool {
+        const packet_start = @intFromPtr(self.bytes.ptr);
+        const bytes_start = @intFromPtr(bytes.ptr);
+        if (bytes_start < packet_start) return false;
+        const offset = bytes_start - packet_start;
+        return offset <= self.bytes.len and
+            bytes.len <= self.bytes.len - offset;
+    }
 
     pub fn prefixedAllocation(
         self: OwnedPacket,
