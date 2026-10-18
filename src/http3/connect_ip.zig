@@ -11,6 +11,7 @@ const quic = @import("../quic/mod.zig");
 const capsule = @import("capsule.zig");
 const config_capsules = @import("connect_ip/capsules.zig");
 const capsule_session = @import("connect_udp/capsule_session.zig");
+const configuration = @import("connect_ip/configuration.zig");
 const session_module = @import("connect_udp/session.zig");
 const scope_module = @import("connect_ip/scope.zig");
 const template_module = @import("connect_ip/template.zig");
@@ -37,6 +38,9 @@ pub fn Protocol(comptime Http3: type) type {
         pub const UriTemplate = template_module.Template;
         pub const Variable = template_module.Variable;
         pub const capsules = config_capsules;
+        pub const ConfigurationState = configuration.State;
+        pub const ConfigurationLimits = configuration.Limits;
+        pub const ConfigurationApplyResult = configuration.ApplyResult;
 
         pub const request_headers = [_]Http3.Qpack.HeaderField{
             .{ .name = ":protocol", .value = protocol },

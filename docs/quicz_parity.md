@@ -875,6 +875,12 @@ gate, `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast`, uses the audited
 ADDRESS_REQUEST/ADDRESS_ASSIGN and Context-ID codec. Netz and h3/Quinn each run
 as client and server, exchange 20/40-byte IP packets with delivery ack, and
 independently observe request and response FIN before connection shutdown.
+An optional per-tunnel `ConfigurationState` adds the cross-Capsule rules that a
+stateless codec cannot enforce: lifetime Request ID uniqueness, bounded
+assignment/route snapshots, empty-list withdrawal, two-phase local ID commit
+across timed writes, transactional peer updates, response-ID correlation, and
+source/route queries including RFC 9484's ICMP exception. Kernel interface and
+forwarding policy remain application-owned.
 H1/H2 Capsule Sessions additionally expose caller-buffer receive with
 non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both

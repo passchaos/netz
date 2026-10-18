@@ -1634,6 +1634,14 @@ feed the stream's outer `.finished` event back through `observePeerFinished`.
 Blocking helpers still reject dispatcher ownership instead of racing the
 endpoint reader. A real endpoint regression exchanges both planes and both
 FINs exclusively through these nonblocking APIs.
+Applications that exchange dynamic configuration can bind a per-tunnel
+`ConfigurationState`. It bounds local/peer Request ID histories, assigned
+prefixes and advertised routes; reserves local IDs before a write but commits
+them only after the complete Capsule reaches the transport; applies peer
+snapshots transactionally; models empty-snapshot withdrawal; rejects unknown
+response IDs and protocol-zero route overlap; and provides source-prefix and
+destination/protocol queries. This state remains separate from OS TUN/routing
+policy and is optional for deployments with wholly out-of-band configuration.
 `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast` is an offline-locked
 bidirectional h3/Quinn process gate that independently uses
 `Protocol::CONNECT_IP`, its own Capsule/varint codec, and Quinn DATAGRAMs. Both

@@ -65,6 +65,12 @@ test "HTTP/3 CONNECT-IP keeps Capsules and DATAGRAM packets on one Session" {
             );
             try std.testing.expectEqualStrings("*", scope.target);
             var session = try h3.connectIpSession(event.message.stream_id);
+            var configuration = http3.connect_ip.ConfigurationState.init(
+                self.server.allocator,
+                .{},
+            );
+            defer configuration.deinit();
+            try session.bindConfigurationState(&configuration);
             defer session.deinit();
 
             // Read the DATAGRAM first even though the Capsule was sent first.
@@ -82,6 +88,10 @@ test "HTTP/3 CONNECT-IP keeps Capsules and DATAGRAM packets on one Session" {
             try std.testing.expectEqual(
                 @as(u62, 13),
                 (try requests.next()).?.request_id,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                configuration.peerRequestCount(),
             );
 
             const assigned = [_]http3.connect_ip.capsules.AddressPrefix{.{
@@ -175,6 +185,12 @@ test "HTTP/3 CONNECT-IP keeps Capsules and DATAGRAM packets on one Session" {
         }
     }
     var ip = session.?;
+    var configuration = http3.connect_ip.ConfigurationState.init(
+        allocator,
+        .{},
+    );
+    defer configuration.deinit();
+    try ip.bindConfigurationState(&configuration);
     defer ip.deinit();
 
     const requested = [_]http3.connect_ip.capsules.AddressPrefix{.{
@@ -188,6 +204,10 @@ test "HTTP/3 CONNECT-IP keeps Capsules and DATAGRAM packets on one Session" {
         &requested,
     );
     try ip.sendCapsuleWithDeadline(request, deadline);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        configuration.localRequestCount(),
+    );
     try ip.sendWithDeadline(&client_packet, deadline);
     sent.waitTimeout(io, .{ .duration = .{
         .raw = .fromSeconds(2),
@@ -211,6 +231,10 @@ test "HTTP/3 CONNECT-IP keeps Capsules and DATAGRAM packets on one Session" {
     try std.testing.expectEqual(
         @as(u62, 13),
         (try assigned.next()).?.request_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        configuration.assignedPrefixes().len,
     );
     delivered.set(io);
     try ip.closeWrite();

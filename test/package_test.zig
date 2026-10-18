@@ -661,6 +661,7 @@ test "public modules are reachable" {
         "receiveEvent",
         "receiveEventWithTimeout",
         "receiveEventWithDeadline",
+        "bindConfigurationState",
         "closeWrite",
     }) |decl| {
         try std.testing.expect(@hasDecl(
@@ -871,6 +872,7 @@ test "public modules are reachable" {
         "receiveEvent",
         "receiveEventWithTimeout",
         "receiveEventWithDeadline",
+        "bindConfigurationState",
         "closeWrite",
     }) |decl| {
         try std.testing.expect(@hasDecl(
@@ -3348,8 +3350,29 @@ test "public modules are reachable" {
         "writeIpPacketInto",
         "maxIpPacketForHttpDatagram",
         "capsules",
+        "ConfigurationState",
+        "ConfigurationLimits",
+        "ConfigurationApplyResult",
     }) |decl| {
         try std.testing.expect(@hasDecl(netz.http3.connect_ip, decl));
+    }
+    inline for (&.{
+        "init",
+        "deinit",
+        "recordLocalAddressRequest",
+        "prepareLocalCapsule",
+        "commitPreparedLocalCapsule",
+        "discardPreparedLocalCapsule",
+        "applyPeerCapsule",
+        "assignedPrefixes",
+        "advertisedRoutes",
+        "sourceIsAssigned",
+        "routeAllows",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.connect_ip.ConfigurationState,
+            decl,
+        ));
     }
     inline for (&.{
         "IpAddress",
@@ -3450,6 +3473,7 @@ test "public modules are reachable" {
         "pollReceiveCapsule",
         "pollReceiveInto",
         "observePeerFinished",
+        "bindConfigurationState",
         "closeWrite",
         "tryCloseWrite",
     }) |decl| {

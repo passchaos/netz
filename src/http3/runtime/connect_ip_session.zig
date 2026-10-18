@@ -24,6 +24,7 @@ pub fn Session(
         peer_finished: bool = false,
         read_scratch: std.ArrayList(u8) = .empty,
         pending_send: ?PendingSend = null,
+        configuration: ?*ConnectIp.ConfigurationState = null,
 
         const Self = @This();
         pub const supports_blocking_relay = false;
@@ -77,6 +78,7 @@ pub fn Session(
         }
 
         pub fn deinit(self: *Self) void {
+            self.discardPreparedConfiguration();
             self.datagrams.deinit();
             self.receive_buffer.deinit(self.allocator);
             self.read_scratch.deinit(self.allocator);
@@ -85,6 +87,16 @@ pub fn Session(
 
         pub fn streamId(self: *const Self) u62 {
             return self.stream_id;
+        }
+
+        pub fn bindConfigurationState(
+            self: *Self,
+            state: *ConnectIp.ConfigurationState,
+        ) !void {
+            if (self.pending_send != null or self.configuration != null) {
+                return error.WriteInProgress;
+            }
+            self.configuration = state;
         }
 
         pub fn writeInProgress(self: *const Self) bool {
@@ -190,9 +202,11 @@ pub fn Session(
         pub fn sendCapsule(self: *Self, encoded: []const u8) !void {
             try self.prepareSend(encoded);
             self.sendBody(encoded[self.pending_send.?.committed..], false) catch |err| {
+                self.discardPreparedConfiguration();
                 self.pending_send = null;
                 return err;
             };
+            self.commitPreparedConfiguration();
             self.pending_send = null;
         }
 
@@ -209,10 +223,12 @@ pub fn Session(
                 error.FlowControlBlocked,
                 => return err,
                 else => {
+                    self.discardPreparedConfiguration();
                     self.pending_send = null;
                     return err;
                 },
             };
+            self.commitPreparedConfiguration();
             self.pending_send = null;
         }
 
@@ -243,11 +259,15 @@ pub fn Session(
                 deadline,
             ) catch |err| {
                 self.pending_send.?.committed += progress.committed_bytes;
-                if (err != error.Timeout) self.pending_send = null;
+                if (err != error.Timeout) {
+                    self.discardPreparedConfiguration();
+                    self.pending_send = null;
+                }
                 return err;
             };
             self.pending_send.?.committed += progress.committed_bytes;
             std.debug.assert(self.pending_send.?.committed == encoded.len);
+            self.commitPreparedConfiguration();
             self.pending_send = null;
         }
 
@@ -308,6 +328,12 @@ pub fn Session(
                 return error.InvalidFrame;
             }
             try validateConfigurationCapsule(parsed.capsule);
+            if (self.configuration) |state| {
+                try state.prepareLocalCapsule(
+                    parsed.capsule.capsule_type,
+                    parsed.capsule.value,
+                );
+            }
             self.pending_send = .{
                 .ptr = encoded.ptr,
                 .len = encoded.len,
@@ -349,8 +375,10 @@ pub fn Session(
                     try self.cancelMalformed();
                     return error.ExcessiveLoad;
                 }
-                self.receive_offset += parsed.consumed;
-                if (!parsed.capsule.isConnectIpConfiguration()) continue;
+                if (!parsed.capsule.isConnectIpConfiguration()) {
+                    self.receive_offset += parsed.consumed;
+                    continue;
+                }
                 validateConfigurationCapsule(parsed.capsule) catch |err| {
                     try self.cancelMalformed();
                     return err;
@@ -359,6 +387,17 @@ pub fn Session(
                     u8,
                     parsed.capsule.value,
                 );
+                errdefer self.allocator.free(storage);
+                if (self.configuration) |state| {
+                    _ = state.applyPeerCapsule(
+                        parsed.capsule.capsule_type,
+                        parsed.capsule.value,
+                    ) catch |err| {
+                        try self.cancelMalformed();
+                        return err;
+                    };
+                }
+                self.receive_offset += parsed.consumed;
                 return .{
                     .stream_id = self.stream_id,
                     .capsule_type = parsed.capsule.capsule_type,
@@ -571,6 +610,18 @@ pub fn Session(
                 ConnectIp.capsules.address_request_type => _ = try ConnectIp.capsules.parseAddressRequest(value.value),
                 ConnectIp.capsules.route_advertisement_type => _ = try ConnectIp.capsules.parseRouteAdvertisement(value.value),
                 else => return error.InvalidFrame,
+            }
+        }
+
+        fn commitPreparedConfiguration(self: *Self) void {
+            if (self.configuration) |state| {
+                state.commitPreparedLocalCapsule();
+            }
+        }
+
+        fn discardPreparedConfiguration(self: *Self) void {
+            if (self.configuration) |state| {
+                state.discardPreparedLocalCapsule();
             }
         }
     };

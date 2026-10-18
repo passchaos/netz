@@ -23,6 +23,11 @@ pub fn Session(
     comptime WriteProgress: type,
 ) type {
     return struct {
+        const ConfigurationState = if (@hasDecl(
+            ContextProtocol,
+            "ConfigurationState",
+        )) ContextProtocol.ConfigurationState else struct {};
+
         allocator: std.mem.Allocator,
         io: std.Io,
         tunnel: Tunnel,
@@ -31,6 +36,7 @@ pub fn Session(
         receive_offset: usize = 0,
         peer_finished: bool = false,
         pending_send: ?PendingSend = null,
+        configuration: ?*ConfigurationState = null,
 
         const Self = @This();
         pub const supports_blocking_relay = true;
@@ -85,6 +91,7 @@ pub fn Session(
         }
 
         pub fn deinit(self: *Self) void {
+            self.discardPreparedConfiguration();
             self.receive_buffer.deinit(self.allocator);
             if (@hasDecl(Tunnel, "deinit")) self.tunnel.deinit();
             self.* = undefined;
@@ -92,6 +99,19 @@ pub fn Session(
 
         pub fn streamId(self: *const Self) u31 {
             return self.tunnel.stream_id;
+        }
+
+        pub fn bindConfigurationState(
+            self: *Self,
+            state: *ConfigurationState,
+        ) !void {
+            if (!@hasDecl(ContextProtocol, "ConfigurationState")) {
+                return error.InvalidCapsule;
+            }
+            if (self.pending_send != null or self.configuration != null) {
+                return error.WriteInProgress;
+            }
+            self.configuration = state;
         }
 
         pub fn maxPayloadSize(self: *const Self) ?usize {
@@ -145,9 +165,11 @@ pub fn Session(
                 &slices_storage,
             );
             self.tunnel.writeSlices(slices, false) catch |err| {
+                self.discardPreparedConfiguration();
                 self.pending_send = null;
                 return err;
             };
+            self.commitPreparedConfiguration();
             self.pending_send = null;
         }
 
@@ -265,7 +287,10 @@ pub fn Session(
                 deadline,
             ) catch |err| {
                 self.pending_send.?.committed += progress.committed_bytes;
-                if (err != error.Timeout) self.pending_send = null;
+                if (err != error.Timeout) {
+                    self.discardPreparedConfiguration();
+                    self.pending_send = null;
+                }
                 return err;
             };
             self.pending_send.?.committed += progress.committed_bytes;
@@ -273,6 +298,7 @@ pub fn Session(
                 self.pending_send.?.committed ==
                     self.pending_send.?.totalLen(),
             );
+            self.commitPreparedConfiguration();
             self.pending_send = null;
         }
 
@@ -459,6 +485,12 @@ pub fn Session(
                     payload,
                 )) return error.InvalidFrame;
             }
+            if (!include_context) {
+                try self.prepareLocalConfiguration(
+                    capsule_type_value,
+                    payload,
+                );
+            }
             var pending = PendingSend{
                 .header_len = 0,
                 .capsule_type = capsule_type_value,
@@ -506,15 +538,33 @@ pub fn Session(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) !OwnedCapsule {
-            const buffered = try self.nextCapsuleUntil(deadline);
-            const owned = try self.allocator.dupe(u8, buffered.value);
-            self.receive_offset += buffered.consumed;
-            return .{
-                .stream_id = @intCast(self.tunnel.stream_id),
-                .capsule_type = buffered.capsule_type,
-                .storage = owned,
-                .value = owned,
-            };
+            while (true) {
+                const buffered = try self.nextCapsuleUntil(deadline);
+                const recognized = self.validatePeerConfiguration(
+                    buffered.capsule_type,
+                    buffered.value,
+                ) catch |err| return self.abortMalformed(err);
+                if (@hasDecl(
+                    ContextProtocol,
+                    "validateConfigurationCapsule",
+                ) and !recognized) {
+                    self.receive_offset += buffered.consumed;
+                    continue;
+                }
+                const owned = try self.allocator.dupe(u8, buffered.value);
+                errdefer self.allocator.free(owned);
+                self.commitPeerConfiguration(
+                    buffered.capsule_type,
+                    buffered.value,
+                ) catch |err| return self.abortMalformed(err);
+                self.receive_offset += buffered.consumed;
+                return .{
+                    .stream_id = @intCast(self.tunnel.stream_id),
+                    .capsule_type = buffered.capsule_type,
+                    .storage = owned,
+                    .value = owned,
+                };
+            }
         }
 
         fn receiveEventUntil(
@@ -527,13 +577,17 @@ pub fn Session(
                     const datagram = ContextProtocol.ContextDatagram.parse(
                         buffered.value,
                     ) catch |err| return self.abortMalformed(err);
-                    self.receive_offset += buffered.consumed;
                     if (datagram.context_id !=
-                        ContextProtocol.payload_context_id) continue;
+                        ContextProtocol.payload_context_id)
+                    {
+                        self.receive_offset += buffered.consumed;
+                        continue;
+                    }
                     const owned = try self.allocator.dupe(
                         u8,
                         datagram.payload,
                     );
+                    self.receive_offset += buffered.consumed;
                     return .{ .payload = .{
                         .stream_id = @intCast(self.tunnel.stream_id),
                         .storage = owned,
@@ -549,12 +603,20 @@ pub fn Session(
                         buffered.capsule_type,
                         buffered.value,
                     ) catch |err| return self.abortMalformed(err);
-                    self.receive_offset += buffered.consumed;
-                    if (!recognized) continue;
+                    if (!recognized) {
+                        self.receive_offset += buffered.consumed;
+                        continue;
+                    }
                     const owned = try self.allocator.dupe(
                         u8,
                         buffered.value,
                     );
+                    errdefer self.allocator.free(owned);
+                    self.commitPeerConfiguration(
+                        buffered.capsule_type,
+                        buffered.value,
+                    ) catch |err| return self.abortMalformed(err);
+                    self.receive_offset += buffered.consumed;
                     return .{ .capsule = .{
                         .stream_id = @intCast(self.tunnel.stream_id),
                         .capsule_type = buffered.capsule_type,
@@ -757,6 +819,62 @@ pub fn Session(
                 return err;
             };
             return error.ExcessiveLoad;
+        }
+
+        fn prepareLocalConfiguration(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+        ) !void {
+            if (@hasDecl(ContextProtocol, "ConfigurationState")) {
+                if (self.configuration) |state| {
+                    try state.prepareLocalCapsule(capsule_type, value);
+                }
+            }
+        }
+
+        fn commitPreparedConfiguration(self: *Self) void {
+            if (@hasDecl(ContextProtocol, "ConfigurationState")) {
+                if (self.configuration) |state| {
+                    state.commitPreparedLocalCapsule();
+                }
+            }
+        }
+
+        fn discardPreparedConfiguration(self: *Self) void {
+            if (@hasDecl(ContextProtocol, "ConfigurationState")) {
+                if (self.configuration) |state| {
+                    state.discardPreparedLocalCapsule();
+                }
+            }
+        }
+
+        fn validatePeerConfiguration(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+        ) !bool {
+            _ = self;
+            if (@hasDecl(
+                ContextProtocol,
+                "validateConfigurationCapsule",
+            )) {
+                return try ContextProtocol
+                    .validateConfigurationCapsule(capsule_type, value);
+            }
+            return true;
+        }
+
+        fn commitPeerConfiguration(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+        ) !void {
+            if (@hasDecl(ContextProtocol, "ConfigurationState")) {
+                if (self.configuration) |state| {
+                    _ = try state.applyPeerCapsule(capsule_type, value);
+                }
+            }
         }
     };
 }

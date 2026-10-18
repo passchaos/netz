@@ -81,6 +81,12 @@ test "HTTP/1 TLS CONNECT-IP exchanges configuration and IP packets" {
                 request.request,
                 &target_storage,
             );
+            var configuration = http3.connect_ip.ConfigurationState.init(
+                self.server.allocator,
+                .{},
+            );
+            defer configuration.deinit();
+            try accepted.session.bindConfigurationState(&configuration);
             defer accepted.session.deinit();
             try std.testing.expectEqualStrings(
                 "192.0.2.0/24",
@@ -104,6 +110,10 @@ test "HTTP/1 TLS CONNECT-IP exchanges configuration and IP packets" {
             try std.testing.expectEqual(
                 @as(u62, 9),
                 (try requests.next()).?.request_id,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                configuration.peerRequestCount(),
             );
 
             var second = try accepted.session.receiveEventWithTimeout(
@@ -162,6 +172,12 @@ test "HTTP/1 TLS CONNECT-IP exchanges configuration and IP packets" {
         &uri_storage,
         .fromSeconds(5),
     );
+    var configuration = http3.connect_ip.ConfigurationState.init(
+        allocator,
+        .{},
+    );
+    defer configuration.deinit();
+    try session.bindConfigurationState(&configuration);
     defer session.deinit();
 
     const requested = [_]http3.connect_ip.capsules.AddressPrefix{.{
@@ -176,6 +192,10 @@ test "HTTP/1 TLS CONNECT-IP exchanges configuration and IP packets" {
         address_request,
         .fromSeconds(2),
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        configuration.localRequestCount(),
+    );
     try session.sendWithTimeout(&client_packet, .fromSeconds(2));
 
     var first = try session.receiveEventWithTimeout(.fromSeconds(2));
@@ -188,6 +208,10 @@ test "HTTP/1 TLS CONNECT-IP exchanges configuration and IP packets" {
     try std.testing.expectEqual(
         @as(u62, 9),
         (try assigned.next()).?.request_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        configuration.assignedPrefixes().len,
     );
     var second = try session.receiveEventWithTimeout(.fromSeconds(2));
     defer second.deinit(allocator);
