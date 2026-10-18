@@ -1325,6 +1325,42 @@ test "MQTT broker lazily reserves Will publisher index" {
     );
 }
 
+test "MQTT ACK flush lock handoff excludes live persistence backends" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(
+        allocator,
+        io,
+        .{ .limits = .{ .max_connections = 1 } },
+    );
+    defer broker.deinit();
+
+    {
+        broker.state_mutex.lockUncancelable(io);
+        defer broker.state_mutex.unlock(io);
+        try std.testing.expect(
+            broker.canCoalesceAcknowledgedSessionFlushLocked(),
+        );
+        broker.persistent_change_autosave_enabled.store(true, .release);
+        try std.testing.expect(
+            !broker.canCoalesceAcknowledgedSessionFlushLocked(),
+        );
+        broker.persistent_change_autosave_enabled.store(false, .release);
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try broker.createCommitLog(tmp.dir, "ack-handoff.log", .{});
+
+    broker.state_mutex.lockUncancelable(io);
+    defer broker.state_mutex.unlock(io);
+    try std.testing.expect(
+        !broker.canCoalesceAcknowledgedSessionFlushLocked(),
+    );
+}
+
 test "MQTT broker Will index allocation failure precedes Session mutation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -7254,6 +7290,18 @@ pub const Broker = struct {
         };
     }
 
+    /// A manual snapshot shares `state_mutex` and therefore observes either
+    /// side of the combined ACK/next-transmission mutation. Live persistence
+    /// backends need the existing intermediate durability barrier, so only
+    /// the in-memory broker may carry this lock directly into its flush.
+    /// The caller holds `state_mutex`, which also serializes commit-log setup.
+    fn canCoalesceAcknowledgedSessionFlushLocked(
+        self: *Broker,
+    ) bool {
+        return self.commit_log == null and
+            !self.persistent_change_autosave_enabled.load(.acquire);
+    }
+
     fn canonicalPublisherId(
         self: *Broker,
         id: router_mod.SubscriberId,
@@ -7598,8 +7646,42 @@ pub const Broker = struct {
         slot: *ClientSlot,
         stop_after_snapshot: bool,
     ) Error!void {
+        return self.flushSlotLockedMode(
+            slot,
+            stop_after_snapshot,
+            false,
+        );
+    }
+
+    /// Variant used when an acknowledgement already owns `state_mutex`.
+    /// `flushSlotLockedMode` consumes and releases that lock on its first
+    /// iteration; every later iteration follows the ordinary acquisition
+    /// path.
+    fn flushSlotAssumeStateLocked(
+        self: *Broker,
+        slot: *ClientSlot,
+        stop_after_snapshot: bool,
+    ) Error!void {
+        return self.flushSlotLockedMode(
+            slot,
+            stop_after_snapshot,
+            true,
+        );
+    }
+
+    fn flushSlotLockedMode(
+        self: *Broker,
+        slot: *ClientSlot,
+        stop_after_snapshot: bool,
+        initial_state_locked: bool,
+    ) Error!void {
+        var supplied_state_lock = initial_state_locked;
         while (true) {
-            self.state_mutex.lockUncancelable(self.io);
+            if (supplied_state_lock) {
+                supplied_state_lock = false;
+            } else {
+                self.state_mutex.lockUncancelable(self.io);
+            }
             var take_changed = false;
             var more_pending = false;
             const maybe_packet = self.takeSessionPacketAssumeLocked(
@@ -9204,6 +9286,25 @@ const ClientTask = struct {
         }
     }
 
+    /// Consume the state lock already held by the ACK handler and release the
+    /// writer on every result. Returning false leaves both locks untouched so
+    /// callers can run the persistence-aware path without a second protocol
+    /// branch.
+    fn tryFlushAcknowledgedSessionWithStateLocked(
+        task: ClientTask,
+        slot: *ClientSlot,
+        session_ack: SessionAckResult,
+    ) Error!bool {
+        if (!session_ack.owned or
+            !task.broker.canCoalesceAcknowledgedSessionFlushLocked())
+        {
+            return false;
+        }
+        defer slot.writer_mutex.unlock(task.broker.io);
+        try task.broker.flushSlotAssumeStateLocked(slot, true);
+        return true;
+    }
+
     fn runLoop(
         task: ClientTask,
         slot: *ClientSlot,
@@ -9326,6 +9427,10 @@ const ClientTask = struct {
                             )) return;
                             return err;
                         };
+                    if (try task.tryFlushAcknowledgedSessionWithStateLocked(
+                        slot,
+                        session_ack,
+                    )) continue;
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
                         task.broker.finalizePersistentChange(
@@ -9389,6 +9494,10 @@ const ClientTask = struct {
                             )) return;
                             return err;
                         };
+                    if (try task.tryFlushAcknowledgedSessionWithStateLocked(
+                        slot,
+                        session_ack,
+                    )) continue;
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
                         task.broker.finalizePersistentChange(
@@ -9480,6 +9589,10 @@ const ClientTask = struct {
                             )) return;
                             return err;
                         };
+                    if (try task.tryFlushAcknowledgedSessionWithStateLocked(
+                        slot,
+                        session_ack,
+                    )) continue;
                     task.broker.state_mutex.unlock(task.broker.io);
                     if (session_ack.persistent_changed) {
                         task.broker.finalizePersistentChange(

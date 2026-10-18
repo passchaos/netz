@@ -8412,6 +8412,53 @@ sequence gate passed all 1,825 scenarios. Raw serial and control artifacts are
 under `zig-out/mqtt-ack-minimal-parse-ab`; their manifest hashes to
 `e49295cf0e95664c7fe2a16676fcaae7f82e28c3a19a9281fbcc14e6ed9c8987`.
 
+The durable acknowledgement path now hands its already-held broker state lock
+directly to selection of the next Session transmission when no live commit log
+or persistent-change autosave backend is enabled. The writer lock was already
+retained across this boundary; the old in-memory path nevertheless unlocked
+the state mutex after PUBACK, terminal PUBREC, or PUBCOMP, ran a persistence
+finalizer that had no configured work, and immediately reacquired the same
+mutex in `flushSlotLocked`. Manual snapshots use that mutex and therefore see
+either side of the combined ACK/selection mutation. Enabling a commit log or
+autosave keeps the original intermediate durability barrier, so the ACK state
+is still persisted before selection and every selected Packet Identifier is
+persisted before its bytes can reach the peer.
+
+Eight fixed-binary AB/BA pairs pinned the client and broker to CPUs 10 and 11
+and used 5,000 warmups plus 100,000 measured durable QoS 2 serial publishes,
+window one, a 256-byte payload, and a 3,600-second Session. Baseline broker
+SHA-256 was
+`be4de343460c12b7f0e46edb27a273da1c491715435850239d3f9be4b34677a6`,
+candidate
+`9b7ddbd812b8215084006991ce9f580da2ce364f42bffa121ed832e9230bcaf3`,
+and the fixed driver remained
+`df965444715c19f38772a6c5b204f60ee5951605a08e0e84d14c2805350988d6`.
+All 16 arms completed 100,000 exact deliveries with checksum 25,725,000.
+Broker instructions improved by a 1.005394 paired median with 8/8 wins and a
+1.004642-1.006132 range. Throughput, p50, p99, and cycles had improvement
+medians of 1.005828, 1.010336, 1.003315, and 1.001590, but their ranges crossed
+1.0, so no serial timing or cycle improvement is claimed.
+
+Two-pair publishers-32, fanout-32, balanced-32x32, and 4-KiB controls showed
+no stable absolute regression. A longer four-pair fanout-32 control used 2,000
+warmups plus 20,000 publishes and 640,000 deliveries per arm. Its throughput,
+cycles, and instructions improved by medians of 1.012888, 1.046069, and
+1.010738, each with 4/4 wins and ranges above 1.0; p50 remained mixed and is
+not claimed. Matched zero-loss 100,000-message profiles moved the flush
+function's self share from 3.57% to 2.50%. Those independently sampled shares
+are explanatory rather than additive A/B evidence. ReleaseFast generation
+reduced the flush implementation from 9,080 to 8,696 bytes and broker `.text`
+by 704 bytes; `.bss` rose 768 bytes, leaving total static size 64 bytes larger.
+
+Debug and ReleaseFast gates cover the coalesced window-one Session path,
+PUBREC/PUBREL replay, transient PUBCOMP accounting, the commit-log ACK barrier,
+and an explicit default/autosave/commit-log branch-selection test. The complete
+broker-focused test filter, 287 selected Mosquitto wire vectors, and all 1,825
+source-locked packet sequences pass. Fixed serial/control artifacts and both
+profiles are retained under `zig-out/mqtt-ack-flush-lock-handoff-ab` and
+`zig-out/mqtt-ack-flush-lock-handoff-profile`; the combined manifest hashes to
+`b2412a946cfc03433990344caee10d52294169c09c52ee52a39d4b93fb3ccb46`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
