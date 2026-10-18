@@ -21,6 +21,12 @@ pub fn Session(
         const Self = @This();
         pub const supports_blocking_relay = false;
 
+        pub const PollReceiveStep = union(enum) {
+            empty,
+            ignored_context,
+            payload: ConnectUdp.ReceivedUdpPayload,
+        };
+
         const PendingReceive = struct {
             offset: usize,
             len: usize,
@@ -48,6 +54,15 @@ pub fn Session(
 
         pub fn maxPayloadSize(self: *const Self) ?usize {
             const maximum = self.transport.maxConnectDatagramPayloadSize(
+                self.stream_id,
+            ) orelse return null;
+            return ConnectUdp.maxUdpPayloadForHttpDatagram(maximum);
+        }
+
+        /// Maximum Context ID 0 payload accepted from the peer. This remains
+        /// available after the local request/response send side is finished.
+        pub fn maxReceivePayloadSize(self: *const Self) ?usize {
+            const maximum = self.transport.connectDatagramReceiveBufferSize(
                 self.stream_id,
             ) orelse return null;
             return ConnectUdp.maxUdpPayloadForHttpDatagram(maximum);
@@ -199,16 +214,49 @@ pub fn Session(
             return self.receiveIntoUntil(out, deadline);
         }
 
+        /// Poll only already-routed HTTP Datagrams. This never reads the QUIC
+        /// endpoint and is therefore safe for dispatcher-owned relay loops.
+        pub fn pollReceiveInto(
+            self: *Self,
+            out: []u8,
+        ) !?ConnectUdp.ReceivedUdpPayload {
+            while (true) switch (try self.pollReceiveIntoStep(out)) {
+                .empty => return null,
+                .ignored_context => continue,
+                .payload => |payload| return payload,
+            };
+        }
+
+        /// Poll at most one already-routed HTTP Datagram. Dispatcher loops
+        /// use the explicit ignored-context result to charge every peer
+        /// datagram against their per-association fairness budget.
+        pub fn pollReceiveIntoStep(
+            self: *Self,
+            out: []u8,
+        ) !PollReceiveStep {
+            if (try self.copyPendingInto(out)) |payload| {
+                return .{ .payload = payload };
+            }
+            try self.ensureReceiveScratch();
+            const raw = (try self.transport.pollConnectDatagramInto(
+                self.stream_id,
+                self.receive_scratch.items,
+            )) orelse return .empty;
+            if (try self.retainRawPayload(raw)) {
+                return .{
+                    .payload = (try self.copyPendingInto(out)).?,
+                };
+            }
+            return .ignored_context;
+        }
+
         fn receiveIntoUntil(
             self: *Self,
             out: []u8,
             deadline: ?std.Io.Clock.Timestamp,
         ) !ConnectUdp.ReceivedUdpPayload {
             if (try self.copyPendingInto(out)) |payload| return payload;
-            const maximum = self.transport.maxConnectDatagramPayloadSize(
-                self.stream_id,
-            ) orelse return error.DatagramUnavailable;
-            try self.receive_scratch.resize(self.allocator, maximum);
+            try self.ensureReceiveScratch();
             while (true) {
                 const raw = if (deadline) |absolute|
                     try self.transport.receiveConnectDatagramIntoWithDeadline(
@@ -221,22 +269,35 @@ pub fn Session(
                         self.stream_id,
                         self.receive_scratch.items,
                     );
-                const datagram = ConnectUdp.ContextDatagram.parse(raw) catch |err| {
-                    try self.transport.cancelRequest(
-                        self.stream_id,
-                        Http3.ApplicationErrorCode.message_error,
-                    );
-                    return err;
-                };
-                if (datagram.context_id != ConnectUdp.udp_context_id) continue;
-                const offset = @intFromPtr(datagram.payload.ptr) -
-                    @intFromPtr(self.receive_scratch.items.ptr);
-                self.pending_receive = .{
-                    .offset = offset,
-                    .len = datagram.payload.len,
-                };
-                return (try self.copyPendingInto(out)).?;
+                if (try self.retainRawPayload(raw)) {
+                    return (try self.copyPendingInto(out)).?;
+                }
             }
+        }
+
+        fn ensureReceiveScratch(self: *Self) !void {
+            const maximum = self.transport.connectDatagramReceiveBufferSize(
+                self.stream_id,
+            ) orelse return error.DatagramUnavailable;
+            try self.receive_scratch.resize(self.allocator, maximum);
+        }
+
+        fn retainRawPayload(self: *Self, raw: []const u8) !bool {
+            const datagram = ConnectUdp.ContextDatagram.parse(raw) catch |err| {
+                try self.transport.cancelRequest(
+                    self.stream_id,
+                    Http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            };
+            if (datagram.context_id != ConnectUdp.udp_context_id) return false;
+            const offset = @intFromPtr(datagram.payload.ptr) -
+                @intFromPtr(self.receive_scratch.items.ptr);
+            self.pending_receive = .{
+                .offset = offset,
+                .len = datagram.payload.len,
+            };
+            return true;
         }
 
         fn copyPendingInto(

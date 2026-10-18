@@ -11,6 +11,8 @@ const body_batch = @import("runtime/body_batch.zig");
 const client_uri = @import("runtime/client/uri.zig");
 const connect_datagram = @import("runtime/datagram.zig");
 const connect_datagram_routing = @import("runtime/datagram/routing.zig");
+const connect_udp_dispatcher_relay =
+    @import("runtime/connect_udp_dispatcher_relay.zig");
 const development_datagram_queue =
     @import("runtime/development/datagram_queue.zig");
 const development_send = @import("runtime/development/send.zig");
@@ -7640,6 +7642,27 @@ pub const HandshakeServerSession = struct {
         return target;
     }
 
+    /// Dispatcher-safe single-attempt CONNECT-UDP acceptance. The caller
+    /// owns transport progress and must refresh the connection timer after
+    /// this method, including after pacing/congestion errors.
+    pub fn tryAcceptConnectUdp(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target_host_storage: []u8,
+    ) Error!http3.connect_udp.Target {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const target = try http3.connect_udp.validateDecodedDefaultRequest(
+            request,
+            target_host_storage,
+        );
+        try self.tryAcceptConnectResponse(
+            stream_id,
+            http3.connect_udp.successResponse(),
+        );
+        return target;
+    }
+
     /// Accept a CONNECT-UDP request routed through an application-configured
     /// RFC 9298 URI Template. The application owns reverse template matching
     /// and supplies the already validated target selected by that route.
@@ -7653,6 +7676,21 @@ pub const HandshakeServerSession = struct {
         try http3.connect_udp.validateDecodedRequest(request);
         try target.validate();
         try self.acceptConnectResponse(
+            stream_id,
+            http3.connect_udp.successResponse(),
+        );
+    }
+
+    pub fn tryAcceptConnectUdpForTarget(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target: http3.connect_udp.Target,
+    ) Error!void {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        try http3.connect_udp.validateDecodedRequest(request);
+        try target.validate();
+        try self.tryAcceptConnectResponse(
             stream_id,
             http3.connect_udp.successResponse(),
         );
@@ -7693,6 +7731,27 @@ pub const HandshakeServerSession = struct {
         const prefix = quic.varint.length(stream_id / 4) catch return null;
         if (prefix > quic_payload) return null;
         return quic_payload - prefix;
+    }
+
+    /// Storage sufficient for one peer HTTP Datagram after its Quarter
+    /// Stream ID has been removed. Unlike the send maximum, this remains
+    /// available after the local stream send side is closed.
+    pub fn connectDatagramReceiveBufferSize(
+        self: HandshakeServerSession,
+        stream_id: u62,
+    ) ?usize {
+        connect_datagram.validateStreamId(stream_id) catch return null;
+        if (!self.connect_datagrams.contains(stream_id)) return null;
+        ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        ) catch return null;
+        const capacity = self.established.connection.endpoint.limits
+            .max_datagram_size;
+        const prefix = quic.varint.length(stream_id / 4) catch return null;
+        if (prefix > capacity) return null;
+        return capacity - prefix;
     }
 
     pub fn sendConnectDatagram(
@@ -16613,6 +16672,27 @@ pub const HandshakeClient = struct {
         return quic_payload - prefix;
     }
 
+    /// Storage sufficient for one peer HTTP Datagram after its Quarter
+    /// Stream ID has been removed. Unlike the send maximum, this remains
+    /// available after the local stream send side is closed.
+    pub fn connectDatagramReceiveBufferSize(
+        self: HandshakeClient,
+        stream_id: u62,
+    ) ?usize {
+        connect_datagram.validateStreamId(stream_id) catch return null;
+        if (!self.connect_datagrams.contains(stream_id)) return null;
+        ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        ) catch return null;
+        const capacity = self.established.connection.endpoint.limits
+            .max_datagram_size;
+        const prefix = quic.varint.length(stream_id / 4) catch return null;
+        if (prefix > capacity) return null;
+        return capacity - prefix;
+    }
+
     pub fn sendConnectDatagram(
         self: *HandshakeClient,
         stream_id: u62,
@@ -19535,6 +19615,9 @@ pub const SharedHandshakeClientPool =
 pub const ConnectUdpClientSession = http3.connect_udp.Session(HandshakeClient);
 pub const ConnectUdpServerSession = http3.connect_udp.Session(
     HandshakeServerSession,
+);
+pub const ConnectUdpDispatcherRelay = connect_udp_dispatcher_relay.Server(
+    RuntimeModule,
 );
 pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
@@ -35241,6 +35324,7 @@ test {
     _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
+    _ = @import("runtime/connect_udp_dispatcher_relay_tests.zig");
     _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");

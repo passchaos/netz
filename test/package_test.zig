@@ -3297,6 +3297,10 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "ConnectUdpServerSession",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ConnectUdpDispatcherRelay",
+    ));
     try std.testing.expect(
         !netz.http3.runtime.ConnectUdpClientSession.supports_blocking_relay,
     );
@@ -3305,6 +3309,9 @@ test "public modules are reachable" {
     );
     inline for (&.{
         "maxPayloadSize",
+        "maxReceivePayloadSize",
+        "pollReceiveInto",
+        "pollReceiveIntoStep",
         "receiveInto",
         "receiveIntoWithTimeout",
         "receiveIntoWithDeadline",
@@ -3334,6 +3341,29 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeServerSession,
         "acceptConnectUdpForTarget",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryAcceptConnectUdp",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryAcceptConnectUdpForTarget",
+    ));
+    inline for (&.{
+        "init",
+        "deinit",
+        "register",
+        "unregister",
+        "relayCount",
+        "relayStats",
+        "pumpOnce",
+        "tryFinishResponse",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.ConnectUdpDispatcherRelay,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(netz.http3, "Datagram"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,

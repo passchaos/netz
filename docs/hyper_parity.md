@@ -1642,6 +1642,19 @@ H3 typed Sessions expose the same caller-buffer API, but their blocking receive
 owns QUIC endpoint progress; the blocking relay therefore returns
 `DispatcherRequired` instead of racing a second socket owner. The h3/Quinn gate
 uses explicit single-owner H3 progress around its real UDP proxy exchange.
+Production shared-endpoint servers can instead use
+`http3.runtime.ConnectUdpDispatcherRelay`. It keeps `EndpointServer` as the
+only QUIC UDP reader while racing that dispatcher with one application-approved
+UDP socket per association. Stable relay state is keyed by connection handle
+plus CONNECT stream ID; active relays and pending close events are bounded,
+target-to-Session backpressure uses a bounded FIFO, and per-relay budgets plus
+a rotating start cursor prevent a busy target from monopolizing a pump turn.
+The relay rejects unexpected UDP sources, counts truncation/backpressure drops,
+keeps target resolution and authorization in the application, and exposes
+explicit FIN, reset, and connection-close results. A real one-connection test
+drives two CONNECT-UDP streams and two UDP echo targets with queued interleaved
+traffic, an unknown Context ID, request cancellation, response FIN, exact byte
+counters, and no second QUIC socket reader.
 The authenticated H3 client now also provides the execution primitive needed
 by a cloneable request sender: one connection accepts an owned-response batch
 whose members retain independent awake-clock deadlines and optional active

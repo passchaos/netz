@@ -875,6 +875,17 @@ surface and retain complete payloads across short-output retries, but blocking
 H3 receive owns endpoint progress; generic blocking relay explicitly returns
 `DispatcherRequired`, and H3 proxy loops remain under their dispatcher/session
 owner.
+`http3.runtime.ConnectUdpDispatcherRelay` supplies that production H3 loop for
+shared endpoints without transferring QUIC receive ownership away from
+`EndpointServer`. It binds stable relay state to connection handle plus CONNECT
+stream ID, races the single dispatcher read with bounded per-target UDP reads,
+rotates the starting relay, and limits work per relay per turn. Target replies
+blocked by pacing or congestion enter a bounded FIFO; overflow, truncation, and
+unexpected-source drops are counted separately. Applications still resolve and
+authorize every target before registering its socket. A real regression uses
+one H3 connection, two simultaneous CONNECT-UDP streams, and two UDP echo
+targets, and verifies queued interleaving, unknown Context handling, exact
+directional counters, request reset, response FIN, and deterministic teardown.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
