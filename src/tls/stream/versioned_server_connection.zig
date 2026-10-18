@@ -3,6 +3,7 @@
 const std = @import("std");
 const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
+const key_material = @import("key_material.zig");
 const record_io = @import("record_io.zig");
 const record_stream = @import("record_stream.zig");
 const server_handshake = @import("server_handshake.zig");
@@ -235,16 +236,26 @@ pub const Connection = struct {
             )) != null;
         var tls13_key: vail.tls.key_exchange.ServerKeyMaterial =
             if (client_offered_x25519 or !client_offered_p256)
-                .{ .x25519 = try randomX25519(io) }
+                .{ .x25519 = try key_material.randomX25519(io) }
             else
-                .{ .secp256r1 = try randomP256(io) };
+                .{ .secp256r1 = try key_material.randomP256(io) };
         const tls13_groups = [_]u16{tls13_key.namedGroup()};
         var tls13_key_owned = true;
         defer if (tls13_key_owned) tls13_key.wipe();
-        var tls12_key_x25519 = try randomX25519(io);
+        var tls12_key_x25519 = try key_material.randomX25519(io);
         defer std.crypto.secureZero(u8, &tls12_key_x25519);
-        var tls12_key = try randomP256(io);
+        var tls12_key = try key_material.randomP256(io);
         defer std.crypto.secureZero(u8, &tls12_key);
+        var tls12_key_p384 = if (options.protocol_policy.offersTls12())
+            try key_material.randomP384(io)
+        else
+            null;
+        defer if (tls12_key_p384) |*key| std.crypto.secureZero(u8, key);
+        var tls12_key_p521 = if (options.protocol_policy.offersTls12())
+            try key_material.randomP521(io)
+        else
+            null;
+        defer if (tls12_key_p521) |*key| std.crypto.secureZero(u8, key);
         var tls13_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &tls13_random);
         try std.Io.randomSecure(io, &tls13_random);
@@ -306,6 +317,8 @@ pub const Connection = struct {
                 .server_random = tls12_random,
                 .server_private_key_x25519 = &tls12_key_x25519,
                 .server_private_key = &tls12_key,
+                .server_private_key_p384 = if (tls12_key_p384) |*key| key else null,
+                .server_private_key_p521 = if (tls12_key_p521) |*key| key else null,
                 .certificate_chain = identity.certificate_chain,
                 .signer = signer,
                 .client_auth_policy = client_auth,
@@ -862,30 +875,6 @@ fn writeServerHandshakeOutput(
     try record_io.writeAll(io, stream, bytes[0..first_len]);
     try record_io.writeAll(io, stream, &compatibility_ccs);
     try record_io.writeAll(io, stream, bytes[first_len..]);
-}
-
-fn randomP256(io: std.Io) (std.Io.RandomSecureError || error{InvalidSecretKey})![vail.tls.key_exchange.p256.secret_len]u8 {
-    var secret: [vail.tls.key_exchange.p256.secret_len]u8 = undefined;
-    var attempts: usize = 0;
-    while (attempts < 16) : (attempts += 1) {
-        try std.Io.randomSecure(io, &secret);
-        _ = vail.tls.key_exchange.p256.publicKey(secret) catch |err| switch (err) {
-            error.InvalidSecretKey => continue,
-            else => return error.InvalidSecretKey,
-        };
-        return secret;
-    }
-    std.crypto.secureZero(u8, &secret);
-    return error.InvalidSecretKey;
-}
-
-fn randomX25519(io: std.Io) std.Io.RandomSecureError![vail.tls.key_exchange.secret_len]u8 {
-    var secret: [vail.tls.key_exchange.secret_len]u8 = undefined;
-    try std.Io.randomSecure(io, &secret);
-    secret[0] &= 248;
-    secret[31] &= 127;
-    secret[31] |= 64;
-    return secret;
 }
 
 fn freshSigner(

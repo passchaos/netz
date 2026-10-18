@@ -723,6 +723,8 @@ pub const Builder = struct {
             const value = try parseOne(words);
             self.tls_protocol_policy = if (std.mem.eql(u8, value, "tlsv1.3"))
                 .tls13_only
+            else if (std.mem.eql(u8, value, "tlsv1.2-only"))
+                .tls12_only
             else if (std.mem.eql(u8, value, "tlsv1.2"))
                 .tls12_and_tls13
             else

@@ -2673,7 +2673,12 @@ advertises, so an OpenSSL TLS 1.2 server may select its default X25519 rather
 than being restricted to a test-forced P-256 fallback. Netz's high-level
 client/server default is X25519-first with P-256 fallback, matching the modern
 OpenSSL/rustls preference; Vail's low-level caller-owned policy remains
-explicit.
+explicit. Mosquitto-compatible `tlsv1.2` remains a minimum-version policy;
+Netz additionally accepts `tlsv1.2-only` on listeners and bridges when an exact
+version boundary is required. That mode advertises all four groups, while the
+dual-version ClientHello advertises only X25519/P-256 because those are the
+TLS 1.3 retry keys it retains. A production OpenSSL gate forces P-384 and P-521
+in turn and completes MQTT 5 with Netz in both client and server roles.
 TLS 1.2 clients filter a configured identity against CertificateRequest's
 certificate types, signature algorithms, and acceptable CA distinguished
 names. Compatible P-521 identities are supported; when no identity is suitable

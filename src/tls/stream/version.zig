@@ -68,6 +68,15 @@ pub const default_tls12_groups = [_]u16{
     // Match modern OpenSSL/rustls preference while retaining P-256 fallback.
     vail.tls.key_exchange.named_group_x25519,
     vail.tls.key_exchange.named_group_secp256r1,
+    vail.tls.key_exchange.named_group_secp384r1,
+    vail.tls.key_exchange.named_group_secp521r1,
+};
+
+/// A dual-version ClientHello may advertise only groups whose TLS 1.3 retry
+/// material is retained alongside the TLS 1.2 state.
+pub const dual_version_tls12_groups = [_]u16{
+    vail.tls.key_exchange.named_group_x25519,
+    vail.tls.key_exchange.named_group_secp256r1,
 };
 
 pub fn transcriptHash(
@@ -88,13 +97,23 @@ test "version policy never enables pre-TLS-1.2 protocols" {
     try std.testing.expect(!Policy.tls12_only.offersTls13());
 }
 
-test "TLS 1.2 defaults prefer X25519 with P-256 fallback" {
+test "TLS 1.2 defaults cover all classical groups honestly" {
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{
+            vail.tls.key_exchange.named_group_x25519,
+            vail.tls.key_exchange.named_group_secp256r1,
+            vail.tls.key_exchange.named_group_secp384r1,
+            vail.tls.key_exchange.named_group_secp521r1,
+        },
+        &default_tls12_groups,
+    );
     try std.testing.expectEqualSlices(
         u16,
         &.{
             vail.tls.key_exchange.named_group_x25519,
             vail.tls.key_exchange.named_group_secp256r1,
         },
-        &default_tls12_groups,
+        &dual_version_tls12_groups,
     );
 }

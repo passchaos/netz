@@ -753,6 +753,8 @@ fn parseSources(
                         "tlsv1.3",
                     ))
                         .tls13_only
+                    else if (std.mem.eql(u8, value, "tlsv1.2-only"))
+                        .tls12_only
                     else if (std.mem.eql(u8, value, "tlsv1.2"))
                         .tls12_and_tls13
                     else
@@ -2346,6 +2348,14 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         @TypeOf(tls12.bridges[0].tls_protocol_policy).tls12_and_tls13,
         tls12.bridges[0].tls_protocol_policy,
     );
+    var tls12_only = try parse(allocator, listener ++
+        "connection tls12-only\naddress localhost\ntopic # in 0\n" ++
+        "bridge_cafile ca.pem\nbridge_tls_version tlsv1.2-only\n");
+    defer tls12_only.deinit(allocator);
+    try std.testing.expectEqual(
+        @TypeOf(tls12_only.bridges[0].tls_protocol_policy).tls12_only,
+        tls12_only.bridges[0].tls_protocol_policy,
+    );
     try std.testing.expectError(
         error.UnsupportedBridgeTlsVersion,
         parse(allocator, listener ++
@@ -3273,6 +3283,18 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     try std.testing.expectEqual(
         tls_stream.VersionPolicy.tls12_and_tls13,
         tls12_listener.listeners[0].tls_protocol_policy,
+    );
+    var tls12_only_listener = try parse(allocator,
+        \\listener 8885
+        \\certfile server.pem
+        \\keyfile server.key
+        \\tls_version tlsv1.2-only
+        \\listener_allow_anonymous true
+    );
+    defer tls12_only_listener.deinit(allocator);
+    try std.testing.expectEqual(
+        tls_stream.VersionPolicy.tls12_only,
+        tls12_only_listener.listeners[0].tls_protocol_policy,
     );
     try std.testing.expectEqualSlices(
         tls_cipher_suites.Tls12Suite,

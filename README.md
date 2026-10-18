@@ -382,7 +382,9 @@ Current protocol coverage includes:
   permits only ECDHE+AEAD suites, requires Extended Master Secret and secure
   renegotiation signaling, supports X25519/P-256/P-384/P-521 in both endpoint
   roles with an X25519-first/P-256-fallback high-level default, and rejects
-  renegotiation. Both versions provide
+  renegotiation. Exact TLS-1.2-only mode advertises all four groups, while a
+  dual-version ClientHello advertises only its X25519/P-256 TLS 1.3 retry
+  material. Both versions provide
   optional/required client authentication, explicit ALPN enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
   introspection, default RFC 6066 OCSP status requests plus optional mandatory
@@ -1887,6 +1889,10 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
 # group preference at its default to exercise X25519 selection.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-bridge-insecure --mosquitto-test-root=/nav_env/Work/mosquitto/test
+# Exercise Netz as both TLS 1.2 client and server against OpenSSL peers forced
+# to P-384 and P-521, using the explicit tlsv1.2-only config extension.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-bridge-tls12-groups --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
 # MQTT 3.1.1 admission and normal socket-file cleanup.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

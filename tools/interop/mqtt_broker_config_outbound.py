@@ -9,7 +9,7 @@ import time
 
 from mqtt_broker_config_bridge import (
     _distinct_ports, _start_broker, _stop, _wait_for_log,
-    _connect_client, _subscribe_client, _expect_bridge_state,
+    _connect_client, _finish_connect, _subscribe_client, _expect_bridge_state,
     _read_publish_and_ack, _packet, _utf8, _read_packet, _decode_varint,
     _create_tls_material, _connect_tls_client, _expect_startup_rejection,
     _openssl, _connect_limits,
@@ -413,6 +413,140 @@ def run_bridge_insecure_hostname_case(
                 peer.close()
             if raw is not None:
                 raw.close()
+            listener.close()
+            if process is not None:
+                _stop(process, output)
+
+
+def run_bridge_tls12_group_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    ca, _, _, _, _ = _create_tls_material(directory)
+    ca_key = directory / "bridge-ca.key"
+    key = directory / "bridge-group-server.key"
+    request = directory / "bridge-group-server.csr"
+    certificate = directory / "bridge-group-server.pem"
+    extensions = directory / "bridge-group-server.ext"
+    extensions.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=serverAuth\n"
+        "subjectAltName=DNS:localhost\n"
+    )
+    _openssl(
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
+        key,
+    )
+    _openssl(
+        "req",
+        "-new",
+        "-key",
+        key,
+        "-subj",
+        "/CN=localhost",
+        "-out",
+        request,
+    )
+    _openssl(
+        "x509",
+        "-req",
+        "-in",
+        request,
+        "-CA",
+        ca,
+        "-CAkey",
+        ca_key,
+        "-set_serial",
+        103,
+        "-days",
+        "1",
+        "-sha256",
+        "-extfile",
+        extensions,
+        "-out",
+        certificate,
+    )
+    ports = _distinct_ports(4)
+    for index, (label, curve) in enumerate((
+        ("p384", "secp384r1"),
+        ("p521", "secp521r1"),
+    )):
+        remote_port = ports[index * 2]
+        local_port = ports[index * 2 + 1]
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        server_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        server_context.load_cert_chain(certificate, key)
+        server_context.set_ciphers("ECDHE-RSA-AES128-GCM-SHA256")
+        server_context.set_ecdh_curve(curve)
+
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", remote_port))
+        listener.listen(1)
+        listener.settimeout(10)
+        config = directory / f"bridge-tls12-{label}.conf"
+        config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            f"certfile {certificate}\nkeyfile {key}\n"
+            "tls_version tlsv1.2-only\n"
+            "ciphers ECDHE-RSA-AES128-GCM-SHA256\n"
+            "listener_allow_anonymous true\nmax_connections 1\n"
+            f"connection tls12-{label}\n"
+            f"address localhost:{remote_port}\ntopic # in 0\n"
+            "bridge_protocol_version mqttv50\nnotifications false\n"
+            f"bridge_cafile {ca}\nbridge_tls_version tlsv1.2-only\n"
+            "bridge_ciphers ECDHE-RSA-AES128-GCM-SHA256\n"
+        )
+        log = directory / f"bridge-tls12-{label}.log"
+        process = output = None
+        remote_raw = remote_peer = None
+        local_raw = local_peer = None
+        try:
+            process, output = _start_broker(broker, config, log, finite=False)
+            remote_raw, _ = listener.accept()
+            remote_raw.settimeout(10)
+            remote_peer = server_context.wrap_socket(
+                remote_raw,
+                server_side=True,
+            )
+            remote_raw = None
+            _connect_limits(_read_packet(remote_peer), 5)
+            remote_peer.sendall(_packet(0x20, b"\x00\x00\x00"))
+            _wait_for_log(process, log, f"bridge tls12-{label} remote=")
+
+            client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            client_context.maximum_version = ssl.TLSVersion.TLSv1_2
+            client_context.load_verify_locations(cafile=ca)
+            client_context.set_ciphers("ECDHE-RSA-AES128-GCM-SHA256")
+            client_context.set_ecdh_curve(curve)
+            local_raw = socket.create_connection(
+                ("127.0.0.1", local_port),
+                timeout=10,
+            )
+            local_peer = client_context.wrap_socket(
+                local_raw,
+                server_hostname="localhost",
+            )
+            local_raw = None
+            _finish_connect(local_peer, f"tls12-{label}-client")
+            local_peer.sendall(b"\xe0\x00")
+        finally:
+            if local_peer is not None:
+                local_peer.close()
+            if local_raw is not None:
+                local_raw.close()
+            if remote_peer is not None:
+                remote_peer.close()
+            if remote_raw is not None:
+                remote_raw.close()
             listener.close()
             if process is not None:
                 _stop(process, output)
