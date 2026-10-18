@@ -1396,7 +1396,8 @@ Current protocol coverage includes:
   bounded hashed
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
-  global or `per_listener_settings`-isolated Mosquitto password/ACL files
+  global or `per_listener_settings`-isolated Mosquitto password/ACL files,
+  including explicit credentialless deny-all listeners,
   with anonymous/user scopes and Linux SIGHUP atomic password/ACL plus TLS/WSS
   server-identity/key-password/client-CA/CRL, bridge-generation, and
   per-listener anonymous/zero-ID/assigned-prefix, protocol-version,
@@ -1862,6 +1863,10 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
 # MQTT 3.1.1 and MQTT 5, including explicit per-listener precedence.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-listener-anonymous --mosquitto-test-root=/nav_env/Work/mosquitto/test
+# Source-lock Mosquitto's allow-anonymous/password-file/username Cartesian
+# matrix across MQTT 3.1, MQTT 3.1.1, and MQTT 5 (24 real CONNECTs).
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-username-or-anonymous --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
 # MQTT 3.1.1 admission and normal socket-file cleanup.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

@@ -1072,16 +1072,6 @@ fn parseSources(
         {
             return error.InvalidDirective;
         }
-        const password_file = if (config.per_listener_settings)
-            listener.password_file
-        else
-            config.password_file;
-        if (!listener.allow_anonymous and password_file.len == 0 and
-            !listener.use_identity_as_username and
-            !listener.use_subject_as_username)
-        {
-            return error.AuthenticationRequired;
-        }
     }
     const candidate = Config{ .listeners = listeners.items };
     _ = try candidate.totalMaxConnections();
@@ -3250,10 +3240,6 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         ),
     );
     try std.testing.expectError(
-        error.AuthenticationRequired,
-        parse(allocator, "listener 1883"),
-    );
-    try std.testing.expectError(
         error.DirectiveRequiresListener,
         parse(allocator, "certfile server.pem\nlistener 1883"),
     );
@@ -3933,6 +3919,18 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expect(config.listeners[0].use_identity_as_username);
     try std.testing.expect(config.listeners[0].use_subject_as_username);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
+}
+
+test "MQTT broker config accepts deny-all listener without credentials" {
+    const allocator = std.testing.allocator;
+    var config = try parse(
+        allocator,
+        "allow_anonymous false\nlistener 1883",
+    );
+    defer config.deinit(allocator);
+    try std.testing.expect(!config.allow_anonymous);
+    try std.testing.expect(!config.listeners[0].allow_anonymous);
+    try std.testing.expectEqual(@as(usize, 0), config.password_file.len);
 }
 
 test "MQTT broker config accepts certificate identity authentication" {

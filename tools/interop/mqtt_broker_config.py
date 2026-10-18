@@ -78,6 +78,8 @@ FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
     "broker/01-connect-listener-allow-anonymous.py":
         "56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214",
+    "broker/01-connect-uname-or-anon.py":
+        "87d4f5620809a67b0521a314079dd59502652d85ff5e021e2c64d87ac2769476",
     "broker/01-connect-unix-socket.py":
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/01-connect-windows-line-endings.py":
@@ -109,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mosquitto-test-root", type=Path)
     selected = parser.add_mutually_exclusive_group()
     selected.add_argument("--only-listener-anonymous", action="store_true")
+    selected.add_argument("--only-username-or-anonymous", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2172,29 +2175,6 @@ def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
 
 
 def run_fail_closed_case(broker: Path, directory: Path) -> None:
-    config = directory / "authentication-required.conf"
-    config.write_text(
-        f"listener {free_port()} 127.0.0.1\n"
-        "listener_allow_anonymous false\n"
-        "max_connections 1\n"
-    )
-    result = subprocess.run(
-        [str(broker), f"--config={config}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    if (
-        result.returncode == 0
-        or "AuthenticationRequired" not in result.stdout
-    ):
-        raise AssertionError(
-            "listener_allow_anonymous false did not fail closed without credentials: "
-            + result.stdout
-        )
-
     missing_interface = directory / "missing-bind-interface.conf"
     missing_interface.write_text(
         f"listener {free_port()}\n"
@@ -2565,6 +2545,98 @@ def run_listener_anonymous_policy_case(
         if return_code != 0:
             raise RuntimeError(
                 f"listener anonymous case {case_index} exited "
+                f"{return_code}: {process.stdout.read()}"
+            )
+
+
+def run_username_or_anonymous_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    password_file = directory / "username-or-anonymous.pwfile"
+    password_file.write_text(
+        "user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    cases = (
+        (True, True, True, True),
+        (True, True, False, True),
+        (True, False, True, True),
+        (True, False, False, True),
+        (False, True, True, True),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, False, False, False),
+    )
+    for index, (
+        allow_anonymous,
+        password_enabled,
+        username_enabled,
+        expected_success,
+    ) in enumerate(cases):
+        port = free_port()
+        config = directory / f"username-or-anonymous-{index}.conf"
+        config.write_text(
+            (f"password_file {password_file}\n" if password_enabled else "")
+            + f"allow_anonymous {str(allow_anonymous).lower()}\n"
+            + f"listener {port} 127.0.0.1\n"
+            + "max_connections 3\n"
+        )
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        try:
+            ready = process.stdout.readline().strip()
+            if "configured 1 listeners for 3 clients" not in ready:
+                raise RuntimeError(
+                    f"username-or-anonymous case {index} failed: {ready}"
+                )
+            read_listener_lines(
+                process,
+                1,
+                f"username-or-anonymous case {index}",
+            )
+            for protocol in (3, 4, 5):
+                client = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=5,
+                )
+                client.settimeout(5)
+                try:
+                    client.sendall(connect_packet(
+                        f"uname-anon-{index}-{protocol}",
+                        username="user" if username_enabled else None,
+                        password="password" if username_enabled else None,
+                        proto_ver=protocol,
+                    ))
+                    reason = connack_reason(read_mqtt_packet(client))
+                    expected_reason = 0 if expected_success else (
+                        0x87 if protocol == 5 else 0x05
+                    )
+                    if reason != expected_reason:
+                        raise AssertionError(
+                            "username-or-anonymous policy mismatch: "
+                            f"case={index} protocol={protocol} "
+                            f"expected={expected_reason:#x} actual={reason:#x}"
+                        )
+                    if expected_success:
+                        client.sendall(b"\xe0\x00")
+                finally:
+                    client.close()
+            return_code = process.wait(timeout=5)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        if return_code != 0:
+            raise RuntimeError(
+                f"username-or-anonymous case {index} exited "
                 f"{return_code}: {process.stdout.read()}"
             )
 
@@ -6902,6 +6974,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_username_or_anonymous:
+            run_username_or_anonymous_case(args.broker, directory)
+            print(
+                "MQTT username-or-anonymous integration passed: "
+                "cases=8 protocols=mqttv31+mqttv311+mqttv5 "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -6980,6 +7061,7 @@ def main() -> None:
         run_missing_root_config_case(args.broker, directory)
         run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
+        run_username_or_anonymous_case(args.broker, directory)
         run_unix_listener_case(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
@@ -7063,6 +7145,7 @@ def main() -> None:
         "source-locked mTLS CN/Subject SIGHUP continuity, "
         "source-locked change-count autosave and restore, "
         "source-locked global/listener anonymous policy precedence, "
+        "source-locked MQTT 3.1/3.1.1/5 username-or-anonymous policy, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "
