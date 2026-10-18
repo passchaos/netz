@@ -4739,6 +4739,17 @@ proxy evidence for the entire suite.
    all five shapes, while throughput remained neutral to positive outside the
    noisy short serial control. Focused Debug/ReleaseFast gates pass 136 tests
    and the Mosquitto source-locked gate remains 1,825/1,825.
+   PUBLISH encoding now also carries the already validated Properties length
+   from wire preflight into direct prefix emission instead of rescanning the
+   same list. Public writers retain every topic, payload-format, QoS, Packet
+   Identifier, property-context, duplicate, size, and overflow check. Sixteen
+   clean durable QoS 2 serial pairs reduced broker instructions by a 1.004498
+   baseline/candidate median with 16/16 wins, improved cycles by 1.010746 with
+   11/16, throughput by 1.007156 with 12/16, and p50 by 1.014379 with 13/16;
+   p99 was neutral. Four-pair five-shape controls showed consistent instruction
+   reductions but mixed neutral throughput, so no general all-shape speedup is
+   claimed. Focused Debug/ReleaseFast gates pass 138 tests and all 1,825 source-
+   locked Mosquitto sequences remain green.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

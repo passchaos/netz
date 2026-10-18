@@ -8275,6 +8275,38 @@ validated-packet reconstruction hotspot. Debug and ReleaseFast focused MQTT
 gates passed 136 tests, and all 1,825 source-locked Mosquitto packet sequences
 pass. Artifacts are retained under `zig-out/mqtt-broker-event-ab`.
 
+PUBLISH prefix generation now carries one validated wire plan from length
+preflight into direct encoding. The plan retains the encoded Properties length
+beside the public prefix/total lengths, so `writePublishPrefixAssumeCapacity`
+does not rescan and revalidate the same list before writing it. Public
+`writePublish` and `writePublishPrefix` still perform the complete topic,
+payload-format, QoS, Packet Identifier, property-context, duplicate-property,
+Remaining Length, and integer-overflow checks before the destination changes.
+
+Sixteen clean CPU-0/client, CPU-1/broker fixed-binary pairs reused the 2,000-
+warmup, 40,000-publish durable QoS 2 serial shape. Baseline broker, candidate
+broker, and fixed driver SHA-256 values were respectively
+`29c945aafe7556c5c92069a066b634f2b621d2cb40bc4f2aa38d98106e5fbefc`,
+`22d16d8906d2b6a91c60e0359f359f7dbda1d4525c5911873b406b93e6dc6e4e`,
+and
+`9b4753e76193e5a3c41b21a7f2171cc55f1185b17ffe5045c85e0227112795b9`.
+All 32 arms completed 40,000 exact deliveries and checksum 10,780,000.
+Instructions improved by a 1.004498 baseline/candidate paired median with
+16/16 wins, cycles by 1.010746 with 11/16, throughput by 1.007156 with 12/16,
+and p50 by 1.014379 with 13/16. P99 was effectively neutral at 1.001253 with
+10/16 wins.
+
+The matched profile reduced `writePropertiesAssumeCapacity` from roughly 0.62%
+to 0.25% of sampled broker cycles and no longer contains a second Properties
+length call below prefix emission; percentages from separately timed profiles
+are explanatory rather than an absolute CPU ratio. Four-pair standard-shape
+controls reduced instructions in every serial, publishers-32, balanced-32x32,
+and 4-KiB arm and three of four fanout arms. Their short-run throughput was
+mixed and neutral, so only the longer serial timing result is retained. Focused
+Debug/ReleaseFast MQTT gates passed 138 tests and all 1,825 source-locked
+Mosquitto packet sequences pass. Artifacts are retained under
+`zig-out/mqtt-publish-plan-ab`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
