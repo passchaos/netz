@@ -113,6 +113,8 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     MissingTemplateVariable,
     DuplicateTemplateVariable,
     InvalidTemplateExpansion,
+    InvalidScope,
+    EncryptionRequired,
     PayloadTooLarge,
     UnexpectedContextId,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
@@ -3911,6 +3913,14 @@ pub const Connection = struct {
 
     fn transportForIo(self: *Connection) RuntimeTransport {
         return self.transport orelse tcpTransport(self.io, self.stream);
+    }
+
+    fn encryptedTransport(self: *const Connection) bool {
+        const transport = self.transport orelse return false;
+        return switch (transport) {
+            .tls_client, .tls_server => true,
+            .tcp => false,
+        };
     }
 
     /// Return the verified peer certificate chain for vail-backed TLS. Server
@@ -8873,6 +8883,116 @@ pub const Connection = struct {
         );
     }
 
+    pub fn openConnectIp(
+        self: *Connection,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        path_storage: []u8,
+    ) Error!ConnectIpSession {
+        return self.openConnectIpUntil(
+            template,
+            scope,
+            variables,
+            path_storage,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn openConnectIpWithTimeout(
+        self: *Connection,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        path_storage: []u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ConnectIpSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openConnectIpWithDeadline(
+            template,
+            scope,
+            variables,
+            path_storage,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn openConnectIpWithDeadline(
+        self: *Connection,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        path_storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ConnectIpSession {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openConnectIpUntil(
+            template,
+            scope,
+            variables,
+            path_storage,
+            deadline,
+        );
+    }
+
+    fn openConnectIpUntil(
+        self: *Connection,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        path_storage: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ConnectIpSession {
+        if (!self.encryptedTransport()) return error.EncryptionRequired;
+        try scope.validate();
+        if (!std.mem.eql(u8, template.scheme(), "https")) {
+            return error.InvalidUriTemplate;
+        }
+        const request_path = try template.expandRequestTargetInto(
+            path_storage,
+            scope,
+            variables,
+        );
+        const headers = [_]http2.Hpack.HeaderField{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        var response = if (deadline) |absolute|
+            try self.openExtendedConnectWithDeadline(.{
+                .method = "CONNECT",
+                .path = request_path,
+                .scheme = template.scheme(),
+                .protocol = http3.connect_ip.protocol,
+                .authority = template.authority(),
+                .headers = &headers,
+            }, absolute)
+        else
+            try self.openExtendedConnect(.{
+                .method = "CONNECT",
+                .path = request_path,
+                .scheme = template.scheme(),
+                .protocol = http3.connect_ip.protocol,
+                .authority = template.authority(),
+                .headers = &headers,
+            });
+        var response_owned = true;
+        defer if (response_owned) response.deinit(self.allocator);
+        http3.connect_ip.validateResponseHead(
+            response.status,
+            response.headers,
+        ) catch |err| {
+            response.tunnel.abort(deadline);
+            return err;
+        };
+        const tunnel = response.tunnel;
+        response.deinit(self.allocator);
+        response_owned = false;
+        return ConnectIpSession.init(self.allocator, self.io, tunnel, .{});
+    }
+
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         var attempt = try self.openExtendedConnectAttemptUntil(options, null);
         errdefer attempt.deinit(self.allocator);
@@ -9149,6 +9269,96 @@ pub const Connection = struct {
             tunnel,
             .{},
         );
+    }
+
+    pub fn readConnectIpRequest(
+        self: *Connection,
+    ) Error!ExtendedConnectRequest {
+        if (!self.encryptedTransport()) return error.EncryptionRequired;
+        var connect_request = try self.readExtendedConnectRequest(
+            http3.connect_ip.protocol,
+        );
+        errdefer connect_request.deinit(self.allocator);
+        try http3.connect_ip.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        return connect_request;
+    }
+
+    pub fn readConnectIpRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readConnectIpRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readConnectIpRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectRequest {
+        if (!self.encryptedTransport()) return error.EncryptionRequired;
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        var connect_request = try self.readExtendedConnectRequestWithDeadline(
+            http3.connect_ip.protocol,
+            deadline,
+        );
+        errdefer connect_request.deinit(self.allocator);
+        try http3.connect_ip.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        return connect_request;
+    }
+
+    pub fn acceptConnectIpDefault(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        target_storage: []u8,
+    ) Error!AcceptedConnectIp {
+        const scope = try http3.connect_ip.parseDefaultPath(
+            connect_request.path,
+            target_storage,
+        );
+        return .{
+            .scope = scope,
+            .session = try self.acceptConnectIpForScope(connect_request, scope),
+        };
+    }
+
+    pub fn acceptConnectIpForScope(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        scope: http3.connect_ip.Scope,
+    ) Error!ConnectIpSession {
+        if (!self.encryptedTransport()) return error.EncryptionRequired;
+        try http3.connect_ip.validateRequestFields(
+            connect_request.method,
+            connect_request.path,
+            connect_request.scheme,
+            connect_request.authority,
+            connect_request.headers,
+        );
+        try scope.validate();
+        const response_headers = [_]http2.Hpack.HeaderField{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        const tunnel = try self.acceptExtendedConnect(
+            connect_request,
+            &response_headers,
+        );
+        return ConnectIpSession.init(self.allocator, self.io, tunnel, .{});
     }
 
     pub fn readExtendedConnectRequest(self: *Connection, expected_protocol: []const u8) Error!ExtendedConnectRequest {
@@ -20146,9 +20356,20 @@ pub const ConnectUdpSession = http3.connect_udp.CapsuleSession(
     TunnelWriteProgress,
 );
 
+pub const ConnectIpSession = http3.connect_ip.CapsuleSession(
+    http2.ErrorCode,
+    Tunnel,
+    TunnelWriteProgress,
+);
+
 pub const AcceptedConnectUdp = struct {
     target: http3.connect_udp.Target,
     session: ConnectUdpSession,
+};
+
+pub const AcceptedConnectIp = struct {
+    scope: http3.connect_ip.Scope,
+    session: ConnectIpSession,
 };
 
 pub const OwnedTunnelData = struct {
@@ -37576,6 +37797,7 @@ test {
     _ = @import("runtime/refusal_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_relay_tests.zig");
+    _ = @import("runtime/connect_ip_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

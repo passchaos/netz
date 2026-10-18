@@ -61,6 +61,8 @@ pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error
     MissingTemplateVariable,
     DuplicateTemplateVariable,
     InvalidTemplateExpansion,
+    InvalidScope,
+    EncryptionRequired,
     PayloadTooLarge,
     UnexpectedContextId,
     ExcessiveLoad,
@@ -5129,6 +5131,108 @@ pub const Client = struct {
         );
     }
 
+    /// Open RFC 9484 CONNECT-IP over an encrypted HTTP/1.1 Upgrade.
+    pub fn openConnectIp(
+        self: *Client,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        uri_storage: []u8,
+    ) Error!ConnectIpSession {
+        return self.openConnectIpUntil(
+            template,
+            scope,
+            variables,
+            uri_storage,
+            null,
+        );
+    }
+
+    pub fn openConnectIpWithTimeout(
+        self: *Client,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        uri_storage: []u8,
+        timeout: std.Io.Duration,
+    ) Error!ConnectIpSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openConnectIpWithDeadline(
+            template,
+            scope,
+            variables,
+            uri_storage,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn openConnectIpWithDeadline(
+        self: *Client,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        uri_storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectIpSession {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openConnectIpUntil(
+            template,
+            scope,
+            variables,
+            uri_storage,
+            deadline,
+        );
+    }
+
+    fn openConnectIpUntil(
+        self: *Client,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        uri_storage: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectIpSession {
+        if (self.tls_conn == null and self.tls_vail_conn == null) {
+            return error.EncryptionRequired;
+        }
+        try scope.validate();
+        if (!std.ascii.eqlIgnoreCase(template.scheme(), "https")) {
+            return error.InvalidUriTemplate;
+        }
+        const request_target = try template.expandUriInto(
+            uri_storage,
+            scope,
+            variables,
+        );
+        const headers = [_]http1.Header{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        if (deadline) |absolute| {
+            std.debug.assert(self.response_deadline == null);
+            self.response_deadline = absolute;
+        }
+        defer if (deadline != null) {
+            self.response_deadline = null;
+        };
+        try self.writeUpgradeRequest(
+            request_target,
+            template.authority(),
+            http3.connect_ip.protocol,
+            &headers,
+        );
+        const tunnel = try self.finishUpgradeInternal(
+            http3.connect_ip.protocol,
+            true,
+        );
+        return ConnectIpSession.init(
+            self.allocator,
+            self.io,
+            ConnectUdpTunnel.init(self.allocator, tunnel),
+            .{},
+        );
+    }
+
     /// Relative-timeout wrapper for the complete Upgrade handshake.
     pub fn openUpgradeWithTimeout(
         self: *Client,
@@ -5693,6 +5797,98 @@ pub const Connection = struct {
             &response_headers,
         );
         return ConnectUdpSession.init(
+            self.allocator,
+            self.io,
+            ConnectUdpTunnel.init(self.allocator, tunnel),
+            .{},
+        );
+    }
+
+    pub fn readConnectIpRequest(self: *Connection) Error!OwnedRequest {
+        if (self.tls_server_conn == null) return error.EncryptionRequired;
+        var request = try self.readRequest(.{});
+        errdefer request.deinit(self.allocator);
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_ip.protocol,
+            "https",
+            request.request,
+        );
+        return request;
+    }
+
+    pub fn readConnectIpRequestWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readConnectIpRequestWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readConnectIpRequestWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedRequest {
+        if (self.tls_server_conn == null) return error.EncryptionRequired;
+        var request = try self.readRequestWithDeadline(.{}, deadline);
+        errdefer request.deinit(self.allocator);
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_ip.protocol,
+            "https",
+            request.request,
+        );
+        return request;
+    }
+
+    pub fn acceptConnectIpDefault(
+        self: *Connection,
+        request: http1.Request,
+        target_storage: []u8,
+    ) Error!AcceptedConnectIp {
+        if (self.tls_server_conn == null) return error.EncryptionRequired;
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_ip.protocol,
+            "https",
+            request,
+        );
+        const scope = try http3.connect_ip.parseDefaultPath(
+            try connect_udp_runtime.requestPath(request.target),
+            target_storage,
+        );
+        return .{
+            .scope = scope,
+            .session = try self.acceptConnectIpForScope(request, scope),
+        };
+    }
+
+    pub fn acceptConnectIpForScope(
+        self: *Connection,
+        request: http1.Request,
+        scope: http3.connect_ip.Scope,
+    ) Error!ConnectIpSession {
+        if (self.tls_server_conn == null) return error.EncryptionRequired;
+        try connect_udp_runtime.validateRequest(
+            http3.capsule,
+            http3.connect_ip.protocol,
+            "https",
+            request,
+        );
+        try scope.validate();
+        const response_headers = [_]http1.Header{.{
+            .name = http3.capsule.header_name,
+            .value = http3.capsule.header_value_true,
+        }};
+        const tunnel = try self.acceptUpgrade(
+            request,
+            http3.connect_ip.protocol,
+            &response_headers,
+        );
+        return ConnectIpSession.init(
             self.allocator,
             self.io,
             ConnectUdpTunnel.init(self.allocator, tunnel),
@@ -6554,9 +6750,20 @@ pub const ConnectUdpSession = http3.connect_udp.CapsuleSession(
     TunnelWriteProgress,
 );
 
+pub const ConnectIpSession = http3.connect_ip.CapsuleSession(
+    connect_udp_runtime.ResetCode,
+    ConnectUdpTunnel,
+    TunnelWriteProgress,
+);
+
 pub const AcceptedConnectUdp = struct {
     target: http3.connect_udp.Target,
     session: ConnectUdpSession,
+};
+
+pub const AcceptedConnectIp = struct {
+    scope: http3.connect_ip.Scope,
+    session: ConnectIpSession,
 };
 
 pub const OwnedRequest = struct {
@@ -14096,4 +14303,5 @@ test {
     _ = @import("runtime/date_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_relay_tests.zig");
+    _ = @import("runtime/connect_ip_tests.zig");
 }

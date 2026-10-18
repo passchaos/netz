@@ -416,3 +416,59 @@ test "CONNECT-IP route advertisements enforce canonical ordering" {
     );
     try std.testing.expect((try no_routes.next()) == null);
 }
+
+test "CONNECT-IP Capsule Session resets malformed configuration" {
+    const ResetCode = enum { protocol_error, enhance_your_calm };
+    const Progress = struct { committed_bytes: usize = 0 };
+    const Tunnel = struct {
+        const Owned = struct {
+            data: []const u8,
+            end_stream: bool,
+
+            pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
+                self.* = undefined;
+            }
+        };
+
+        stream_id: u31 = 0,
+        input: []const u8,
+        delivered: bool = false,
+        reset_code: ?ResetCode = null,
+
+        pub fn read(self: *@This()) !Owned {
+            if (self.delivered) return .{ .data = &.{}, .end_stream = true };
+            self.delivered = true;
+            return .{ .data = self.input, .end_stream = false };
+        }
+
+        pub fn readWithDeadline(
+            self: *@This(),
+            _: std.Io.Clock.Timestamp,
+        ) !Owned {
+            return self.read();
+        }
+
+        pub fn reset(self: *@This(), code: ResetCode) !void {
+            self.reset_code = code;
+        }
+    };
+    const Session = connect_ip.CapsuleSession(ResetCode, Tunnel, Progress);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const malformed = [_]u8{
+        http3.capsule.CapsuleType.address_request,
+        0,
+    };
+    var session = Session.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .input = &malformed },
+        .{},
+    );
+    defer session.deinit();
+    try std.testing.expectError(error.InvalidCapsule, session.receiveEvent());
+    try std.testing.expectEqual(
+        ResetCode.protocol_error,
+        session.tunnel.reset_code.?,
+    );
+}

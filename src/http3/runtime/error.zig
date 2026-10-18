@@ -25,6 +25,8 @@ pub const Error = http3.Error || quic.runtime.Error ||
     UnsafeEarlyDataMethod,
     InvalidAddressConnectPolicy,
     InvalidTarget,
+    InvalidScope,
+    InvalidCapsule,
     InvalidUriTemplate,
     MissingTemplateVariable,
     DuplicateTemplateVariable,
@@ -58,6 +60,8 @@ pub fn messageStreamErrorCode(err: anyerror) ?u64 {
         error.InvalidHeader,
         error.InvalidContentLength,
         error.ExtendedConnectDisabled,
+        error.InvalidScope,
+        error.InvalidCapsule,
         => http3.ApplicationErrorCode.message_error,
         error.TooManyInformationalResponses => http3.ApplicationErrorCode.excessive_load,
         // This tag also represents connection admission limits. Runtime call

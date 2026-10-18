@@ -6,7 +6,7 @@ const deadline_policy = @import("../../internal/deadline.zig");
 
 pub fn Session(
     comptime Http3: type,
-    comptime ConnectUdp: type,
+    comptime ContextProtocol: type,
     comptime Transport: type,
 ) type {
     return struct {
@@ -24,7 +24,7 @@ pub fn Session(
         pub const PollReceiveStep = union(enum) {
             empty,
             ignored_context,
-            payload: ConnectUdp.ReceivedUdpPayload,
+            payload: ContextProtocol.ReceivedContextPayload,
         };
 
         const PendingReceive = struct {
@@ -56,7 +56,7 @@ pub fn Session(
             const maximum = self.transport.maxConnectDatagramPayloadSize(
                 self.stream_id,
             ) orelse return null;
-            return ConnectUdp.maxUdpPayloadForHttpDatagram(maximum);
+            return ContextProtocol.maxContextPayloadForHttpDatagram(maximum);
         }
 
         /// Maximum Context ID 0 payload accepted from the peer. This remains
@@ -65,12 +65,12 @@ pub fn Session(
             const maximum = self.transport.connectDatagramReceiveBufferSize(
                 self.stream_id,
             ) orelse return null;
-            return ConnectUdp.maxUdpPayloadForHttpDatagram(maximum);
+            return ContextProtocol.maxContextPayloadForHttpDatagram(maximum);
         }
 
         fn encode(self: *Self, payload: []const u8) ![]const u8 {
-            const value = ConnectUdp.ContextDatagram{
-                .context_id = ConnectUdp.udp_context_id,
+            const value = ContextProtocol.ContextDatagram{
+                .context_id = ContextProtocol.payload_context_id,
                 .payload = payload,
             };
             try self.send_scratch.resize(
@@ -123,9 +123,9 @@ pub fn Session(
         fn adopt(
             self: *Self,
             raw: anytype,
-        ) !?ConnectUdp.OwnedUdpPayload {
+        ) !?ContextProtocol.OwnedContextPayload {
             var owned = raw;
-            const datagram = ConnectUdp.ContextDatagram.parse(
+            const datagram = ContextProtocol.ContextDatagram.parse(
                 owned.payload,
             ) catch |err| {
                 owned.deinit(self.allocator);
@@ -135,7 +135,7 @@ pub fn Session(
                 );
                 return err;
             };
-            if (datagram.context_id != ConnectUdp.udp_context_id) {
+            if (datagram.context_id != ContextProtocol.payload_context_id) {
                 owned.deinit(self.allocator);
                 return null;
             }
@@ -146,7 +146,7 @@ pub fn Session(
             };
         }
 
-        pub fn receive(self: *Self) !ConnectUdp.OwnedUdpPayload {
+        pub fn receive(self: *Self) !ContextProtocol.OwnedContextPayload {
             if (try self.takePendingOwned()) |payload| return payload;
             while (true) {
                 const raw = try self.transport.receiveConnectDatagram(
@@ -159,7 +159,7 @@ pub fn Session(
         pub fn receiveWithTimeout(
             self: *Self,
             timeout: std.Io.Duration,
-        ) !ConnectUdp.OwnedUdpPayload {
+        ) !ContextProtocol.OwnedContextPayload {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             return self.receiveWithDeadline(.fromNow(self.io, .{
                 .raw = timeout,
@@ -170,7 +170,7 @@ pub fn Session(
         pub fn receiveWithDeadline(
             self: *Self,
             deadline: std.Io.Clock.Timestamp,
-        ) !ConnectUdp.OwnedUdpPayload {
+        ) !ContextProtocol.OwnedContextPayload {
             _ = try deadline_policy.usableAwake(self.io, deadline);
             if (try self.takePendingOwned()) |payload| return payload;
             while (true) {
@@ -189,7 +189,7 @@ pub fn Session(
         pub fn receiveInto(
             self: *Self,
             out: []u8,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             return self.receiveIntoUntil(out, null);
         }
 
@@ -197,7 +197,7 @@ pub fn Session(
             self: *Self,
             out: []u8,
             timeout: std.Io.Duration,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             return self.receiveIntoWithDeadline(out, .fromNow(self.io, .{
                 .raw = timeout,
@@ -209,7 +209,7 @@ pub fn Session(
             self: *Self,
             out: []u8,
             deadline: std.Io.Clock.Timestamp,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             _ = try deadline_policy.usableAwake(self.io, deadline);
             return self.receiveIntoUntil(out, deadline);
         }
@@ -219,7 +219,7 @@ pub fn Session(
         pub fn pollReceiveInto(
             self: *Self,
             out: []u8,
-        ) !?ConnectUdp.ReceivedUdpPayload {
+        ) !?ContextProtocol.ReceivedContextPayload {
             while (true) switch (try self.pollReceiveIntoStep(out)) {
                 .empty => return null,
                 .ignored_context => continue,
@@ -254,7 +254,7 @@ pub fn Session(
             self: *Self,
             out: []u8,
             deadline: ?std.Io.Clock.Timestamp,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             if (try self.copyPendingInto(out)) |payload| return payload;
             try self.ensureReceiveScratch();
             while (true) {
@@ -283,14 +283,14 @@ pub fn Session(
         }
 
         fn retainRawPayload(self: *Self, raw: []const u8) !bool {
-            const datagram = ConnectUdp.ContextDatagram.parse(raw) catch |err| {
+            const datagram = ContextProtocol.ContextDatagram.parse(raw) catch |err| {
                 try self.transport.cancelRequest(
                     self.stream_id,
                     Http3.ApplicationErrorCode.message_error,
                 );
                 return err;
             };
-            if (datagram.context_id != ConnectUdp.udp_context_id) return false;
+            if (datagram.context_id != ContextProtocol.payload_context_id) return false;
             const offset = @intFromPtr(datagram.payload.ptr) -
                 @intFromPtr(self.receive_scratch.items.ptr);
             self.pending_receive = .{
@@ -303,7 +303,7 @@ pub fn Session(
         fn copyPendingInto(
             self: *Self,
             out: []u8,
-        ) !?ConnectUdp.ReceivedUdpPayload {
+        ) !?ContextProtocol.ReceivedContextPayload {
             const pending = self.pending_receive orelse return null;
             if (out.len < pending.len) return error.BufferTooShort;
             @memcpy(
@@ -319,7 +319,7 @@ pub fn Session(
 
         fn takePendingOwned(
             self: *Self,
-        ) !?ConnectUdp.OwnedUdpPayload {
+        ) !?ContextProtocol.OwnedContextPayload {
             const pending = self.pending_receive orelse return null;
             const owned = try self.allocator.dupe(
                 u8,

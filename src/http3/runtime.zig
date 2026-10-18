@@ -13,6 +13,7 @@ const connect_datagram = @import("runtime/datagram.zig");
 const connect_datagram_routing = @import("runtime/datagram/routing.zig");
 const connect_udp_dispatcher_relay =
     @import("runtime/connect_udp_dispatcher_relay.zig");
+const connect_ip_session = @import("runtime/connect_ip_session.zig");
 const development_datagram_queue =
     @import("runtime/development/datagram_queue.zig");
 const development_send = @import("runtime/development/send.zig");
@@ -455,21 +456,37 @@ fn receiveConnectDatagramFromSession(
         }
         if (deadline) |absolute| {
             if (@TypeOf(session) == *HandshakeServerSession) {
-                try session.receiveDetachedRequestProgressWithDeadline(
-                    stream_id,
-                    absolute,
-                );
+                if (session.connect_datagrams.streamDetached(stream_id))
+                    try session.receiveDetachedRequestProgressWithDeadline(
+                        stream_id,
+                        absolute,
+                    )
+                else
+                    try session.receiveAttachedConnectDatagramProgress(
+                        absolute,
+                    );
             } else {
-                try session.receiveDetachedResponseProgressWithDeadline(
-                    stream_id,
-                    absolute,
-                );
+                if (session.connect_datagrams.streamDetached(stream_id))
+                    try session.receiveDetachedResponseProgressWithDeadline(
+                        stream_id,
+                        absolute,
+                    )
+                else
+                    try session.receiveAttachedConnectDatagramProgress(
+                        absolute,
+                    );
             }
         } else {
             if (@TypeOf(session) == *HandshakeServerSession) {
-                try session.receiveDetachedRequestProgress(stream_id);
+                if (session.connect_datagrams.streamDetached(stream_id))
+                    try session.receiveDetachedRequestProgress(stream_id)
+                else
+                    try session.receiveAttachedConnectDatagramProgress(null);
             } else {
-                try session.receiveDetachedResponseProgress(stream_id);
+                if (session.connect_datagrams.streamDetached(stream_id))
+                    try session.receiveDetachedResponseProgress(stream_id)
+                else
+                    try session.receiveAttachedConnectDatagramProgress(null);
             }
         }
     }
@@ -489,18 +506,24 @@ fn receiveConnectDatagramIntoFromSession(
             stream_id,
             output,
         );
-        if (@TypeOf(session) == *HandshakeServerSession) {
+        if (@TypeOf(session) == *HandshakeServerSession and
+            session.connect_datagrams.streamDetached(stream_id))
+        {
             try session.receiveDetachedRequestProgressInto(
                 stream_id,
                 deadline,
                 &target,
             );
-        } else {
+        } else if (@TypeOf(session) != *HandshakeServerSession and
+            session.connect_datagrams.streamDetached(stream_id))
+        {
             try session.receiveDetachedResponseProgressInto(
                 stream_id,
                 deadline,
                 &target,
             );
+        } else {
+            try session.receiveAttachedConnectDatagramProgress(deadline);
         }
         if (try target.finish()) |payload| return payload;
     }
@@ -7388,6 +7411,7 @@ pub const HandshakeServerSession = struct {
             try self.startResponse(stream_id, response, null);
 
         std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        try self.connect_datagrams.markStreamDetached(stream_id);
         var removed = self.streaming_requests.takeEntry(stream_id) orelse
             unreachable;
         removed.deinit();
@@ -7423,6 +7447,7 @@ pub const HandshakeServerSession = struct {
                 &self.established.connection,
                 &entry.reader,
             );
+        try self.connect_datagrams.markStreamDetached(stream_id);
         var removed = self.streaming_requests.takeEntry(stream_id) orelse
             return error.UnexpectedStream;
         removed.deinit();
@@ -7460,6 +7485,7 @@ pub const HandshakeServerSession = struct {
         std.debug.assert(committed.reader.canDetachRequest());
         committed.reader.markCredited(release_received);
         std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        try self.connect_datagrams.markStreamDetached(stream_id);
         var removed = self.streaming_requests.takeEntry(stream_id) orelse
             unreachable;
         removed.deinit();
@@ -7709,6 +7735,134 @@ pub const HandshakeServerSession = struct {
             self,
             stream_id,
         );
+    }
+
+    /// Accept an RFC 9484 CONNECT-IP request while retaining its request
+    /// stream reader for reliable configuration Capsules.
+    pub fn acceptConnectIp(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target_storage: []u8,
+    ) Error!http3.connect_ip.Scope {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const scope = try http3.connect_ip.validateDecodedDefaultRequest(
+            request,
+            target_storage,
+        );
+        try self.acceptConnectIpResponseAttached(stream_id);
+        return scope;
+    }
+
+    pub fn acceptConnectIpForScope(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        scope: http3.connect_ip.Scope,
+    ) Error!void {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        try http3.connect_ip.validateDecodedRequest(request);
+        try scope.validate();
+        try self.acceptConnectIpResponseAttached(stream_id);
+    }
+
+    pub fn tryAcceptConnectIp(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target_storage: []u8,
+    ) Error!http3.connect_ip.Scope {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const scope = try http3.connect_ip.validateDecodedDefaultRequest(
+            request,
+            target_storage,
+        );
+        try self.tryAcceptConnectIpResponseAttached(stream_id);
+        return scope;
+    }
+
+    pub fn tryAcceptConnectIpForScope(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        scope: http3.connect_ip.Scope,
+    ) Error!void {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        try http3.connect_ip.validateDecodedRequest(request);
+        try scope.validate();
+        try self.tryAcceptConnectIpResponseAttached(stream_id);
+    }
+
+    pub fn connectIpSession(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!ConnectIpServerSession {
+        if (!self.connect_datagrams.contains(stream_id) or
+            self.connect_datagrams.streamDetached(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        return ConnectIpServerSession.init(
+            self.established.connection.endpoint.allocator,
+            self.connectionIo(),
+            self,
+            stream_id,
+        );
+    }
+
+    fn acceptConnectIpResponseAttached(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        const response = http3.connect_ip.successResponse();
+        try validateConnectAcceptance(response);
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (!entry.reader.canDetachRequest() or
+            self.outbound_bodies.find(stream_id) != null or
+            self.connect_datagrams.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        try self.connect_datagrams.register(stream_id);
+        errdefer self.connect_datagrams.unregister(stream_id);
+        const release_received = entry.reader.uncreditedConsumed();
+        try self.established.connection.releaseReceivedCapacity(
+            stream_id,
+            release_received,
+        );
+        entry.reader.markCredited(release_received);
+        try self.startResponse(stream_id, response, null);
+        std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        std.debug.assert(!self.connect_datagrams.streamDetached(stream_id));
+    }
+
+    fn tryAcceptConnectIpResponseAttached(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        const response = http3.connect_ip.successResponse();
+        try validateConnectAcceptance(response);
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (!entry.reader.canDetachRequest() or
+            self.outbound_bodies.find(stream_id) != null or
+            self.connect_datagrams.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        try self.connect_datagrams.register(stream_id);
+        errdefer self.connect_datagrams.unregister(stream_id);
+        const release_received = entry.reader.uncreditedConsumed();
+        try self.tryStartResponseLiteral(
+            stream_id,
+            response,
+            release_received,
+        );
+        entry.reader.markCredited(release_received);
+        std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        std.debug.assert(!self.connect_datagrams.streamDetached(stream_id));
     }
 
     pub fn maxConnectDatagramPayloadSize(
@@ -11149,6 +11303,13 @@ pub const HandshakeServerSession = struct {
         } else {
             try self.flushRequestPacketFeedback();
         }
+    }
+
+    fn receiveAttachedConnectDatagramProgress(
+        self: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.receiveRequestPacketUntil(deadline);
     }
 
     fn flushRequestPacketFeedback(self: *HandshakeServerSession) Error!void {
@@ -16462,6 +16623,7 @@ pub const HandshakeClient = struct {
                 &self.established.connection,
                 &entry.reader,
             );
+        try self.connect_datagrams.markStreamDetached(stream_id);
         var removed = self.streaming_responses.takeEntry(stream_id) orelse
             return error.UnexpectedStream;
         removed.deinit();
@@ -16581,6 +16743,30 @@ pub const HandshakeClient = struct {
         );
     }
 
+    fn receiveAttachedConnectDatagramProgress(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try receiveConnectionResponsePacketUntil(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            self.options.local_settings.qpack_blocked_streams,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            null,
+            &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
+            deadline,
+        );
+        try self.flushResponsePacketFeedback();
+    }
+
     pub fn connectDatagramsNegotiated(self: HandshakeClient) bool {
         return self.control.settings.sent and
             self.control.settings.received and
@@ -16607,6 +16793,74 @@ pub const HandshakeClient = struct {
         errdefer self.cancelPendingConnectDatagramAssociation(stream_id);
         try self.registerPendingConnectDatagramAssociation(stream_id);
         return stream_id;
+    }
+
+    pub fn startConnectIp(
+        self: *HandshakeClient,
+        scope: http3.connect_ip.Scope,
+        authority: []const u8,
+        path_storage: []u8,
+    ) Error!u62 {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const stream_id = try self.startRequest(
+            try http3.connect_ip.requestInto(
+                path_storage,
+                scope,
+                authority,
+            ),
+            null,
+        );
+        errdefer self.cancelPendingConnectDatagramAssociation(stream_id);
+        try self.registerPendingConnectDatagramAssociation(stream_id);
+        return stream_id;
+    }
+
+    pub fn startConnectIpWithTemplate(
+        self: *HandshakeClient,
+        template: http3.connect_ip.UriTemplate,
+        scope: http3.connect_ip.Scope,
+        variables: []const http3.connect_ip.Variable,
+        path_storage: []u8,
+    ) Error!u62 {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const stream_id = try self.startRequest(
+            try http3.connect_ip.requestWithTemplateInto(
+                path_storage,
+                template,
+                scope,
+                variables,
+            ),
+            null,
+        );
+        errdefer self.cancelPendingConnectDatagramAssociation(stream_id);
+        try self.registerPendingConnectDatagramAssociation(stream_id);
+        return stream_id;
+    }
+
+    /// Validate the final response head without detaching the CONNECT stream;
+    /// reliable configuration Capsules continue through the streaming reader.
+    pub fn acceptConnectIpResponse(
+        self: *HandshakeClient,
+        stream_id: u62,
+        response: http3.DecodedResponseHead,
+    ) Error!ConnectIpClientSession {
+        try http3.connect_ip.validateResponseHead(
+            response.status,
+            response.headers,
+        );
+        if (response.content_length != null) return error.InvalidHeader;
+        if (!self.connect_datagrams.contains(stream_id) or
+            self.connect_datagrams.streamDetached(stream_id) or
+            self.streaming_responses.find(stream_id) == null)
+        {
+            return error.UnexpectedStream;
+        }
+        return ConnectIpClientSession.init(
+            self.allocator,
+            self.connectionIo(),
+            self,
+            stream_id,
+        );
     }
 
     pub fn startConnectUdpWithTemplate(
@@ -19618,6 +19872,20 @@ pub const ConnectUdpServerSession = http3.connect_udp.Session(
 );
 pub const ConnectUdpDispatcherRelay = connect_udp_dispatcher_relay.Server(
     RuntimeModule,
+);
+pub const ConnectIpClientSession = connect_ip_session.Session(
+    http3,
+    http3.connect_ip,
+    HandshakeClient,
+    BodyWriteProgress,
+    .client,
+);
+pub const ConnectIpServerSession = connect_ip_session.Session(
+    http3,
+    http3.connect_ip,
+    HandshakeServerSession,
+    BodyWriteProgress,
+    .server,
 );
 pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
@@ -35325,6 +35593,8 @@ test {
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_dispatcher_relay_tests.zig");
+    _ = @import("runtime/connect_ip_tests.zig");
+    _ = @import("runtime/connect_ip_dispatcher_tests.zig");
     _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");

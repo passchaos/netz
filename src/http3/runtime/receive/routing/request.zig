@@ -178,7 +178,7 @@ pub fn applyServerRequestPacketFrames(
         {
             const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
             if (detached_streams) |detached| {
-                if (detached.contains(stream_id)) {
+                if (detached.streamDetached(stream_id)) {
                     // Detached associations report their own terminal state.
                     // Do not let reset of CONNECT A abort a receive that is
                     // currently waiting for unrelated request B. Terminal
@@ -225,7 +225,7 @@ pub fn applyServerRequestPacketFrames(
         if ((detached_stream_id != null and
             frame.stream.stream_id == detached_stream_id.?) or
             (detached_streams != null and
-                detached_streams.?.contains(
+                detached_streams.?.streamDetached(
                     std.math.cast(u62, frame.stream.stream_id) orelse
                         return error.UnexpectedStream,
                 )))
@@ -458,7 +458,7 @@ fn hasDetachedAssociation(
 ) bool {
     return detached_stream_id != null or
         if (detached_streams) |detached|
-            detached.associationCount() != 0
+            detached.hasDetachedStreams()
         else
             false;
 }

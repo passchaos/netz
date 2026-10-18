@@ -80,6 +80,7 @@ pub const Terminal = union(enum) {
 pub const Registry = struct {
     const Association = struct {
         stream_id: u62,
+        stream_detached: bool = false,
         queue: std.ArrayList([]u8) = .empty,
         head: usize = 0,
         queued_bytes: usize = 0,
@@ -196,6 +197,28 @@ pub const Registry = struct {
 
     pub fn associationStreamId(self: Registry, index: usize) u62 {
         return self.associations.items[index].stream_id;
+    }
+
+    pub fn markStreamDetached(
+        self: *Registry,
+        stream_id: u62,
+    ) !void {
+        try validateStreamId(stream_id);
+        const index = self.index.get(stream_id) orelse
+            return error.UnexpectedStream;
+        self.associations.items[index].stream_detached = true;
+    }
+
+    pub fn streamDetached(self: Registry, stream_id: u62) bool {
+        const index = self.index.get(stream_id) orelse return false;
+        return self.associations.items[index].stream_detached;
+    }
+
+    pub fn hasDetachedStreams(self: Registry) bool {
+        for (self.associations.items) |association| {
+            if (association.stream_detached) return true;
+        }
+        return false;
     }
 
     pub fn register(self: *Registry, stream_id: u62) !void {
@@ -450,6 +473,26 @@ pub const Registry = struct {
 pub fn validateStreamId(stream_id: u62) error{UnexpectedStream}!void {
     // HTTP request streams are client-initiated bidirectional QUIC streams.
     if (stream_id & 0x3 != 0) return error.UnexpectedStream;
+}
+
+test "HTTP/3 CONNECT datagram association detaches explicitly" {
+    var registry = Registry.init(std.testing.allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+    try std.testing.expect(registry.contains(0));
+    try std.testing.expect(!registry.streamDetached(0));
+    try std.testing.expect(!registry.hasDetachedStreams());
+    try registry.markStreamDetached(0);
+    try std.testing.expect(registry.streamDetached(0));
+    try std.testing.expect(registry.hasDetachedStreams());
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        registry.markStreamDetached(4),
+    );
 }
 
 test "HTTP/3 CONNECT datagram registry demultiplexes and bounds FIFO queues" {

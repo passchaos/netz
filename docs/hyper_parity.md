@@ -1618,10 +1618,28 @@ Internet Protocol Number request scopes; supports the default and configured
 Level-3 MASQUE URI Templates; validates Extended CONNECT responses; frames
 Context ID 0 IP packets; and provides allocation-free ADDRESS_ASSIGN,
 ADDRESS_REQUEST and ROUTE_ADVERTISEMENT Capsule codecs. Prefix host bits,
-nonzero/per-Capsule-unique emitted Request IDs, route ordering, same-protocol overlap and
-protocol-zero cross-protocol overlap are checked before writers touch caller
-storage. HTTP/1.1 Upgrade and HTTP/2/HTTP/3 runtime Session adapters remain the
-next CONNECT-IP layer and are not claimed by this codec-level slice.
+nonzero/per-Capsule-unique emitted Request IDs, route ordering, same-protocol
+overlap and protocol-zero cross-protocol overlap are checked before writers
+touch caller storage. Typed encrypted HTTP/1.1 Upgrade and HTTP/2 Extended
+CONNECT Sessions now carry configuration and IP packets through one ordered
+Capsule event stream. HTTP/3 keeps the reliable CONNECT DATA reader attached
+for configuration Capsules while the same Session routes Context ID 0 packets
+through QUIC DATAGRAM; association registration and stream detachment are
+separate states so neither plane steals the other. Real TLS H1/H2 and
+authenticated H3 regressions cover bidirectional configuration, IP packets,
+opposite-plane receive ordering, malformed-Capsule reset, and both FINs.
+Shared HTTP/3 endpoints retain one UDP reader: dispatcher-bound servers use
+one-attempt CONNECT-IP acceptance, configuration/DATAGRAM polls and sends, then
+feed the stream's outer `.finished` event back through `observePeerFinished`.
+Blocking helpers still reject dispatcher ownership instead of racing the
+endpoint reader. A real endpoint regression exchanges both planes and both
+FINs exclusively through these nonblocking APIs.
+`zig build interop-connect-ip-h3 -Doptimize=ReleaseFast` is an offline-locked
+bidirectional h3/Quinn process gate that independently uses
+`Protocol::CONNECT_IP`, its own Capsule/varint codec, and Quinn DATAGRAMs. Both
+role pairings exchange ADDRESS_REQUEST/ADDRESS_ASSIGN, 20/40-byte IP packets,
+delivery acknowledgments, request FIN and response FIN without treating QUIC
+connection close as stream completion.
 The Capsule Session also has caller-buffer receive variants matching the H3
 DATAGRAM surface. A short output leaves the complete datagram pending for a
 larger retry, while warmed reads avoid the owning API's per-payload allocation.

@@ -156,7 +156,7 @@ pub fn routePacket(
         {
             const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
             if (state.detached_streams) |detached| {
-                if (detached.contains(stream_id)) {
+                if (detached.streamDetached(stream_id)) {
                     // Detached associations report their own terminal state.
                     // Their caller routes DATAGRAMs before exposing the reset.
                     continue;
@@ -188,7 +188,7 @@ pub fn routePacket(
             continue;
         }
         if (state.detached_streams) |detached| {
-            if (detached.contains(
+            if (detached.streamDetached(
                 std.math.cast(u62, frame.stream.stream_id) orelse
                     return error.UnexpectedStream,
             )) {
@@ -453,7 +453,7 @@ pub fn recordClientResponseReset(
 fn hasDetachedAssociation(state: State) bool {
     return state.detached_stream_id != null or
         if (state.detached_streams) |detached|
-            detached.associationCount() != 0
+            detached.hasDetachedStreams()
         else
             false;
 }

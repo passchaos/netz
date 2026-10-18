@@ -645,6 +645,45 @@ test "public modules are reachable" {
         netz.http1.runtime,
         "AcceptedConnectUdp",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "ConnectIpSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "AcceptedConnectIp",
+    ));
+    inline for (&.{
+        "send",
+        "receive",
+        "sendCapsule",
+        "receiveCapsule",
+        "receiveEvent",
+        "receiveEventWithTimeout",
+        "receiveEventWithDeadline",
+        "closeWrite",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http1.runtime.ConnectIpSession,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "openConnectIp",
+        "openConnectIpWithTimeout",
+        "openConnectIpWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(netz.http1.runtime.Client, decl));
+    }
+    inline for (&.{
+        "readConnectIpRequest",
+        "readConnectIpRequestWithTimeout",
+        "readConnectIpRequestWithDeadline",
+        "acceptConnectIpDefault",
+        "acceptConnectIpForScope",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(netz.http1.runtime.Connection, decl));
+    }
     try std.testing.expect(
         netz.http1.runtime.ConnectUdpSession.supports_blocking_relay,
     );
@@ -816,6 +855,41 @@ test "public modules are reachable" {
         netz.http2.runtime,
         "AcceptedConnectUdp",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "ConnectIpSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "AcceptedConnectIp",
+    ));
+    inline for (&.{
+        "send",
+        "receive",
+        "sendCapsule",
+        "receiveCapsule",
+        "receiveEvent",
+        "receiveEventWithTimeout",
+        "receiveEventWithDeadline",
+        "closeWrite",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.ConnectIpSession,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "openConnectIp",
+        "openConnectIpWithTimeout",
+        "openConnectIpWithDeadline",
+        "readConnectIpRequest",
+        "readConnectIpRequestWithTimeout",
+        "readConnectIpRequestWithDeadline",
+        "acceptConnectIpDefault",
+        "acceptConnectIpForScope",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, decl));
+    }
     try std.testing.expect(
         netz.http2.runtime.ConnectUdpSession.supports_blocking_relay,
     );
@@ -3332,6 +3406,62 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "ConnectUdpServerSession",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ConnectIpClientSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ConnectIpServerSession",
+    ));
+    inline for (&.{
+        "startConnectIp",
+        "startConnectIpWithTemplate",
+        "acceptConnectIpResponse",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.HandshakeClient,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "acceptConnectIp",
+        "acceptConnectIpForScope",
+        "tryAcceptConnectIp",
+        "tryAcceptConnectIpForScope",
+        "connectIpSession",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.HandshakeServerSession,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "send",
+        "receive",
+        "receiveInto",
+        "sendCapsule",
+        "sendCapsuleWithTimeout",
+        "sendCapsuleWithDeadline",
+        "trySendCapsule",
+        "receiveCapsule",
+        "receiveCapsuleWithTimeout",
+        "receiveCapsuleWithDeadline",
+        "pollReceiveCapsule",
+        "pollReceiveInto",
+        "observePeerFinished",
+        "closeWrite",
+        "tryCloseWrite",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.ConnectIpClientSession,
+            decl,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.ConnectIpServerSession,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
         "ConnectUdpDispatcherRelay",

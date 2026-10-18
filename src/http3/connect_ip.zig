@@ -10,6 +10,8 @@ const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
 const capsule = @import("capsule.zig");
 const config_capsules = @import("connect_ip/capsules.zig");
+const capsule_session = @import("connect_udp/capsule_session.zig");
+const session_module = @import("connect_udp/session.zig");
 const scope_module = @import("connect_ip/scope.zig");
 const template_module = @import("connect_ip/template.zig");
 
@@ -18,6 +20,10 @@ pub fn Protocol(comptime Http3: type) type {
         pub const protocol = "connect-ip";
         pub const default_path_prefix = scope_module.default_path_prefix;
         pub const ip_context_id: u62 = 0;
+        pub const payload_context_id = ip_context_id;
+        /// Maximum ordinary IPv6 packet size without RFC 2675 jumbograms.
+        pub const max_ip_packet_size: usize = 65_575;
+        pub const max_context_payload_size = max_ip_packet_size;
 
         pub const Error = Http3.Error || wire.Error || scope_module.Error ||
             template_module.Error || config_capsules.Error || error{
@@ -41,18 +47,21 @@ pub fn Protocol(comptime Http3: type) type {
             capsule.protocol_header,
         };
 
-        pub fn defaultPathLen(scope: Scope) Error!usize {
+        pub fn defaultPathLen(scope: Scope) scope_module.Error!usize {
             return scope_module.defaultPathLen(scope);
         }
 
-        pub fn writeDefaultPath(out: []u8, scope: Scope) Error![]u8 {
+        pub fn writeDefaultPath(
+            out: []u8,
+            scope: Scope,
+        ) scope_module.Error![]u8 {
             return scope_module.writeDefaultPath(out, scope);
         }
 
         pub fn parseDefaultPath(
             path: []const u8,
             target_out: []u8,
-        ) Error!Scope {
+        ) scope_module.Error!Scope {
             return scope_module.parseDefaultPath(path, target_out);
         }
 
@@ -268,7 +277,76 @@ pub fn Protocol(comptime Http3: type) type {
             maximum_http_datagram_payload: usize,
         ) ?usize {
             if (maximum_http_datagram_payload == 0) return null;
-            return maximum_http_datagram_payload - 1;
+            return @min(
+                maximum_http_datagram_payload - 1,
+                max_ip_packet_size,
+            );
+        }
+
+        pub const OwnedIpPayload = struct {
+            stream_id: u62,
+            storage: []u8,
+            payload: []const u8,
+
+            pub fn deinit(
+                self: *OwnedIpPayload,
+                allocator: std.mem.Allocator,
+            ) void {
+                allocator.free(self.storage);
+                self.* = undefined;
+            }
+        };
+
+        pub const ReceivedIpPayload = struct {
+            stream_id: u62,
+            payload: []u8,
+        };
+
+        pub const OwnedContextPayload = OwnedIpPayload;
+        pub const ReceivedContextPayload = ReceivedIpPayload;
+
+        pub fn maxContextPayloadForHttpDatagram(
+            maximum_http_datagram_payload: usize,
+        ) ?usize {
+            return maxIpPacketForHttpDatagram(
+                maximum_http_datagram_payload,
+            );
+        }
+
+        /// Validate one reliable CONNECT-IP configuration Capsule value.
+        /// Returns false for unknown extension Capsule types, which receivers
+        /// skip while preserving every registered RFC 9484 configuration.
+        pub fn validateConfigurationCapsule(
+            capsule_type: u64,
+            value: []const u8,
+        ) Error!bool {
+            switch (capsule_type) {
+                capsules.address_assign_type => _ = try capsules.parseAddressAssign(value),
+                capsules.address_request_type => _ = try capsules.parseAddressRequest(value),
+                capsules.route_advertisement_type => _ = try capsules.parseRouteAdvertisement(value),
+                else => return false,
+            }
+            return true;
+        }
+
+        pub fn Session(comptime Transport: type) type {
+            return session_module.Session(Http3, @This(), Transport);
+        }
+
+        pub const CapsuleSessionOptions = capsule_session.Options;
+
+        pub fn CapsuleSession(
+            comptime ResetCode: type,
+            comptime Tunnel: type,
+            comptime WriteProgress: type,
+        ) type {
+            return capsule_session.Session(
+                ResetCode,
+                capsule,
+                @This(),
+                Tunnel,
+                WriteProgress,
+            );
         }
     };
 }

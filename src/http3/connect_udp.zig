@@ -22,6 +22,8 @@ pub fn Protocol(comptime Http3: type) type {
         pub const default_path_prefix = "/.well-known/masque/udp/";
         pub const udp_context_id: u62 = 0;
         pub const max_udp_payload_size: usize = 65_527;
+        pub const payload_context_id = udp_context_id;
+        pub const max_context_payload_size = max_udp_payload_size;
 
         pub const Error = Http3.Error || wire.Error || template_module.Error || error{
             InvalidTarget,
@@ -421,6 +423,17 @@ pub fn Protocol(comptime Http3: type) type {
             stream_id: u62,
             payload: []u8,
         };
+
+        pub const OwnedContextPayload = OwnedUdpPayload;
+        pub const ReceivedContextPayload = ReceivedUdpPayload;
+
+        pub fn maxContextPayloadForHttpDatagram(
+            maximum_http_datagram_payload: usize,
+        ) ?usize {
+            return maxUdpPayloadForHttpDatagram(
+                maximum_http_datagram_payload,
+            );
+        }
 
         /// Typed Context ID 0 data plane over a detached CONNECT association.
         /// Unknown extension contexts are dropped as RFC 9298 permits.

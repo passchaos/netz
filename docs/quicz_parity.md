@@ -861,10 +861,20 @@ core: strict wildcard/DNS/IP-prefix and `ipproto` scopes, default or configured
 Level-3 URI Templates, Extended CONNECT metadata, Context ID 0 IP packet
 framing, and caller-buffer ADDRESS_ASSIGN, ADDRESS_REQUEST, and ordered
 ROUTE_ADVERTISEMENT Capsule codecs. Malformed address families, non-network
-prefixes, zero or per-Capsule duplicate emitted Request IDs, reversed/overlapping routes,
-and short output are rejected transactionally. This is codec and negotiation
-coverage; version-specific HTTP/1.1, HTTP/2, and HTTP/3 Session/runtime adapters
-and independent CONNECT-IP peer interop remain open.
+prefixes, zero or per-Capsule duplicate emitted Request IDs,
+reversed/overlapping routes, and short output are rejected transactionally.
+Encrypted HTTP/1.1 and HTTP/2 typed Sessions now multiplex configuration and IP
+packet Capsules without implicit event loss. The authenticated HTTP/3 Session
+retains its streaming CONNECT reader for ADDRESS/ROUTE Capsules while routing
+Context ID 0 through QUIC DATAGRAM, including either-plane-first delivery and
+bidirectional FIN. Its EndpointServer surface has matching one-attempt accept,
+send, poll, and close APIs; the dispatcher remains the sole UDP reader and
+hands the typed Session explicit FIN observation. A new offline-locked process
+gate, `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast`, uses the audited
+`~/Work/h3` `Protocol::CONNECT_IP` token plus an independent Rust
+ADDRESS_REQUEST/ADDRESS_ASSIGN and Context-ID codec. Netz and h3/Quinn each run
+as client and server, exchange 20/40-byte IP packets with delivery ack, and
+independently observe request and response FIN before connection shutdown.
 H1/H2 Capsule Sessions additionally expose caller-buffer receive with
 non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both

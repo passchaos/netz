@@ -11,12 +11,14 @@ const quic = @import("../../quic/mod.zig");
 
 pub const Options = struct {
     max_incomplete_capsule_bytes: usize = 65_560,
+    max_payload_size: usize = 65_575,
+    max_capsule_value_bytes: usize = 256 * 1024,
 };
 
 pub fn Session(
     comptime ResetCode: type,
     comptime Capsule: type,
-    comptime ConnectUdp: type,
+    comptime ContextProtocol: type,
     comptime Tunnel: type,
     comptime WriteProgress: type,
 ) type {
@@ -36,6 +38,7 @@ pub fn Session(
         const PendingSend = struct {
             header: [24]u8 = undefined,
             header_len: usize,
+            capsule_type: u64,
             payload: []const u8,
             committed: usize = 0,
 
@@ -43,8 +46,13 @@ pub fn Session(
                 return self.header_len + self.payload.len;
             }
 
-            fn matches(self: *const PendingSend, payload: []const u8) bool {
-                return self.payload.len == payload.len and
+            fn matches(
+                self: *const PendingSend,
+                capsule_type: u64,
+                payload: []const u8,
+            ) bool {
+                return self.capsule_type == capsule_type and
+                    self.payload.len == payload.len and
                     (payload.len == 0 or self.payload.ptr == payload.ptr);
             }
 
@@ -86,8 +94,11 @@ pub fn Session(
             return self.tunnel.stream_id;
         }
 
-        pub fn maxPayloadSize(_: *const Self) ?usize {
-            return ConnectUdp.max_udp_payload_size;
+        pub fn maxPayloadSize(self: *const Self) ?usize {
+            return @min(
+                ContextProtocol.max_context_payload_size,
+                self.options.max_payload_size,
+            );
         }
 
         pub fn writeInProgress(self: *const Self) bool {
@@ -99,7 +110,36 @@ pub fn Session(
         }
 
         pub fn send(self: *Self, payload: []const u8) !void {
-            try self.prepareSend(payload);
+            try self.preparePacketSend(payload);
+            return self.finishPreparedSend();
+        }
+
+        /// Send one non-DATAGRAM Capsule value. On timeout, the borrowed value
+        /// must remain stable and the same type/value pair must be retried.
+        pub fn sendCapsule(
+            self: *Self,
+            encoded: []const u8,
+        ) !void {
+            const parsed = try self.validateEncodedCapsule(encoded);
+            return self.sendCapsuleValue(
+                parsed.capsule.capsule_type,
+                parsed.capsule.value,
+            );
+        }
+
+        pub fn sendCapsuleValue(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+        ) !void {
+            if (capsule_type == Capsule.CapsuleType.datagram) {
+                return error.InvalidFrame;
+            }
+            try self.prepareCapsuleSend(capsule_type, value, false);
+            return self.finishPreparedSend();
+        }
+
+        fn finishPreparedSend(self: *Self) !void {
             var slices_storage: [2][]const u8 = undefined;
             const slices = self.pending_send.?.remainingSlices(
                 &slices_storage,
@@ -129,7 +169,90 @@ pub fn Session(
             deadline: std.Io.Clock.Timestamp,
         ) !void {
             _ = try deadline_policy.usableAwake(self.io, deadline);
-            try self.prepareSend(payload);
+            try self.preparePacketSend(payload);
+            return self.finishPreparedSendWithDeadline(deadline);
+        }
+
+        pub fn sendCapsuleWithTimeout(
+            self: *Self,
+            encoded: []const u8,
+            timeout: std.Io.Duration,
+        ) !void {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendCapsuleWithDeadline(
+                encoded,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendCapsuleWithDeadline(
+            self: *Self,
+            encoded: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) !void {
+            const parsed = try self.validateEncodedCapsule(encoded);
+            return self.sendCapsuleValueWithDeadline(
+                parsed.capsule.capsule_type,
+                parsed.capsule.value,
+                deadline,
+            );
+        }
+
+        pub fn sendCapsuleValueWithTimeout(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+            timeout: std.Io.Duration,
+        ) !void {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendCapsuleValueWithDeadline(
+                capsule_type,
+                value,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendCapsuleValueWithDeadline(
+            self: *Self,
+            capsule_type: u64,
+            value: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) !void {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            if (capsule_type == Capsule.CapsuleType.datagram) {
+                return error.InvalidFrame;
+            }
+            try self.prepareCapsuleSend(capsule_type, value, false);
+            return self.finishPreparedSendWithDeadline(deadline);
+        }
+
+        fn validateEncodedCapsule(
+            self: *Self,
+            encoded: []const u8,
+        ) !Capsule.Parsed {
+            const parsed = try Capsule.parse(encoded);
+            if (parsed.consumed != encoded.len or
+                parsed.capsule.capsule_type == Capsule.CapsuleType.datagram or
+                parsed.capsule.value.len > self.options.max_capsule_value_bytes)
+            {
+                return error.InvalidFrame;
+            }
+            if (@hasDecl(
+                ContextProtocol,
+                "validateConfigurationCapsule",
+            )) {
+                if (!try ContextProtocol.validateConfigurationCapsule(
+                    parsed.capsule.capsule_type,
+                    parsed.capsule.value,
+                )) return error.InvalidFrame;
+            }
+            return parsed;
+        }
+
+        fn finishPreparedSendWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) !void {
             var slices_storage: [2][]const u8 = undefined;
             const slices = self.pending_send.?.remainingSlices(
                 &slices_storage,
@@ -158,14 +281,14 @@ pub fn Session(
             try self.tunnel.closeWrite();
         }
 
-        pub fn receive(self: *Self) !ConnectUdp.OwnedUdpPayload {
+        pub fn receive(self: *Self) !ContextProtocol.OwnedContextPayload {
             return self.receiveUntil(null);
         }
 
         pub fn receiveWithTimeout(
             self: *Self,
             timeout: std.Io.Duration,
-        ) !ConnectUdp.OwnedUdpPayload {
+        ) !ContextProtocol.OwnedContextPayload {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             return self.receiveWithDeadline(.fromNow(self.io, .{
                 .raw = timeout,
@@ -176,9 +299,90 @@ pub fn Session(
         pub fn receiveWithDeadline(
             self: *Self,
             deadline: std.Io.Clock.Timestamp,
-        ) !ConnectUdp.OwnedUdpPayload {
+        ) !ContextProtocol.OwnedContextPayload {
             _ = try deadline_policy.usableAwake(self.io, deadline);
             return self.receiveUntil(deadline);
+        }
+
+        pub const OwnedCapsule = struct {
+            stream_id: u62,
+            capsule_type: u64,
+            storage: []u8,
+            value: []const u8,
+
+            pub fn deinit(
+                self: *OwnedCapsule,
+                allocator: std.mem.Allocator,
+            ) void {
+                allocator.free(self.storage);
+                self.* = undefined;
+            }
+        };
+
+        pub const OwnedEvent = union(enum) {
+            payload: ContextProtocol.OwnedContextPayload,
+            capsule: OwnedCapsule,
+
+            pub fn deinit(
+                self: *OwnedEvent,
+                allocator: std.mem.Allocator,
+            ) void {
+                switch (self.*) {
+                    .payload => |*payload| payload.deinit(allocator),
+                    .capsule => |*value| value.deinit(allocator),
+                }
+                self.* = undefined;
+            }
+        };
+
+        /// Receive the next Capsule without skipping CONNECT-IP configuration
+        /// types. The returned value is owned independently of stream scratch.
+        pub fn receiveCapsule(self: *Self) !OwnedCapsule {
+            return self.receiveCapsuleUntil(null);
+        }
+
+        pub fn receiveCapsuleWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) !OwnedCapsule {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveCapsuleWithDeadline(.fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        pub fn receiveCapsuleWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) !OwnedCapsule {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.receiveCapsuleUntil(deadline);
+        }
+
+        /// Receive either a Context ID 0 payload or a recognized protocol
+        /// configuration Capsule without consuming the other event class.
+        pub fn receiveEvent(self: *Self) !OwnedEvent {
+            return self.receiveEventUntil(null);
+        }
+
+        pub fn receiveEventWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) !OwnedEvent {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveEventWithDeadline(.fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        pub fn receiveEventWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) !OwnedEvent {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.receiveEventUntil(deadline);
         }
 
         /// Receive one Context ID 0 UDP payload into caller storage. A short
@@ -187,7 +391,7 @@ pub fn Session(
         pub fn receiveInto(
             self: *Self,
             out: []u8,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             return self.receiveIntoUntil(out, null);
         }
 
@@ -197,7 +401,7 @@ pub fn Session(
             self: *Self,
             out: []u8,
             timeout: std.Io.Duration,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             return self.receiveIntoWithDeadline(out, .fromNow(self.io, .{
                 .raw = timeout,
@@ -210,38 +414,76 @@ pub fn Session(
             self: *Self,
             out: []u8,
             deadline: std.Io.Clock.Timestamp,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             _ = try deadline_policy.usableAwake(self.io, deadline);
             return self.receiveIntoUntil(out, deadline);
         }
 
-        fn prepareSend(self: *Self, payload: []const u8) !void {
+        fn preparePacketSend(self: *Self, payload: []const u8) !void {
+            if (payload.len > @min(
+                ContextProtocol.max_context_payload_size,
+                self.options.max_payload_size,
+            )) {
+                return error.PayloadTooLarge;
+            }
+            return self.prepareCapsuleSend(
+                Capsule.CapsuleType.datagram,
+                payload,
+                true,
+            );
+        }
+
+        fn prepareCapsuleSend(
+            self: *Self,
+            capsule_type_value: u64,
+            payload: []const u8,
+            include_context: bool,
+        ) !void {
             if (self.pending_send) |*pending| {
-                if (!pending.matches(payload)) return error.WriteInProgress;
+                if (!pending.matches(capsule_type_value, payload)) {
+                    return error.WriteInProgress;
+                }
                 return;
             }
-            if (payload.len > ConnectUdp.max_udp_payload_size) {
-                return error.PayloadTooLarge;
+            if (!include_context and
+                payload.len > self.options.max_capsule_value_bytes)
+            {
+                return error.ExcessiveLoad;
+            }
+            if (!include_context and @hasDecl(
+                ContextProtocol,
+                "validateConfigurationCapsule",
+            )) {
+                if (!try ContextProtocol.validateConfigurationCapsule(
+                    capsule_type_value,
+                    payload,
+                )) return error.InvalidFrame;
             }
             var pending = PendingSend{
                 .header_len = 0,
+                .capsule_type = capsule_type_value,
                 .payload = payload,
             };
             var offset: usize = 0;
             const capsule_type = try quic.varint.encodeInto(
                 pending.header[offset..],
-                Capsule.CapsuleType.datagram,
+                capsule_type_value,
             );
             offset += capsule_type.len;
-            const value_len = std.math.add(usize, payload.len, 1) catch
-                return error.IntegerOverflow;
+            const value_len = std.math.add(
+                usize,
+                payload.len,
+                @intFromBool(include_context),
+            ) catch return error.IntegerOverflow;
             const length = try quic.varint.encodeInto(
                 pending.header[offset..],
                 @intCast(value_len),
             );
             offset += length.len;
-            pending.header[offset] = 0;
-            offset += 1;
+            if (include_context) {
+                pending.header[offset] = 0;
+                offset += 1;
+            }
             pending.header_len = offset;
             self.pending_send = pending;
         }
@@ -249,7 +491,7 @@ pub fn Session(
         fn receiveUntil(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
-        ) !ConnectUdp.OwnedUdpPayload {
+        ) !ContextProtocol.OwnedContextPayload {
             const buffered = try self.nextDatagramUntil(deadline);
             const owned = try self.allocator.dupe(u8, buffered.payload);
             self.receive_offset += buffered.consumed;
@@ -260,11 +502,75 @@ pub fn Session(
             };
         }
 
+        fn receiveCapsuleUntil(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !OwnedCapsule {
+            const buffered = try self.nextCapsuleUntil(deadline);
+            const owned = try self.allocator.dupe(u8, buffered.value);
+            self.receive_offset += buffered.consumed;
+            return .{
+                .stream_id = @intCast(self.tunnel.stream_id),
+                .capsule_type = buffered.capsule_type,
+                .storage = owned,
+                .value = owned,
+            };
+        }
+
+        fn receiveEventUntil(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !OwnedEvent {
+            while (true) {
+                const buffered = try self.nextCapsuleUntil(deadline);
+                if (buffered.capsule_type == Capsule.CapsuleType.datagram) {
+                    const datagram = ContextProtocol.ContextDatagram.parse(
+                        buffered.value,
+                    ) catch |err| return self.abortMalformed(err);
+                    self.receive_offset += buffered.consumed;
+                    if (datagram.context_id !=
+                        ContextProtocol.payload_context_id) continue;
+                    const owned = try self.allocator.dupe(
+                        u8,
+                        datagram.payload,
+                    );
+                    return .{ .payload = .{
+                        .stream_id = @intCast(self.tunnel.stream_id),
+                        .storage = owned,
+                        .payload = owned,
+                    } };
+                }
+                if (@hasDecl(
+                    ContextProtocol,
+                    "validateConfigurationCapsule",
+                )) {
+                    const recognized = ContextProtocol
+                        .validateConfigurationCapsule(
+                        buffered.capsule_type,
+                        buffered.value,
+                    ) catch |err| return self.abortMalformed(err);
+                    self.receive_offset += buffered.consumed;
+                    if (!recognized) continue;
+                    const owned = try self.allocator.dupe(
+                        u8,
+                        buffered.value,
+                    );
+                    return .{ .capsule = .{
+                        .stream_id = @intCast(self.tunnel.stream_id),
+                        .capsule_type = buffered.capsule_type,
+                        .storage = owned,
+                        .value = owned,
+                    } };
+                }
+                self.receive_offset += buffered.consumed;
+            }
+        }
+
         fn receiveIntoUntil(
             self: *Self,
             out: []u8,
             deadline: ?std.Io.Clock.Timestamp,
-        ) !ConnectUdp.ReceivedUdpPayload {
+        ) !ContextProtocol.ReceivedContextPayload {
             const buffered = try self.nextDatagramUntil(deadline);
             if (out.len < buffered.payload.len) return error.BufferTooShort;
             @memcpy(out[0..buffered.payload.len], buffered.payload);
@@ -324,6 +630,50 @@ pub fn Session(
             consumed: usize,
         };
 
+        const BufferedCapsule = struct {
+            capsule_type: u64,
+            value: []const u8,
+            consumed: usize,
+        };
+
+        fn nextCapsuleUntil(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !BufferedCapsule {
+            while (true) {
+                if (try self.pollBufferedCapsule()) |value| return value;
+                if (self.bufferedLen() >
+                    self.options.max_incomplete_capsule_bytes)
+                {
+                    return self.abortExcessiveLoad();
+                }
+                if (self.peer_finished) {
+                    if (self.bufferedLen() != 0) {
+                        return self.abortMalformed(error.BufferTooShort);
+                    }
+                    return error.ConnectionClosed;
+                }
+                self.compactReceiveBuffer();
+                var data = if (deadline) |absolute|
+                    try self.tunnel.readWithDeadline(absolute)
+                else
+                    try self.tunnel.read();
+                defer data.deinit(self.allocator);
+                try self.receive_buffer.appendSlice(self.allocator, data.data);
+                self.peer_finished = data.end_stream;
+                if (self.bufferedLen() >
+                    self.options.max_incomplete_capsule_bytes)
+                {
+                    if (try self.pollBufferedCapsule()) |value| return value;
+                    if (self.bufferedLen() >
+                        self.options.max_incomplete_capsule_bytes)
+                    {
+                        return self.abortExcessiveLoad();
+                    }
+                }
+            }
+        }
+
         fn pollBuffered(self: *Self) !?BufferedUdpPayload {
             while (self.receive_offset < self.receive_buffer.items.len) {
                 const remaining = self.receive_buffer.items[self.receive_offset..];
@@ -337,10 +687,10 @@ pub fn Session(
                     self.receive_offset += parsed.consumed;
                     continue;
                 }
-                const datagram = ConnectUdp.ContextDatagram.parse(
+                const datagram = ContextProtocol.ContextDatagram.parse(
                     parsed.capsule.value,
                 ) catch |err| return self.abortMalformed(err);
-                if (datagram.context_id != ConnectUdp.udp_context_id) {
+                if (datagram.context_id != ContextProtocol.payload_context_id) {
                     self.receive_offset += parsed.consumed;
                     continue;
                 }
@@ -352,6 +702,30 @@ pub fn Session(
             self.receive_buffer.clearRetainingCapacity();
             self.receive_offset = 0;
             return null;
+        }
+
+        fn pollBufferedCapsule(self: *Self) !?BufferedCapsule {
+            if (self.receive_offset >= self.receive_buffer.items.len) {
+                self.receive_buffer.clearRetainingCapacity();
+                self.receive_offset = 0;
+                return null;
+            }
+            const parsed = Capsule.parse(
+                self.receive_buffer.items[self.receive_offset..],
+            ) catch |err| switch (err) {
+                error.BufferTooShort => return null,
+                else => |other| return self.abortMalformed(other),
+            };
+            if (parsed.capsule.value.len >
+                self.options.max_capsule_value_bytes)
+            {
+                return self.abortExcessiveLoad();
+            }
+            return .{
+                .capsule_type = parsed.capsule.capsule_type,
+                .value = parsed.capsule.value,
+                .consumed = parsed.consumed,
+            };
         }
 
         fn bufferedLen(self: *const Self) usize {
