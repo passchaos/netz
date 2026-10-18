@@ -7,6 +7,7 @@ import unittest
 
 import bad_authentication_method
 import disconnect_forms
+import extended_authentication
 import maximum_topic_hierarchy
 import pattern_matching
 import persistent_incoming_qos2
@@ -193,6 +194,8 @@ class SourceLockTests(unittest.TestCase):
                     "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
                 "broker/09-auth-bad-method.py":
                     "d9d68d5394b19240b48e7d82f93d13b56d0492d2c86d382e7d4af0f6d2098035",
+                "broker/09-extended-auth-multistep-reauth.py":
+                    "450c8462e908762a120221f56eef9eba9b6b9124f9e7f9f639695d66def77a19",
                 "broker/09-acl-change.py":
                     "548ab0d7ba510dac77b47b2e1b606fcd6d1513cb953149b76e3e97cc643d3ebb",
                 "broker/09-plugin-auth-acl-pub-prop.py":
@@ -293,6 +296,19 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(bad_authentication_method.AUTHENTICATION_METHOD, "basic")
         self.assertEqual(bad_authentication_method.CLIENT_ID, "connect-test")
         self.assertEqual(bad_authentication_method.SCENARIO_COUNT, 1)
+        self.assertEqual(extended_authentication.METHOD, "mirror")
+        self.assertEqual(extended_authentication.INITIAL_DATA, "step1")
+        self.assertEqual(extended_authentication.SERVER_CHALLENGE, "1pets")
+        self.assertEqual(
+            extended_authentication.CLIENT_RESPONSE,
+            "supercalifragilisticexpialidocious",
+        )
+        self.assertEqual(extended_authentication.BAD_METHOD, "badmethod")
+        self.assertEqual(
+            extended_authentication.CLIENT_ID,
+            "client-params-test",
+        )
+        self.assertEqual(extended_authentication.SCENARIO_COUNT, 1)
         self.assertEqual(persistent_incoming_qos2.SCENARIO_COUNT, 2)
         self.assertEqual(proxy_v1_bad.SCENARIO_COUNT, 22)
         self.assertEqual(proxy_v2_bad.SCENARIO_COUNT, 12)

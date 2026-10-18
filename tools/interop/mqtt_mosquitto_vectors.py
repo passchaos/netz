@@ -20,6 +20,7 @@ import time
 from mqtt_vectors import (
     bad_authentication_method,
     disconnect_forms,
+    extended_authentication,
     maximum_topic_hierarchy,
     pattern_matching,
     persistent_incoming_qos2,
@@ -41,6 +42,7 @@ SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + bad_authentication_method.SCENARIO_COUNT
     + disconnect_forms.SCENARIO_COUNT
+    + extended_authentication.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_incoming_qos2.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
@@ -6334,6 +6336,15 @@ def main() -> None:
         mqtt5_props,
         mqtt5_rc,
         NetzBroker,
+        expect_packet,
+    )
+    extended_authentication.run(
+        args.broker,
+        mqtt_packets,
+        mqtt5_props,
+        mqtt5_rc,
+        NetzBroker,
+        expected_connack,
         expect_packet,
     )
     unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
