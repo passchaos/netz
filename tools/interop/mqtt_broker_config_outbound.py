@@ -292,7 +292,6 @@ def run_bridge_insecure_hostname_case(
         context.load_cert_chain(certificate, key)
         if name == "tlsv1.2":
             context.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256")
-            context.set_ecdh_curve("prime256v1")
         contexts[name] = context
 
     ports = _distinct_ports(12)

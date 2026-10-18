@@ -1,5 +1,6 @@
 //! TLS protocol-version and cipher-suite metadata shared by stream adapters.
 
+const std = @import("std");
 const vail = @import("vail");
 
 /// TLS versions supported by TCP-based netz transports. QUIC remains TLS 1.3
@@ -64,7 +65,10 @@ pub const default_tls12_cipher_suites = [_]vail.tls.tls12.Suite{
 };
 
 pub const default_tls12_groups = [_]u16{
+    // Preserve the established P-256 server preference while retaining
+    // X25519 for dual-version ClientHellos and X25519-only peers.
     vail.tls.key_exchange.named_group_secp256r1,
+    vail.tls.key_exchange.named_group_x25519,
 };
 
 pub fn transcriptHash(
@@ -77,11 +81,21 @@ pub fn transcriptHash(
 }
 
 test "version policy never enables pre-TLS-1.2 protocols" {
-    const std = @import("std");
     try std.testing.expect(!Policy.tls13_only.offersTls12());
     try std.testing.expect(Policy.tls13_only.offersTls13());
     try std.testing.expect(Policy.tls12_and_tls13.offersTls12());
     try std.testing.expect(Policy.tls12_and_tls13.offersTls13());
     try std.testing.expect(Policy.tls12_only.offersTls12());
     try std.testing.expect(!Policy.tls12_only.offersTls13());
+}
+
+test "TLS 1.2 defaults retain P-256 preference and X25519 fallback" {
+    try std.testing.expectEqualSlices(
+        u16,
+        &.{
+            vail.tls.key_exchange.named_group_secp256r1,
+            vail.tls.key_exchange.named_group_x25519,
+        },
+        &default_tls12_groups,
+    );
 }

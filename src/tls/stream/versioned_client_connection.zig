@@ -244,6 +244,8 @@ pub const Connection = struct {
             },
             else => unreachable,
         };
+        var tls12_key_x25519 = try randomX25519(io);
+        defer std.crypto.secureZero(u8, &tls12_key_x25519);
         var tls12_key = try randomP256(io);
         defer std.crypto.secureZero(u8, &tls12_key);
 
@@ -304,6 +306,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .random = client_random,
             .server_name = options.server_name,
+            .client_private_key_x25519 = &tls12_key_x25519,
             .client_private_key = &tls12_key,
             .policy = .{
                 .cipher_suites = options.tls12_cipher_suites,
@@ -327,7 +330,7 @@ pub const Connection = struct {
                     vail.tls.key_exchange.named_group_x25519,
                 }
             else
-                &.{vail.tls.key_exchange.named_group_secp256r1},
+                &version.default_tls12_groups,
             .supported_versions = if (options.protocol_policy.offersTls13())
                 &.{ 0x0304, 0x0303 }
             else

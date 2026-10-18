@@ -241,6 +241,8 @@ pub const Connection = struct {
         const tls13_groups = [_]u16{tls13_key.namedGroup()};
         var tls13_key_owned = true;
         defer if (tls13_key_owned) tls13_key.wipe();
+        var tls12_key_x25519 = try randomX25519(io);
+        defer std.crypto.secureZero(u8, &tls12_key_x25519);
         var tls12_key = try randomP256(io);
         defer std.crypto.secureZero(u8, &tls12_key);
         var tls13_random: [32]u8 = undefined;
@@ -302,6 +304,7 @@ pub const Connection = struct {
                     .issue_session_ticket = options.tls12_session_tickets != null,
                 },
                 .server_random = tls12_random,
+                .server_private_key_x25519 = &tls12_key_x25519,
                 .server_private_key = &tls12_key,
                 .certificate_chain = identity.certificate_chain,
                 .signer = signer,

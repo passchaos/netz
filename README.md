@@ -380,7 +380,8 @@ Current protocol coverage includes:
 - Shared vail-backed TLS 1.2/1.3 stream client/server wrappers with explicit
   TLS-1.3-only, TLS-1.2-only, or highest-version negotiation policy; TLS 1.2
   permits only ECDHE+AEAD suites, requires Extended Master Secret and secure
-  renegotiation signaling, and rejects renegotiation. Both versions provide
+  renegotiation signaling, supports X25519/P-256/P-384/P-521 in both endpoint
+  roles, and rejects renegotiation. Both versions provide
   optional/required client authentication, explicit ALPN enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
   introspection, default RFC 6066 OCSP status requests plus optional mandatory
@@ -1881,7 +1882,8 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-empty-password-reload --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Prove strict hostname rejection, explicit bridge_insecure compatibility, and
-# retained CA-chain rejection over both TLS 1.2 and TLS 1.3.
+# retained CA-chain rejection over TLS 1.2/1.3, leaving the TLS 1.2 OpenSSL
+# group preference at its default to exercise X25519 selection.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-bridge-insecure --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including

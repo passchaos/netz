@@ -7324,7 +7324,8 @@ def main() -> None:
             print(
                 "MQTT bridge insecure-hostname integration passed: "
                 "strict_mismatch=reject explicit_opt_in=accept "
-                "untrusted_ca=reject protocols=tls12+tls13+mqttv5 "
+                "untrusted_ca=reject tls12_group=openssl-default "
+                "protocols=tls12+tls13+mqttv5 "
                 + RUNTIME
             )
             return

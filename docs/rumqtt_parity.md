@@ -2667,6 +2667,10 @@ profile is deliberately modern: ECDHE with AES-GCM or ChaCha20-Poly1305,
 mandatory Extended Master Secret and secure-renegotiation signaling, no CBC,
 static-RSA key exchange, or renegotiation. Listener `tls_version`/`ciphers` and
 bridge `bridge_tls_version`/`bridge_ciphers` map this policy explicitly.
+Both endpoint roles support X25519, P-256, P-384, and P-521. The dual-version
+client retains independent TLS 1.2 private material for every group it
+advertises, so an OpenSSL TLS 1.2 server may select its default X25519 rather
+than being restricted to a test-forced P-256 fallback.
 TLS 1.2 clients filter a configured identity against CertificateRequest's
 certificate types, signature algorithms, and acceptable CA distinguished
 names. Compatible P-521 identities are supported; when no identity is suitable
@@ -2766,7 +2770,8 @@ stapled-OCSP policies remain enforced. The default remains strict. A production
 OpenSSL gate exercises TLS 1.2 and TLS 1.3 independently: the default rejects a
 CA-trusted `DNS:localhost` certificate when the bridge target is `127.0.0.1`,
 the explicit opt-in completes MQTT 5, and an opt-in peer signed by an
-unconfigured CA is still rejected.
+unconfigured CA is still rejected. Its TLS 1.2 arms leave OpenSSL's group
+selection at the default, exercising X25519 rather than forcing P-256.
 
 `mqtt.tls_runtime.Server` is a native TLS 1.2/1.3 listener backed by project-local
 vail primitives. It accepts caller-provided DER certificate chains and
