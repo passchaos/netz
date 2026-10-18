@@ -607,6 +607,13 @@ The 24 real CONNECTs require successful named and anonymous admission when
 allowed, legacy return code `0x05` or MQTT 5 reason `0x87` when denied, and a
 live credentialless deny-all listener when anonymous admission is disabled
 without a password file.
+The companion source lock for
+`01-connect-uname-password-denied-no-will.py` proves authorization precedes
+duplicate-Client-ID takeover. Its strengthened production replay keeps an
+independent observer connected while MQTT 3.1.1 and MQTT 5 attackers reuse a
+live authenticated victim's Client ID with a wrong password. Each attacker
+receives the version-correct refusal, both victims remain PING-responsive, and
+the observer receives no victim Will.
 The same gate source-locks Mosquitto revision `5cd25465`'s
 `01-connect-unix-socket.py` and runs its portable wire behavior through the
 production config example: `listener 0 PATH` deep-owns one raw Unix-domain
@@ -4832,12 +4839,12 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The process gate now additionally locks thirteen upstream sources:
+   semantics. The process gate now additionally locks fourteen upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous
-   policy, username-or-anonymous policy, and two password/ACL invalid-reload
-   cases. The
+   policy, username-or-anonymous policy, authentication-before-takeover
+   ordering, and two password/ACL invalid-reload cases. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security

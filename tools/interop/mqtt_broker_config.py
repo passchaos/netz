@@ -80,6 +80,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214",
     "broker/01-connect-uname-or-anon.py":
         "87d4f5620809a67b0521a314079dd59502652d85ff5e021e2c64d87ac2769476",
+    "broker/01-connect-uname-password-denied-no-will.py":
+        "b98adef4b4e43a95d1440ce8b69eeb1022a66205864546399e9a83c56416815d",
     "broker/01-connect-unix-socket.py":
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/01-connect-windows-line-endings.py":
@@ -112,6 +114,7 @@ def parse_args() -> argparse.Namespace:
     selected = parser.add_mutually_exclusive_group()
     selected.add_argument("--only-listener-anonymous", action="store_true")
     selected.add_argument("--only-username-or-anonymous", action="store_true")
+    selected.add_argument("--only-authentication-takeover", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2824,6 +2827,122 @@ def run_authentication_case(broker: Path, directory: Path) -> None:
     if return_code != 0:
         raise RuntimeError(
             f"authenticated broker exited {return_code}: {process.stdout.read()}"
+        )
+
+
+def run_authentication_takeover_order_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    port = free_port()
+    password_file = directory / "authentication-takeover.pwfile"
+    password_file.write_text(
+        "user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    config = directory / "authentication-takeover.conf"
+    config.write_text(
+        f"password_file {password_file}\n"
+        "allow_anonymous false\n"
+        f"listener {port} 127.0.0.1\n"
+        "max_connections 5\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        ready = process.stdout.readline().strip()
+        if "configured 1 listeners for 5 clients" not in ready:
+            raise RuntimeError(
+                f"authentication takeover broker failed to start: {ready}"
+            )
+        read_listener_lines(process, 1, "authentication takeover")
+
+        observer = socket.create_connection(("127.0.0.1", port), timeout=5)
+        observer.settimeout(5)
+        try:
+            observer.sendall(connect_packet(
+                "takeover-observer",
+                username="user",
+                password="password",
+            ))
+            if connack_reason(read_mqtt_packet(observer)) != 0:
+                raise AssertionError("takeover observer failed CONNECT")
+            observer.sendall(subscribe_packet(1, "takeover/#"))
+            if read_mqtt_packet(observer) != bytes.fromhex("900400010000"):
+                raise AssertionError("takeover observer SUBACK mismatch")
+
+            for protocol in (4, 5):
+                client_id = f"auth-takeover-{protocol}"
+                victim = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=5,
+                )
+                victim.settimeout(5)
+                try:
+                    victim.sendall(connect_packet(
+                        client_id,
+                        username="user",
+                        password="password",
+                        proto_ver=protocol,
+                        will_topic=f"takeover/{protocol}",
+                        will_payload=b"must-not-publish",
+                    ))
+                    if connack_reason(read_mqtt_packet(victim)) != 0:
+                        raise AssertionError(
+                            f"takeover victim failed CONNECT: protocol={protocol}"
+                        )
+
+                    attacker = socket.create_connection(
+                        ("127.0.0.1", port),
+                        timeout=5,
+                    )
+                    attacker.settimeout(5)
+                    try:
+                        attacker.sendall(connect_packet(
+                            client_id,
+                            username="user",
+                            password="wrong",
+                            proto_ver=protocol,
+                        ))
+                        reason = connack_reason(read_mqtt_packet(attacker))
+                        expected_reason = 0x87 if protocol == 5 else 0x05
+                        if reason != expected_reason:
+                            raise AssertionError(
+                                "unauthorized takeover mismatch: "
+                                f"protocol={protocol} "
+                                f"expected={expected_reason:#x} actual={reason:#x}"
+                            )
+                    finally:
+                        attacker.close()
+
+                    mqtt_ping(victim)
+                    mqtt_ping(observer)
+                    expect_no_packet(
+                        observer,
+                        f"unauthorized takeover Will protocol={protocol}",
+                    )
+                    victim.sendall(b"\xe0\x00")
+                finally:
+                    victim.close()
+            observer.sendall(b"\xe0\x00")
+        finally:
+            observer.close()
+        return_code = process.wait(timeout=5)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+    if return_code != 0:
+        raise RuntimeError(
+            "authentication takeover broker exited "
+            f"{return_code}: {process.stdout.read()}"
         )
 
 
@@ -6983,6 +7102,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_authentication_takeover:
+            run_authentication_takeover_order_case(args.broker, directory)
+            print(
+                "MQTT authentication-before-takeover integration passed: "
+                "protocols=mqttv311+mqttv5 victim_live=true will_suppressed=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -7111,6 +7239,7 @@ def main() -> None:
         run_invalid_acl_file_case(args.broker, directory)
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
+        run_authentication_takeover_order_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
         run_listener_policy_reload_case(args.broker, directory)
         run_server_identity_reload_case(args.broker, directory)
@@ -7146,6 +7275,7 @@ def main() -> None:
         "source-locked change-count autosave and restore, "
         "source-locked global/listener anonymous policy precedence, "
         "source-locked MQTT 3.1/3.1.1/5 username-or-anonymous policy, "
+        "source-locked authentication-before-Client-ID-takeover ordering, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "

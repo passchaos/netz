@@ -356,7 +356,7 @@ test "broker authorizes CONNECT before creating Session state" {
         .{ .ip4 = .loopback(0) },
         .{
             .limits = .{
-                .max_connections = 4,
+                .max_connections = 5,
                 .max_queued_deliveries_per_connection = 8,
                 .runtime = .{ .max_packet_size = 4096 },
             },
@@ -368,7 +368,7 @@ test "broker authorizes CONNECT before creating Session state" {
     );
     defer broker.deinit();
 
-    var serve = ServeState{ .broker = &broker, .connection_count = 4 };
+    var serve = ServeState{ .broker = &broker, .connection_count = 5 };
     const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
     var joined = false;
     defer if (!joined) thread.join();
@@ -436,14 +436,41 @@ test "broker authorizes CONNECT before creating Session state" {
             .client_id = "authorized",
             .username = "user",
             .password = "password",
+            .will = .{
+                .topic = "authorization/will",
+                .payload = "must-not-publish",
+                .qos = .at_least_once,
+            },
         },
     );
     defer accepted.close();
+    var refused_takeover = try context.runtime_mod.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "authorized",
+            .username = "user",
+            .password = "wrong",
+        },
+    );
+    defer refused_takeover.deinit(allocator);
+    try std.testing.expect(!refused_takeover.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        refused_takeover.connack.connack.reason_code,
+    );
+    // Authorization must precede duplicate-Client-ID takeover. A rejected
+    // peer cannot displace this connection or consume/publish its Will.
     try accepted.ping();
+    try std.testing.expectEqual(@as(usize, 1), broker.sessions.count());
+    try std.testing.expectEqual(@as(usize, 1), broker.wills.count());
     try accepted.disconnect(0);
 
     try joinServer(thread, &joined, &serve);
-    try std.testing.expectEqual(@as(usize, 4), policy.calls);
+    try std.testing.expectEqual(@as(usize, 5), policy.calls);
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
 }
 
 test "broker CONNECT context exposes trusted PROXY identity" {
