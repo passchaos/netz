@@ -1528,6 +1528,7 @@ fn loadTlsResources(
                 .bundle = &resources.ca_bundle,
                 .lock = &resources.ca_lock,
             } else null,
+            .verify_host = source.verify_host,
         },
         .use_vail = true,
         .client_identity = if (server_identity) |identity| .{

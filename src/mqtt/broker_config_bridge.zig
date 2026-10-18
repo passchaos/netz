@@ -51,6 +51,8 @@ pub const Error = mqtt.Error || tls_cipher_suites.Error ||
     UnsupportedBridgeRestartTimeout,
     UnsupportedBridgeStartType,
     UnsupportedBridgeTlsVersion,
+    /// Retained for source compatibility; explicit hostname opt-out is now
+    /// represented by `Bridge.verify_host = false`.
     InsecureBridgeTlsUnsupported,
 };
 
@@ -146,6 +148,9 @@ pub const Bridge = struct {
     tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
     tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     require_ocsp: bool = false,
+    /// Verify the configured bridge host against the server certificate.
+    /// `bridge_insecure true` disables only this identity match.
+    verify_host: bool = true,
     round_robin: bool = false,
     start_type: StartType = .automatic,
     reload_type: ReloadType = .lazy,
@@ -497,6 +502,7 @@ pub const Builder = struct {
     tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
     tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     require_ocsp: bool = false,
+    verify_host: bool = true,
     round_robin: bool = false,
     start_type: StartType = .automatic,
     reload_type: ReloadType = .lazy,
@@ -711,9 +717,7 @@ pub const Builder = struct {
             self.require_ocsp = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "bridge_insecure")) {
             try markOnce(&self.seen.bridge_insecure);
-            if (try parseOneBool(words)) {
-                return error.InsecureBridgeTlsUnsupported;
-            }
+            self.verify_host = !(try parseOneBool(words));
         } else if (std.mem.eql(u8, directive, "bridge_tls_version")) {
             try markOnce(&self.seen.bridge_tls_version);
             const value = try parseOne(words);
@@ -933,6 +937,7 @@ pub const Builder = struct {
             .tls12_cipher_suites = self.tls12_cipher_suites,
             .tls_protocol_policy = self.tls_protocol_policy,
             .require_ocsp = self.require_ocsp,
+            .verify_host = self.verify_host,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
             .reload_type = self.reload_type,

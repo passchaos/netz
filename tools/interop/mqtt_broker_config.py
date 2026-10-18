@@ -31,6 +31,7 @@ from mqtt_broker_config_local_session import run_local_clean_session_case
 from mqtt_broker_config_outbound import (
     run_bridge_cipher_suite_case,
     run_bridge_connack_capability_case,
+    run_bridge_insecure_hostname_case,
     run_lazy_outbound_bridge_case,
     run_outbound_bridge_case,
     run_outbound_bridge_protocol_limits_case,
@@ -128,6 +129,7 @@ def parse_args() -> argparse.Namespace:
         "--only-bridge-connack-capabilities",
         action="store_true",
     )
+    selected.add_argument("--only-bridge-insecure", action="store_true")
     selected.add_argument(
         "--only-session-clean-start-persistence",
         action="store_true",
@@ -7317,6 +7319,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_bridge_insecure:
+            run_bridge_insecure_hostname_case(args.broker, directory)
+            print(
+                "MQTT bridge insecure-hostname integration passed: "
+                "strict_mismatch=reject explicit_opt_in=accept "
+                "untrusted_ca=reject protocols=tls12+tls13+mqttv5 "
+                + RUNTIME
+            )
+            return
         if args.only_session_clean_start_persistence:
             run_persistent_session_clean_start_case(args.broker, directory)
             print(
@@ -7360,6 +7371,7 @@ def main() -> None:
         run_outbound_bridge_protocol_limits_case(args.broker, directory)
         run_private_bridge_server_case(args.broker, directory)
         run_bridge_cipher_suite_case(args.broker, directory)
+        run_bridge_insecure_hostname_case(args.broker, directory)
         run_bridge_connack_capability_case(args.broker, directory)
         run_bridge_ocsp_case(args.broker, directory)
         run_local_clean_session_case(args.broker, directory)
@@ -7451,6 +7463,7 @@ def main() -> None:
         "persistent remote-subscription cleanup with interleaved delivery, "
         "private-bridge negotiation with standard MQTT 3.1/3.1.1 fallback, "
         "TLS 1.3 bridge cipher-suite selection, "
+        "explicit bridge hostname-verification opt-out with retained CA trust, "
         "required TLS 1.3 bridge OCSP stapling, "
         "local Client ID and clean-Session restart isolation, "
         "cleartext/TLS bridge source-address binding and traced TCP keepalive/"

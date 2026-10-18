@@ -1909,6 +1909,7 @@ test "MQTT broker config parses owned inbound bridges" {
         upstream.tls12_cipher_suites,
     );
     try std.testing.expect(upstream.require_ocsp);
+    try std.testing.expect(upstream.verify_host);
     try std.testing.expectEqual(@as(usize, 2), upstream.rules.len);
     try std.testing.expectEqualStrings(
         "remote/sensors/#",
@@ -2332,12 +2333,11 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection invalid-ocsp\naddress localhost\ntopic # in 0\n" ++
             "bridge_cafile ca.pem\nbridge_require_ocsp required\n"),
     );
-    try std.testing.expectError(
-        error.InsecureBridgeTlsUnsupported,
-        parse(allocator, listener ++
-            "connection insecure\naddress localhost\ntopic # in 0\n" ++
-            "bridge_cafile ca.pem\nbridge_insecure true\n"),
-    );
+    var insecure = try parse(allocator, listener ++
+        "connection insecure\naddress localhost\ntopic # in 0\n" ++
+        "bridge_cafile ca.pem\nbridge_insecure true\n");
+    defer insecure.deinit(allocator);
+    try std.testing.expect(!insecure.bridges[0].verify_host);
     var tls12 = try parse(allocator, listener ++
         "connection tls12\naddress localhost\ntopic # in 0\n" ++
         "bridge_cafile ca.pem\nbridge_tls_version tlsv1.2\n");

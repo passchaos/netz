@@ -75,6 +75,9 @@ pub const Options = struct {
 
 pub const VerifiedOptions = struct {
     server_name: []const u8,
+    /// When false, the built-in verifier still enforces the complete CA path,
+    /// validity, signature, serverAuth EKU, revocation, and OCSP policy while
+    /// omitting only DNS/IP identity matching.
     verify_host: bool = true,
     ca_bundle: ?CaBundle = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
@@ -448,7 +451,6 @@ pub const Connection = struct {
         defer if (caller_bundle_locked) options.ca_bundle.?.lock.unlockShared(io);
         var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
         const verifier = options.server_verifier orelse blk: {
-            if (!options.verify_host) return error.CertificateUntrusted;
             const now = std.Io.Timestamp.now(io, .real);
             if (options.ca_bundle) |ca_bundle| {
                 try ca_bundle.lock.lockShared(io);
@@ -462,7 +464,10 @@ pub const Connection = struct {
                 bundle_verifier = system_store.?.verifier(now.toSeconds());
             }
             bundle_verifier.stapled_ocsp = options.stapled_ocsp;
-            break :blk bundle_verifier.clientVerifier();
+            break :blk if (options.verify_host)
+                bundle_verifier.clientVerifier()
+            else
+                bundle_verifier.serverChainVerifier();
         };
         const mapped = Options{
             .server_name = options.server_name,

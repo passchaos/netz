@@ -1362,6 +1362,8 @@ Current protocol coverage includes:
   safe staged replacement, with strict QoS/prefix mapping and local/remote loop suppression,
   upstream Session/authentication settings, bounded
   reconnect policy, vail-backed TLS 1.2/1.3 with CA/hostname verification,
+  explicit testing-only `bridge_insecure` hostname opt-out that retains CA
+  path, validity, signature, serverAuth EKU, revocation, and OCSP validation,
   explicit minimum-version policy, separate ordered TLS 1.2/TLS 1.3
   cipher-suite policy, required stapled-OCSP validation, and automatic
   RFC 5077 ticket reuse on same-host TLS 1.2 bridge reconnects without
@@ -1878,6 +1880,10 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
 # the live named client without its Will, and preserve anonymous policy.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-empty-password-reload --mosquitto-test-root=/nav_env/Work/mosquitto/test
+# Prove strict hostname rejection, explicit bridge_insecure compatibility, and
+# retained CA-chain rejection over both TLS 1.2 and TLS 1.3.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-bridge-insecure --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
 # MQTT 3.1.1 admission and normal socket-file cleanup.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

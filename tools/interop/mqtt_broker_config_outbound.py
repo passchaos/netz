@@ -247,6 +247,178 @@ def run_bridge_cipher_suite_case(broker: Path, directory: Path) -> None:
             _stop(process, output)
 
 
+def run_bridge_insecure_hostname_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    ca, certificate, key, _, _ = _create_tls_material(directory)
+    wrong_ca_key = directory / "bridge-wrong-ca.key"
+    wrong_ca = directory / "bridge-wrong-ca.pem"
+    _openssl(
+        "ecparam",
+        "-name",
+        "prime256v1",
+        "-genkey",
+        "-noout",
+        "-out",
+        wrong_ca_key,
+    )
+    _openssl(
+        "req",
+        "-new",
+        "-x509",
+        "-key",
+        wrong_ca_key,
+        "-sha256",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Netz wrong bridge CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-out",
+        wrong_ca,
+    )
+    contexts: dict[str, ssl.SSLContext] = {}
+    for name, version in (
+        ("tlsv1.2", ssl.TLSVersion.TLSv1_2),
+        ("tlsv1.3", ssl.TLSVersion.TLSv1_3),
+    ):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = version
+        context.maximum_version = version
+        context.load_cert_chain(certificate, key)
+        if name == "tlsv1.2":
+            context.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256")
+            context.set_ecdh_curve("prime256v1")
+        contexts[name] = context
+
+    ports = _distinct_ports(12)
+    cases = (
+        (
+            "strict-hostname-tls12",
+            ports[0],
+            ports[1],
+            ca,
+            False,
+            False,
+            "tlsv1.2",
+        ),
+        (
+            "insecure-hostname-tls12",
+            ports[2],
+            ports[3],
+            ca,
+            True,
+            True,
+            "tlsv1.2",
+        ),
+        (
+            "insecure-untrusted-tls12",
+            ports[4],
+            ports[5],
+            wrong_ca,
+            True,
+            False,
+            "tlsv1.2",
+        ),
+        (
+            "strict-hostname-tls13",
+            ports[6],
+            ports[7],
+            ca,
+            False,
+            False,
+            "tlsv1.3",
+        ),
+        (
+            "insecure-hostname-tls13",
+            ports[8],
+            ports[9],
+            ca,
+            True,
+            True,
+            "tlsv1.3",
+        ),
+        (
+            "insecure-untrusted-tls13",
+            ports[10],
+            ports[11],
+            wrong_ca,
+            True,
+            False,
+            "tlsv1.3",
+        ),
+    )
+    for (
+        label,
+        remote_port,
+        local_port,
+        trust,
+        insecure,
+        expect_success,
+        tls_version,
+    ) in cases:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", remote_port))
+        listener.listen(1)
+        listener.settimeout(10)
+        config = directory / f"bridge-{label}.conf"
+        config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "listener_allow_anonymous true\nmax_connections 1\n"
+            f"connection {label}\n"
+            f"address 127.0.0.1:{remote_port}\ntopic # in 0\n"
+            "bridge_protocol_version mqttv50\nnotifications false\n"
+            f"bridge_cafile {trust}\n"
+            f"bridge_insecure {str(insecure).lower()}\n"
+            f"bridge_tls_version {tls_version}\n"
+            + (
+                "bridge_ciphers ECDHE-ECDSA-AES128-GCM-SHA256\n"
+                if tls_version == "tlsv1.2"
+                else ""
+            )
+        )
+        log = directory / f"bridge-{label}.log"
+        process = output = raw = peer = None
+        try:
+            process, output = _start_broker(broker, config, log, finite=False)
+            raw, _ = listener.accept()
+            raw.settimeout(10)
+            try:
+                peer = contexts[tls_version].wrap_socket(raw, server_side=True)
+                raw = None
+            except ssl.SSLError as error:
+                raw.close()
+                raw = None
+                if expect_success:
+                    time.sleep(0.2)
+                    raise AssertionError(
+                        f"{label} failed TLS verification: {error}; "
+                        f"broker_status={process.poll()}; "
+                        f"broker_log={log.read_text(errors='replace')!r}"
+                    ) from error
+            else:
+                if not expect_success:
+                    raise AssertionError(
+                        f"{label} unexpectedly completed TLS verification"
+                    )
+                _connect_limits(_read_packet(peer), 5)
+                peer.sendall(_packet(0x20, b"\x00\x00\x00"))
+                _wait_for_log(process, log, f"bridge {label} remote=")
+        finally:
+            if peer is not None:
+                peer.close()
+            if raw is not None:
+                raw.close()
+            listener.close()
+            if process is not None:
+                _stop(process, output)
+
+
 def run_bridge_connack_capability_case(
     broker: Path,
     directory: Path,

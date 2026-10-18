@@ -2759,6 +2759,14 @@ stream client so it can answer CertificateRequest with Ed25519, ECDSA, or SM2
 identity material. The vail path maps the same system/caller CA and hostname
 policy by default, or accepts a pinned/custom `server_verifier`; clients
 without an identity keep the standard-library TLS path.
+Configured bridges also support Mosquitto's explicit `bridge_insecure true`
+compatibility switch. It disables only DNS/IP certificate identity matching;
+the selected CA path, validity, signature, serverAuth EKU, revocation and
+stapled-OCSP policies remain enforced. The default remains strict. A production
+OpenSSL gate exercises TLS 1.2 and TLS 1.3 independently: the default rejects a
+CA-trusted `DNS:localhost` certificate when the bridge target is `127.0.0.1`,
+the explicit opt-in completes MQTT 5, and an opt-in peer signed by an
+unconfigured CA is still rejected.
 
 `mqtt.tls_runtime.Server` is a native TLS 1.2/1.3 listener backed by project-local
 vail primitives. It accepts caller-provided DER certificate chains and
