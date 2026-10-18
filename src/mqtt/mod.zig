@@ -177,8 +177,9 @@ pub const FixedHeader = struct {
 pub fn packetTypeFromFirstByte(first: u8) Error!PacketType {
     const packet_nibble: u4 = @truncate(first >> 4);
     if (packet_nibble == 0) return error.ReservedPacketType;
-    return std.enums.fromInt(PacketType, packet_nibble) orelse
-        error.InvalidPacketType;
+    // PacketType exhaustively and contiguously covers every remaining u4
+    // value (1...15), so the generic enum lookup has no failure case here.
+    return @enumFromInt(packet_nibble);
 }
 
 test "MQTT fixed header distinguishes reserved packet type zero" {
@@ -190,6 +191,13 @@ test "MQTT fixed header distinguishes reserved packet type zero" {
         error.ReservedPacketType,
         FixedHeader.parse(&.{ 0x0f, 0x00 }),
     );
+    inline for (std.meta.fields(PacketType)) |field| {
+        const first = @as(u8, @intCast(field.value)) << 4;
+        try std.testing.expectEqual(
+            @as(PacketType, @enumFromInt(field.value)),
+            try packetTypeFromFirstByte(first),
+        );
+    }
 }
 
 test "MQTT fixed header write is transactional" {

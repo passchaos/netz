@@ -4881,6 +4881,15 @@ proxy evidence for the entire suite.
    Persistence, exactly-once release, expiry and PUBCOMP ordering are unchanged;
    this is deterministic redundant-work removal, not closure of the broader
    serial or RSS gap.
+   MQTT's Control Packet type field exhaustively uses non-zero `u4` values.
+   After preserving the reserved-zero check, packet framing now converts that
+   nibble directly instead of executing an unreachable generic enum failure
+   path. Eight fixed-binary serial pairs reduced broker instructions by a
+   1.009357 median with 8/8 wins and a 1.008045-1.010145 range. Every arm of
+   two-pair publishers, fanout, balanced and 4-KiB controls also improved
+   instructions, by 0.75-2.21% median. Timing/cycles were noisy and mixed, so
+   no latency or throughput claim is made. Exhaustive type mapping, reserved
+   precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

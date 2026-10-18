@@ -8341,6 +8341,37 @@ for controls. The zero-loss current profile report hashes to
 `58e97db685f41e1dcc1921f9fe4a185fe75141e0d5208b62dc2aedf9beed3083`;
 artifacts are retained under `zig-out/mqtt-qos2-release-clock-ab`.
 
+MQTT Control Packet types occupy every non-zero value of their four-bit wire
+field. `packetTypeFromFirstByte` now rejects zero first and converts 1 through
+15 directly, instead of calling the generic `std.enums.fromInt` lookup whose
+failure path was unreachable for a `u4`. Exhaustive tests bind every enum field
+to its high nibble and preserve reserved-type-zero error precedence before
+Remaining Length validation. No accepted or rejected wire value changes.
+
+Eight CPU-0/client, CPU-1/broker fixed-binary pairs reused the 2,000-warmup,
+40,000-publish serial durable QoS 2 shape and the fixed driver above. Baseline
+broker, candidate broker and driver SHA-256 values were respectively
+`4476f64a7266e843166480e059bde502b34afb69051e367a64b4f5ba4bab9bd6`,
+`5c981574d1a0720f164fb47c8a2b770c5ce95c4f8100ec21a29170088f8facdf`,
+and
+`df965444715c19f38772a6c5b204f60ee5951605a08e0e84d14c2805350988d6`.
+All arms completed 40,000 exact deliveries with checksum 10,780,000. Broker
+instructions improved by a 1.009357 baseline/candidate paired median with 8/8
+wins and a narrow 1.008045-1.010145 range. One candidate arm encountered
+severe host noise, so cycles, throughput and latency receive no improvement
+claim despite their otherwise positive medians.
+
+Two-pair publishers-32, fanout-32, balanced-32x32 and 4-KiB controls improved
+instructions in every arm, with paired medians of 1.0075x, 1.0221x, 1.0124x
+and 1.0092x. Timing and cycles were mixed under host load. A zero-loss
+100,000-message candidate profile no longer contains the targeted generic enum
+lookup above `packetTypeFromFirstByte`; its report SHA-256 is
+`51b88a9f963cad1aa44a503f2aae96f42c28dcac07948d9acdc4b7640ca0bac2`.
+Serial and control result tables hash to
+`3ee4c77d93230c5400455d4df8c28086c37f2e3d8c9a536c07afb50ec93a6395`
+and `a6ccde70321e832e8f4260b4a194849975e76d8f7792d497f34a59d194571480`;
+artifacts are retained under `zig-out/mqtt-packet-type-direct-ab`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
