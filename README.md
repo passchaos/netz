@@ -1884,6 +1884,10 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
 # the live named client without its Will, and preserve anonymous policy.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-empty-password-reload --mosquitto-test-root=/nav_env/Work/mosquitto/test
+# Source-lock Mosquitto's empty/comment-only ACL CVE regression across global
+# and per-listener policy under MQTT 3.1.1/5.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-empty-acl --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Prove strict hostname rejection, explicit bridge_insecure compatibility, and
 # retained CA-chain rejection over TLS 1.2/1.3, leaving the TLS 1.2 OpenSSL
 # group preference at its default to exercise X25519 selection.

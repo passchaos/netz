@@ -366,6 +366,18 @@ test "MQTT ACL file treats an access-name topic as the default form" {
     try std.testing.expect(acl.allows(.write, anonymous, "read"));
 }
 
+test "MQTT ACL file accepts empty rules as default deny" {
+    var acl = try parse(std.testing.allocator, "\n# no grants\r\n\t\n");
+    defer acl.deinit();
+    try std.testing.expectEqual(@as(usize, 0), acl.ruleCount());
+    const anonymous = Identity{ .client_id = "anon", .username = null };
+    try std.testing.expect(!acl.allows(.read, anonymous, "empty/value"));
+    try std.testing.expect(!acl.allows(.write, anonymous, "empty/value"));
+    const named = Identity{ .client_id = "named", .username = "user" };
+    try std.testing.expect(!acl.allows(.read, named, "empty/value"));
+    try std.testing.expect(!acl.allows(.write, named, "empty/value"));
+}
+
 test "MQTT ACL file owns rule storage" {
     const allocator = std.testing.allocator;
     const source = try allocator.dupe(

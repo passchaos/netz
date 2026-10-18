@@ -622,6 +622,11 @@ populated file with an empty one, administratively disconnects the live named
 user without publishing its Will, rejects subsequent MQTT 3.1.1/5 named
 CONNECTs with their version-correct reasons, and keeps anonymous admission and
 an existing anonymous observer usable.
+The source-locked `09-acl-empty-file.py` CVE regression covers the corresponding
+zero-rule authorization boundary. Empty/comment-only ACL files remain valid in
+both global and `per_listener_settings` scopes: anonymous MQTT 3.1.1/5 clients
+can CONNECT, SUBSCRIBE and PING, while QoS 1 publication receives the
+version-correct result and no matching delivery escapes the default deny.
 The same gate source-locks Mosquitto revision `5cd25465`'s
 `01-connect-unix-socket.py` and runs its portable wire behavior through the
 production config example: `listener 0 PATH` deep-owns one raw Unix-domain
@@ -4868,13 +4873,13 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The process gate now additionally locks fifteen upstream sources:
+   semantics. The process gate now additionally locks sixteen upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous
    policy, username-or-anonymous policy, authentication-before-takeover
-   ordering, password-file parser robustness, and two password/ACL
-   invalid-reload cases. The
+   ordering, password-file parser robustness, empty-ACL default deny, and two
+   password/ACL invalid-reload cases. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security

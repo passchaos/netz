@@ -98,6 +98,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "b885e25540dcae346bfc7347af8d0fbf87472d39e97c6436c7efc5ac5394997e",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
+    "broker/09-acl-empty-file.py":
+        "b5ff60d2bc8505f7fa8ea87d727b5993b7075916eee9a915fff337b42a50901e",
     "broker/09-pwfile-parse-invalid.py":
         "9e7293ab7d4272696f413f7a6e80e19e6b85453f33efb8caeb98ccb3e0030ec7",
     "broker/11-persistence-autosave-changes.py":
@@ -120,6 +122,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-username-or-anonymous", action="store_true")
     selected.add_argument("--only-authentication-takeover", action="store_true")
     selected.add_argument("--only-empty-password-reload", action="store_true")
+    selected.add_argument("--only-empty-acl", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2673,6 +2676,98 @@ def run_invalid_acl_file_case(broker: Path, directory: Path) -> None:
         raise AssertionError(
             "invalid ACL pattern did not fail before listen: " + result.stdout
         )
+
+
+def run_empty_acl_case(broker: Path, directory: Path) -> None:
+    acl_file = directory / "empty.acl"
+    acl_file.write_text("# no grants\n\n")
+    for per_listener in (False, True):
+        port = free_port()
+        config = directory / f"empty-acl-{str(per_listener).lower()}.conf"
+        config.write_text(
+            ("per_listener_settings true\n" if per_listener else "")
+            + f"listener {port} 127.0.0.1\n"
+            + "listener_allow_anonymous true\n"
+            + f"acl_file {acl_file}\n"
+            + "max_connections 2\n"
+        )
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        try:
+            ready = process.stdout.readline().strip()
+            if "configured 1 listeners for 2 clients" not in ready:
+                raise RuntimeError(
+                    f"empty ACL broker failed to start: {ready}"
+                )
+            read_listener_lines(process, 1, "empty ACL")
+            for protocol in (4, 5):
+                client = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=5,
+                )
+                client.settimeout(5)
+                try:
+                    client.sendall(connect_packet(
+                        f"empty-acl-{int(per_listener)}-{protocol}",
+                        proto_ver=protocol,
+                    ))
+                    if connack_reason(read_mqtt_packet(client)) != 0:
+                        raise AssertionError(
+                            f"empty ACL rejected CONNECT: protocol={protocol}"
+                        )
+                    client.sendall(subscribe_packet(
+                        1,
+                        "empty/#",
+                        proto_ver=protocol,
+                    ))
+                    expected_suback = (
+                        bytes.fromhex("900400010000")
+                        if protocol == 5
+                        else bytes.fromhex("9003000100")
+                    )
+                    if read_mqtt_packet(client) != expected_suback:
+                        raise AssertionError(
+                            f"empty ACL SUBACK mismatch: protocol={protocol}"
+                        )
+                    client.sendall(publish_packet(
+                        "empty/value",
+                        b"must-not-deliver",
+                        qos=1,
+                        packet_id=2,
+                        proto_ver=protocol,
+                    ))
+                    reason = puback_reason(read_mqtt_packet(client), 2)
+                    expected_reason = 0x87 if protocol == 5 else 0
+                    if reason != expected_reason:
+                        raise AssertionError(
+                            "empty ACL publish result mismatch: "
+                            f"protocol={protocol} "
+                            f"expected={expected_reason:#x} actual={reason:#x}"
+                        )
+                    mqtt_ping(client)
+                    expect_no_packet(
+                        client,
+                        f"empty ACL self-delivery protocol={protocol}",
+                    )
+                    client.sendall(b"\xe0\x00")
+                finally:
+                    client.close()
+            return_code = process.wait(timeout=5)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        if return_code != 0:
+            raise RuntimeError(
+                f"empty ACL broker exited {return_code}: "
+                + process.stdout.read()
+            )
 
 
 def run_acl_v311_case(broker: Path, directory: Path) -> None:
@@ -7264,6 +7359,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_empty_acl:
+            run_empty_acl_case(args.broker, directory)
+            print(
+                "MQTT empty ACL integration passed: "
+                "scopes=global+per-listener protocols=mqttv311+mqttv5 "
+                "connect+subscribe+ping=allow publish+delivery=deny "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -7410,6 +7515,7 @@ def main() -> None:
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
+        run_empty_acl_case(args.broker, directory)
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_authentication_takeover_order_case(args.broker, directory)
@@ -7452,6 +7558,7 @@ def main() -> None:
         "source-locked authentication-before-Client-ID-takeover ordering, "
         "empty password-file named-user deny-all generation "
         "with live revocation, "
+        "source-locked empty ACL default-deny policy, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "
