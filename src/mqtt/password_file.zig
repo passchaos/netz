@@ -3,7 +3,9 @@
 //! Only hashed credentials are accepted. Current Argon2id entries, `$7$`
 //! PBKDF2-SHA512 entries, and legacy `$6$` salted SHA-512 entries are decoded
 //! at load time. Malformed, duplicate, plaintext, or excessively expensive
-//! entries fail closed before a listener is opened.
+//! entries fail closed before a listener is opened. An empty or comment-only
+//! file is a valid zero-user generation, allowing an atomic switch to deny all
+//! named credentials while preserving the configured anonymous policy.
 
 const std = @import("std");
 const mqtt = @import("mod.zig");
@@ -19,6 +21,7 @@ const digest_length = std.crypto.hash.sha2.Sha512.digest_length;
 const max_salt_length = 64;
 
 pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
+    /// Retained for source compatibility; empty files now produce zero users.
     EmptyPasswordFile,
     TooManyUsers,
     DuplicateUser,
@@ -148,7 +151,6 @@ pub fn parse(
     io: std.Io,
     source: []const u8,
 ) Error!File {
-    if (source.len == 0) return error.EmptyPasswordFile;
     if (source.len > max_file_bytes) return error.InvalidEntry;
     const owned_source = try allocator.dupe(u8, source);
     errdefer {
@@ -190,7 +192,6 @@ pub fn parse(
         });
         try index.put(allocator, username, entry_index);
     }
-    if (entries.items.len == 0) return error.EmptyPasswordFile;
     return .{
         .allocator = allocator,
         .io = io,
@@ -463,6 +464,42 @@ test "MQTT password file compares one parsed credential across reloads" {
     try std.testing.expect(!first.sameCredential(&second, "missing"));
     try std.testing.expect(!first.sameCredential(&replacement, "user"));
     try std.testing.expect(!first.sameCredential(&replacement, "other"));
+}
+
+test "MQTT password file accepts empty generations as deny-all" {
+    const allocator = std.testing.allocator;
+    var empty = try parse(allocator, std.testing.io, "");
+    defer empty.deinit();
+    var comments = try parse(
+        allocator,
+        std.testing.io,
+        "\n  # all users revoked\r\n\t\n",
+    );
+    defer comments.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), empty.userCount());
+    try std.testing.expectEqual(@as(usize, 0), comments.userCount());
+    try std.testing.expect(!empty.verify("user", "password"));
+    try std.testing.expect(!comments.verify("user", "password"));
+    try std.testing.expect(!empty.sameCredential(&comments, "user"));
+
+    var policy = Authorization{
+        .passwords = &empty,
+        .allow_anonymous = false,
+    };
+    const anonymous = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 60,
+        .client_id = "anonymous",
+    };
+    try std.testing.expect(!Authorization.authorize(&policy, anonymous));
+    policy.allow_anonymous = true;
+    try std.testing.expect(Authorization.authorize(&policy, anonymous));
+    var named = anonymous;
+    named.username = "user";
+    named.password = "password";
+    try std.testing.expect(!Authorization.authorize(&policy, named));
 }
 
 test "MQTT password file fails closed and owns its input" {

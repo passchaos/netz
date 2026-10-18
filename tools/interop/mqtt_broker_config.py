@@ -96,6 +96,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "b885e25540dcae346bfc7347af8d0fbf87472d39e97c6436c7efc5ac5394997e",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
+    "broker/09-pwfile-parse-invalid.py":
+        "9e7293ab7d4272696f413f7a6e80e19e6b85453f33efb8caeb98ccb3e0030ec7",
     "broker/11-persistence-autosave-changes.py":
         "e375ec1114f56728f4c1dc62d7f510b26e936428805f444cb387e206bf3ccac1",
     "broker/16-config-missing.py":
@@ -115,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-listener-anonymous", action="store_true")
     selected.add_argument("--only-username-or-anonymous", action="store_true")
     selected.add_argument("--only-authentication-takeover", action="store_true")
+    selected.add_argument("--only-empty-password-reload", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2942,6 +2945,142 @@ def run_authentication_takeover_order_case(
     if return_code != 0:
         raise RuntimeError(
             "authentication takeover broker exited "
+            f"{return_code}: {process.stdout.read()}"
+        )
+
+
+def run_empty_password_reload_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    port = free_port()
+    password_file = directory / "empty-reload.pwfile"
+    password_file.write_text(
+        "user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    config = directory / "empty-password-reload.conf"
+    config.write_text(
+        f"password_file {password_file}\n"
+        "allow_anonymous true\n"
+        f"listener {port} 127.0.0.1\n"
+        "max_connections 6\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        ready = process.stdout.readline().strip()
+        if "configured 1 listeners for 6 clients" not in ready:
+            raise RuntimeError(
+                f"empty password reload broker failed to start: {ready}"
+            )
+        read_listener_lines(process, 1, "empty password reload")
+
+        observer = socket.create_connection(("127.0.0.1", port), timeout=5)
+        observer.settimeout(5)
+        try:
+            observer.sendall(connect_packet("empty-reload-observer"))
+            if connack_reason(read_mqtt_packet(observer)) != 0:
+                raise AssertionError("empty reload observer failed CONNECT")
+            observer.sendall(subscribe_packet(1, "empty/#"))
+            if read_mqtt_packet(observer) != bytes.fromhex("900400010000"):
+                raise AssertionError("empty reload observer SUBACK mismatch")
+
+            victim = socket.create_connection(("127.0.0.1", port), timeout=5)
+            victim.settimeout(5)
+            try:
+                victim.sendall(connect_packet(
+                    "empty-reload-victim",
+                    username="user",
+                    password="password",
+                    will_topic="empty/revoked",
+                    will_payload=b"must-not-publish",
+                ))
+                if connack_reason(read_mqtt_packet(victim)) != 0:
+                    raise AssertionError("empty reload victim failed CONNECT")
+
+                password_file.write_text("")
+                os.kill(process.pid, signal.SIGHUP)
+                wait_process_line(
+                    process,
+                    "security reload completed: source=SIGHUP",
+                    "empty password-file reload",
+                )
+                administrative_disconnect = read_mqtt_packet(victim)
+                if administrative_disconnect != bytes.fromhex("e00198"):
+                    raise AssertionError(
+                        "empty password reload did not revoke live user: "
+                        + administrative_disconnect.hex()
+                    )
+            finally:
+                victim.close()
+
+            mqtt_ping(observer)
+            expect_no_packet(observer, "empty password reload victim Will")
+
+            for protocol in (4, 5):
+                named = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=5,
+                )
+                named.settimeout(5)
+                try:
+                    named.sendall(connect_packet(
+                        f"empty-named-{protocol}",
+                        username="user",
+                        password="password",
+                        proto_ver=protocol,
+                    ))
+                    reason = connack_reason(read_mqtt_packet(named))
+                    expected_reason = 0x87 if protocol == 5 else 0x05
+                    if reason != expected_reason:
+                        raise AssertionError(
+                            "empty password file admitted named user: "
+                            f"protocol={protocol} "
+                            f"expected={expected_reason:#x} actual={reason:#x}"
+                        )
+                finally:
+                    named.close()
+
+                anonymous = socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=5,
+                )
+                anonymous.settimeout(5)
+                try:
+                    anonymous.sendall(connect_packet(
+                        f"empty-anon-{protocol}",
+                        proto_ver=protocol,
+                    ))
+                    if connack_reason(read_mqtt_packet(anonymous)) != 0:
+                        raise AssertionError(
+                            "empty password file changed anonymous policy: "
+                            f"protocol={protocol}"
+                        )
+                    anonymous.sendall(b"\xe0\x00")
+                finally:
+                    anonymous.close()
+
+            mqtt_ping(observer)
+            expect_no_packet(observer, "empty password reload delayed Will")
+            observer.sendall(b"\xe0\x00")
+        finally:
+            observer.close()
+        return_code = process.wait(timeout=5)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+    if return_code != 0:
+        raise RuntimeError(
+            "empty password reload broker exited "
             f"{return_code}: {process.stdout.read()}"
         )
 
@@ -7111,6 +7250,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_empty_password_reload:
+            run_empty_password_reload_case(args.broker, directory)
+            print(
+                "MQTT empty password-file reload integration passed: "
+                "protocols=mqttv311+mqttv5 named=deny anonymous=allow "
+                "live_revocation=true will_suppressed=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -7240,6 +7389,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_authentication_takeover_order_case(args.broker, directory)
+        run_empty_password_reload_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
         run_listener_policy_reload_case(args.broker, directory)
         run_server_identity_reload_case(args.broker, directory)
@@ -7276,6 +7426,8 @@ def main() -> None:
         "source-locked global/listener anonymous policy precedence, "
         "source-locked MQTT 3.1/3.1.1/5 username-or-anonymous policy, "
         "source-locked authentication-before-Client-ID-takeover ordering, "
+        "empty password-file named-user deny-all generation "
+        "with live revocation, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "

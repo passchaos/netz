@@ -1397,7 +1397,8 @@ Current protocol coverage includes:
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files,
-  including explicit credentialless deny-all listeners and CONNECT
+  including empty/comment-only zero-user generations for atomic named-user
+  revocation, explicit credentialless deny-all listeners, and CONNECT
   authorization before duplicate-Client-ID takeover so rejected peers cannot
   displace a live Session or publish its Will,
   with anonymous/user scopes and Linux SIGHUP atomic password/ACL plus TLS/WSS
@@ -1873,6 +1874,10 @@ zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
 # retaining the legitimate connection and suppressing its Will.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
   --only-authentication-takeover --mosquitto-test-root=/nav_env/Work/mosquitto/test
+# Reload a configured password file to an empty zero-user generation, revoke
+# the live named client without its Will, and preserve anonymous policy.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-empty-password-reload --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
 # MQTT 3.1.1 admission and normal socket-file cleanup.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
