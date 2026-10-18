@@ -1768,6 +1768,29 @@ pub fn build(b: *std.Build) void {
         &connect_udp_hyper_interop.step,
     );
 
+    const connect_udp_h3_peer = b.addExecutable(.{
+        .name = "netz-connect-udp-h3-peer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/connect_udp_h3_peer.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const connect_udp_h3_interop = b.addSystemCommand(
+        &.{"tools/interop/connect_udp_h3.sh"},
+    );
+    connect_udp_h3_interop.addArtifactArg(connect_udp_h3_peer);
+    const connect_udp_h3_interop_step = b.step(
+        "interop-connect-udp-h3",
+        "Run bidirectional HTTP/3 CONNECT-UDP interop with h3/quinn",
+    );
+    connect_udp_h3_interop_step.dependOn(
+        &connect_udp_h3_interop.step,
+    );
+
     const http_unified_hyper_client = b.addExecutable(.{
         .name = "netz-http-unified-hyper-client",
         .root_module = b.createModule(.{

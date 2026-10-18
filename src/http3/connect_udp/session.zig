@@ -19,6 +19,7 @@ pub fn Session(
         pending_receive: ?PendingReceive = null,
 
         const Self = @This();
+        pub const supports_blocking_relay = false;
 
         const PendingReceive = struct {
             offset: usize,

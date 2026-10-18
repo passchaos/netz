@@ -1,0 +1,20 @@
+[package]
+name = "netz-h3-connect-udp-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bytes = "1"
+futures-util = "0.3"
+h3 = { path = "../../../../../Work/h3/h3" }
+h3-datagram = { path = "../../../../../Work/h3/h3-datagram" }
+h3-quinn = { path = "../../../../../Work/h3/h3-quinn", features = ["datagram"] }
+http = "1"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "time"] }
+
+[[bin]]
+name = "netz-h3-connect-udp-interop"
+path = "src/main.rs"

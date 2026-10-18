@@ -73,6 +73,9 @@ pub fn Relay(comptime ConnectUdp: type) type {
             udp_receive_buffer: []u8,
             options: Options,
         ) anyerror!Result {
+            if (!Session.supports_blocking_relay) {
+                return error.DispatcherRequired;
+            }
             const maximum_payload = session.maxPayloadSize() orelse
                 return error.DatagramUnavailable;
             if (session_receive_buffer.len < maximum_payload) {
@@ -123,42 +126,48 @@ pub fn Relay(comptime ConnectUdp: type) type {
                         return deadline.wait(active_io);
                     }
                 };
-                var queue_storage: [4]ReceiveWake = undefined;
                 var completed: [4]ReceiveWake = undefined;
-                var select: std.Io.Select(ReceiveWake) = .init(
-                    io,
-                    &queue_storage,
-                );
-                var drained = false;
-                defer if (!drained) select.cancelDiscard();
-                select.async(
-                    .session,
-                    Task.sessionReceive,
-                    .{ session, session_receive_buffer },
-                );
-                select.async(
-                    .udp,
-                    Task.udpReceive,
-                    .{ socket, io, udp_receive_buffer },
-                );
-                if (options.cancel) |event| {
-                    select.async(.cancel, Task.waitEvent, .{ event, io });
-                }
-                if (options.deadline) |deadline| {
-                    select.async(
-                        .deadline,
-                        Task.waitDeadline,
-                        .{ deadline, io },
+                const completed_count = select_block: {
+                    var queue_storage: [4]ReceiveWake = undefined;
+                    var select: std.Io.Select(ReceiveWake) = .init(
+                        io,
+                        &queue_storage,
                     );
-                }
-
-                var completed_count: usize = 1;
-                completed[0] = try select.await();
-                while (select.cancel()) |late| {
-                    completed[completed_count] = late;
-                    completed_count += 1;
-                }
-                drained = true;
+                    var drained = false;
+                    defer if (!drained) select.cancelDiscard();
+                    select.async(
+                        .session,
+                        Task.sessionReceive,
+                        .{ session, session_receive_buffer },
+                    );
+                    select.async(
+                        .udp,
+                        Task.udpReceive,
+                        .{ socket, io, udp_receive_buffer },
+                    );
+                    if (options.cancel) |event| {
+                        select.async(
+                            .cancel,
+                            Task.waitEvent,
+                            .{ event, io },
+                        );
+                    }
+                    if (options.deadline) |deadline| {
+                        select.async(
+                            .deadline,
+                            Task.waitDeadline,
+                            .{ deadline, io },
+                        );
+                    }
+                    var count: usize = 1;
+                    completed[0] = try select.await();
+                    while (select.cancel()) |late| {
+                        completed[count] = late;
+                        count += 1;
+                    }
+                    drained = true;
+                    break :select_block count;
+                };
 
                 var terminal: ?EndReason = null;
                 for (completed[0..completed_count]) |wake| switch (wake) {
@@ -253,82 +262,30 @@ pub fn Relay(comptime ConnectUdp: type) type {
             payload: []const u8,
             options: Options,
         ) anyerror!SendOutcome {
-            const Wake = union(enum) {
-                sent: anyerror!void,
-                cancel: anyerror!void,
-                deadline: anyerror!void,
+            if (terminalNow(io, options)) |terminal| {
+                return .{ .sent = false, .terminal = terminal };
+            }
+            // UDP send is one atomic message syscall. Running it in a
+            // concurrent select lets a zio worker publish task completion
+            // before its event-loop submission is socket-visible. Execute it
+            // directly and check cooperative termination on both sides.
+            try socket.send(io, target, payload);
+            return .{
+                .sent = true,
+                .terminal = terminalNow(io, options),
             };
-            const Task = struct {
-                fn send(
-                    udp_socket: *net.Socket,
-                    active_io: std.Io,
-                    destination: *const net.IpAddress,
-                    bytes: []const u8,
-                ) anyerror!void {
-                    return udp_socket.send(active_io, destination, bytes);
-                }
+        }
 
-                fn waitEvent(
-                    event: *std.Io.Event,
-                    active_io: std.Io,
-                ) anyerror!void {
-                    return event.wait(active_io);
-                }
-
-                fn waitDeadline(
-                    deadline: std.Io.Clock.Timestamp,
-                    active_io: std.Io,
-                ) anyerror!void {
-                    return deadline.wait(active_io);
-                }
-            };
-            var queue_storage: [3]Wake = undefined;
-            var completed: [3]Wake = undefined;
-            var select: std.Io.Select(Wake) = .init(io, &queue_storage);
-            var drained = false;
-            defer if (!drained) select.cancelDiscard();
-            select.async(.sent, Task.send, .{ socket, io, target, payload });
+        fn terminalNow(io: std.Io, options: Options) ?EndReason {
             if (options.cancel) |event| {
-                select.async(.cancel, Task.waitEvent, .{ event, io });
+                if (event.isSet()) return .canceled;
             }
             if (options.deadline) |deadline| {
-                select.async(
-                    .deadline,
-                    Task.waitDeadline,
-                    .{ deadline, io },
-                );
+                if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+                    return .deadline;
+                }
             }
-            var completed_count: usize = 1;
-            completed[0] = try select.await();
-            while (select.cancel()) |late| {
-                completed[completed_count] = late;
-                completed_count += 1;
-            }
-            drained = true;
-            var sent = false;
-            var terminal: ?EndReason = null;
-            for (completed[0..completed_count]) |wake| switch (wake) {
-                .sent => |result| if (result) |_| {
-                    sent = true;
-                } else |err| switch (err) {
-                    error.Canceled => {},
-                    else => return err,
-                },
-                .cancel => |result| if (result) |_| {
-                    terminal = terminal orelse .canceled;
-                } else |err| switch (err) {
-                    error.Canceled => {},
-                    else => return err,
-                },
-                .deadline => |result| if (result) |_| {
-                    terminal = terminal orelse .deadline;
-                } else |err| switch (err) {
-                    error.Canceled => {},
-                    else => return err,
-                },
-            };
-            if (!sent and terminal == null) return error.Canceled;
-            return .{ .sent = sent, .terminal = terminal };
+            return null;
         }
 
         fn sendSessionBefore(
@@ -338,80 +295,34 @@ pub fn Relay(comptime ConnectUdp: type) type {
             payload: []const u8,
             options: Options,
         ) anyerror!SendOutcome {
-            const Wake = union(enum) {
-                sent: anyerror!void,
-                cancel: anyerror!void,
-                deadline: anyerror!void,
-            };
-            const Task = struct {
-                fn send(active: *Session, bytes: []const u8) anyerror!void {
-                    return active.send(bytes);
-                }
-
-                fn waitEvent(
-                    event: *std.Io.Event,
-                    active_io: std.Io,
-                ) anyerror!void {
-                    return event.wait(active_io);
-                }
-
-                fn waitDeadline(
-                    deadline: std.Io.Clock.Timestamp,
-                    active_io: std.Io,
-                ) anyerror!void {
-                    return deadline.wait(active_io);
-                }
-            };
-            var queue_storage: [3]Wake = undefined;
-            var completed: [3]Wake = undefined;
-            var select: std.Io.Select(Wake) = .init(io, &queue_storage);
-            var drained = false;
-            defer if (!drained) select.cancelDiscard();
-            select.async(.sent, Task.send, .{ session, payload });
-            if (options.cancel) |event| {
-                select.async(.cancel, Task.waitEvent, .{ event, io });
+            if (terminalNow(io, options)) |terminal| {
+                return .{ .sent = false, .terminal = terminal };
             }
             if (options.deadline) |deadline| {
-                select.async(
-                    .deadline,
-                    Task.waitDeadline,
-                    .{ deadline, io },
-                );
-            }
-            var completed_count: usize = 1;
-            completed[0] = try select.await();
-            while (select.cancel()) |late| {
-                completed[completed_count] = late;
-                completed_count += 1;
-            }
-            drained = true;
-            var sent = false;
-            var terminal: ?EndReason = null;
-            for (completed[0..completed_count]) |wake| switch (wake) {
-                .sent => |result| if (result) |_| {
-                    sent = true;
-                } else |err| switch (err) {
-                    error.Canceled => {},
-                    error.ConnectionClosed => {
-                        terminal = terminal orelse .session_closed;
+                session.sendWithDeadline(payload, deadline) catch |err| switch (err) {
+                    error.Timeout => return .{
+                        .sent = false,
+                        .terminal = .deadline,
+                    },
+                    error.ConnectionClosed => return .{
+                        .sent = false,
+                        .terminal = .session_closed,
                     },
                     else => return err,
-                },
-                .cancel => |result| if (result) |_| {
-                    terminal = terminal orelse .canceled;
-                } else |err| switch (err) {
-                    error.Canceled => {},
+                };
+            } else {
+                session.send(payload) catch |err| switch (err) {
+                    error.ConnectionClosed => return .{
+                        .sent = false,
+                        .terminal = .session_closed,
+                    },
                     else => return err,
-                },
-                .deadline => |result| if (result) |_| {
-                    terminal = terminal orelse .deadline;
-                } else |err| switch (err) {
-                    error.Canceled => {},
-                    else => return err,
-                },
+                };
+            }
+            return .{
+                .sent = true,
+                .terminal = terminalNow(io, options),
             };
-            if (!sent and terminal == null) return error.Canceled;
-            return .{ .sent = sent, .terminal = terminal };
         }
     };
 }

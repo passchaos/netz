@@ -94,6 +94,11 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
                 );
                 defer udp.deinit();
                 if (index == 0) {
+                    var session_storage: [4096]u8 = undefined;
+                    const incoming = try udp.receiveIntoWithTimeout(
+                        &session_storage,
+                        .fromSeconds(2),
+                    );
                     var relay_socket = try std.Io.net.IpAddress.bind(
                         &.{ .ip4 = .loopback(0) },
                         self.server.quic_server.endpoint.io,
@@ -102,38 +107,40 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
                     defer relay_socket.close(
                         self.server.quic_server.endpoint.io,
                     );
-                    var session_storage: [4096]u8 = undefined;
                     var udp_storage: [4096]u8 = undefined;
-                    const relayed = try http3.connect_udp.relay.run(
-                        runtime.ConnectUdpServerSession,
+                    try std.testing.expectError(
+                        error.DispatcherRequired,
+                        http3.connect_udp.relay.run(
+                            runtime.ConnectUdpServerSession,
+                            self.server.quic_server.endpoint.io,
+                            &udp,
+                            &relay_socket,
+                            &self.target,
+                            &session_storage,
+                            &udp_storage,
+                            .{},
+                        ),
+                    );
+                    try relay_socket.send(
                         self.server.quic_server.endpoint.io,
-                        &udp,
-                        &relay_socket,
                         &self.target,
-                        &session_storage,
+                        incoming.payload,
+                    );
+                    const echoed = try relay_socket.receiveTimeout(
+                        self.server.quic_server.endpoint.io,
                         &udp_storage,
-                        .{
-                            .deadline = .fromNow(
-                                self.server.quic_server.endpoint.io,
-                                .{
-                                    .raw = .fromSeconds(2),
-                                    .clock = .awake,
-                                },
-                            ),
-                            .max_forwarded_datagrams = 2,
-                        },
+                        .{ .duration = .{
+                            .raw = .fromSeconds(2),
+                            .clock = .awake,
+                        } },
                     );
-                    try std.testing.expectEqual(
-                        http3.connect_udp.relay.EndReason.datagram_limit,
-                        relayed.reason,
-                    );
-                    try std.testing.expectEqual(
-                        @as(u64, 1),
-                        relayed.stats.session_to_udp_datagrams,
-                    );
-                    try std.testing.expectEqual(
-                        @as(u64, 1),
-                        relayed.stats.udp_to_session_datagrams,
+                    try std.testing.expect(std.Io.net.IpAddress.eql(
+                        &echoed.from,
+                        &self.target,
+                    ));
+                    try udp.sendWithTimeout(
+                        echoed.data,
+                        .fromSeconds(2),
                     );
                 } else {
                     var incoming = try udp.receiveWithTimeout(.fromSeconds(2));

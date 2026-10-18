@@ -645,6 +645,9 @@ test "public modules are reachable" {
         netz.http1.runtime,
         "AcceptedConnectUdp",
     ));
+    try std.testing.expect(
+        netz.http1.runtime.ConnectUdpSession.supports_blocking_relay,
+    );
     inline for (&.{
         "maxPayloadSize",
         "receiveInto",
@@ -813,6 +816,9 @@ test "public modules are reachable" {
         netz.http2.runtime,
         "AcceptedConnectUdp",
     ));
+    try std.testing.expect(
+        netz.http2.runtime.ConnectUdpSession.supports_blocking_relay,
+    );
     inline for (&.{
         "maxPayloadSize",
         "receiveInto",
@@ -3291,6 +3297,12 @@ test "public modules are reachable" {
         netz.http3.runtime,
         "ConnectUdpServerSession",
     ));
+    try std.testing.expect(
+        !netz.http3.runtime.ConnectUdpClientSession.supports_blocking_relay,
+    );
+    try std.testing.expect(
+        !netz.http3.runtime.ConnectUdpServerSession.supports_blocking_relay,
+    );
     inline for (&.{
         "maxPayloadSize",
         "receiveInto",

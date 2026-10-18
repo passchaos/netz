@@ -31,6 +31,7 @@ pub fn Session(
         pending_send: ?PendingSend = null,
 
         const Self = @This();
+        pub const supports_blocking_relay = true;
 
         const PendingSend = struct {
             header: [24]u8 = undefined,
