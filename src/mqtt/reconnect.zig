@@ -1478,6 +1478,37 @@ pub const Client = struct {
         return true;
     }
 
+    /// Explicitly downgrade an owned MQTT 5 CONNECT after an Unsupported
+    /// Protocol Version refusal. MQTT 5 CONNECT and Will properties cannot be
+    /// represented by legacy protocols: CONNECT properties are discarded,
+    /// while a non-empty Will property list fails closed. Returns false for
+    /// unrelated refusals or when this Client is no longer configured for v5.
+    pub fn adaptProtocolToLastConnectRefusal(
+        self: *Client,
+        fallback: mqtt.ProtocolVersion,
+        bridge_mode: bool,
+    ) Error!bool {
+        if (fallback == .v5) return error.InvalidProperty;
+        const refusal = self.last_connect_refusal orelse return false;
+        if (self.options.value.protocol != .v5 or
+            refusal.connack.reason_code != 0x84)
+        {
+            return false;
+        }
+        if (self.options.will) |will| {
+            if (will.properties.len != 0) return error.InvalidProperty;
+        }
+        self.options.value.protocol = fallback;
+        self.options.value.bridge_mode = bridge_mode;
+        self.options.value.v3_1_connack_mode = if (fallback == .v3_1 and bridge_mode)
+            .mosquitto
+        else
+            .strict;
+        self.options.value.properties = &.{};
+        self.clearLastConnectRefusal();
+        return true;
+    }
+
     /// Ask the single-owner poll loop to retire its current transport and
     /// reconnect. This method is thread-safe; the request is observed within
     /// `PollOptions.cancellation_check_interval` while a read is blocked.

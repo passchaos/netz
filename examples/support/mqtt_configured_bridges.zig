@@ -1364,17 +1364,41 @@ fn initOutbound(
         .attempt_target_unsubscribe = source.attempt_unsubscribe,
         .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
         .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
+        .target_protocol_fallback = targetProtocolFallback(source),
         .defer_local_source_connect = !activate_local_source,
         .replace_local_source_subscriptions = !activate_local_source,
     };
     if (source.usesTls()) try loadTlsResources(resources, allocator, io, std.Io.Dir.cwd(), source) else {
         resources.connector = .{
             .source = source,
-            .require_private_bridge = source.requiresPrivateBridgeMode(),
+            .require_private_bridge = source.requiresPrivateBridgeMode() or
+                requiresPrivateProtocolFallback(source),
         };
         resources.connector_configured = true;
     }
     return mqtt.bridge.outbound.LocalBridge.initEndpoints(allocator, io, .{ .broker = local, .id = id }, .{ .connector = resources.connector.connector() }, options, shutdown);
+}
+
+fn targetProtocolFallback(
+    source: *const mqtt.broker_config.Bridge,
+) ?mqtt.bridge.outbound.ProtocolFallback {
+    if (source.protocol != .v5) return null;
+    if (source.hasInbound() and source.hasOutbound() and
+        !source.try_private)
+    {
+        return null;
+    }
+    return .{
+        .protocol = .v3_1_1,
+        .bridge_mode = source.try_private,
+    };
+}
+
+fn requiresPrivateProtocolFallback(
+    source: *const mqtt.broker_config.Bridge,
+) bool {
+    const fallback = targetProtocolFallback(source) orelse return false;
+    return fallback.bridge_mode and source.hasInbound() and source.hasOutbound();
 }
 
 fn remoteConnectOptions(
@@ -1527,7 +1551,8 @@ fn loadTlsResources(
     resources.connector = .{
         .source = source,
         .tls_options = connect_options,
-        .require_private_bridge = source.requiresPrivateBridgeMode(),
+        .require_private_bridge = source.requiresPrivateBridgeMode() or
+            requiresPrivateProtocolFallback(source),
     };
     resources.connector_configured = true;
 }
@@ -2204,6 +2229,12 @@ test "configured bridge maps Mosquitto remote protocol limits" {
     var v5 = source;
     v5.protocol = .v5;
     try std.testing.expect(!remoteConnectOptions(&v5, &.{}).bridge_mode);
+    const fallback = targetProtocolFallback(&v5).?;
+    try std.testing.expectEqual(
+        mqtt.ProtocolVersion.v3_1_1,
+        fallback.protocol,
+    );
+    try std.testing.expect(fallback.bridge_mode);
     var v31 = source;
     v31.protocol = .v3_1;
     try std.testing.expectEqual(

@@ -5180,6 +5180,18 @@ test "public modules are reachable" {
         "adaptWillToLastConnectRefusal",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "adaptProtocolToLastConnectRefusal",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.outbound,
+        "ProtocolFallback",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.bridge.outbound.MultiOptions,
+        "target_protocol_fallback",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "SessionSnapshotFileError",
     ));

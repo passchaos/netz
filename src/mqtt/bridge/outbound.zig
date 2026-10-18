@@ -7,6 +7,7 @@ pub const InboundRule = engine.InboundRule;
 pub const Options = engine.Options;
 pub const MultiOptions = engine.MultiOptions;
 pub const NotificationOptions = engine.NotificationOptions;
+pub const ProtocolFallback = engine.ProtocolFallback;
 pub const CoordinatorMode = engine.CoordinatorMode;
 pub const CoordinatorOptions = engine.CoordinatorOptions;
 pub const ConnectEvent = engine.ConnectEvent;

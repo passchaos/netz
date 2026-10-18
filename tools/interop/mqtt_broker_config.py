@@ -88,6 +88,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "61d209b427f5b77c1481e8d53fa2a74a520757e41c62d0347117f66c492d6157",
     "broker/06-bridge-connack-retain-not-supported.py":
         "48d1fc9b070e93f22f2441b1b3ce2a30e087cb21aeb60a1151a6c6fe2b12eae5",
+    "broker/06-bridge-connack-v5-bad-protocol-version.py":
+        "b885e25540dcae346bfc7347af8d0fbf87472d39e97c6436c7efc5ac5394997e",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
     "broker/11-persistence-autosave-changes.py":
@@ -6943,7 +6945,8 @@ def main() -> None:
             run_bridge_connack_capability_case(args.broker, directory)
             print(
                 "MQTT bridge CONNACK capability integration passed: "
-                "will_qos=1->0 retain=true->false attempts=3 "
+                "will_qos=1->0 retain=true->false "
+                "protocol=mqttv5->mqttv311-private attempts=4 "
                 f"mosquitto_process_sources={source_count} "
                 + RUNTIME
             )
@@ -7049,7 +7052,7 @@ def main() -> None:
         "and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
-        "source-locked bridge CONNACK QoS/Retain notification-Will adaptation, "
+        "source-locked bridge CONNACK QoS/Retain/Protocol notification-Will adaptation, "
         "source-locked immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "
         "and client continuity, mTLS, "
         "single-Session bidirectional bridge mapping, "

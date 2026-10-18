@@ -79,6 +79,111 @@ test "MQTT reconnect retains and transfers failed CONNACK" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect explicitly downgrades owned protocol after refusal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var pending = try self.server.acceptPending(.{
+                    .protocol = .v5,
+                });
+                defer pending.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    mqtt.ProtocolVersion.v5,
+                    pending.connect.connect.protocol,
+                );
+                try std.testing.expect(
+                    pending.connect.connect.properties.len != 0,
+                );
+                try pending.connection.writeConnAck(.{
+                    .reason_code = 0x84,
+                });
+            }
+            var pending = try self.server.acceptPending(.{
+                .protocol = .v3_1_1,
+            });
+            var pending_owned = true;
+            defer if (pending_owned) {
+                pending.deinit(self.server.allocator);
+            };
+            try std.testing.expectEqual(
+                mqtt.ProtocolVersion.v3_1_1,
+                pending.connect.connect.protocol,
+            );
+            try std.testing.expect(pending.connect.connect.bridge_mode);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                pending.connect.connect.properties.len,
+            );
+            var accepted = try pending.finish(.{ .protocol = .v3_1_1 });
+            pending_owned = false;
+            defer accepted.deinit(self.server.allocator);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "protocol-fallback",
+            .clean_start = false,
+            .properties = &.{sessionExpiryProperty(60)},
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    try std.testing.expectError(error.ConnectRefused, client.connect());
+    try std.testing.expectEqual(
+        @as(u8, 0x84),
+        client.lastConnectRefusal().?.reason_code,
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.adaptProtocolToLastConnectRefusal(.v5, false),
+    );
+    try std.testing.expect(try client.adaptProtocolToLastConnectRefusal(
+        .v3_1_1,
+        true,
+    ));
+    try std.testing.expect(client.lastConnectRefusal() == null);
+    _ = try client.connect();
+    try client.disconnect(0);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect client reports server violations and retires connections" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -974,7 +974,7 @@ test "local outbound bridge one-shot failure closes its local consumer" {
     try std.testing.expectEqual(@as(usize, 0), local.local_consumer_routes.count());
 }
 
-test "local outbound bridge adapts notification Will to refused capabilities" {
+test "local outbound bridge adapts notification Will and target protocol" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -1040,8 +1040,24 @@ test "local outbound bridge adapts notification Will to refused capabilities" {
                 });
             }
 
+            {
+                var pending = try self.server.acceptPending(.{
+                    .protocol = .v5,
+                });
+                defer pending.deinit(self.server.allocator);
+                const will = pending.connect.connect.will.?;
+                try std.testing.expectEqual(
+                    mqtt.QoS.at_most_once,
+                    will.qos,
+                );
+                try std.testing.expect(!will.retain);
+                try pending.connection.writeConnAck(.{
+                    .reason_code = 0x84,
+                });
+            }
+
             var final_pending = try self.server.acceptPending(.{
-                .protocol = .v5,
+                .protocol = .v3_1_1,
             });
             var final_pending_owned = true;
             defer if (final_pending_owned) {
@@ -1049,11 +1065,22 @@ test "local outbound bridge adapts notification Will to refused capabilities" {
             };
             const final_will = final_pending.connect.connect.will.?;
             try std.testing.expectEqual(
+                mqtt.ProtocolVersion.v3_1_1,
+                final_pending.connect.connect.protocol,
+            );
+            try std.testing.expect(final_pending.connect.connect.bridge_mode);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                final_pending.connect.connect.properties.len,
+            );
+            try std.testing.expectEqual(
                 mqtt.QoS.at_most_once,
                 final_will.qos,
             );
             try std.testing.expect(!final_will.retain);
-            var accepted = try final_pending.finish(.{ .protocol = .v5 });
+            var accepted = try final_pending.finish(.{
+                .protocol = .v3_1_1,
+            });
             final_pending_owned = false;
             defer accepted.deinit(self.server.allocator);
 
@@ -1118,6 +1145,10 @@ test "local outbound bridge adapts notification Will to refused capabilities" {
             .notifications = .{
                 .topic = "bridge/capability/state",
                 .publish_remote = true,
+            },
+            .target_protocol_fallback = .{
+                .protocol = .v3_1_1,
+                .bridge_mode = true,
             },
         },
         &shutdown,

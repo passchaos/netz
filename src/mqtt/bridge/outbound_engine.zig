@@ -75,6 +75,7 @@ pub const Options = struct {
     attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
     notifications: ?NotificationOptions = null,
+    target_protocol_fallback: ?ProtocolFallback = null,
 };
 
 pub const MultiOptions = struct {
@@ -91,6 +92,7 @@ pub const MultiOptions = struct {
     attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
     notifications: ?NotificationOptions = null,
+    target_protocol_fallback: ?ProtocolFallback = null,
     /// Construct a broker-local source without registering it yet. This is
     /// used by configuration reload staging so the active generation retains
     /// sole ownership until commit.
@@ -103,6 +105,11 @@ pub const MultiOptions = struct {
 pub const NotificationOptions = struct {
     topic: []const u8,
     publish_remote: bool = true,
+};
+
+pub const ProtocolFallback = struct {
+    protocol: mqtt.ProtocolVersion,
+    bridge_mode: bool = false,
 };
 
 pub const CoordinatorMode = enum {
@@ -190,6 +197,7 @@ pub fn Engine(comptime Source: type) type {
         coordinator: ?coordinator_mod.Store = null,
         poll_source_next: bool = true,
         notifications: ?OwnedNotifications = null,
+        target_protocol_fallback: ?ProtocolFallback = null,
         local_online: bool = false,
         once: bool = false,
 
@@ -218,6 +226,7 @@ pub fn Engine(comptime Source: type) type {
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
+                    .target_protocol_fallback = options.target_protocol_fallback,
                 },
                 shutdown,
             );
@@ -270,6 +279,7 @@ pub fn Engine(comptime Source: type) type {
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
+                    .target_protocol_fallback = options.target_protocol_fallback,
                 },
                 shutdown,
             );
@@ -320,6 +330,7 @@ pub fn Engine(comptime Source: type) type {
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
+                    .target_protocol_fallback = options.target_protocol_fallback,
                 },
                 shutdown,
             );
@@ -397,6 +408,24 @@ pub fn Engine(comptime Source: type) type {
                             if (rule.no_local) return error.InvalidProperty;
                         }
                     },
+                }
+            }
+            if (options.target_protocol_fallback) |fallback| {
+                if (options.target_connect.protocol != .v5 or
+                    fallback.protocol == .v5)
+                {
+                    return error.InvalidProperty;
+                }
+                if (target_connect.will) |will| {
+                    if (will.properties.len != 0) {
+                        return error.InvalidProperty;
+                    }
+                }
+                if (inbound_rules.values.len != 0 and
+                    rules.values.len != 0 and
+                    !fallback.bridge_mode)
+                {
+                    return error.UnsafeBidirectionalBridge;
                 }
             }
             const outbound_qos2 = rulesUseQoS2(rules.values);
@@ -561,6 +590,7 @@ pub fn Engine(comptime Source: type) type {
                     0,
                 .coordinator = coordinator,
                 .notifications = notifications,
+                .target_protocol_fallback = options.target_protocol_fallback,
             };
             errdefer if (result.coordinator) |*store| store.deinit();
             // `source` and result.source share owned storage at this temporary
@@ -643,8 +673,8 @@ pub fn Engine(comptime Source: type) type {
             while (true) {
                 const connected = self.target.connect() catch |err| {
                     if (err == error.ConnectRefused and
-                        adaptations < 2 and
-                        self.adaptTargetNotificationWill())
+                        adaptations < 3 and
+                        try self.adaptTargetConnectRefusal())
                     {
                         adaptations += 1;
                         continue;
@@ -661,7 +691,7 @@ pub fn Engine(comptime Source: type) type {
         ) (Error || std.Io.Cancelable)!?reconnect.ClientEvent {
             return self.target.pollWithOptions(options) catch |err| {
                 if (err == error.ConnectRefused and
-                    self.adaptTargetNotificationWill())
+                    try self.adaptTargetConnectRefusal())
                 {
                     return null;
                 }
@@ -669,10 +699,19 @@ pub fn Engine(comptime Source: type) type {
             };
         }
 
-        fn adaptTargetNotificationWill(self: *Self) bool {
-            const notifications = self.notifications orelse return false;
-            if (!notifications.publish_remote) return false;
-            return self.target.adaptWillToLastConnectRefusal();
+        fn adaptTargetConnectRefusal(self: *Self) Error!bool {
+            if (self.notifications) |notifications| {
+                if (notifications.publish_remote and
+                    self.target.adaptWillToLastConnectRefusal())
+                {
+                    return true;
+                }
+            }
+            const fallback = self.target_protocol_fallback orelse return false;
+            return self.target.adaptProtocolToLastConnectRefusal(
+                fallback.protocol,
+                fallback.bridge_mode,
+            );
         }
 
         pub fn disconnect(self: *Self, reason_code: u8) Error!void {
