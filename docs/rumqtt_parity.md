@@ -4891,9 +4891,8 @@ proxy evidence for the entire suite.
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 287 curated
-   scenarios, and extend the strict broker configuration adapter toward the
-   upstream harness's remaining listener-reload semantics. The process gate
-   now additionally locks twenty-one upstream sources:
+   scenarios. The strict broker configuration adapter now locks twenty-two
+   upstream process sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous
@@ -4908,7 +4907,14 @@ proxy evidence for the entire suite.
    a focused three-generation MQTT 3.1.1/5 restart gate. That gate additionally
    verifies QoS 2 DUP/PUBREL restoration, Clean Start cleanup, retained
    properties and expiry pruning rather than depending on Mosquitto's internal
-   database-count assertions. The
+   database-count assertions. Mosquitto's broad `16-config-huge.py` parser and
+   repeated-reload scenario is also source-locked. Its focused replacement
+   exercises both global and `per_listener_settings` policy resolution while
+   atomically swapping anonymous/password, zero-length Client ID, assigned-ID
+   prefix, accepted-version, Maximum QoS/Keep Alive and Topic Alias policy;
+   existing clients remain live and a changed listener port rolls back the
+   complete reload. Dynamic listener topology remains an explicit
+   restart-required boundary rather than a silently ignored setting. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security

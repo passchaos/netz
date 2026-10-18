@@ -116,6 +116,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "57ccce9ffecef64400e7d0a438c973ede0f94cac9519fec65cc149137b90abb8",
     "broker/16-config-missing.py":
         "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
+    "broker/16-config-huge.py":
+        "db9cabccbd61eec0eb89b263e9cc78aea1c7366b68121191c6cf37f315873fcd",
     "broker/23-security-password-file-reload.py":
         "de0ae7ebf17db99700bed5e12adf777a44f330a70b45196e3ff16147b2b70d42",
     "broker/23-security-acl-file-reload.py":
@@ -140,6 +142,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-persistence-restart", action="store_true")
+    selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
         "--only-bridge-connack-capabilities",
@@ -7474,6 +7477,17 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_listener_policy_reload:
+            run_listener_policy_reload_case(args.broker, directory)
+            print(
+                "MQTT listener policy reload integration passed: "
+                "upstream=config-huge per-listener=false+true reloads=two "
+                "anonymous+password+zero-id+prefix+protocol+qos+keepalive+alias=true "
+                "topology-change=rollback live-client=continuous "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_bridge_reload:
             run_bridge_reload_case(args.broker, directory)
             print(
@@ -7621,7 +7635,8 @@ def main() -> None:
         "source-locked Unix listener lifecycle, "
         "source-locked mTLS CN/Subject SIGHUP continuity, "
         "source-locked change-count autosave and restore, "
-        "source-locked global/listener anonymous policy precedence, "
+        "source-locked global/listener anonymous policy precedence and "
+        "multi-policy listener SIGHUP reload, "
         "source-locked MQTT 3.1/3.1.1/5 username-or-anonymous policy, "
         "source-locked authentication-before-Client-ID-takeover ordering, "
         "empty password-file named-user deny-all generation "
