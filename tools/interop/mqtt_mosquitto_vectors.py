@@ -18,6 +18,7 @@ import tempfile
 import time
 
 from mqtt_vectors import (
+    bad_authentication_method,
     disconnect_forms,
     maximum_topic_hierarchy,
     pattern_matching,
@@ -38,6 +39,7 @@ from mqtt_vectors import (
 BASE_SCENARIO_COUNT = 171
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
+    + bad_authentication_method.SCENARIO_COUNT
     + disconnect_forms.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_incoming_qos2.SCENARIO_COUNT
@@ -6326,6 +6328,14 @@ def main() -> None:
     import mqtt5_opts  # type: ignore
     import mqtt_packets  # type: ignore
 
+    bad_authentication_method.run(
+        args.broker,
+        mqtt_packets,
+        mqtt5_props,
+        mqtt5_rc,
+        NetzBroker,
+        expect_packet,
+    )
     unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
     mqtt31_client_identifier_length(args.broker, mqtt_packets)
     mqtt31_duplicate_control_flags(args.broker, mqtt_packets)
