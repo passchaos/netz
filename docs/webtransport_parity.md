@@ -1229,6 +1229,12 @@ handle routing, both-session progress and payload isolation.
    repeatability shape at three repetitions; multi-minute and heterogeneous
    network distributions remain evidence work rather than a basic progress
    bug.
+   The default `interop-webtransport-stream-churn` gate now appends a compact
+   ceiling regression on every run: 256 streams, 512 bytes per stream, 128
+   ordinary resets after a 256-byte prefix and deterministic 5% loss. It
+   verifies 98,304 bytes and forces the reset burst beyond the initial
+   congestion window, preserving the former failure boundary without turning
+   routine validation into the full 64-KiB long-run matrix.
 
 The whole-stream and caller-buffer incremental receive pollers enumerate QUIC
 receive streams through a fixed 256-ID stack page, but that page is not a

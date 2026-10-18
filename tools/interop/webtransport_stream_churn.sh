@@ -49,7 +49,7 @@ run_case() {
       grep -Fq '  reset mode: ordinary' "$output"
     fi
     case $label in
-      loss|reliable-loss)
+      loss|reliable-loss|ceiling-loss)
         grep -Fq '  simulated loss percent: 5' "$output"
         awk '/  datagrams dropped:/ { if ($3 + 0 > 0) found=1 } END { exit !found }' "$output"
         ;;
@@ -89,3 +89,18 @@ expected_bytes=$((finished_streams * transfer_bytes + reset_streams * reset_pref
 run_case reliable-loss --reliable-reset --loss-pct=5
 run_case reliable-client-reorder --reliable-reset \
   --reorder-every=5 --fault-direction=client
+
+# Keep the former large-reset congestion failure in the default gate without
+# making every routine run transfer the full long-run payload matrix. The
+# 128 RESET_STREAM frames exceed the initial congestion window; 512 bytes per
+# stream are enough to exercise ACK/PTO progress while keeping this case small.
+runs=1
+streams=256
+transfer_bytes=512
+reset_every=2
+reset_after_bytes=256
+reset_streams=$((streams / reset_every))
+finished_streams=$((streams - reset_streams))
+reset_prefix=$reset_after_bytes
+expected_bytes=$((finished_streams * transfer_bytes + reset_streams * reset_prefix))
+run_case ceiling-loss --loss-pct=5
