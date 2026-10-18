@@ -2670,7 +2670,10 @@ bridge `bridge_tls_version`/`bridge_ciphers` map this policy explicitly.
 Both endpoint roles support X25519, P-256, P-384, and P-521. The dual-version
 client retains independent TLS 1.2 private material for every group it
 advertises, so an OpenSSL TLS 1.2 server may select its default X25519 rather
-than being restricted to a test-forced P-256 fallback.
+than being restricted to a test-forced P-256 fallback. Netz's high-level
+client/server default is X25519-first with P-256 fallback, matching the modern
+OpenSSL/rustls preference; Vail's low-level caller-owned policy remains
+explicit.
 TLS 1.2 clients filter a configured identity against CertificateRequest's
 certificate types, signature algorithms, and acceptable CA distinguished
 names. Compatible P-521 identities are supported; when no identity is suitable

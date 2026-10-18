@@ -381,7 +381,8 @@ Current protocol coverage includes:
   TLS-1.3-only, TLS-1.2-only, or highest-version negotiation policy; TLS 1.2
   permits only ECDHE+AEAD suites, requires Extended Master Secret and secure
   renegotiation signaling, supports X25519/P-256/P-384/P-521 in both endpoint
-  roles, and rejects renegotiation. Both versions provide
+  roles with an X25519-first/P-256-fallback high-level default, and rejects
+  renegotiation. Both versions provide
   optional/required client authentication, explicit ALPN enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
   introspection, default RFC 6066 OCSP status requests plus optional mandatory

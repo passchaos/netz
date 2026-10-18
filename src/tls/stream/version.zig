@@ -65,10 +65,9 @@ pub const default_tls12_cipher_suites = [_]vail.tls.tls12.Suite{
 };
 
 pub const default_tls12_groups = [_]u16{
-    // Preserve the established P-256 server preference while retaining
-    // X25519 for dual-version ClientHellos and X25519-only peers.
-    vail.tls.key_exchange.named_group_secp256r1,
+    // Match modern OpenSSL/rustls preference while retaining P-256 fallback.
     vail.tls.key_exchange.named_group_x25519,
+    vail.tls.key_exchange.named_group_secp256r1,
 };
 
 pub fn transcriptHash(
@@ -89,12 +88,12 @@ test "version policy never enables pre-TLS-1.2 protocols" {
     try std.testing.expect(!Policy.tls12_only.offersTls13());
 }
 
-test "TLS 1.2 defaults retain P-256 preference and X25519 fallback" {
+test "TLS 1.2 defaults prefer X25519 with P-256 fallback" {
     try std.testing.expectEqualSlices(
         u16,
         &.{
-            vail.tls.key_exchange.named_group_secp256r1,
             vail.tls.key_exchange.named_group_x25519,
+            vail.tls.key_exchange.named_group_secp256r1,
         },
         &default_tls12_groups,
     );
