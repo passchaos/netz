@@ -1,4 +1,4 @@
-//! RFC 9298 URI Template validation and scalar expansion.
+//! MASQUE URI Template validation and scalar expansion.
 //!
 //! RFC 9298 permits Level-3 templates but explicitly excludes reserved,
 //! fragment, label, path-segment, and path-parameter operators. Consequently
@@ -31,6 +31,18 @@ pub const Template = struct {
     request_template: []const u8,
 
     pub fn compile(source: []const u8) Error!Template {
+        return compileWithRequiredVariables(source, &.{
+            "target_host",
+            "target_port",
+        });
+    }
+
+    /// Compile the common RFC 9298/RFC 9484 Level-3 subset while requiring
+    /// the protocol-specific variables supplied by the caller.
+    pub fn compileWithRequiredVariables(
+        source: []const u8,
+        required_variables: []const []const u8,
+    ) Error!Template {
         if (source.len == 0) return error.InvalidUriTemplate;
         for (source, 0..) |byte, index| {
             if (byte < 0x21 or byte > 0x7e or byte == '#') {
@@ -79,8 +91,6 @@ pub const Template = struct {
             return error.InvalidUriTemplate;
         }
 
-        var target_host_found = false;
-        var target_port_found = false;
         var query_started = false;
         var index: usize = 0;
         while (index < request_template.len) {
@@ -124,16 +134,20 @@ pub const Template = struct {
             while (names.next()) |name| {
                 try validateVariableName(name);
                 count += 1;
-                target_host_found = target_host_found or
-                    std.mem.eql(u8, name, "target_host");
-                target_port_found = target_port_found or
-                    std.mem.eql(u8, name, "target_port");
             }
             if (count == 0) return error.InvalidUriTemplate;
             index = end + 1;
         }
-        if (!target_host_found or !target_port_found) {
-            return error.MissingTemplateVariable;
+        for (required_variables, 0..) |required, required_index| {
+            try validateVariableName(required);
+            for (required_variables[0..required_index]) |previous| {
+                if (std.mem.eql(u8, previous, required)) {
+                    return error.DuplicateTemplateVariable;
+                }
+            }
+            if (!templateContainsVariable(request_template, required)) {
+                return error.MissingTemplateVariable;
+            }
         }
         return .{
             .source = source,
@@ -149,12 +163,24 @@ pub const Template = struct {
         target_port: u16,
         variables: []const Variable,
     ) Error!usize {
-        return self.expandInternal(
-            null,
-            target_host,
+        try validateTargetHost(target_host);
+        if (target_port == 0) return error.InvalidTarget;
+        var port_storage: [5]u8 = undefined;
+        const port = std.fmt.bufPrint(&port_storage, "{d}", .{
             target_port,
-            variables,
-        );
+        }) catch unreachable;
+        return self.expandedVariablesLen(&.{
+            .{ .name = "target_host", .value = target_host },
+            .{ .name = "target_port", .value = port },
+        }, variables);
+    }
+
+    pub fn expandedVariablesLen(
+        self: Template,
+        builtins: []const Variable,
+        variables: []const Variable,
+    ) Error!usize {
+        return self.expandVariablesInternal(null, builtins, variables);
     }
 
     /// Expand only the HTTP request target (path and optional query) into
@@ -173,10 +199,31 @@ pub const Template = struct {
             variables,
         );
         if (out.len < needed) return error.BufferTooShort;
-        const written = try self.expandInternal(
-            out,
-            target_host,
+        try validateTargetHost(target_host);
+        if (target_port == 0) return error.InvalidTarget;
+        var port_storage: [5]u8 = undefined;
+        const port = std.fmt.bufPrint(&port_storage, "{d}", .{
             target_port,
+        }) catch unreachable;
+        const written = try self.expandVariablesInternal(out, &.{
+            .{ .name = "target_host", .value = target_host },
+            .{ .name = "target_port", .value = port },
+        }, variables);
+        std.debug.assert(written == needed);
+        return out[0..written];
+    }
+
+    pub fn expandVariablesRequestTargetInto(
+        self: Template,
+        out: []u8,
+        builtins: []const Variable,
+        variables: []const Variable,
+    ) Error![]u8 {
+        const needed = try self.expandedVariablesLen(builtins, variables);
+        if (out.len < needed) return error.BufferTooShort;
+        const written = try self.expandVariablesInternal(
+            out,
+            builtins,
             variables,
         );
         std.debug.assert(written == needed);
@@ -216,11 +263,37 @@ pub const Template = struct {
         return out[0..needed];
     }
 
-    fn expandInternal(
+    pub fn expandVariablesUriInto(
+        self: Template,
+        out: []u8,
+        builtins: []const Variable,
+        variables: []const Variable,
+    ) Error![]u8 {
+        const prefix_len = self.source.len - self.request_template.len;
+        const request_target_len = try self.expandedVariablesLen(
+            builtins,
+            variables,
+        );
+        const needed = std.math.add(
+            usize,
+            prefix_len,
+            request_target_len,
+        ) catch return error.IntegerOverflow;
+        if (out.len < needed) return error.BufferTooShort;
+        @memcpy(out[0..prefix_len], self.source[0..prefix_len]);
+        const request_target = try self.expandVariablesRequestTargetInto(
+            out[prefix_len..needed],
+            builtins,
+            variables,
+        );
+        std.debug.assert(request_target.len == request_target_len);
+        return out[0..needed];
+    }
+
+    fn expandVariablesInternal(
         self: Template,
         out: ?[]u8,
-        target_host: []const u8,
-        target_port: u16,
+        builtins: []const Variable,
         variables: []const Variable,
     ) Error!usize {
         if (self.request_template.len == 0 or
@@ -228,13 +301,7 @@ pub const Template = struct {
         {
             return error.InvalidUriTemplate;
         }
-        try validateTargetHost(target_host);
-        if (target_port == 0) return error.InvalidTarget;
-        try validateVariables(variables);
-        var port_storage: [5]u8 = undefined;
-        const port = std.fmt.bufPrint(&port_storage, "{d}", .{
-            target_port,
-        }) catch unreachable;
+        try validateVariables(builtins, variables);
 
         var writer = Writer{ .out = out };
         var query_emitted = false;
@@ -261,8 +328,7 @@ pub const Template = struct {
             while (names.next()) |name| {
                 const value = variableValue(
                     name,
-                    target_host,
-                    port,
+                    builtins,
                     variables,
                 ) orelse continue;
                 switch (operator) {
@@ -340,13 +406,54 @@ fn validateVariableName(name: []const u8) Error!void {
     if (segment_len == 0) return error.InvalidUriTemplate;
 }
 
-fn validateVariables(variables: []const Variable) Error!void {
+fn templateContainsVariable(
+    request_template: []const u8,
+    expected: []const u8,
+) bool {
+    var index: usize = 0;
+    while (index < request_template.len) {
+        if (request_template[index] != '{') {
+            index += 1;
+            continue;
+        }
+        const end = std.mem.indexOfScalarPos(
+            u8,
+            request_template,
+            index + 1,
+            '}',
+        ) orelse return false;
+        const expression = request_template[index + 1 .. end];
+        const names_text = switch (expression[0]) {
+            '?', '&' => expression[1..],
+            else => expression,
+        };
+        var names = std.mem.splitScalar(u8, names_text, ',');
+        while (names.next()) |name| {
+            if (std.mem.eql(u8, name, expected)) return true;
+        }
+        index = end + 1;
+    }
+    return false;
+}
+
+fn validateVariables(
+    builtins: []const Variable,
+    variables: []const Variable,
+) Error!void {
+    for (builtins, 0..) |builtin, index| {
+        try validateVariableName(builtin.name);
+        for (builtins[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, builtin.name)) {
+                return error.DuplicateTemplateVariable;
+            }
+        }
+    }
     for (variables, 0..) |variable, index| {
         try validateVariableName(variable.name);
-        if (std.mem.eql(u8, variable.name, "target_host") or
-            std.mem.eql(u8, variable.name, "target_port"))
-        {
-            return error.DuplicateTemplateVariable;
+        for (builtins) |builtin| {
+            if (std.mem.eql(u8, variable.name, builtin.name)) {
+                return error.DuplicateTemplateVariable;
+            }
         }
         for (variables[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, variable.name)) {
@@ -358,12 +465,12 @@ fn validateVariables(variables: []const Variable) Error!void {
 
 fn variableValue(
     name: []const u8,
-    target_host: []const u8,
-    target_port: []const u8,
+    builtins: []const Variable,
     variables: []const Variable,
 ) ?[]const u8 {
-    if (std.mem.eql(u8, name, "target_host")) return target_host;
-    if (std.mem.eql(u8, name, "target_port")) return target_port;
+    for (builtins) |builtin| {
+        if (std.mem.eql(u8, name, builtin.name)) return builtin.value;
+    }
     for (variables) |variable| {
         if (std.mem.eql(u8, name, variable.name)) return variable.value;
     }

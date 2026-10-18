@@ -856,6 +856,15 @@ variables; forbidden Level-2/3 operators and all Level-4 modifiers fail during
 compilation. A second H3 Session in the same real exchange uses a query template
 and application-selected server target, rather than treating custom templates
 as the default path.
+The adjacent `http3.connect_ip` module now implements the RFC 9484 protocol
+core: strict wildcard/DNS/IP-prefix and `ipproto` scopes, default or configured
+Level-3 URI Templates, Extended CONNECT metadata, Context ID 0 IP packet
+framing, and caller-buffer ADDRESS_ASSIGN, ADDRESS_REQUEST, and ordered
+ROUTE_ADVERTISEMENT Capsule codecs. Malformed address families, non-network
+prefixes, zero or per-Capsule duplicate emitted Request IDs, reversed/overlapping routes,
+and short output are rejected transactionally. This is codec and negotiation
+coverage; version-specific HTTP/1.1, HTTP/2, and HTTP/3 Session/runtime adapters
+and independent CONNECT-IP peer interop remain open.
 H1/H2 Capsule Sessions additionally expose caller-buffer receive with
 non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both

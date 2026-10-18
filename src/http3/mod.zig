@@ -11,6 +11,7 @@ const header_fields = @import("codec/header_storage.zig");
 pub const runtime = @import("runtime.zig");
 pub const capsule = @import("capsule.zig");
 pub const connect_udp = @import("connect_udp.zig").Protocol(@This());
+pub const connect_ip = @import("connect_ip.zig").Protocol(@This());
 pub const origin_pool = @import("origin_pool.zig");
 
 pub const Error = wire.Error || error{
@@ -8736,6 +8737,7 @@ test "HTTP/3 response honors HEAD and CONNECT request semantics" {
 test {
     _ = runtime;
     _ = origin_pool;
+    _ = @import("connect_ip_tests.zig");
     _ = @import("codec/header_capacity_tests.zig");
     _ = @import("informational_tests.zig");
 }

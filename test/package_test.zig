@@ -3260,6 +3260,41 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "hitRate"));
     try std.testing.expect(@hasDecl(netz.http3, "capsule"));
     try std.testing.expect(@hasDecl(netz.http3, "connect_udp"));
+    try std.testing.expect(@hasDecl(netz.http3, "connect_ip"));
+    inline for (&.{
+        "Scope",
+        "UriTemplate",
+        "ContextDatagram",
+        "requestInto",
+        "requestWithTemplateInto",
+        "validateDefaultRequest",
+        "validateDecodedDefaultRequest",
+        "successResponse",
+        "validateResponse",
+        "writeIpPacketInto",
+        "maxIpPacketForHttpDatagram",
+        "capsules",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(netz.http3.connect_ip, decl));
+    }
+    inline for (&.{
+        "IpAddress",
+        "AddressPrefix",
+        "AddressIterator",
+        "Route",
+        "RouteIterator",
+        "parseAddressAssign",
+        "parseAddressRequest",
+        "parseRouteAdvertisement",
+        "writeAddressAssignInto",
+        "writeAddressRequestInto",
+        "writeRouteAdvertisementInto",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.connect_ip.capsules,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http3.connect_udp,
         "ContextDatagram",

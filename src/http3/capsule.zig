@@ -20,6 +20,9 @@ pub const ParseError = wire.Error || error{IntegerOverflow};
 
 pub const CapsuleType = struct {
     pub const datagram: u64 = 0x00;
+    pub const address_assign: u64 = 0x01;
+    pub const address_request: u64 = 0x02;
+    pub const route_advertisement: u64 = 0x03;
 };
 
 pub const header_name = "capsule-protocol";
@@ -59,6 +62,12 @@ pub const Capsule = struct {
 
     pub fn isDatagram(self: Capsule) bool {
         return self.capsule_type == CapsuleType.datagram;
+    }
+
+    pub fn isConnectIpConfiguration(self: Capsule) bool {
+        return self.capsule_type == CapsuleType.address_assign or
+            self.capsule_type == CapsuleType.address_request or
+            self.capsule_type == CapsuleType.route_advertisement;
     }
 };
 

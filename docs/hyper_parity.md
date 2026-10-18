@@ -1612,6 +1612,16 @@ bidirectional payloads, fragmentation, unknown extensions, timeout resumption,
 and strict Capsule negotiation; the authenticated HTTP/3 exchange additionally
 proves SETTINGS ordering, default and custom-template expansion, and two
 independent Sessions.
+RFC 9484 CONNECT-IP now has a shared transport-neutral core at
+`http3.connect_ip`. It validates wildcard, DNS, IPv4-prefix, IPv6-prefix and
+Internet Protocol Number request scopes; supports the default and configured
+Level-3 MASQUE URI Templates; validates Extended CONNECT responses; frames
+Context ID 0 IP packets; and provides allocation-free ADDRESS_ASSIGN,
+ADDRESS_REQUEST and ROUTE_ADVERTISEMENT Capsule codecs. Prefix host bits,
+nonzero/per-Capsule-unique emitted Request IDs, route ordering, same-protocol overlap and
+protocol-zero cross-protocol overlap are checked before writers touch caller
+storage. HTTP/1.1 Upgrade and HTTP/2/HTTP/3 runtime Session adapters remain the
+next CONNECT-IP layer and are not claimed by this codec-level slice.
 The Capsule Session also has caller-buffer receive variants matching the H3
 DATAGRAM surface. A short output leaves the complete datagram pending for a
 larger retry, while warmed reads avoid the owning API's per-payload allocation.
