@@ -1019,6 +1019,10 @@ pub const AcceptOptions = struct {
     /// Packet is charged after a successful transport read or write, including
     /// CONNECT/CONNACK and packets later rejected by semantic validation.
     traffic_counters: ?*TrafficCounters = null,
+    /// Retain live deltas on the Connection until an explicit flush or close.
+    /// Broker owners that include active Connection snapshots can avoid a
+    /// shared atomic update for every packet while preserving lifetime totals.
+    traffic_counters_deferred: bool = false,
     /// Absolute budget for receiving the first complete CONNECT packet after
     /// the underlying TCP/TLS/WebSocket transport is established. A null value
     /// preserves unbounded behavior; zero fails before reading.
@@ -1070,6 +1074,13 @@ pub const TrafficStats = struct {
     messages_sent: u64,
     bytes_received: u64,
     bytes_sent: u64,
+
+    pub fn add(self: *TrafficStats, values: TrafficStats) void {
+        self.messages_received +%= values.messages_received;
+        self.messages_sent +%= values.messages_sent;
+        self.bytes_received +%= values.bytes_received;
+        self.bytes_sent +%= values.bytes_sent;
+    }
 };
 
 /// Thread-safe cumulative counters suitable for sharing across all connections
@@ -2923,6 +2934,7 @@ pub const Connection = struct {
     transport: PacketTransport,
     traffic: TrafficCounters = .{},
     traffic_sink: ?*TrafficCounters = null,
+    traffic_sink_deferred: bool = false,
     protocol: mqtt.ProtocolVersion = .v5,
     strict_utf8: bool = false,
     endpoint_role: EndpointRole = .unestablished,
@@ -3073,6 +3085,7 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
+        self.flushDeferredTrafficCounters();
         self.packet_identifiers.deinit(self.allocator);
         self.clearTopicAliases();
         self.clearAssignedClientId();
@@ -3123,7 +3136,9 @@ pub const Connection = struct {
         self: *Connection,
         counters: *TrafficCounters,
     ) void {
-        if (self.traffic_sink == counters) return;
+        if (self.traffic_sink == counters and !self.traffic_sink_deferred) {
+            return;
+        }
         std.debug.assert(self.traffic_sink == null);
         counters.add(self.traffic.stats());
         // Traffic observed before attachment is now represented by the
@@ -3131,6 +3146,34 @@ pub const Connection = struct {
         // or defensive reattachment cannot charge those packets twice.
         self.traffic = .{};
         self.traffic_sink = counters;
+    }
+
+    /// Attach a sink whose live delta remains connection-owned until an
+    /// explicit flush or close. Owners that can include active connection
+    /// snapshots in their aggregate view avoid two shared atomic RMWs per
+    /// packet while retaining exact lifetime totals.
+    pub fn attachDeferredTrafficCounters(
+        self: *Connection,
+        counters: *TrafficCounters,
+    ) void {
+        if (self.traffic_sink == counters and self.traffic_sink_deferred) {
+            return;
+        }
+        std.debug.assert(self.traffic_sink == null);
+        self.traffic_sink = counters;
+        self.traffic_sink_deferred = true;
+    }
+
+    /// Move a deferred connection delta into its shared lifetime sink once.
+    /// Callers must first stop both direction owners or otherwise serialize
+    /// this boundary with them.
+    pub fn flushDeferredTrafficCounters(self: *Connection) void {
+        if (!self.traffic_sink_deferred) return;
+        const counters = self.traffic_sink orelse unreachable;
+        counters.add(self.traffic.stats());
+        self.traffic = .{};
+        self.traffic_sink = null;
+        self.traffic_sink_deferred = false;
     }
 
     pub fn trafficStats(self: *const Connection) TrafficStats {
@@ -3547,7 +3590,11 @@ pub const Connection = struct {
         }
         self.strict_utf8 = options.strict_utf8;
         if (options.traffic_counters) |counters| {
-            self.attachTrafficCounters(counters);
+            if (options.traffic_counters_deferred) {
+                self.attachDeferredTrafficCounters(counters);
+            } else {
+                self.attachTrafficCounters(counters);
+            }
         }
         var connect = (if (deadline) |absolute|
             self.readConnectPacketWithDeadline(absolute)
@@ -6701,12 +6748,16 @@ pub const Connection = struct {
 
     fn recordPacketReceived(self: *Connection, bytes: usize) void {
         self.traffic.recordReceivedExclusive(bytes);
-        if (self.traffic_sink) |counters| counters.recordReceived(bytes);
+        if (!self.traffic_sink_deferred) {
+            if (self.traffic_sink) |counters| counters.recordReceived(bytes);
+        }
     }
 
     fn recordPacketSent(self: *Connection, bytes: usize) void {
         self.traffic.recordSentExclusive(bytes);
-        if (self.traffic_sink) |counters| counters.recordSent(bytes);
+        if (!self.traffic_sink_deferred) {
+            if (self.traffic_sink) |counters| counters.recordSent(bytes);
+        }
     }
 
     fn pendingPacketCount(self: *const Connection) usize {
@@ -7548,6 +7599,59 @@ test "MQTT exclusive traffic updates preserve wrapping counter semantics" {
             .bytes_sent = 0,
         },
         counters.stats(),
+    );
+}
+
+test "MQTT deferred traffic sink flushes one exact connection delta" {
+    var aggregate: TrafficCounters = .{};
+    var connection = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+    };
+    connection.recordPacketReceived(7);
+    connection.attachDeferredTrafficCounters(&aggregate);
+    connection.attachDeferredTrafficCounters(&aggregate);
+    connection.recordPacketReceived(11);
+    connection.recordPacketSent(13);
+
+    try std.testing.expectEqualDeep(
+        TrafficStats{
+            .messages_received = 2,
+            .messages_sent = 1,
+            .bytes_received = 18,
+            .bytes_sent = 13,
+        },
+        connection.trafficStats(),
+    );
+    try std.testing.expectEqualDeep(
+        TrafficStats{
+            .messages_received = 0,
+            .messages_sent = 0,
+            .bytes_received = 0,
+            .bytes_sent = 0,
+        },
+        aggregate.stats(),
+    );
+
+    connection.flushDeferredTrafficCounters();
+    connection.flushDeferredTrafficCounters();
+    try std.testing.expectEqualDeep(
+        TrafficStats{
+            .messages_received = 0,
+            .messages_sent = 0,
+            .bytes_received = 0,
+            .bytes_sent = 0,
+        },
+        connection.trafficStats(),
+    );
+    try std.testing.expectEqualDeep(
+        TrafficStats{
+            .messages_received = 2,
+            .messages_sent = 1,
+            .bytes_received = 18,
+            .bytes_sent = 13,
+        },
+        aggregate.stats(),
     );
 }
 

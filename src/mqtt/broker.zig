@@ -3267,7 +3267,13 @@ pub const Broker = struct {
             live_queued_deliveries +|= slot.queuedCount();
         }
         const sessions = self.sessions.aggregateStats();
-        const traffic = self.traffic.stats();
+        var traffic = self.traffic.stats();
+        for (self.slots) |slot| {
+            if (slot.connection) |connection| {
+                std.debug.assert(connection.traffic_sink_deferred);
+                traffic.add(connection.trafficStats());
+            }
+        }
         const publish = self.publish_counters.snapshot();
         return .{
             .uptime_seconds = uptimeSeconds(
@@ -3995,6 +4001,7 @@ pub const Broker = struct {
         const server = &(self.server orelse return error.InvalidProperty);
         var accept_options = self.options.accept;
         accept_options.traffic_counters = &self.traffic;
+        accept_options.traffic_counters_deferred = true;
         const listener = Listener{
             .source = server.pendingSource(),
             .accept = accept_options,
@@ -4305,6 +4312,7 @@ pub const Broker = struct {
         var result = listener;
         var accept_options = listener.accept orelse self.options.accept;
         accept_options.traffic_counters = &self.traffic;
+        accept_options.traffic_counters_deferred = true;
         result.accept = accept_options;
         return result;
     }
@@ -4316,6 +4324,7 @@ pub const Broker = struct {
         var result = listener;
         var accept_options = listener.accept orelse self.options.accept;
         accept_options.traffic_counters = &self.traffic;
+        accept_options.traffic_counters_deferred = true;
         result.accept = accept_options;
         return result;
     }
@@ -4378,7 +4387,7 @@ pub const Broker = struct {
         auto_client_id_prefix: []const u8,
     ) anyerror!void {
         try validateAutoClientIdPrefix(auto_client_id_prefix);
-        pending.connection.attachTrafficCounters(&self.traffic);
+        pending.connection.attachDeferredTrafficCounters(&self.traffic);
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
         defer if (slot_claimed) {
@@ -4597,7 +4606,7 @@ pub const Broker = struct {
     ) Error!?ClientTask {
         var pending_owned = true;
         defer if (pending_owned) pending.deinit(self.allocator);
-        pending.connection.attachTrafficCounters(&self.traffic);
+        pending.connection.attachDeferredTrafficCounters(&self.traffic);
         var suppress_reserved_will =
             self.options.protect_reserved_topics and
             if (pending.connect.connect.will) |will|
@@ -5514,6 +5523,9 @@ pub const Broker = struct {
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
         // mutex, so it can never reserve a slot that still owns a connection.
+        if (slot.connection) |active| {
+            active.flushDeferredTrafficCounters();
+        }
         const connection = slot.connection;
         const assigned_client_id = slot.takeAssignedClientId();
         const listener_access_control = slot.listener_access_control;
