@@ -393,7 +393,11 @@ pub fn Session(
                         parsed.capsule.capsule_type,
                         parsed.capsule.value,
                     ) catch |err| {
-                        try self.cancelMalformed();
+                        switch (err) {
+                            error.OutOfMemory => return err,
+                            error.ExcessiveLoad => try self.cancelExcessiveLoad(),
+                            else => try self.cancelMalformed(),
+                        }
                         return err;
                     };
                 }
@@ -584,6 +588,13 @@ pub fn Session(
             return self.parent.cancelRequest(
                 self.stream_id,
                 Http3.ApplicationErrorCode.message_error,
+            );
+        }
+
+        fn cancelExcessiveLoad(self: *Self) !void {
+            return self.parent.cancelRequest(
+                self.stream_id,
+                Http3.ApplicationErrorCode.excessive_load,
             );
         }
 

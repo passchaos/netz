@@ -872,15 +872,20 @@ send, poll, and close APIs; the dispatcher remains the sole UDP reader and
 hands the typed Session explicit FIN observation. A new offline-locked process
 gate, `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast`, uses the audited
 `~/Work/h3` `Protocol::CONNECT_IP` token plus an independent Rust
-ADDRESS_REQUEST/ADDRESS_ASSIGN and Context-ID codec. Netz and h3/Quinn each run
-as client and server, exchange 20/40-byte IP packets with delivery ack, and
+ADDRESS_REQUEST/ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT, and Context-ID codec. Netz
+and h3/Quinn each run as client and server, exchange an advertised route and
+empty-snapshot withdrawal plus 20/40-byte IP packets with delivery ack, and
 independently observe request and response FIN before connection shutdown.
 An optional per-tunnel `ConfigurationState` adds the cross-Capsule rules that a
 stateless codec cannot enforce: lifetime Request ID uniqueness, bounded
-assignment/route snapshots, empty-list withdrawal, two-phase local ID commit
-across timed writes, transactional peer updates, response-ID correlation, and
-source/route queries including RFC 9484's ICMP exception. Kernel interface and
-forwarding policy remain application-owned.
+assignment/route snapshots in both directions, empty-list withdrawal, and
+two-phase local ID and snapshot commit across timed writes. Outgoing nonzero
+assignment IDs must correlate to peer requests; peer updates are transactional;
+and symmetric source/route queries include RFC 9484's ICMP exception. H1/H2
+payload-only reads cannot bypass configuration validation or state application,
+and a local allocation failure leaves the Capsule retryable without a false
+protocol reset. Kernel interface and forwarding policy remain
+application-owned.
 H1/H2 Capsule Sessions additionally expose caller-buffer receive with
 non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both

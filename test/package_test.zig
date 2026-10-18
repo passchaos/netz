@@ -3366,8 +3366,12 @@ test "public modules are reachable" {
         "applyPeerCapsule",
         "assignedPrefixes",
         "advertisedRoutes",
+        "sentAssignedPrefixes",
+        "sentAdvertisedRoutes",
         "sourceIsAssigned",
         "routeAllows",
+        "peerSourceIsAssigned",
+        "peerRouteAllows",
     }) |decl| {
         try std.testing.expect(@hasDecl(
             netz.http3.connect_ip.ConfigurationState,

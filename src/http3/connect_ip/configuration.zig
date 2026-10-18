@@ -23,6 +23,13 @@ pub const ApplyResult = enum {
     unknown,
 };
 
+const PreparedLocal = enum {
+    none,
+    address_request,
+    address_assign,
+    route_advertisement,
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
@@ -32,11 +39,18 @@ pub const State = struct {
     peer_request_id_staging: std.ArrayList(u62) = .empty,
     assignments: std.ArrayList(capsules.AddressPrefix) = .empty,
     assignment_staging: std.ArrayList(capsules.AddressPrefix) = .empty,
+    sent_assignments: std.ArrayList(capsules.AddressPrefix) = .empty,
+    sent_assignment_staging: std.ArrayList(capsules.AddressPrefix) = .empty,
     routes: std.ArrayList(capsules.Route) = .empty,
     route_staging: std.ArrayList(capsules.Route) = .empty,
-    local_prepare_active: bool = false,
+    sent_routes: std.ArrayList(capsules.Route) = .empty,
+    sent_route_staging: std.ArrayList(capsules.Route) = .empty,
+    response_id_staging: std.ArrayList(u62) = .empty,
+    local_prepared: PreparedLocal = .none,
     assignment_revision: u64 = 0,
     route_revision: u64 = 0,
+    sent_assignment_revision: u64 = 0,
+    sent_route_revision: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, limits: Limits) State {
         return .{ .allocator = allocator, .limits = limits };
@@ -49,8 +63,13 @@ pub const State = struct {
         self.peer_request_id_staging.deinit(self.allocator);
         self.assignments.deinit(self.allocator);
         self.assignment_staging.deinit(self.allocator);
+        self.sent_assignments.deinit(self.allocator);
+        self.sent_assignment_staging.deinit(self.allocator);
         self.routes.deinit(self.allocator);
         self.route_staging.deinit(self.allocator);
+        self.sent_routes.deinit(self.allocator);
+        self.sent_route_staging.deinit(self.allocator);
+        self.response_id_staging.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -60,6 +79,18 @@ pub const State = struct {
 
     pub fn advertisedRoutes(self: *const State) []const capsules.Route {
         return self.routes.items;
+    }
+
+    /// Latest ADDRESS_ASSIGN snapshot completely committed to the peer.
+    pub fn sentAssignedPrefixes(
+        self: *const State,
+    ) []const capsules.AddressPrefix {
+        return self.sent_assignments.items;
+    }
+
+    /// Latest ROUTE_ADVERTISEMENT snapshot completely committed to the peer.
+    pub fn sentAdvertisedRoutes(self: *const State) []const capsules.Route {
+        return self.sent_routes.items;
     }
 
     pub fn localRequestCount(self: *const State) usize {
@@ -85,35 +116,79 @@ pub const State = struct {
         capsule_type: u64,
         value: []const u8,
     ) Error!void {
-        if (self.local_prepare_active) return error.InvalidCapsule;
-        if (capsule_type != capsules.address_request_type) return;
-        var iterator = capsules.parseAddressRequest(value) catch
-            return error.InvalidCapsule;
-        try self.collectRequestIds(
-            &iterator,
-            &self.local_request_ids,
-            &self.local_request_id_staging,
-        );
-        try self.ensureRequestIdCapacity(
-            &self.local_request_ids,
-            self.local_request_id_staging.items.len,
-        );
-        self.local_prepare_active = true;
+        if (self.local_prepared != .none) return error.InvalidCapsule;
+        switch (capsule_type) {
+            capsules.address_request_type => {
+                var iterator = capsules.parseAddressRequest(value) catch
+                    return error.InvalidCapsule;
+                try self.collectRequestIds(
+                    &iterator,
+                    &self.local_request_ids,
+                    &self.local_request_id_staging,
+                );
+                try self.ensureRequestIdCapacity(
+                    &self.local_request_ids,
+                    self.local_request_id_staging.items.len,
+                );
+                self.local_prepared = .address_request;
+            },
+            capsules.address_assign_type => {
+                try self.stageAssignments(
+                    value,
+                    &self.peer_request_ids,
+                    &self.sent_assignment_staging,
+                );
+                self.local_prepared = .address_assign;
+            },
+            capsules.route_advertisement_type => {
+                try self.stageRoutes(value, &self.sent_route_staging);
+                self.local_prepared = .route_advertisement;
+            },
+            else => {},
+        }
     }
 
     pub fn commitPreparedLocalCapsule(self: *State) void {
-        if (!self.local_prepare_active) return;
-        for (self.local_request_id_staging.items) |request_id| {
-            self.local_request_ids.putAssumeCapacityNoClobber(request_id, {});
+        switch (self.local_prepared) {
+            .none => return,
+            .address_request => {
+                for (self.local_request_id_staging.items) |request_id| {
+                    self.local_request_ids.putAssumeCapacityNoClobber(
+                        request_id,
+                        {},
+                    );
+                }
+            },
+            .address_assign => {
+                std.mem.swap(
+                    std.ArrayList(capsules.AddressPrefix),
+                    &self.sent_assignments,
+                    &self.sent_assignment_staging,
+                );
+                self.sent_assignment_revision +|= 1;
+            },
+            .route_advertisement => {
+                std.mem.swap(
+                    std.ArrayList(capsules.Route),
+                    &self.sent_routes,
+                    &self.sent_route_staging,
+                );
+                self.sent_route_revision +|= 1;
+            },
         }
-        self.local_request_id_staging.clearRetainingCapacity();
-        self.local_prepare_active = false;
+        self.clearLocalPreparation();
     }
 
     pub fn discardPreparedLocalCapsule(self: *State) void {
-        if (!self.local_prepare_active) return;
+        if (self.local_prepared == .none) return;
+        self.clearLocalPreparation();
+    }
+
+    fn clearLocalPreparation(self: *State) void {
         self.local_request_id_staging.clearRetainingCapacity();
-        self.local_prepare_active = false;
+        self.sent_assignment_staging.clearRetainingCapacity();
+        self.sent_route_staging.clearRetainingCapacity();
+        self.local_prepared = .none;
     }
 
     pub fn applyPeerCapsule(
@@ -163,28 +238,33 @@ pub const State = struct {
         destination: capsules.IpAddress,
         ip_protocol: u8,
     ) bool {
-        for (self.routes.items) |route| {
-            if (route.version() != destination.version() or
-                std.mem.order(
-                    u8,
-                    destination.bytes(),
-                    route.startBytes(),
-                ) == .lt or
-                std.mem.order(
-                    u8,
-                    destination.bytes(),
-                    route.endBytes(),
-                ) == .gt)
-            {
-                continue;
-            }
-            if (route.protocol() == 0 or route.protocol() == ip_protocol or
-                isIcmp(destination.version(), ip_protocol))
-            {
-                return true;
-            }
+        return routesAllow(self.routes.items, destination, ip_protocol);
+    }
+
+    /// Check a peer packet source against the latest ADDRESS_ASSIGN snapshot
+    /// that this endpoint committed to the transport.
+    pub fn peerSourceIsAssigned(
+        self: *const State,
+        address: capsules.IpAddress,
+    ) bool {
+        for (self.sent_assignments.items) |assignment| {
+            if (prefixContains(assignment, address)) return true;
         }
         return false;
+    }
+
+    /// Check a peer packet destination against the latest routes that this
+    /// endpoint committed to the transport.
+    pub fn peerRouteAllows(
+        self: *const State,
+        destination: capsules.IpAddress,
+        ip_protocol: u8,
+    ) bool {
+        return routesAllow(
+            self.sent_routes.items,
+            destination,
+            ip_protocol,
+        );
     }
 
     fn collectRequestIds(
@@ -242,60 +322,22 @@ pub const State = struct {
     }
 
     fn applyAddressAssign(self: *State, value: []const u8) Error!void {
-        var iterator = capsules.parseAddressAssign(value) catch
-            return error.InvalidCapsule;
-        self.assignment_staging.clearRetainingCapacity();
-        self.peer_request_id_staging.clearRetainingCapacity();
-        while (iterator.next() catch return error.InvalidCapsule) |assignment| {
-            if (assignment.request_id != 0) {
-                if (!self.local_request_ids.contains(assignment.request_id)) {
-                    return error.UnknownRequestId;
-                }
-                if (containsId(
-                    self.peer_request_id_staging.items,
-                    assignment.request_id,
-                )) return error.DuplicateRequestId;
-                try self.peer_request_id_staging.append(
-                    self.allocator,
-                    assignment.request_id,
-                );
-            }
-            if (isRejectedAssignment(assignment)) continue;
-            if (self.assignment_staging.items.len >=
-                self.limits.max_assigned_prefixes)
-            {
-                return error.ExcessiveLoad;
-            }
-            try self.assignment_staging.append(self.allocator, assignment);
-        }
+        try self.stageAssignments(
+            value,
+            &self.local_request_ids,
+            &self.assignment_staging,
+        );
         std.mem.swap(
             std.ArrayList(capsules.AddressPrefix),
             &self.assignments,
             &self.assignment_staging,
         );
         self.assignment_staging.clearRetainingCapacity();
-        self.peer_request_id_staging.clearRetainingCapacity();
         self.assignment_revision +|= 1;
     }
 
     fn applyRoutes(self: *State, value: []const u8) Error!void {
-        var iterator = capsules.parseRouteAdvertisement(value) catch
-            return error.InvalidCapsule;
-        self.route_staging.clearRetainingCapacity();
-        while (iterator.next() catch return error.InvalidCapsule) |route| {
-            if (self.route_staging.items.len >= self.limits.max_routes) {
-                return error.ExcessiveLoad;
-            }
-            for (self.route_staging.items) |previous| {
-                if (previous.version() == route.version() and
-                    (previous.protocol() == 0 or route.protocol() == 0) and
-                    rangesOverlap(previous, route))
-                {
-                    return error.InvalidCapsule;
-                }
-            }
-            try self.route_staging.append(self.allocator, route);
-        }
+        try self.stageRoutes(value, &self.route_staging);
         std.mem.swap(
             std.ArrayList(capsules.Route),
             &self.routes,
@@ -303,6 +345,65 @@ pub const State = struct {
         );
         self.route_staging.clearRetainingCapacity();
         self.route_revision +|= 1;
+    }
+
+    fn stageAssignments(
+        self: *State,
+        value: []const u8,
+        known_request_ids: *const std.AutoHashMapUnmanaged(u62, void),
+        staging: *std.ArrayList(capsules.AddressPrefix),
+    ) Error!void {
+        var iterator = capsules.parseAddressAssign(value) catch
+            return error.InvalidCapsule;
+        staging.clearRetainingCapacity();
+        errdefer staging.clearRetainingCapacity();
+        self.response_id_staging.clearRetainingCapacity();
+        defer self.response_id_staging.clearRetainingCapacity();
+        while (iterator.next() catch return error.InvalidCapsule) |assignment| {
+            if (assignment.request_id != 0) {
+                if (!known_request_ids.contains(assignment.request_id)) {
+                    return error.UnknownRequestId;
+                }
+                if (containsId(
+                    self.response_id_staging.items,
+                    assignment.request_id,
+                )) return error.DuplicateRequestId;
+                try self.response_id_staging.append(
+                    self.allocator,
+                    assignment.request_id,
+                );
+            }
+            if (isRejectedAssignment(assignment)) continue;
+            if (staging.items.len >= self.limits.max_assigned_prefixes) {
+                return error.ExcessiveLoad;
+            }
+            try staging.append(self.allocator, assignment);
+        }
+    }
+
+    fn stageRoutes(
+        self: *State,
+        value: []const u8,
+        staging: *std.ArrayList(capsules.Route),
+    ) Error!void {
+        var iterator = capsules.parseRouteAdvertisement(value) catch
+            return error.InvalidCapsule;
+        staging.clearRetainingCapacity();
+        errdefer staging.clearRetainingCapacity();
+        while (iterator.next() catch return error.InvalidCapsule) |route| {
+            if (staging.items.len >= self.limits.max_routes) {
+                return error.ExcessiveLoad;
+            }
+            for (staging.items) |previous| {
+                if (previous.version() == route.version() and
+                    (previous.protocol() == 0 or route.protocol() == 0) and
+                    rangesOverlap(previous, route))
+                {
+                    return error.InvalidCapsule;
+                }
+            }
+            try staging.append(self.allocator, route);
+        }
     }
 };
 
@@ -346,6 +447,35 @@ fn prefixContains(
 fn rangesOverlap(a: capsules.Route, b: capsules.Route) bool {
     return std.mem.order(u8, a.startBytes(), b.endBytes()) != .gt and
         std.mem.order(u8, b.startBytes(), a.endBytes()) != .gt;
+}
+
+fn routesAllow(
+    routes: []const capsules.Route,
+    destination: capsules.IpAddress,
+    ip_protocol: u8,
+) bool {
+    for (routes) |route| {
+        if (route.version() != destination.version() or
+            std.mem.order(
+                u8,
+                destination.bytes(),
+                route.startBytes(),
+            ) == .lt or
+            std.mem.order(
+                u8,
+                destination.bytes(),
+                route.endBytes(),
+            ) == .gt)
+        {
+            continue;
+        }
+        if (route.protocol() == 0 or route.protocol() == ip_protocol or
+            isIcmp(destination.version(), ip_protocol))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn isIcmp(version: u8, protocol: u8) bool {

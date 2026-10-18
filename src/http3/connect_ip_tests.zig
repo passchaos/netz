@@ -417,7 +417,7 @@ test "CONNECT-IP route advertisements enforce canonical ordering" {
     try std.testing.expect((try no_routes.next()) == null);
 }
 
-test "CONNECT-IP Capsule Session resets malformed configuration" {
+test "CONNECT-IP payload receive validates skipped configuration" {
     const ResetCode = enum { protocol_error, enhance_your_calm };
     const Progress = struct { committed_bytes: usize = 0 };
     const Tunnel = struct {
@@ -466,7 +466,7 @@ test "CONNECT-IP Capsule Session resets malformed configuration" {
         .{},
     );
     defer session.deinit();
-    try std.testing.expectError(error.InvalidCapsule, session.receiveEvent());
+    try std.testing.expectError(error.InvalidCapsule, session.receive());
     try std.testing.expectEqual(
         ResetCode.protocol_error,
         session.tunnel.reset_code.?,
@@ -560,6 +560,208 @@ test "CONNECT-IP Capsule Session commits Request ID after timed retry" {
     try std.testing.expectError(
         error.DuplicateRequestId,
         session.sendCapsule(encoded),
+    );
+
+    const routes = [_]capsules.Route{.{ .ipv4 = .{
+        .start = .{ 198, 51, 100, 0 },
+        .end = .{ 198, 51, 100, 255 },
+        .ip_protocol = 17,
+    } }};
+    const route = try capsules.writeRouteAdvertisementInto(
+        &storage,
+        &routes,
+    );
+    session.tunnel.fail_once = true;
+    deadline = .fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    });
+    try std.testing.expectError(
+        error.Timeout,
+        session.sendCapsuleWithDeadline(route, deadline),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        configuration.sentAdvertisedRoutes().len,
+    );
+    deadline = .fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    });
+    try session.sendCapsuleWithDeadline(route, deadline);
+    try std.testing.expect(configuration.peerRouteAllows(
+        .{ .ipv4 = .{ 198, 51, 100, 42 } },
+        17,
+    ));
+}
+
+test "CONNECT-IP payload receive applies skipped configuration" {
+    const ResetCode = enum { protocol_error, enhance_your_calm };
+    const Progress = struct { committed_bytes: usize = 0 };
+    const Tunnel = struct {
+        const Owned = struct {
+            data: []const u8,
+            end_stream: bool,
+
+            pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
+                self.* = undefined;
+            }
+        };
+
+        stream_id: u31 = 0,
+        input: []const u8,
+        delivered: bool = false,
+        reset_code: ?ResetCode = null,
+
+        pub fn read(self: *@This()) !Owned {
+            if (self.delivered) return .{ .data = &.{}, .end_stream = true };
+            self.delivered = true;
+            return .{ .data = self.input, .end_stream = false };
+        }
+
+        pub fn readWithDeadline(
+            self: *@This(),
+            _: std.Io.Clock.Timestamp,
+        ) !Owned {
+            return self.read();
+        }
+
+        pub fn reset(self: *@This(), code: ResetCode) !void {
+            self.reset_code = code;
+        }
+    };
+    const Session = connect_ip.CapsuleSession(ResetCode, Tunnel, Progress);
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var configuration = connect_ip.ConfigurationState.init(allocator, .{});
+    defer configuration.deinit();
+
+    const requested = [_]capsules.AddressPrefix{.{
+        .request_id = 71,
+        .address = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+        .prefix_length = 32,
+    }};
+    var capsule_storage: [64]u8 = undefined;
+    const request = try capsules.writeAddressRequestInto(
+        &capsule_storage,
+        &requested,
+    );
+    try configuration.recordLocalAddressRequest(
+        (try http3.capsule.parse(request)).capsule.value,
+    );
+
+    const assigned = [_]capsules.AddressPrefix{.{
+        .request_id = 71,
+        .address = .{ .ipv4 = .{ 192, 0, 2, 71 } },
+        .prefix_length = 32,
+    }};
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(allocator);
+    var assignment_storage: [64]u8 = undefined;
+    try stream.appendSlice(
+        allocator,
+        try capsules.writeAddressAssignInto(&assignment_storage, &assigned),
+    );
+    try http3.capsule.writeDatagram(&stream, allocator, "\x00ip-packet");
+
+    var session = Session.init(
+        allocator,
+        threaded.io(),
+        .{ .input = stream.items },
+        .{},
+    );
+    try session.bindConfigurationState(&configuration);
+    defer session.deinit();
+    var payload = try session.receive();
+    defer payload.deinit(allocator);
+    try std.testing.expectEqualStrings("ip-packet", payload.payload);
+    try std.testing.expect(configuration.sourceIsAssigned(.{
+        .ipv4 = .{ 192, 0, 2, 71 },
+    }));
+    try std.testing.expect(session.tunnel.reset_code == null);
+}
+
+test "CONNECT-IP configuration OOM is retryable without stream reset" {
+    const ResetCode = enum { protocol_error, enhance_your_calm };
+    const Progress = struct { committed_bytes: usize = 0 };
+    const Tunnel = struct {
+        const Owned = struct {
+            data: []const u8,
+            end_stream: bool,
+
+            pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
+                self.* = undefined;
+            }
+        };
+
+        stream_id: u31 = 0,
+        input: []const u8,
+        delivered: bool = false,
+        reset_code: ?ResetCode = null,
+
+        pub fn read(self: *@This()) !Owned {
+            if (self.delivered) return .{ .data = &.{}, .end_stream = true };
+            self.delivered = true;
+            return .{ .data = self.input, .end_stream = false };
+        }
+
+        pub fn readWithDeadline(
+            self: *@This(),
+            _: std.Io.Clock.Timestamp,
+        ) !Owned {
+            return self.read();
+        }
+
+        pub fn reset(self: *@This(), code: ResetCode) !void {
+            self.reset_code = code;
+        }
+    };
+    const Session = connect_ip.CapsuleSession(ResetCode, Tunnel, Progress);
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var configuration = connect_ip.ConfigurationState.init(
+        failing.allocator(),
+        .{},
+    );
+    defer {
+        configuration.allocator = allocator;
+        configuration.deinit();
+    }
+
+    const routes = [_]capsules.Route{.{ .ipv4 = .{
+        .start = .{ 203, 0, 113, 0 },
+        .end = .{ 203, 0, 113, 255 },
+        .ip_protocol = 6,
+    } }};
+    var encoded: [64]u8 = undefined;
+    const route = try capsules.writeRouteAdvertisementInto(&encoded, &routes);
+    var session = Session.init(
+        allocator,
+        threaded.io(),
+        .{ .input = route },
+        .{},
+    );
+    try session.bindConfigurationState(&configuration);
+    defer session.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, session.receiveCapsule());
+    try std.testing.expect(session.tunnel.reset_code == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        configuration.advertisedRoutes().len,
+    );
+    configuration.allocator = allocator;
+    var received = try session.receiveCapsule();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        configuration.advertisedRoutes().len,
     );
 }
 
@@ -719,6 +921,119 @@ test "CONNECT-IP configuration state applies snapshots transactionally" {
     );
     try std.testing.expectEqual(@as(usize, 0), state.assignedPrefixes().len);
     try std.testing.expectEqual(@as(u64, 2), state.assignment_revision);
+}
+
+test "CONNECT-IP configuration state commits sent snapshots transactionally" {
+    const allocator = std.testing.allocator;
+    var state = connect_ip.ConfigurationState.init(allocator, .{
+        .max_request_ids_per_direction = 2,
+        .max_assigned_prefixes = 2,
+        .max_routes = 2,
+    });
+    defer state.deinit();
+    var encoded: [256]u8 = undefined;
+
+    const peer_request = [_]capsules.AddressPrefix{.{
+        .request_id = 81,
+        .address = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+        .prefix_length = 32,
+    }};
+    const request = try capsules.writeAddressRequestInto(
+        &encoded,
+        &peer_request,
+    );
+    _ = try state.applyPeerCapsule(
+        capsules.address_request_type,
+        (try http3.capsule.parse(request)).capsule.value,
+    );
+
+    const unknown_assignment = [_]capsules.AddressPrefix{.{
+        .request_id = 82,
+        .address = .{ .ipv4 = .{ 192, 0, 2, 82 } },
+        .prefix_length = 32,
+    }};
+    const unknown = try capsules.writeAddressAssignInto(
+        &encoded,
+        &unknown_assignment,
+    );
+    try std.testing.expectError(
+        error.UnknownRequestId,
+        state.prepareLocalCapsule(
+            capsules.address_assign_type,
+            (try http3.capsule.parse(unknown)).capsule.value,
+        ),
+    );
+
+    const assignment = [_]capsules.AddressPrefix{.{
+        .request_id = 81,
+        .address = .{ .ipv4 = .{ 192, 0, 2, 81 } },
+        .prefix_length = 32,
+    }};
+    const assigned = try capsules.writeAddressAssignInto(
+        &encoded,
+        &assignment,
+    );
+    const assigned_value = (try http3.capsule.parse(assigned)).capsule.value;
+    try state.prepareLocalCapsule(
+        capsules.address_assign_type,
+        assigned_value,
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.sentAssignedPrefixes().len);
+    state.discardPreparedLocalCapsule();
+    try std.testing.expectEqual(@as(usize, 0), state.sentAssignedPrefixes().len);
+    try state.prepareLocalCapsule(
+        capsules.address_assign_type,
+        assigned_value,
+    );
+    state.commitPreparedLocalCapsule();
+    try std.testing.expect(state.peerSourceIsAssigned(.{
+        .ipv4 = .{ 192, 0, 2, 81 },
+    }));
+    try std.testing.expectEqual(@as(u64, 1), state.sent_assignment_revision);
+
+    const routes = [_]capsules.Route{.{ .ipv4 = .{
+        .start = .{ 203, 0, 113, 0 },
+        .end = .{ 203, 0, 113, 255 },
+        .ip_protocol = 6,
+    } }};
+    const route = try capsules.writeRouteAdvertisementInto(&encoded, &routes);
+    try state.prepareLocalCapsule(
+        capsules.route_advertisement_type,
+        (try http3.capsule.parse(route)).capsule.value,
+    );
+    state.commitPreparedLocalCapsule();
+    try std.testing.expect(state.peerRouteAllows(
+        .{ .ipv4 = .{ 203, 0, 113, 42 } },
+        6,
+    ));
+    try std.testing.expect(state.peerRouteAllows(
+        .{ .ipv4 = .{ 203, 0, 113, 42 } },
+        1,
+    ));
+    try std.testing.expect(!state.peerRouteAllows(
+        .{ .ipv4 = .{ 203, 0, 113, 42 } },
+        17,
+    ));
+
+    const empty_assign = try capsules.writeAddressAssignInto(&encoded, &.{});
+    try state.prepareLocalCapsule(
+        capsules.address_assign_type,
+        (try http3.capsule.parse(empty_assign)).capsule.value,
+    );
+    state.commitPreparedLocalCapsule();
+    try std.testing.expectEqual(@as(usize, 0), state.sentAssignedPrefixes().len);
+    const empty_routes = try capsules.writeRouteAdvertisementInto(
+        &encoded,
+        &.{},
+    );
+    try state.prepareLocalCapsule(
+        capsules.route_advertisement_type,
+        (try http3.capsule.parse(empty_routes)).capsule.value,
+    );
+    state.commitPreparedLocalCapsule();
+    try std.testing.expectEqual(@as(usize, 0), state.sentAdvertisedRoutes().len);
+    try std.testing.expectEqual(@as(u64, 2), state.sent_assignment_revision);
+    try std.testing.expectEqual(@as(u64, 2), state.sent_route_revision);
 }
 
 test "CONNECT-IP configuration state bounds peer IDs and route rollback" {

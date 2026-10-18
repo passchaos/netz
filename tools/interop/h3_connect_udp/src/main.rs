@@ -33,6 +33,10 @@ const SERVER_IP_PACKET: [u8; 40] = [
     0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82,
     0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82,
 ];
+const CLIENT_ROUTE_START: [u8; 4] = [198, 51, 100, 0];
+const CLIENT_ROUTE_END: [u8; 4] = [198, 51, 100, 255];
+const SERVER_ROUTE_START: [u8; 4] = [203, 0, 113, 0];
+const SERVER_ROUTE_END: [u8; 4] = [203, 0, 113, 255];
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -142,12 +146,34 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
         .ok_or("missing CONNECT-IP ADDRESS_REQUEST")?;
     let request_capsule = request_data.copy_to_bytes(request_data.remaining());
     validate_address_request(&request_capsule, 21)?;
+    let mut route_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP ROUTE_ADVERTISEMENT timeout")??
+        .ok_or("missing CONNECT-IP ROUTE_ADVERTISEMENT")?;
+    let route_capsule = route_data.copy_to_bytes(route_data.remaining());
+    validate_route_advertisement(&route_capsule, CLIENT_ROUTE_START, CLIENT_ROUTE_END, 17)?;
+    let mut withdrawal_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP route withdrawal timeout")??
+        .ok_or("missing CONNECT-IP route withdrawal")?;
+    let withdrawal = withdrawal_data.copy_to_bytes(withdrawal_data.remaining());
+    validate_route_withdrawal(&withdrawal)?;
     let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
     if packet != CLIENT_IP_PACKET {
         return Err("invalid CONNECT-IP client packet".into());
     }
     stream
         .send_data(Bytes::from(encode_address_assign(21, [192, 0, 2, 21])))
+        .await?;
+    stream
+        .send_data(Bytes::from(encode_route_advertisement(
+            SERVER_ROUTE_START,
+            SERVER_ROUTE_END,
+            6,
+        )))
+        .await?;
+    stream
+        .send_data(Bytes::from(encode_route_withdrawal()))
         .await?;
     send_context_zero(&mut datagram_sender, &SERVER_IP_PACKET)?;
     let ack = read_context_zero(&mut datagram_reader, stream_id).await?;
@@ -167,7 +193,7 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())
@@ -229,6 +255,16 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
     stream
         .send_data(Bytes::from(encode_address_request(21)))
         .await?;
+    stream
+        .send_data(Bytes::from(encode_route_advertisement(
+            CLIENT_ROUTE_START,
+            CLIENT_ROUTE_END,
+            17,
+        )))
+        .await?;
+    stream
+        .send_data(Bytes::from(encode_route_withdrawal()))
+        .await?;
     send_context_zero(&mut datagram_sender, &CLIENT_IP_PACKET)?;
     let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
     if packet != SERVER_IP_PACKET {
@@ -240,6 +276,18 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
         .ok_or("missing CONNECT-IP ADDRESS_ASSIGN")?;
     let assignment = response_data.copy_to_bytes(response_data.remaining());
     validate_address_assign(&assignment, 21, [192, 0, 2, 21])?;
+    let mut route_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP ROUTE_ADVERTISEMENT timeout")??
+        .ok_or("missing CONNECT-IP ROUTE_ADVERTISEMENT")?;
+    let route = route_data.copy_to_bytes(route_data.remaining());
+    validate_route_advertisement(&route, SERVER_ROUTE_START, SERVER_ROUTE_END, 6)?;
+    let mut withdrawal_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP route withdrawal timeout")??
+        .ok_or("missing CONNECT-IP route withdrawal")?;
+    let withdrawal = withdrawal_data.copy_to_bytes(withdrawal_data.remaining());
+    validate_route_withdrawal(&withdrawal)?;
     send_context_zero(&mut datagram_sender, b"h3-ip-ack")?;
     timeout(IO_TIMEOUT, stream.finish()).await??;
     let response_end = timeout(IO_TIMEOUT, stream.recv_data())
@@ -252,7 +300,7 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())
@@ -541,6 +589,19 @@ fn encode_address_assign(request_id: u64, address: [u8; 4]) -> Vec<u8> {
     encode_capsule(0x01, &value)
 }
 
+fn encode_route_advertisement(start: [u8; 4], end: [u8; 4], protocol: u8) -> Vec<u8> {
+    let mut value = Vec::with_capacity(10);
+    value.push(4);
+    value.extend_from_slice(&start);
+    value.extend_from_slice(&end);
+    value.push(protocol);
+    encode_capsule(0x03, &value)
+}
+
+fn encode_route_withdrawal() -> Vec<u8> {
+    encode_capsule(0x03, &[])
+}
+
 fn encode_capsule(capsule_type: u64, value: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(value.len() + 2);
     encode_varint(capsule_type, &mut encoded);
@@ -584,6 +645,33 @@ fn validate_address_assign(
         || value[id_len + 5] != 32
     {
         return Err("invalid ADDRESS_ASSIGN".into());
+    }
+    Ok(())
+}
+
+fn validate_route_advertisement(
+    bytes: &[u8],
+    start: [u8; 4],
+    end: [u8; 4],
+    protocol: u8,
+) -> Result<(), Box<dyn Error>> {
+    let (capsule_type, value) = decode_capsule(bytes).ok_or("malformed ROUTE_ADVERTISEMENT")?;
+    if capsule_type != 0x03
+        || value.len() != 10
+        || value[0] != 4
+        || value[1..5] != start
+        || value[5..9] != end
+        || value[9] != protocol
+    {
+        return Err("invalid ROUTE_ADVERTISEMENT".into());
+    }
+    Ok(())
+}
+
+fn validate_route_withdrawal(bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    let (capsule_type, value) = decode_capsule(bytes).ok_or("malformed route withdrawal")?;
+    if capsule_type != 0x03 || !value.is_empty() {
+        return Err("invalid route withdrawal".into());
     }
     Ok(())
 }
@@ -677,5 +765,8 @@ mod tests {
         validate_address_request(&request, 21).unwrap();
         let assignment = encode_address_assign(21, [192, 0, 2, 21]);
         validate_address_assign(&assignment, 21, [192, 0, 2, 21]).unwrap();
+        let route = encode_route_advertisement(CLIENT_ROUTE_START, CLIENT_ROUTE_END, 17);
+        validate_route_advertisement(&route, CLIENT_ROUTE_START, CLIENT_ROUTE_END, 17).unwrap();
+        validate_route_withdrawal(&encode_route_withdrawal()).unwrap();
     }
 }

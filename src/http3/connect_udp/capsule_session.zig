@@ -553,10 +553,10 @@ pub fn Session(
                 }
                 const owned = try self.allocator.dupe(u8, buffered.value);
                 errdefer self.allocator.free(owned);
-                self.commitPeerConfiguration(
+                try self.commitPeerConfiguration(
                     buffered.capsule_type,
                     buffered.value,
-                ) catch |err| return self.abortMalformed(err);
+                );
                 self.receive_offset += buffered.consumed;
                 return .{
                     .stream_id = @intCast(self.tunnel.stream_id),
@@ -612,10 +612,10 @@ pub fn Session(
                         buffered.value,
                     );
                     errdefer self.allocator.free(owned);
-                    self.commitPeerConfiguration(
+                    try self.commitPeerConfiguration(
                         buffered.capsule_type,
                         buffered.value,
-                    ) catch |err| return self.abortMalformed(err);
+                    );
                     self.receive_offset += buffered.consumed;
                     return .{ .capsule = .{
                         .stream_id = @intCast(self.tunnel.stream_id),
@@ -746,6 +746,16 @@ pub fn Session(
                 if (parsed.capsule.capsule_type !=
                     Capsule.CapsuleType.datagram)
                 {
+                    const recognized = self.validatePeerConfiguration(
+                        parsed.capsule.capsule_type,
+                        parsed.capsule.value,
+                    ) catch |err| return self.abortMalformed(err);
+                    if (recognized) {
+                        try self.commitPeerConfiguration(
+                            parsed.capsule.capsule_type,
+                            parsed.capsule.value,
+                        );
+                    }
                     self.receive_offset += parsed.consumed;
                     continue;
                 }
@@ -872,7 +882,14 @@ pub fn Session(
         ) !void {
             if (@hasDecl(ContextProtocol, "ConfigurationState")) {
                 if (self.configuration) |state| {
-                    _ = try state.applyPeerCapsule(capsule_type, value);
+                    _ = state.applyPeerCapsule(
+                        capsule_type,
+                        value,
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => return err,
+                        error.ExcessiveLoad => return self.abortExcessiveLoad(),
+                        else => return self.abortMalformed(err),
+                    };
                 }
             }
         }
