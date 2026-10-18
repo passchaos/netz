@@ -562,6 +562,40 @@ test "MQTT reauthentication method mismatch sends protocol error" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reauthentication rejection validates before wire mutation" {
+    var connection = runtime.Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .server,
+    };
+    connection.authentication.phase = .active;
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        connection.rejectReauthentication(0x87),
+    );
+    connection.authentication.phase = .reauthenticating;
+    try std.testing.expectError(
+        error.InvalidAuthenticationState,
+        connection.rejectReauthentication(0),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        connection.rejectReauthentication(0x04),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        connection.rejectReauthenticationWithProperties(
+            0x87,
+            &.{.{ .four_byte = .{
+                .id = .session_expiry_interval,
+                .value = 1,
+            } }},
+        ),
+    );
+    try std.testing.expect(connection.isUsable());
+}
+
 test "MQTT enhanced auth cannot finish before explicit authorization" {
     const allocator = std.testing.allocator;
     var connection = runtime.Connection{
@@ -942,4 +976,106 @@ test "MQTT live broker policy completes reauthentication" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), policy.calls);
+}
+
+test "MQTT live broker policy rejects reauthentication and retires connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Policy = struct {
+        calls: usize = 0,
+        retired: bool = false,
+
+        fn start(
+            _: *anyopaque,
+            pending: *runtime.PendingAcceptedClient,
+        ) broker_mod.Error!void {
+            try pending.authorizeAuthentication();
+        }
+
+        fn handle(
+            context_ptr: *anyopaque,
+            connection: *runtime.Connection,
+            auth: mqtt.Auth,
+            complete: bool,
+        ) broker_mod.Error!void {
+            const self: *@This() =
+                @ptrCast(@alignCast(context_ptr));
+            if (complete or auth.reason_code != 0x19) {
+                return error.InvalidAuthenticationState;
+            }
+            self.calls += 1;
+            try connection.rejectReauthentication(0x87);
+            self.retired = !connection.isUsable();
+        }
+    };
+    var policy: Policy = .{};
+    var broker = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .authentication = .{
+                .context = &policy,
+                .start = Policy.start,
+                .handle = Policy.handle,
+            },
+        },
+    );
+    defer broker.deinit();
+
+    const Shared = struct {
+        broker: *broker_mod.Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .broker = &broker };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var connection = try Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "live-broker-auth-rejection",
+            .properties = &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = "repeat",
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "repeat",
+                } },
+            },
+        },
+    );
+    defer connection.close();
+    try connection.beginReauthentication("repeat");
+    var disconnect = try connection.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x87),
+        disconnect.disconnect.reason_code,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        disconnect.disconnect.properties.len,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), policy.calls);
+    try std.testing.expect(policy.retired);
 }

@@ -29,6 +29,7 @@ from mqtt_vectors import (
     proxy_v2_bad,
     qos0_live_queue_scope,
     qos2_receive_maximum,
+    reauthentication_rejection,
     single_step_authentication,
     source_lock,
     subscription_flip_flop,
@@ -51,6 +52,7 @@ SCENARIO_COUNT = (
     + proxy_v2_bad.SCENARIO_COUNT
     + qos0_live_queue_scope.SCENARIO_COUNT
     + qos2_receive_maximum.SCENARIO_COUNT
+    + reauthentication_rejection.SCENARIO_COUNT
     + single_step_authentication.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
     + subscription_hierarchy.SCENARIO_COUNT
@@ -6350,6 +6352,15 @@ def main() -> None:
         expect_packet,
     )
     single_step_authentication.run(
+        args.broker,
+        mqtt_packets,
+        mqtt5_props,
+        mqtt5_rc,
+        NetzBroker,
+        expected_connack,
+        expect_packet,
+    )
+    reauthentication_rejection.run(
         args.broker,
         mqtt_packets,
         mqtt5_props,

@@ -9245,6 +9245,7 @@ const ClientTask = struct {
                         owned.auth,
                         complete,
                     );
+                    if (!connection.isUsable()) return;
                 },
                 .subscribe => |*owned| {
                     task.broker.handleSubscribe(

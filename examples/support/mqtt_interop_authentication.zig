@@ -12,6 +12,7 @@ const netz = @import("netz");
 const mirror_method = "mirror";
 const single_method = "single";
 const error_method = "error";
+const repeat_method = "repeat";
 const initial_data = "step1";
 const server_challenge = "1pets";
 const client_response = "supercalifragilisticexpialidocious";
@@ -41,6 +42,15 @@ pub const Policy = struct {
         if (std.mem.eql(u8, method, single_method)) {
             const data = try authenticationData(properties);
             if (std.mem.eql(u8, data, "data")) {
+                try pending.authorizeAuthentication();
+            } else {
+                try pending.rejectAuthentication(0x87);
+            }
+            return;
+        }
+        if (std.mem.eql(u8, method, repeat_method)) {
+            const data = try authenticationData(properties);
+            if (std.mem.eql(u8, data, "repeat")) {
                 try pending.authorizeAuthentication();
             } else {
                 try pending.rejectAuthentication(0x87);
@@ -78,6 +88,19 @@ pub const Policy = struct {
         complete: bool,
     ) netz.mqtt.broker.Error!void {
         if (complete) return error.InvalidAuthenticationState;
+        const method = netz.mqtt.authenticationMethod(auth.properties) orelse
+            return error.AuthenticationNotConfigured;
+        if (std.mem.eql(u8, method, repeat_method)) {
+            if (auth.reason_code != 0x19) {
+                return error.InvalidAuthenticationState;
+            }
+            try requireData(auth.properties, "repeat");
+            try connection.rejectReauthentication(0x87);
+            return;
+        }
+        if (!std.mem.eql(u8, method, mirror_method)) {
+            return error.AuthenticationMethodMismatch;
+        }
         switch (auth.reason_code) {
             0x19 => {
                 try requireData(auth.properties, initial_data);

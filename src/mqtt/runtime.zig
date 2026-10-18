@@ -5799,6 +5799,32 @@ pub const Connection = struct {
         }
     }
 
+    /// Reject peer-initiated re-authentication and retire this Network
+    /// Connection after the failure DISCONNECT has been written.
+    pub fn rejectReauthentication(
+        self: *Connection,
+        reason_code: u8,
+    ) Error!void {
+        try self.rejectReauthenticationWithProperties(reason_code, &.{});
+    }
+
+    /// Property-capable counterpart to `rejectReauthentication`. The caller
+    /// retains Connection ownership and must eventually call `close`, but all
+    /// intervening MQTT operations fail with `error.ConnectionClosed`.
+    pub fn rejectReauthenticationWithProperties(
+        self: *Connection,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        if (self.authentication.phase != .reauthenticating or
+            reason_code == 0)
+        {
+            return error.InvalidAuthenticationState;
+        }
+        try self.writeDisconnectWithProperties(reason_code, properties);
+        self.transport_unusable.store(true, .release);
+    }
+
     /// Respond to an initial pre-CONNACK authentication challenge.
     pub fn continueInitialAuthentication(
         self: *Connection,

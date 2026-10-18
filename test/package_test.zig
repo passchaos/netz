@@ -5047,6 +5047,14 @@ test "public modules are reachable" {
         netz.mqtt.runtime.PendingAcceptedClient,
         "authenticationRejectionReason",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "rejectReauthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "rejectReauthenticationWithProperties",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
