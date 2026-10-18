@@ -2686,6 +2686,7 @@ fn validateHostHeaderBlockIndex(
 }
 
 pub fn absoluteFormAuthority(target: []const u8) ?[]const u8 {
+    if (target.len == 0 or !std.ascii.isAlphabetic(target[0])) return null;
     const scheme_end = std.mem.indexOf(u8, target, "://") orelse return null;
     if (!validUriScheme(target[0..scheme_end])) return null;
     const authority_start = scheme_end + 3;
@@ -4935,6 +4936,18 @@ test "HTTP/1 parses absolute-form authority as the effective Host" {
 
     const scheme_must_start_alpha = "GET 1http://example.com/proxy HTTP/1.1\r\nHost: example.com\r\n\r\n";
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, scheme_must_start_alpha, .{}));
+
+    var non_alpha = [_]u8{0} ++ "http://example.com/path".*;
+    for (0..256) |value| {
+        const first: u8 = @intCast(value);
+        if (std.ascii.isAlphabetic(first)) continue;
+        non_alpha[0] = first;
+        try std.testing.expect(absoluteFormAuthority(&non_alpha) == null);
+    }
+    try std.testing.expectEqualStrings(
+        "example.com",
+        absoluteFormAuthority("HTTP://example.com/path").?,
+    );
 }
 
 test "HTTP/1 writers reject forbidden response bodies" {

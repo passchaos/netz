@@ -15,11 +15,16 @@ const raw_request =
     "GET /next HTTP/1.1\r\n" ++
     "Host: example.com\r\n" ++
     "\r\n";
+const raw_absolute_request =
+    "POST http://example.com/bench?mode=parse HTTP/1.1\r\n" ++
+    raw_request["POST /bench?mode=parse HTTP/1.1\r\n".len..];
 
 const Scenario = enum { all, borrowed, owned, owned_checked };
+const TargetForm = enum { origin, absolute };
 
 const Options = struct {
     scenario: Scenario = .all,
+    target_form: TargetForm = .origin,
     iterations: usize = default_iterations,
 };
 
@@ -30,6 +35,10 @@ pub fn main(init: std.process.Init) !void {
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
+    const request_bytes = switch (options.target_form) {
+        .origin => raw_request,
+        .absolute => raw_absolute_request,
+    };
 
     var headers: [32]netz.http1.Header = undefined;
     var borrowed_total: usize = 0;
@@ -38,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
         const started = nowNs(io);
         for (0..options.iterations) |_| {
             const head = try netz.http1.parseRequestHead(
-                raw_request,
+                request_bytes,
                 &headers,
                 .{},
             );
@@ -54,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..options.iterations) |_| {
             var request = try netz.http1.parseRequest(
                 allocator,
-                raw_request,
+                request_bytes,
                 .{},
             );
             owned_total += request.consumed;
@@ -70,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..options.iterations) |_| {
             var request = try netz.http1.parseRequest(
                 allocator,
-                raw_request,
+                request_bytes,
                 .{},
             );
             try netz.http1.validateRequestHost(request);
@@ -82,8 +91,9 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "HTTP/1 parse benchmark\n  io backend: zio-std-io\n" ++
+            "  target form: {s}\n" ++
             "  iterations: {d}\n",
-        .{options.iterations},
+        .{ @tagName(options.target_form), options.iterations },
     );
     if (options.scenario == .all or options.scenario == .borrowed) {
         std.debug.print(
@@ -131,6 +141,11 @@ fn parseOptions(
             options.scenario = std.meta.stringToEnum(
                 Scenario,
                 arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--target-form=")) {
+            options.target_form = std.meta.stringToEnum(
+                TargetForm,
+                arg["--target-form=".len..],
             ) orelse return error.InvalidArgument;
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             options.iterations = try std.fmt.parseInt(

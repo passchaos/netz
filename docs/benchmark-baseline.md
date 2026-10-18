@@ -423,6 +423,52 @@ cycles to 0.982606 (-1.739%, 7/7). This is a parser and same-process pipeline
 result, not a claim about end-to-end Internet latency. Debug/ReleaseFast HTTP/1
 tests, parser/cleartext/TLS connection fuzz gates, and complete bidirectional
 Hyper cleartext/TLS interoperability passed.
+Absolute-form detection now rejects an empty target or any non-alphabetic
+first byte before searching for `://`. RFC 3986 requires a scheme to begin
+with an ASCII letter, so ordinary origin-form `/...`, OPTIONS `*`, and invalid
+numeric/control prefixes cannot be absolute-form. The public helper retains
+full validation for alphabetic schemes, including authority/userinfo/path
+rules. A 256-value first-byte regression plus uppercase-scheme coverage binds
+that split. `bench-http1-parse` now also accepts
+`--target-form=origin|absolute`, with origin remaining the default.
+
+Twenty fixed-binary CPU-10 AB/BA pairs used two million borrowed origin-form
+parses per arm and exact 348,000,000-byte totals. Baseline SHA-256 was
+`b50f73d9769218f458f85d5a9d9651bef0253d59b645cff724eb7ae9b75c07d5`,
+candidate
+`1f27a51233dc6bab165f8f5d721bac6476ae10c6e10320d6f833dba813a7e42b`.
+Latency, cycles and instructions improved by paired medians of 1.041357,
+1.039862 and 1.036547; latency won 19/20 pairs and both counters won 20/20.
+Twelve one-million-parse pairs with the extended benchmark improved owned
+parsing by 1.008958 median (11/12 latency/cycles, 12/12 instructions) and
+owned-plus-explicit-Host validation by 1.028594 (12/12 for all three).
+
+The equal-source absolute-form control used binaries
+`081a5907e5d5481d09fc245fbd614b9a0cfd18f9416a288b2bfafdf7916ecacb`
+and
+`065f4c77114cbd0a6adae3816b33bca866f5de9cec795455e94292cb57bd0c16`.
+Across twenty pairs its latency median was exactly 1.000000, cycles 0.999016,
+and instructions exactly 1.000000, with ranges crossing 1.0; no absolute-form
+change is claimed. A real 16-request persistent pipeline used fixed binaries
+`22b0f39d61d17378c0b4a052a283caa7155a755e918c222e214aa10c8f8c6053`
+and
+`0ad39f5ea2b75d34417a94f1be075aa9ae016416009c966055177529505d540c`.
+Twenty 500-warmup/5,000-measured pairs completed 80,000 requests and exact
+7,120,000-byte checksums per arm. Elapsed time improved by 1.007725 median
+with 17/20 wins and cycles by 1.014609 with 20/20 wins; instructions increased
+by 0.159% in every pair because the predictable form branch replaces a longer
+scan. The runtime conclusion is lower cycles and latency, not fewer executed
+instructions.
+
+Equal-duration 20-million-parse profiles had zero lost samples and moved
+approximate event count from 11,140,535,340 to 10,674,843,162. The former
+4.01% standalone `absoluteFormAuthority` entry fell below the 0.20% reporting
+threshold. These independent profiles explain the call path; fixed-pair
+results carry the performance claim. Raw parser, absolute-form control,
+owned, pipeline and profile artifacts are retained under
+`zig-out/http1-absolute-form-fastpath-ab` and
+`zig-out/http1-absolute-form-fastpath-profile`; their combined manifest hashes
+to `1abd2c9883be66180a2b763664f4a870773d2c86214be8dd0249e05506bc9f00`.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,
