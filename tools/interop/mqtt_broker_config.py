@@ -123,6 +123,10 @@ def parse_args() -> argparse.Namespace:
         "--only-session-clean-start-persistence",
         action="store_true",
     )
+    selected.add_argument(
+        "--only-retained-source-persistence",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -6961,6 +6965,15 @@ def main() -> None:
                 "MQTT Session Clean Start persistence integration passed: "
                 "mqttv311+mqttv5 queued+inflight+subscriptions=true "
                 "three_generations=true "
+                + RUNTIME
+            )
+            return
+        if args.only_retained_source_persistence:
+            run_retain_source_case(args.broker, directory)
+            print(
+                "MQTT retained source persistence integration passed: "
+                "mqttv311+mqttv5 global+listener anonymous+named=true "
+                "acl_reauthorization=true "
                 + RUNTIME
             )
             return

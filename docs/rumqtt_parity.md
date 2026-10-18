@@ -611,7 +611,10 @@ authorization distinct from every 16-bit TCP port, while reload requires the
 same owned path. TLS, WebSocket, PROXY, `socket_domain`, and `bind_interface`
 combinations fail before any endpoint is opened rather than being ignored.
 The retained-source matrix persists and restarts the standalone broker after
-storing a retained PUBLISH, source-locking the ACL-reload wire boundary in
+storing a retained PUBLISH. It source-locks the basic MQTT 3.1.1/5 retained
+restart shapes in Mosquitto's `15-persist-retain-v3-1-1.py` and
+`15-persist-retain-v5-0.py`, then strengthens them by locking the ACL-reload
+wire boundary in
 Mosquitto's `04-retain-check-source.py`, its CVE-2018-12546
 `04-retain-check-source-persist.py`, and the cross-listener
 `04-retain-check-source-persist-diff-port.py` regressions. MQTT 3.1.1 and MQTT
