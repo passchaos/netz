@@ -79,6 +79,10 @@ MOSQUITTO_PROCESS_SOURCES = {
         "56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214",
     "broker/01-connect-unix-socket.py":
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
+    "broker/01-connect-windows-line-endings.py":
+        "cf19b5edbe4f06e0ca5ef275cbd7b10ea43488569224d1bdda1575c1b52799ab",
+    "broker/16-config-missing.py":
+        "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
     "broker/23-security-password-file-reload.py":
         "de0ae7ebf17db99700bed5e12adf777a44f330a70b45196e3ff16147b2b70d42",
     "broker/23-security-acl-file-reload.py":
@@ -94,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-listener-anonymous", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
+    selected.add_argument("--only-config-file-lifecycle", action="store_true")
     return parser.parse_args()
 
 
@@ -2325,6 +2330,96 @@ def run_unix_listener_case(broker: Path, directory: Path) -> None:
         )
     if socket_path.exists():
         raise AssertionError("Unix listener socket survived broker teardown")
+
+
+def run_windows_line_endings_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    config = directory / "windows-line-endings.conf"
+    config.write_bytes(
+        (
+            f"listener {port} 127.0.0.1\r\n"
+            "listener_allow_anonymous true\r\n"
+            "max_connections 2\r\n"
+        ).encode()
+    )
+    environment = os.environ.copy()
+    environment[FINITE_TEST_ENV] = "1"
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdout is not None
+    clients: list[socket.socket] = []
+    try:
+        wait_process_line(
+            process,
+            "configured 1 listeners for 2 clients",
+            "Windows line endings broker startup",
+        )
+        listener_lines = read_listener_lines(
+            process,
+            1,
+            "Windows line endings broker startup",
+        )
+        if not listener_lines[0].startswith("mqtt "):
+            raise RuntimeError(
+                "Windows line endings listener missing: "
+                + repr(listener_lines)
+            )
+        for protocol in (4, 5):
+            client = socket.create_connection(("127.0.0.1", port), timeout=5)
+            client.settimeout(5)
+            clients.append(client)
+            client.sendall(connect_packet(
+                f"windows-line-endings-{protocol}",
+                proto_ver=protocol,
+            ))
+            reason = connack_reason(read_mqtt_packet(client))
+            if reason != 0:
+                raise AssertionError(
+                    "Windows line endings CONNECT for protocol "
+                    f"{protocol} returned {reason:#x}"
+                )
+            client.close()
+            clients.pop()
+        process.wait(timeout=5)
+        if process.returncode != 0:
+            raise RuntimeError(
+                "Windows line endings broker failed: "
+                + process.stdout.read()
+            )
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def run_missing_root_config_case(broker: Path, directory: Path) -> None:
+    missing = directory / "missing-root.conf"
+    result = subprocess.run(
+        [str(broker), f"--config={missing}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+    )
+    expected = f"Error: Unable to open config file '{missing}'."
+    if result.returncode != 3 or expected not in result.stdout:
+        raise AssertionError(
+            "missing root config did not produce the typed CLI failure: "
+            f"returncode={result.returncode} output={result.stdout!r}"
+        )
+    if "listening" in result.stdout:
+        raise AssertionError("missing root config opened a listener")
 
 
 def run_listener_anonymous_policy_case(
@@ -6778,6 +6873,18 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_config_file_lifecycle:
+            run_missing_root_config_case(args.broker, directory)
+            run_windows_line_endings_case(args.broker, directory)
+            print(
+                "MQTT config file lifecycle integration passed: "
+                "missing_root_exit=3 crlf=mqttv311+mqttv5 "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
+        run_missing_root_config_case(args.broker, directory)
+        run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
         run_unix_listener_case(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
@@ -6854,7 +6961,8 @@ def main() -> None:
         run_signed_crl_listener_case(args.broker, directory, "ed25519")
         run_rsa_tls_identity_case(args.broker, directory)
     print(
-        "MQTT broker config integration passed: strict authentication, "
+        "MQTT broker config integration passed: missing-root exit=3, "
+        "CRLF mqttv311+mqttv5, strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "source-locked Unix listener lifecycle, "
         "source-locked global/listener anonymous policy precedence, "

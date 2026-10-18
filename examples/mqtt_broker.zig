@@ -72,14 +72,24 @@ pub fn main(init: std.process.Init) !void {
     defer backend.deinit();
     const io = backend.io();
     if (config_path) |path| {
-        return broker_config_runner.run(base_allocator, io, path, .{
+        broker_config_runner.run(base_allocator, io, path, .{
             .finite_test = if (init.environ_map.get(
                 "NETZ_MQTT_CONFIG_FINITE_TEST",
             )) |value|
                 std.mem.eql(u8, value, "1")
             else
                 false,
-        });
+        }) catch |err| switch (err) {
+            error.ConfigFileNotFound => {
+                std.debug.print(
+                    "Error: Unable to open config file '{s}'.\n",
+                    .{path},
+                );
+                std.process.exit(3);
+            },
+            else => return err,
+        };
+        return;
     }
     const config = try parseArgs(init);
     var counting = CountingAllocator.init(base_allocator);

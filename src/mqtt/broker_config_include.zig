@@ -12,6 +12,7 @@ pub const max_include_files: usize = 256;
 pub const max_directory_entries: usize = 1024;
 
 pub const Error = std.mem.Allocator.Error || error{
+    ConfigFileNotFound,
     EmptyConfig,
     InvalidDirective,
     NestedIncludeDirectory,
@@ -221,10 +222,31 @@ pub fn load(
         .base_dir = dir,
     };
     errdefer builder.deinit();
-    const main_source = try builder.readFile(dir, sub_path);
+    const main_source = builder.readFile(dir, sub_path) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigFileNotFound,
+        else => return err,
+    };
     if (main_source.len == 0) return error.EmptyConfig;
     try builder.expandMain(main_source);
     return builder.finish();
+}
+
+test "missing root config is distinct from dependent file failures" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(
+        error.ConfigFileNotFound,
+        load(
+            std.testing.allocator,
+            io,
+            tmp.dir,
+            "missing.conf",
+        ),
+    );
 }
 
 const Line = struct {

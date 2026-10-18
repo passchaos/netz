@@ -1354,6 +1354,9 @@ Current protocol coverage includes:
   single-family socket domains and named-interface address binding enforced
   before bind,
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
+  LF/CRLF configuration files, with a typed missing-root error that the
+  production CLI reports with the exact path and Mosquitto-compatible exit 3
+  before opening any listener, plus
   supervised single-Session inbound, outbound, mixed, and `topic ... both ...`
   bridges whose runtime Set deep-owns every nested configuration value for
   safe staged replacement, with strict QoS/prefix mapping and local/remote loop suppression,
