@@ -4753,16 +4753,19 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The process gate now additionally locks seven upstream sources:
+   semantics. The process gate now additionally locks eight upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
-   mTLS identity reload, listener anonymous policy, and two password/ACL
-   invalid-reload cases. The
+   mTLS identity reload, change-count autosave, listener anonymous policy, and
+   two password/ACL invalid-reload cases. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security
    file failures retain their own classifications. The mTLS case keeps both a
    certificate-CN-mapped WSS Session and a full RFC 2253 Subject-mapped TCP
-   Session live across SIGHUP, then proves both with PING. The gate also
+   Session live across SIGHUP, then proves both with PING. The autosave case
+   strengthens the upstream one-change checkpoint with disabled, change-count,
+   periodic, target-switch, rollback, and retained-state restart phases. The
+   gate also
    verifies a complete Unix process lifecycle and proves Netz's transactional
    reload rollback divergence through a real SIGHUP broker process. The nineteen
    behavior-bearing broker packet JSON files are

@@ -83,6 +83,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "cf19b5edbe4f06e0ca5ef275cbd7b10ea43488569224d1bdda1575c1b52799ab",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
+    "broker/11-persistence-autosave-changes.py":
+        "e375ec1114f56728f4c1dc62d7f510b26e936428805f444cb387e206bf3ccac1",
     "broker/16-config-missing.py":
         "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
     "broker/23-security-password-file-reload.py":
@@ -102,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
     selected.add_argument("--only-tls-identity-reload", action="store_true")
+    selected.add_argument("--only-autosave-reload", action="store_true")
     return parser.parse_args()
 
 
@@ -6905,6 +6908,15 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_autosave_reload:
+            run_autosave_reload_case(args.broker, directory)
+            print(
+                "MQTT autosave reload integration passed: "
+                "disabled+changes+time+target-switch+restore=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         run_missing_root_config_case(args.broker, directory)
         run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
@@ -6988,6 +7000,7 @@ def main() -> None:
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "source-locked Unix listener lifecycle, "
         "source-locked mTLS CN/Subject SIGHUP continuity, "
+        "source-locked change-count autosave and restore, "
         "source-locked global/listener anonymous policy precedence, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "

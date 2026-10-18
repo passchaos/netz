@@ -1400,7 +1400,8 @@ Current protocol coverage includes:
   server-identity/key-password/client-CA/CRL, bridge-generation, and
   per-listener anonymous/zero-ID/assigned-prefix, protocol-version,
   Maximum-QoS/Keep-Alive/Topic-Alias admission plus periodic/change-count/disabled
-  autosave-policy reload,
+  autosave-policy reload, including source-locked retained-state checkpoint and
+  restart recovery after change-count activation,
   selective live credential revocation, cross-subsystem rollback, and
   ref-counted in-flight handshake generations, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
