@@ -1175,6 +1175,20 @@ handle routing, both-session progress and payload isolation.
    their seeded continuous 5% loss/every-fifth reordering schedules. This
    remains a bounded loopback lifecycle gate rather than a production-network
    or throughput comparison.
+   A 2026-10-18 ceiling extension then ran only the 256-stream shape at 64 KiB
+   per stream, three seeds for each sender/fault pairing: twelve additional
+   cross-implementation sessions. With netz sending, loss runs delivered
+   118-132 FINs and 124-138 resets, verified 7,768,576-8,682,496 bytes and
+   dropped 394-453 of 8,214-9,171 considered datagrams; reorder runs delivered
+   128-130 FINs and 126-128 resets, verified 8,421,376-8,551,936 bytes and held
+   1,571-1,577 datagrams. With wtransport sending through the single-shot
+   relay, loss runs delivered 128-138 FINs and 118-128 resets with exactly two
+   drops; reorder runs delivered 114-133 FINs and 123-142 resets with exactly
+   two held pairs. Every run independently matched its seeded byte count,
+   checksum, 256-bit reset mask and application-code sum. This extends the
+   maximum-concurrency cross-peer evidence to three repetitions and four times
+   the prior per-stream payload without turning loopback fault injection into
+   a production-network claim.
    A bounded repeatability gate runs a mixed FIN/reset shape three times under
    deterministic 5% loss, then runs sustained client-direction FIN traffic
    three times under reordering. It requires exact delivered-byte/reset
