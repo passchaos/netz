@@ -119,6 +119,10 @@ def parse_args() -> argparse.Namespace:
         "--only-bridge-connack-capabilities",
         action="store_true",
     )
+    selected.add_argument(
+        "--only-session-clean-start-persistence",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -6948,6 +6952,15 @@ def main() -> None:
                 "will_qos=1->0 retain=true->false "
                 "protocol=mqttv5->mqttv311-private attempts=4 "
                 f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
+        if args.only_session_clean_start_persistence:
+            run_persistent_session_clean_start_case(args.broker, directory)
+            print(
+                "MQTT Session Clean Start persistence integration passed: "
+                "mqttv311+mqttv5 queued+inflight+subscriptions=true "
+                "three_generations=true "
                 + RUNTIME
             )
             return

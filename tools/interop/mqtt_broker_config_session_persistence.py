@@ -290,9 +290,10 @@ def run_persistent_session_clean_start_case(
 ) -> None:
     """Persist Clean Start deletion after restoring queued/inflight state.
 
-    MQTT 3.1.1 directly ports Mosquitto's
-    15-persist-client-msg-out-clear-v3-1-1.py. MQTT 5 repeats the same three
-    broker generations with Clean Start and Session Expiry Interval semantics.
+    MQTT 3.1.1 combines Mosquitto's base
+    15-persist-client-msg-out-v3-1-1.py restore with the stronger
+    15-persist-client-msg-out-clear-v3-1-1.py cleanup. MQTT 5 repeats the same
+    three broker generations with Clean Start and Session Expiry semantics.
     """
     for protocol in (4, 5):
         _run_clean_start_case(broker, directory, protocol)
