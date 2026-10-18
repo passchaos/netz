@@ -4753,10 +4753,10 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The process gate now additionally locks eight upstream sources:
+   semantics. The process gate now additionally locks nine upstream sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,
-   mTLS identity reload, change-count autosave, listener anonymous policy, and
-   two password/ACL invalid-reload cases. The
+   bridge reload, mTLS identity reload, change-count autosave, listener
+   anonymous policy, and two password/ACL invalid-reload cases. The
    CRLF case admits MQTT 3.1.1 and MQTT 5 through the production process. A
    missing root file has a distinct loader error that the CLI maps to exit 3
    plus the exact path before any listener opens; dependent include/security
@@ -4765,9 +4765,11 @@ proxy evidence for the entire suite.
    Session live across SIGHUP, then proves both with PING. The autosave case
    strengthens the upstream one-change checkpoint with disabled, change-count,
    periodic, target-switch, rollback, and retained-state restart phases. The
-   gate also
-   verifies a complete Unix process lifecycle and proves Netz's transactional
-   reload rollback divergence through a real SIGHUP broker process. The nineteen
+   bridge case strengthens upstream immediate/lazy replacement with lazy
+   supersession, add/remove, cross-subsystem preparation failure rollback, and
+   live local-client continuity. The gate also verifies a complete Unix process
+   lifecycle and proves Netz's transactional reload rollback divergence through
+   a real SIGHUP broker process. The nineteen
    behavior-bearing broker packet JSON files are
    already included completely; the only unselected JSON file is
    `ZZ-broker-check.json`, whose sole test is an empty end-of-suite sentinel.

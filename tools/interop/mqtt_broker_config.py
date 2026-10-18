@@ -81,6 +81,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/01-connect-windows-line-endings.py":
         "cf19b5edbe4f06e0ca5ef275cbd7b10ea43488569224d1bdda1575c1b52799ab",
+    "broker/06-bridge-config-reload.py":
+        "6ad3507ff44b52ab06794335e5eca0071d633ffb38584aaea0d5a21ca4d1f997",
     "broker/08-ssl-hup-disconnect.py":
         "bf1e6b1367f56cdbbe9313af657bca2e630e3b4c96ea7f40be0b62c7ef661de3",
     "broker/11-persistence-autosave-changes.py":
@@ -105,6 +107,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
     selected.add_argument("--only-tls-identity-reload", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
+    selected.add_argument("--only-bridge-reload", action="store_true")
     return parser.parse_args()
 
 
@@ -6917,6 +6920,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_bridge_reload:
+            run_bridge_reload_case(args.broker, directory)
+            print(
+                "MQTT bridge reload integration passed: "
+                "immediate+lazy+supersede+add+remove+rollback=true "
+                "live_client_continuity=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         run_missing_root_config_case(args.broker, directory)
         run_windows_line_endings_case(args.broker, directory)
         run_listener_anonymous_policy_case(args.broker, directory)
@@ -7017,7 +7030,7 @@ def main() -> None:
         "and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
-        "immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "
+        "source-locked immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "
         "and client continuity, mTLS, "
         "single-Session bidirectional bridge mapping, "
         "MQTT 3.1/3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
