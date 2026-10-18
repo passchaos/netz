@@ -469,6 +469,48 @@ owned, pipeline and profile artifacts are retained under
 `zig-out/http1-absolute-form-fastpath-ab` and
 `zig-out/http1-absolute-form-fastpath-profile`; their combined manifest hashes
 to `1abd2c9883be66180a2b763664f4a870773d2c86214be8dd0249e05506bc9f00`.
+
+A 2026-10-19 follow-up audited the remaining HTTP/1 start-line and metadata
+hotspots without retaining a production change. The fixed parser baseline was
+`065f4c77114cbd0a6adae3816b33bca866f5de9cec795455e94292cb57bd0c16`.
+Replacing the two exact HTTP-version comparisons with one `HTTP/1.` prefix
+check plus a minor-version dispatch produced candidate
+`d94517a84f637693596424850c841d3a87a5d6826c5fa7fa439b5afa16798207`.
+Across twenty CPU-10, five-million-parse borrowed origin-form pairs, the
+baseline/candidate medians were 0.990888 for latency, 0.991600 for cycles, and
+1.014213 for instructions: executed instructions fell in every pair, but the
+candidate was slower in 15/20 latency and cycle pairs. Twelve owned pairs were
+also slower in 12/12 latency and cycle comparisons, with medians 0.994314 and
+0.994323. Twenty absolute-form pairs had latency/cycle medians of 0.982143 and
+0.982558, despite a 1.010281 instruction ratio.
+
+The matching 16-request pipeline candidate
+`19fc23639ed2db1fec493e984b0ba50fa6e79df4f4095ee69428fd7fad8c7cc4`
+did improve elapsed time, cycles, and instructions by baseline/candidate
+medians of 1.011533, 1.022609, and 1.018417 with 20/20 wins. That opposite
+result was not used to hide the direct parser regressions: two further
+fixed-width/minor-first implementations also reduced instructions while
+losing parser cycles, and the first candidate enlarged the allocating parser's
+generated body by 60 bytes. The audited httparse 1.10.1 reference likewise
+recognizes HTTP/1.0 and HTTP/1.1 with two native eight-byte comparisons rather
+than a prefix/suffix split. The complete bidirectional Hyper cleartext/TLS gate
+passed, so semantics and interoperability were not the rejection reason.
+
+Three subsequent candidates showed the same instruction-versus-cycle trap.
+Directed request-line delimiter searches reduced instructions by a 1.014756
+ratio but lost latency and cycles in all five screening pairs. Fixed-literal
+word comparisons for Host, Content-Length, and Transfer-Encoding reduced
+instructions by 0.77% but had baseline/candidate latency and cycle medians of
+0.977477 and 0.979029. A fused borrowed Host/framing scan initially measured
+1.009238 latency, 1.007518 cycles, and 1.006386 instructions across twenty
+pairs, but its owned control regressed latency and cycles in all twelve pairs
+at 0.988730 and 0.988348. Restoring the owned implementation removed most of
+the borrowed gain, and a borrowed-only state variant then regressed by about
+8%. These results identify generated-code layout and dependency-chain
+sensitivity rather than a robust eliminated-work win. Every candidate and its
+test-only oracle was therefore removed; no start-line, header-comparison, or
+metadata-fusion performance claim is retained.
+
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,
