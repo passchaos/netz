@@ -10,6 +10,75 @@ fn sessionExpiryProperty(seconds: u32) mqtt.Property {
     } };
 }
 
+test "MQTT reconnect retains and transfers failed CONNACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.acceptPending(.{ .protocol = .v5 });
+            defer pending.deinit(self.server.allocator);
+            try pending.connection.writeConnAck(.{
+                .reason_code = 0x9b,
+                .properties = &.{.{ .byte = .{
+                    .id = .maximum_qos,
+                    .value = 0,
+                } }},
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "retained-refusal",
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    try std.testing.expectError(error.ConnectRefused, client.connect());
+    const borrowed = client.lastConnectRefusal().?;
+    try std.testing.expectEqual(@as(u8, 0x9b), borrowed.reason_code);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        mqtt.maximumQoS(borrowed.properties).?,
+    );
+    var owned = client.takeLastConnectRefusal().?;
+    defer owned.deinit(allocator);
+    try std.testing.expect(client.lastConnectRefusal() == null);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect client reports server violations and retires connections" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

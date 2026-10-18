@@ -615,12 +615,12 @@ pub fn Engine(comptime Source: type) type {
                 }
                 try self.validateDurableSourceState();
                 if (self.target.connection() == null) {
-                    const connected = try self.target.connect();
+                    const connected = try self.connectTarget();
                     try self.noteTargetConnected(connected);
                 }
             } else {
                 if (self.target.connection() == null) {
-                    const connected = try self.target.connect();
+                    const connected = try self.connectTarget();
                     try self.noteTargetConnected(connected);
                 }
                 if (!self.sourceConnected()) {
@@ -634,6 +634,45 @@ pub fn Engine(comptime Source: type) type {
                 .source_session_present = self.source_session_present,
                 .target_session_present = self.target_session_present,
             };
+        }
+
+        fn connectTarget(
+            self: *Self,
+        ) (Error || std.Io.Cancelable)!reconnect.ConnectEvent {
+            var adaptations: u2 = 0;
+            while (true) {
+                const connected = self.target.connect() catch |err| {
+                    if (err == error.ConnectRefused and
+                        adaptations < 2 and
+                        self.adaptTargetNotificationWill())
+                    {
+                        adaptations += 1;
+                        continue;
+                    }
+                    return err;
+                };
+                return connected;
+            }
+        }
+
+        fn pollTarget(
+            self: *Self,
+            options: reconnect.PollOptions,
+        ) (Error || std.Io.Cancelable)!?reconnect.ClientEvent {
+            return self.target.pollWithOptions(options) catch |err| {
+                if (err == error.ConnectRefused and
+                    self.adaptTargetNotificationWill())
+                {
+                    return null;
+                }
+                return err;
+            };
+        }
+
+        fn adaptTargetNotificationWill(self: *Self) bool {
+            const notifications = self.notifications orelse return false;
+            if (!notifications.publish_remote) return false;
+            return self.target.adaptWillToLastConnectRefusal();
         }
 
         pub fn disconnect(self: *Self, reason_code: u8) Error!void {
@@ -713,7 +752,7 @@ pub fn Engine(comptime Source: type) type {
             bounded: reconnect.PollOptions,
         ) (Error || std.Io.Cancelable)!bool {
             if (self.once and self.target.connection() == null) return error.ConnectionClosed;
-            var event = try self.target.pollWithOptions(bounded) orelse {
+            var event = try self.pollTarget(bounded) orelse {
                 if (self.target.connection() == null) try self.notifyLocal(false);
                 return false;
             };
@@ -1151,7 +1190,7 @@ pub fn Engine(comptime Source: type) type {
         ) (Error || std.Io.Cancelable)!void {
             if (try self.commitCompletedTargetDelivery()) return;
             if (self.once and self.target.connection() == null) return error.ConnectionClosed;
-            var event = self.target.pollWithOptions(bounded) catch |err| {
+            var event = self.pollTarget(bounded) catch |err| {
                 if (err == error.PublishRefused) {
                     if (try self.commitCompletedTargetDelivery()) return;
                     self.target.disconnectTransport();
@@ -1501,7 +1540,7 @@ pub fn Engine(comptime Source: type) type {
             while (self.target.connection() == null) {
                 if (self.once) return error.ConnectionClosed;
                 try self.notifyLocal(false);
-                var event = try self.target.pollWithOptions(
+                var event = try self.pollTarget(
                     bridgeClientPollOptions(&self.target, poll_options),
                 ) orelse {
                     try self.serviceSourceWhileWaiting(current, bounded);

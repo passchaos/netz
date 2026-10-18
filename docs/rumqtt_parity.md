@@ -281,6 +281,18 @@ without tearing down current inbound subscriptions. Legal PUBLISH traffic
 interleaved before an UNSUBACK is retained in wire order, acknowledged, and
 deliberately discarded; disabling the option omits the cleanup packet.
 
+The reconnect client retains one bounded owned failed CONNACK instead of
+collapsing every protocol refusal into an opaque error. Applications may
+borrow or take that typed refusal, or explicitly lower an owned CONNECT Will
+from its capability properties before retrying. Configured and programmatic
+bridges apply this only to the remote notification Will they generated:
+`0x9b` plus Maximum QoS lowers QoS, and `0x9a` plus Retain Available false
+clears RETAIN. At most two changed fields can cause immediate retries, so a
+repeated or unrelated refusal remains terminal and caller-supplied Wills are
+never silently modified. A real three-connection test observes QoS 1/Retain,
+QoS 0/Retain, then QoS 0/non-Retain before accepting the bridge and validating
+both online and offline state publications.
+
 Mosquitto-compatible `try_private` defaults on for MQTT 3.1 and 3.1.1 bridges.
 Netz emits the private protocol-level marker, immediately retries a one-way
 bridge on the same endpoint with its configured standard level after an

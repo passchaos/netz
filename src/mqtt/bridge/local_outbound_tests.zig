@@ -974,6 +974,163 @@ test "local outbound bridge one-shot failure closes its local consumer" {
     try std.testing.expectEqual(@as(usize, 0), local.local_consumer_routes.count());
 }
 
+test "local outbound bridge adapts notification Will to refused capabilities" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+
+    const Remote = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var pending = try self.server.acceptPending(.{
+                    .protocol = .v5,
+                });
+                defer pending.deinit(self.server.allocator);
+                const will = pending.connect.connect.will.?;
+                try std.testing.expectEqual(
+                    mqtt.QoS.at_least_once,
+                    will.qos,
+                );
+                try std.testing.expect(will.retain);
+                try pending.connection.writeConnAck(.{
+                    .reason_code = 0x9b,
+                    .properties = &.{.{ .byte = .{
+                        .id = .maximum_qos,
+                        .value = 0,
+                    } }},
+                });
+            }
+
+            {
+                var pending = try self.server.acceptPending(.{
+                    .protocol = .v5,
+                });
+                defer pending.deinit(self.server.allocator);
+                const will = pending.connect.connect.will.?;
+                try std.testing.expectEqual(
+                    mqtt.QoS.at_most_once,
+                    will.qos,
+                );
+                try std.testing.expect(will.retain);
+                try pending.connection.writeConnAck(.{
+                    .reason_code = 0x9a,
+                    .properties = &.{.{ .byte = .{
+                        .id = .retain_available,
+                        .value = 0,
+                    } }},
+                });
+            }
+
+            var final_pending = try self.server.acceptPending(.{
+                .protocol = .v5,
+            });
+            var final_pending_owned = true;
+            defer if (final_pending_owned) {
+                final_pending.deinit(self.server.allocator);
+            };
+            const final_will = final_pending.connect.connect.will.?;
+            try std.testing.expectEqual(
+                mqtt.QoS.at_most_once,
+                final_will.qos,
+            );
+            try std.testing.expect(!final_will.retain);
+            var accepted = try final_pending.finish(.{ .protocol = .v5 });
+            final_pending_owned = false;
+            defer accepted.deinit(self.server.allocator);
+
+            for ([_][]const u8{ "1", "0" }) |payload| {
+                var publish = try accepted.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "bridge/capability/state",
+                    publish.publish.topic,
+                );
+                try std.testing.expectEqualStrings(
+                    payload,
+                    publish.publish.payload,
+                );
+            }
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                disconnect.disconnect.reason_code,
+            );
+        }
+    };
+    var remote_state = Remote{ .server = &remote };
+    const remote_thread = try std.Thread.spawn(
+        .{},
+        Remote.run,
+        .{&remote_state},
+    );
+    var joined = false;
+    defer if (!joined) remote_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.LocalBridge.initEndpoints(
+        allocator,
+        io,
+        .{ .broker = &local, .id = [_]u8{0x56} ** 16 },
+        .{ .address = remote.address() },
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "capability-source",
+                .clean_start = false,
+                .properties = &.{.{ .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 60,
+                } }},
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "capability-target",
+                .clean_start = false,
+                .properties = &.{.{ .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 60,
+                } }},
+            },
+            .rules = &.{.{
+                .filter = "capability/#",
+                .qos = .at_most_once,
+            }},
+            .notifications = .{
+                .topic = "bridge/capability/state",
+                .publish_remote = true,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    try bridge.disconnect(0);
+
+    remote_thread.join();
+    joined = true;
+    if (remote_state.err) |err| return err;
+}
+
 test "local outbound lazy bridge connects at threshold and retires when idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

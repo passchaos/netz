@@ -5168,6 +5168,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "lastConnectRefusal",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "takeLastConnectRefusal",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "adaptWillToLastConnectRefusal",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "SessionSnapshotFileError",
     ));

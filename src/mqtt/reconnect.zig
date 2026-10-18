@@ -1188,6 +1188,7 @@ pub const Client = struct {
     ping_response_deadline: ?std.Io.Timestamp = null,
     tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
     tls13_session_ticket: ?tls_stream.Tls13SessionTicket = null,
+    last_connect_refusal: ?runtime.OwnedConnAck = null,
     reconnect_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -1412,6 +1413,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
+        self.clearLastConnectRefusal();
         if (self.tls12_session_ticket) |*ticket| ticket.deinit();
         if (self.tls13_session_ticket) |*ticket| ticket.deinit();
         for (self.subscriptions.items) |*subscription| {
@@ -1426,6 +1428,54 @@ pub const Client = struct {
 
     pub fn connection(self: *Client) ?*runtime.Connection {
         return if (self.connection_state) |*active| active else null;
+    }
+
+    /// Borrow the most recent failed CONNACK. The view remains valid until
+    /// the next connect attempt, explicit adaptation/take, or deinitialization.
+    pub fn lastConnectRefusal(self: *const Client) ?mqtt.ConnAck {
+        const owned = self.last_connect_refusal orelse return null;
+        return owned.connack;
+    }
+
+    /// Transfer ownership of the most recent failed CONNACK to the caller,
+    /// which must deinitialize it with the allocator used to create this Client.
+    pub fn takeLastConnectRefusal(self: *Client) ?runtime.OwnedConnAck {
+        const owned = self.last_connect_refusal orelse return null;
+        self.last_connect_refusal = null;
+        return owned;
+    }
+
+    /// Explicitly lower the owned CONNECT Will to capabilities advertised by
+    /// a QoS/Retain refusal. Returns true only when one field changed; callers
+    /// may then retry without risking an unbounded refusal loop.
+    pub fn adaptWillToLastConnectRefusal(self: *Client) bool {
+        const refusal = self.last_connect_refusal orelse return false;
+        const will = if (self.options.will) |*value| value else return false;
+        const changed = switch (refusal.connack.reason_code) {
+            0x9b => blk: {
+                const maximum = mqtt.maximumQoS(
+                    refusal.connack.properties,
+                ) orelse break :blk false;
+                if (@intFromEnum(will.qos) <= @intFromEnum(maximum)) {
+                    break :blk false;
+                }
+                will.qos = maximum;
+                break :blk true;
+            },
+            0x9a => blk: {
+                const available = mqtt.retainAvailable(
+                    refusal.connack.properties,
+                ) orelse break :blk false;
+                if (available or !will.retain) break :blk false;
+                will.retain = false;
+                break :blk true;
+            },
+            else => false,
+        };
+        if (!changed) return false;
+        self.options.value.will = will.view();
+        self.clearLastConnectRefusal();
+        return true;
     }
 
     /// Ask the single-owner poll loop to retire its current transport and
@@ -1472,6 +1522,7 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) (Error || std.Io.Cancelable)!ConnectEvent {
         if (self.connection_state != null) return error.InvalidProperty;
+        self.clearLastConnectRefusal();
         var failed_attempts: usize = 0;
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
@@ -1513,7 +1564,9 @@ pub const Client = struct {
                     attempt.deinit(self.allocator);
                     return err;
                 };
-                attempt.deinit(self.allocator);
+                std.debug.assert(attempt.connection == null);
+                self.last_connect_refusal = attempt.connack;
+                attempt.connack = undefined;
                 return error.ConnectRefused;
             }
             var result = try attempt.requireAccepted();
@@ -1575,6 +1628,13 @@ pub const Client = struct {
                 .session_present = session_present,
                 .failed_attempts = failed_attempts,
             };
+        }
+    }
+
+    fn clearLastConnectRefusal(self: *Client) void {
+        if (self.last_connect_refusal) |*refusal| {
+            refusal.deinit(self.allocator);
+            self.last_connect_refusal = null;
         }
     }
 
