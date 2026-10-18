@@ -4147,7 +4147,7 @@ normal DISCONNECT after installing a Will, reconnects with the same Client ID
 and a replacement Will, and receives Session Present. Exact live PUBLISH bytes
 on both sides of the reconnect plus an ordered PINGRESP prove the canceled old
 Will is never resurrected.
-Three companion cases port Mosquitto's
+Three companion source-locked cases port Mosquitto's
 `07-will-delay-session-expiry.py`, `07-will-delay-session-expiry2.py`, and
 `07-will-delay-session-expiry-0.py`. They time the external delivery when
 Session Expiry is shorter than Will Delay, when Will Delay is shorter, and when
