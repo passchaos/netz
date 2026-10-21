@@ -19,6 +19,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "proxy"));
     try std.testing.expect(@hasDecl(netz.proxy, "socks5"));
     try std.testing.expect(@hasDecl(netz.proxy.socks5, "connectHost"));
+    try std.testing.expect(@hasDecl(netz.http, "Socks5Proxy"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
         "adoptTlsStreamWithDeadline",

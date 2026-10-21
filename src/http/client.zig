@@ -13,6 +13,7 @@ const http2_runtime = @import("../http2/runtime.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
+const proxy_socks5 = @import("../proxy/socks5.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const uri_redirect = @import("../http1/runtime/redirect.zig");
@@ -21,7 +22,7 @@ const header_mapping = @import("client/header_mapping.zig");
 const redirect = @import("client/redirect.zig");
 
 pub const Error = http1_runtime.Error || http2_runtime.Error ||
-    uri_redirect.Error || error{
+    proxy_socks5.Error || uri_redirect.Error || error{
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
 };
@@ -33,6 +34,8 @@ pub const CleartextProtocol = types.CleartextProtocol;
 pub const AddressResolver = types.AddressResolver;
 pub const AddressConnectPolicy = types.AddressConnectPolicy;
 pub const HappyEyeballsOptions = types.HappyEyeballsOptions;
+pub const Socks5Options = types.Socks5Options;
+pub const Socks5Proxy = types.Socks5Proxy;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const RequestOptions = types.RequestOptions;
@@ -329,10 +332,14 @@ pub const Client = struct {
                 self.io,
                 self.options.connect_timeout,
             );
-        const stream = try self.connectEndpointBefore(
-            endpoint,
-            connect_deadline,
-        );
+        const stream = if (self.options.socks5_proxy) |proxy|
+            try self.connectEndpointViaSocks5Before(
+                endpoint,
+                proxy,
+                connect_deadline,
+            )
+        else
+            try self.connectEndpointBefore(endpoint, connect_deadline);
         if (self.options.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch {
                 stream.close(self.io);
@@ -491,6 +498,43 @@ pub const Client = struct {
                 addresses,
                 null,
                 self.options.address_connect_policy,
+            );
+    }
+
+    fn connectEndpointViaSocks5Before(
+        self: *Client,
+        endpoint: http1_runtime.UriEndpoint,
+        proxy: Socks5Proxy,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!std.Io.net.Stream {
+        var options = proxy.options;
+        if (options.address_resolver == null) {
+            options.address_resolver = self.options.address_resolver;
+        }
+        if (options.address_connect_policy == null) {
+            options.address_connect_policy =
+                self.options.address_connect_policy;
+        }
+        return if (deadline) |absolute|
+            proxy_socks5.connectHostWithDeadline(
+                self.allocator,
+                self.io,
+                proxy.host,
+                proxy.port,
+                endpoint.tls_host,
+                endpoint.port,
+                options,
+                absolute,
+            )
+        else
+            proxy_socks5.connectHost(
+                self.allocator,
+                self.io,
+                proxy.host,
+                proxy.port,
+                endpoint.tls_host,
+                endpoint.port,
+                options,
             );
     }
 

@@ -12,6 +12,7 @@ const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 const address_resolver = @import("../../internal/address_resolver.zig");
 const tcp_connect = @import("../../internal/tcp_connect.zig");
+const proxy_socks5 = @import("../../proxy/socks5.zig");
 
 pub const Protocol = enum {
     http1,
@@ -38,6 +39,13 @@ pub const CleartextProtocol = enum {
 pub const AddressResolver = address_resolver.Resolver;
 pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
 pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
+pub const Socks5Options = proxy_socks5.Options;
+
+pub const Socks5Proxy = struct {
+    host: []const u8,
+    port: u16 = 1080,
+    options: Socks5Options = .{},
+};
 
 pub const Header = struct {
     name: []const u8,
@@ -74,6 +82,10 @@ pub const Options = struct {
     /// resolver's exact sequential fallback; `.happy_eyeballs` stable-
     /// interleaves address families and races them with a bounded stagger.
     address_connect_policy: AddressConnectPolicy = .ordered,
+    /// Route every TCP origin through SOCKS5 with proxy-side destination DNS.
+    /// One Client or Pool has one fixed proxy route; each origin/redirect hop
+    /// still receives an independently negotiated tunnel.
+    socks5_proxy: ?Socks5Proxy = null,
     tcp_nodelay: bool = true,
     http1_limits: http1_runtime.Limits = .{},
     http2_limits: http2_runtime.Limits = .{},

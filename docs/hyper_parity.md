@@ -2240,6 +2240,17 @@ remote-DNS SOCKS CONNECT requests and completes both HTTP and certificate- and
 hostname-verified HTTPS without exposing the proxy authority in Host or TLS
 identity.
 
+The unified HTTP client and bounded connection pool now take the same fixed
+SOCKS5 route. Cleartext HTTP/1, cleartext HTTP/2 prior knowledge, and HTTPS
+ALPN negotiation all run on the returned tunnel; redirect hops open new
+remote-DNS tunnels while pooled requests to one authority reuse the negotiated
+connection. Cross-origin credential and TLS-ticket policy remains in the shared
+redirect engine. A Python peer gate verifies a two-origin HTTP/1 redirect with
+Authorization stripping, certificate-verified TLS 1.3 selecting HTTP/2, and
+two pooled HTTP/1 requests over exactly one SOCKS tunnel. Configuring both this
+TCP proxy and HTTP/3 is rejected at pool construction until SOCKS5 UDP
+ASSOCIATE exists, rather than silently bypassing the proxy with QUIC.
+
 ## Remaining evidence
 
 The shared `fuzz-parsers` target exercises strict borrowed and owned HTTP/1
