@@ -13,7 +13,11 @@ pub const black_hole_cooldown_ns: u64 = 60 * std.time.ns_per_s;
 pub const pmtu_raise_timer_ns: u64 = 600 * std.time.ns_per_s;
 
 pub const Config = struct {
+    /// Enable active DPLPMTUD probing. Passive black-hole detection remains
+    /// active when this is false so a configured larger initial size can
+    /// still recover to QUIC's guaranteed minimum.
     enabled: bool = false,
+    initial_size: usize = min_udp_payload_size,
     max_probe_size: usize = max_ipv4_udp_payload_size,
     is_ipv6: bool = false,
     max_probe_failures: u8 = default_max_probe_failures,
@@ -26,6 +30,7 @@ pub const Config = struct {
 /// ack-eliciting PING plus enough PADDING to reach `probeSize()`.
 pub const State = struct {
     enabled: bool = false,
+    initial_size: u16 = min_udp_payload_size,
     current_size: usize = min_udp_payload_size,
     max_probe_size: usize = max_ipv4_udp_payload_size,
     probe_size: ?usize = null,
@@ -55,6 +60,10 @@ pub const State = struct {
     // paths use the explicit identity-aware variants below.
 
     pub fn init(config: Config) State {
+        const initial_size: u16 = @intCast(@min(
+            @max(config.initial_size, min_udp_payload_size),
+            std.math.maxInt(u16),
+        ));
         var max_probe_size = config.max_probe_size;
         if (max_probe_size <= min_udp_payload_size) {
             max_probe_size = if (config.is_ipv6) max_ipv6_udp_payload_size else max_ipv4_udp_payload_size;
@@ -62,6 +71,8 @@ pub const State = struct {
         max_probe_size = @max(max_probe_size, min_udp_payload_size);
         return .{
             .enabled = config.enabled,
+            .initial_size = initial_size,
+            .current_size = initial_size,
             .max_probe_size = max_probe_size,
             .max_probe_failures = @max(config.max_probe_failures, 1),
             .should_probe = config.enabled,
@@ -184,7 +195,6 @@ pub const State = struct {
     }
 
     pub fn onMtuSizedPacketAcked(self: *State, packet_number: u64, datagram_size: usize) void {
-        if (!self.enabled) return;
         const bounded_size = std.math.cast(u16, datagram_size) orelse
             std.math.maxInt(u16);
         if (bounded_size < self.acked_mtu) return;
@@ -248,7 +258,7 @@ pub const State = struct {
         now_ns: u64,
     ) BlackHoleResult {
         _ = new_loss_burst;
-        if (!self.enabled or is_probe) return .{};
+        if (is_probe) return .{};
         if (self.last_loss_packet_number) |previous| {
             if (previous +| 1 != packet_number) {
                 const result = self.finishLossBurst(now_ns);
@@ -277,8 +287,7 @@ pub const State = struct {
         const smallest = self.loss_burst_smallest_size;
         self.last_loss_packet_number = null;
         self.loss_burst_smallest_size = 0;
-        if (!self.enabled or
-            smallest <= min_udp_payload_size or
+        if (smallest <= min_udp_payload_size or
             smallest > self.current_size)
         {
             return .{};
@@ -308,7 +317,11 @@ pub const State = struct {
         self.active_probe_packet_number = null;
         self.active_probe_size = null;
         self.should_probe = false;
-        self.raise_probe_after_ns = std.math.add(u64, now_ns, black_hole_cooldown_ns) catch std.math.maxInt(u64);
+        self.raise_probe_after_ns = if (self.enabled)
+            std.math.add(u64, now_ns, black_hole_cooldown_ns) catch
+                std.math.maxInt(u64)
+        else
+            null;
         return .{ .mtu_dropped = true, .new_size = self.current_size };
     }
 
@@ -325,10 +338,13 @@ pub const State = struct {
 
     pub fn resetForPath(self: *State) void {
         const enabled = self.enabled;
+        const initial_size = self.initial_size;
         const max_probe_size = self.max_probe_size;
         const max_probe_failures = self.max_probe_failures;
         self.* = .{
             .enabled = enabled,
+            .initial_size = initial_size,
+            .current_size = initial_size,
             .max_probe_size = max_probe_size,
             .max_probe_failures = max_probe_failures,
             .should_probe = enabled,
@@ -377,6 +393,34 @@ test "QUIC PMTUD disabled state does not probe" {
     var state = State.init(.{ .enabled = false });
     try std.testing.expect(!state.shouldProbe());
     try std.testing.expectEqual(@as(?usize, null), state.probeSize(1500));
+}
+
+test "QUIC PMTUD disabled state still recovers from a black hole" {
+    var state = State.init(.{
+        .enabled = false,
+        .initial_size = 1400,
+        .max_probe_size = 1400,
+    });
+    try std.testing.expectEqual(@as(usize, 1400), state.currentSize());
+    try std.testing.expect(!state.shouldProbe());
+
+    for ([_]u64{ 0, 2, 4, 6 }) |packet_number| {
+        try std.testing.expect(!state.onNonProbeLost(
+            packet_number,
+            1300,
+            true,
+            packet_number + 1,
+        ).mtu_dropped);
+    }
+    const dropped = state.finishLossBurst(10);
+    try std.testing.expect(dropped.mtu_dropped);
+    try std.testing.expectEqual(min_udp_payload_size, state.currentSize());
+    try std.testing.expectEqual(@as(?u64, null), state.probeDeadlineNs());
+    try std.testing.expect(!state.shouldProbe());
+
+    state.resetForPath();
+    try std.testing.expectEqual(@as(usize, 1400), state.currentSize());
+    try std.testing.expect(!state.shouldProbe());
 }
 
 test "QUIC PMTUD retains size-only probe API compatibility" {

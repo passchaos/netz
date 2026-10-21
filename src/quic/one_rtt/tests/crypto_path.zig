@@ -1238,6 +1238,72 @@ test "QUIC 1-RTT PMTU ACK prunes smaller black-hole bursts" {
     );
 }
 
+test "QUIC 1-RTT passive black-hole recovery works without active PMTUD" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6c} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "passive-local",
+        .peer_connection_id = "passive-peer",
+        .enable_pacing = false,
+        .enable_pmtud = false,
+        .max_datagram_size = 1400,
+    });
+    defer connection.deinit();
+    try std.testing.expectEqual(@as(usize, 1400), connection.currentSendDatagramSize());
+    try std.testing.expect(!connection.pmtudShouldProbe());
+    const path_epoch = one_rtt.testing.currentPathEpoch(&connection);
+
+    for ([_]u64{ 0, 2, 4, 6 }) |packet_number| {
+        try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            100,
+            1300,
+            .not_ect,
+            packet_number + 1,
+            path_epoch,
+        );
+    }
+    try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+        10,
+        true,
+        100,
+        quic.pmtu.min_udp_payload_size,
+        .not_ect,
+        11,
+        path_epoch,
+    );
+    try one_rtt.testing.applyReceivedFrames(&connection, 100, &.{.{ .ack = .{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }}, 100, .not_ect);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        connection.currentSendDatagramSize(),
+    );
+    try std.testing.expectEqual(@as(?u64, null), connection.pmtuProbeDeadline());
+    try std.testing.expect(!connection.pmtudShouldProbe());
+
+    connection.pmtud.resetForPath();
+    try std.testing.expectEqual(@as(usize, 1400), connection.currentSendDatagramSize());
+    try std.testing.expect(!connection.pmtudShouldProbe());
+}
+
 test "QUIC 1-RTT ignores stale PMTU probe ACK after path reset" {
     const allocator = std.testing.allocator;
 

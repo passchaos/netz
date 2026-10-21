@@ -1415,7 +1415,14 @@ pub const Connection = struct {
             ),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .ecn_path = .init(config.automatic_ecn_policy),
-            .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
+            .pmtud = .init(.{
+                .enabled = config.enable_pmtud,
+                .initial_size = if (config.enable_pmtud)
+                    quic.pmtu.min_udp_payload_size
+                else
+                    config.max_datagram_size,
+                .max_probe_size = config.pmtud_max_probe_size,
+            }),
             .path_validation = .initWithMaxPendingResponses(
                 endpoint.allocator,
                 config.max_pending_path_responses,
@@ -5438,7 +5445,6 @@ pub const Connection = struct {
             self.config.max_datagram_size,
             self.endpoint.limits.max_datagram_size,
         );
-        if (!self.pmtud.enabled) return configured;
         return @min(configured, self.pmtud.currentSize());
     }
 

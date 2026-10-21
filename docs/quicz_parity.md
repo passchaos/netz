@@ -356,6 +356,10 @@ and cwnd heuristics remain coherent with the new path size. Dedicated
 PING/PADDING probes stay outside generic retransmission ownership; their sent
 metadata retains an independent loss timer, so a lost lone probe is retried by
 the PMTU search rather than accidentally resurfacing as an ordinary PTO packet.
+Disabling active discovery now disables only those probes and timers: a path
+configured above 1200 bytes still uses the same bounded ACK/loss detector and
+falls back passively after four qualifying bursts, while a later path reset
+restores the configured initial size.
 QUIC 1-RTT automatic ECN marking is now path-scoped rather than a single
 tracker-global latch. Ordinary convenience sends mark eligible application
 packets `ECT(0)` while the current path is in testing/capable state, reset
