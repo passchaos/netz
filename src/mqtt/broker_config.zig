@@ -152,6 +152,9 @@ pub const Config = struct {
     max_queued_bytes: usize = 0,
     /// Hard limit for broker-owned heap allocations. Zero means unlimited.
     memory_limit: usize = 0,
+    /// Optional process-identification file held by the configured broker.
+    /// The production runner keeps an exclusive advisory lock for its lifetime.
+    pid_file: []u8 = &.{},
     retain_available: bool = true,
     check_retain_source: bool = true,
     client_id_prefixes: []u8 = &.{},
@@ -175,6 +178,7 @@ pub const Config = struct {
         if (self.bridges.len != 0) allocator.free(self.bridges);
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
+        if (self.pid_file.len != 0) allocator.free(self.pid_file);
         if (self.client_id_prefixes.len != 0) {
             allocator.free(self.client_id_prefixes);
         }
@@ -337,6 +341,7 @@ const GlobalSeen = struct {
     max_queued_messages: bool = false,
     max_queued_bytes: bool = false,
     memory_limit: bool = false,
+    pid_file: bool = false,
     retain_available: bool = false,
     check_retain_source: bool = false,
     client_id_prefixes: bool = false,
@@ -395,6 +400,7 @@ fn parseSources(
             allocator.free(config.password_file);
         }
         if (config.acl_file.len != 0) allocator.free(config.acl_file);
+        if (config.pid_file.len != 0) allocator.free(config.pid_file);
         if (config.client_id_prefixes.len != 0) {
             allocator.free(config.client_id_prefixes);
         }
@@ -594,6 +600,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "memory_limit")) {
                 try markOnce(&global_seen.memory_limit);
                 config.memory_limit = try parseOneInteger(usize, &words);
+            } else if (std.mem.eql(u8, directive, "pid_file")) {
+                try markOnce(&global_seen.pid_file);
+                config.pid_file = try parseOneOwned(allocator, &words);
             } else if (std.mem.eql(u8, directive, "retain_available")) {
                 try markOnce(&global_seen.retain_available);
                 config.retain_available = try parseOneBool(&words);
@@ -1339,6 +1348,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_queued_messages 23
         \\max_queued_bytes 4096
         \\memory_limit 16777216
+        \\pid_file run/netz-mqtt.pid
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
@@ -1396,6 +1406,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 23), config.effectiveMaxQueuedMessages());
     try std.testing.expectEqual(@as(usize, 4096), config.max_queued_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), config.memory_limit);
+    try std.testing.expectEqualStrings("run/netz-mqtt.pid", config.pid_file);
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
@@ -3213,6 +3224,13 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(
             allocator,
             "memory_limit 1024\nmemory_limit 2048\nlistener 1883",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(
+            allocator,
+            "pid_file first.pid\npid_file second.pid\nlistener 1883",
         ),
     );
     try std.testing.expectError(

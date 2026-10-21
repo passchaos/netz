@@ -73,6 +73,7 @@ fn fieldClass(comptime name: []const u8) FieldClass {
         std.mem.eql(u8, name, "max_inflight_bytes") or
         std.mem.eql(u8, name, "max_queued_messages") or
         std.mem.eql(u8, name, "max_queued_bytes") or
+        std.mem.eql(u8, name, "pid_file") or
         std.mem.eql(u8, name, "websocket_headers_size") or
         std.mem.eql(u8, name, "set_tcp_nodelay"))
     {
@@ -156,6 +157,9 @@ test "restart-required MQTT globals reject every changed field" {
     try expectRestart(initial, candidate);
     candidate = initial;
     candidate.max_queued_bytes = 1;
+    try expectRestart(initial, candidate);
+    candidate = initial;
+    candidate.pid_file = @constCast("changed.pid");
     try expectRestart(initial, candidate);
     candidate = initial;
     candidate.websocket_headers_size -= 1;

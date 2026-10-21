@@ -136,6 +136,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-empty-password-reload", action="store_true")
     selected.add_argument("--only-empty-acl", action="store_true")
     selected.add_argument("--only-memory-limit", action="store_true")
+    selected.add_argument("--only-pid-file", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2376,6 +2377,113 @@ def run_memory_limit_case(broker: Path, directory: Path) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+
+
+def run_pid_file_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    pid_path = directory / "configured-broker.pid"
+    config = directory / "pid-file.conf"
+    config.write_text(
+        f"pid_file {pid_path}\n"
+        f"listener {port} 127.0.0.1\n"
+        "listener_allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+
+    def start(label: str) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        wait_process_line(
+            process,
+            "configured 1 listeners for 1 clients",
+            label,
+        )
+        read_listener_lines(process, 1, label)
+        if pid_path.read_text() != f"{process.pid}\n":
+            raise AssertionError(f"{label} wrote the wrong PID file")
+        return process
+
+    def finish(process: subprocess.Popen[str], client_id: str) -> None:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            client.settimeout(5)
+            client.sendall(connect_packet(client_id))
+            if connack_reason(read_mqtt_packet(client)) != 0:
+                raise AssertionError(f"{client_id} CONNECT was refused")
+            client.sendall(bytes.fromhex("e000"))
+        finally:
+            client.close()
+        if process.wait(timeout=5) != 0:
+            assert process.stdout is not None
+            raise RuntimeError(
+                f"{client_id} broker failed: " + process.stdout.read()
+            )
+
+    pid_path.write_text("stale\n")
+    first = start("PID-file stale recovery")
+    try:
+        duplicate = subprocess.run(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if duplicate.returncode == 0 or "PidFileLocked" not in duplicate.stdout:
+            raise AssertionError(
+                "concurrent broker did not fail on the held PID file: "
+                + duplicate.stdout
+            )
+        finish(first, "pid-owner")
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.wait()
+        assert first.stdout is not None
+        first.stdout.close()
+    if pid_path.exists():
+        raise AssertionError("normal broker exit retained its PID file")
+
+    replaced = start("PID-file replacement ownership")
+    try:
+        pid_path.unlink()
+        pid_path.write_text("replacement\n")
+        finish(replaced, "pid-replaced")
+    finally:
+        if replaced.poll() is None:
+            replaced.kill()
+            replaced.wait()
+        assert replaced.stdout is not None
+        replaced.stdout.close()
+    if pid_path.read_text() != "replacement\n":
+        raise AssertionError("broker removed a replacement PID-file path")
+    pid_path.unlink()
+
+    crashed = start("PID-file crash setup")
+    crashed.kill()
+    crashed.wait(timeout=5)
+    assert crashed.stdout is not None
+    crashed.stdout.close()
+    if not pid_path.exists():
+        raise AssertionError("forced termination unexpectedly removed PID file")
+
+    recovered = start("PID-file post-crash recovery")
+    try:
+        finish(recovered, "pid-recovered")
+    finally:
+        if recovered.poll() is None:
+            recovered.kill()
+            recovered.wait()
+        assert recovered.stdout is not None
+        recovered.stdout.close()
+    if pid_path.exists():
+        raise AssertionError("recovered broker retained its PID file")
 
 
 def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
@@ -7510,6 +7618,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_pid_file:
+            run_pid_file_case(args.broker, directory)
+            print(
+                "MQTT broker PID-file lifecycle integration passed: "
+                "stale=reclaimed concurrent=locked crash=recovered "
+                "normal-exit=removed replacement=preserved "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -7692,6 +7810,7 @@ def main() -> None:
         run_runtime_delivery_policy_reload_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_memory_limit_case(args.broker, directory)
+        run_pid_file_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
         run_empty_acl_case(args.broker, directory)
@@ -7730,6 +7849,7 @@ def main() -> None:
         "CRLF mqttv311+mqttv5, strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "hard heap memory limit with live SIGHUP reload, "
+        "locked crash-recoverable PID-file lifecycle, "
         "source-locked Unix listener lifecycle, "
         "source-locked mTLS CN/Subject SIGHUP continuity, "
         "source-locked change-count autosave and restore, "

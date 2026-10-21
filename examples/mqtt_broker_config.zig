@@ -19,6 +19,7 @@ const reload_compatibility = @import(
     "support/mqtt_reload_compatibility.zig",
 );
 const MemoryLimiter = @import("support/memory_limiter.zig").MemoryLimiter;
+const mqtt_pid_file = @import("support/mqtt_pid_file.zig");
 const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
 
 const mqtt = netz.mqtt;
@@ -663,6 +664,16 @@ pub fn run(
     );
     defer config.deinit(allocator);
     memory_limiter.setLimit(config.memory_limit);
+    var pid_file = if (config.pid_file.len == 0)
+        null
+    else
+        try mqtt_pid_file.PidFile.acquire(
+            io,
+            std.Io.Dir.cwd(),
+            config.pid_file,
+            mqtt_pid_file.currentProcessId(),
+        );
+    defer if (pid_file) |*owned| owned.deinit();
 
     const connection_count = try config.totalMaxConnections();
     const active_connection_limit = try config.activeConnectionLimit();
