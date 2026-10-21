@@ -39,7 +39,7 @@ pub const State = struct {
     active_probe_epoch: u32 = 0,
     active_probe_size: ?usize = null,
     last_loss_packet_number: ?u64 = null,
-    loss_burst_signaled: bool = false,
+    loss_burst_smallest_size: u16 = 0,
 
     pub const BlackHoleResult = struct {
         mtu_dropped: bool = false,
@@ -183,14 +183,16 @@ pub const State = struct {
         }
         self.black_hole_counter = 0;
         self.largest_acked_mtu_sized_packet = packet_number;
+        self.last_loss_packet_number = null;
+        self.loss_burst_smallest_size = 0;
     }
 
     /// Observe one ordinary packet loss for PMTU black-hole detection.
     ///
-    /// Only non-probe datagrams larger than the base PLPMTU and no larger than
-    /// the currently validated PMTU qualify. The caller supplies
-    /// `new_loss_burst` so one congestion outage contributes at most one signal
-    /// per discontiguous packet-number run.
+    /// Only complete non-probe loss bursts whose smallest datagram exceeds the
+    /// base PLPMTU can qualify. A later base-sized loss in the same contiguous
+    /// run therefore makes the whole burst non-suspicious, matching Quinn's
+    /// conservative black-hole heuristic.
     pub fn onNonProbeLost(
         self: *State,
         packet_number: u64,
@@ -207,12 +209,9 @@ pub const State = struct {
         );
     }
 
-    /// Preserve loss-burst continuity for every packet on the current path.
-    ///
-    /// PMTU probes and base-sized packets never increment black-hole evidence,
-    /// but they still bridge adjacent packet numbers. Without observing them,
-    /// one contiguous outage split around a probe (or across two detector
-    /// passes) could be counted as multiple independent loss bursts.
+    /// Aggregate one ordinary loss into the current packet-number burst.
+    /// PMTU probes are excluded: a probe between two ordinary lost packets
+    /// creates a packet-number gap and therefore separates their bursts.
     pub fn onPacketLost(
         self: *State,
         packet_number: u64,
@@ -221,23 +220,46 @@ pub const State = struct {
         new_loss_burst: bool,
         now_ns: u64,
     ) BlackHoleResult {
-        const contiguous_with_previous = if (self.last_loss_packet_number) |previous|
-            previous +| 1 == packet_number
-        else
-            false;
-        if (!contiguous_with_previous and new_loss_burst) {
-            self.loss_burst_signaled = false;
+        _ = new_loss_burst;
+        if (!self.enabled or is_probe) return .{};
+        if (self.last_loss_packet_number) |previous| {
+            if (previous +| 1 != packet_number) {
+                const result = self.finishLossBurst(now_ns);
+                if (result.mtu_dropped) return result;
+            }
         }
         self.last_loss_packet_number = packet_number;
-        if (!self.enabled or (!new_loss_burst and !contiguous_with_previous)) return .{};
-        if (is_probe) return .{};
-        if (datagram_size <= min_udp_payload_size or datagram_size > self.current_size) return .{};
-        if (self.largest_acked_mtu_sized_packet) |largest| {
-            if (packet_number <= largest) return .{};
+        const bounded_size = std.math.cast(u16, datagram_size) orelse
+            std.math.maxInt(u16);
+        if (self.loss_burst_smallest_size == 0 or
+            bounded_size < self.loss_burst_smallest_size)
+        {
+            self.loss_burst_smallest_size = bounded_size;
         }
-        if (self.loss_burst_signaled) return .{};
+        return .{};
+    }
+
+    /// Close the current loss burst and apply any resulting black-hole signal.
+    /// Loss detection calls this once after each reported batch so a final
+    /// burst does not remain invisible until some later packet is lost.
+    pub fn finishLossBurst(
+        self: *State,
+        now_ns: u64,
+    ) BlackHoleResult {
+        const latest = self.last_loss_packet_number orelse return .{};
+        const smallest = self.loss_burst_smallest_size;
+        self.last_loss_packet_number = null;
+        self.loss_burst_smallest_size = 0;
+        if (!self.enabled or
+            smallest <= min_udp_payload_size or
+            smallest > self.current_size)
+        {
+            return .{};
+        }
+        if (self.largest_acked_mtu_sized_packet) |largest| {
+            if (latest <= largest) return .{};
+        }
         self.black_hole_counter +|= 1;
-        self.loss_burst_signaled = true;
         if (self.black_hole_counter <= black_hole_threshold) return .{};
         self.black_hole_counter = 0;
         self.largest_acked_mtu_sized_packet = null;
@@ -429,7 +451,8 @@ test "QUIC PMTUD black-hole detection requires four discontiguous bursts" {
     try std.testing.expect(!state.onNonProbeLost(2, 1300, false, 20).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(4, 1300, true, 30).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(7, 1300, true, 40).mtu_dropped);
-    const result = state.onNonProbeLost(10, 1300, true, 50);
+    try std.testing.expect(!state.onNonProbeLost(10, 1300, true, 50).mtu_dropped);
+    const result = state.finishLossBurst(50);
     try std.testing.expect(result.mtu_dropped);
     try std.testing.expectEqual(min_udp_payload_size, result.new_size);
     try std.testing.expectEqual(min_udp_payload_size, state.currentSize());
@@ -442,10 +465,12 @@ test "QUIC PMTUD black-hole evidence clears on acknowledged MTU-sized packet" {
 
     try std.testing.expect(!state.onNonProbeLost(10, 1300, true, 10).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(12, 1300, true, 20).mtu_dropped);
+    try std.testing.expect(!state.finishLossBurst(20).mtu_dropped);
     state.onMtuSizedPacketAcked(13, 1300);
     try std.testing.expect(!state.onNonProbeLost(14, 1300, true, 30).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(16, 1300, true, 40).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(18, 1300, true, 50).mtu_dropped);
+    try std.testing.expect(!state.finishLossBurst(50).mtu_dropped);
 }
 
 test "QUIC PMTUD completed search rearms after raise timer" {
@@ -461,21 +486,27 @@ test "QUIC PMTUD completed search rearms after raise timer" {
     try std.testing.expect(state.shouldProbe());
 }
 
-test "QUIC PMTUD preserves contiguous loss burst across calls and bridging losses" {
+test "QUIC PMTUD rejects a burst containing a base-sized loss" {
     var state = State.init(.{ .enabled = true, .max_probe_size = 1400 });
     state.current_size = 1300;
 
     try std.testing.expect(!state.onNonProbeLost(10, 1300, true, 10).mtu_dropped);
-    // A non-qualifying bridging loss still keeps the contiguous run open.
     try std.testing.expect(!state.onNonProbeLost(11, 1200, false, 20).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(12, 1300, false, 30).mtu_dropped);
-    try std.testing.expectEqual(@as(u8, 1), state.black_hole_counter);
+    try std.testing.expect(!state.finishLossBurst(30).mtu_dropped);
+    try std.testing.expectEqual(@as(u8, 0), state.black_hole_counter);
+}
 
-    // Probe loss is not evidence itself, but it is part of the same packet
-    // number run and must not split the surrounding ordinary losses.
-    try std.testing.expect(!state.onPacketLost(13, 1400, true, true, 40).mtu_dropped);
-    try std.testing.expect(!state.onNonProbeLost(14, 1300, false, 50).mtu_dropped);
+test "QUIC PMTUD probe loss separates ordinary loss bursts" {
+    var state = State.init(.{ .enabled = true, .max_probe_size = 1400 });
+    state.current_size = 1300;
+
+    try std.testing.expect(!state.onNonProbeLost(20, 1300, true, 10).mtu_dropped);
+    try std.testing.expect(!state.onPacketLost(21, 1400, true, false, 20).mtu_dropped);
+    try std.testing.expect(!state.onNonProbeLost(22, 1300, false, 30).mtu_dropped);
     try std.testing.expectEqual(@as(u8, 1), state.black_hole_counter);
+    try std.testing.expect(!state.finishLossBurst(30).mtu_dropped);
+    try std.testing.expectEqual(@as(u8, 2), state.black_hole_counter);
 }
 
 test "QUIC PMTUD raise timer respects peer ceiling" {

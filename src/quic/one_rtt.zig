@@ -5536,7 +5536,12 @@ pub const Connection = struct {
             if (result.mtu_dropped) {
                 self.applyCurrentPmtuToPath();
                 self.pacer.reset();
+                return;
             }
+        }
+        if (self.pmtud.finishLossBurst(now).mtu_dropped) {
+            self.applyCurrentPmtuToPath();
+            self.pacer.reset();
         }
     }
 
@@ -16692,6 +16697,14 @@ fn parsePacketFramesForType(
 /// to normal transport callers while allowing the large conformance suite to
 /// live outside the production module.
 pub const testing = struct {
+    pub fn reportLostPmtuEvidence(
+        connection: *Connection,
+        generation: u32,
+        now_ns: u64,
+    ) void {
+        connection.reportLostPmtuEvidence(generation, now_ns);
+    }
+
     pub fn prepareLossDeadlineBenchmark(
         connection: *Connection,
         packet_count: usize,

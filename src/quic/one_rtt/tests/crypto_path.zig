@@ -1073,6 +1073,78 @@ test "QUIC 1-RTT PMTU probe loss lowers next probe size" {
     try std.testing.expect(next > quic.pmtu.min_udp_payload_size);
 }
 
+test "QUIC 1-RTT PMTU black-hole evidence evaluates complete loss bursts" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6a} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "black-hole-local",
+        .peer_connection_id = "black-hole-peer",
+        .enable_pacing = false,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+    });
+    defer connection.deinit();
+    connection.pmtud.current_size = 1300;
+    connection.pmtud.should_probe = false;
+    const path_epoch = one_rtt.testing.currentPathEpoch(&connection);
+
+    const mixed_packet_numbers = [_]u64{ 0, 1, 3, 4, 6, 7, 9, 10 };
+    for (mixed_packet_numbers, 0..) |packet_number, index| {
+        try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            100,
+            if (index % 2 == 0) 1300 else quic.pmtu.min_udp_payload_size,
+            .not_ect,
+            packet_number + 1,
+            path_epoch,
+        );
+        connection.sent.packets.items[index].lost_generation = 1;
+    }
+    one_rtt.testing.reportLostPmtuEvidence(&connection, 1, 100);
+    try std.testing.expectEqual(@as(usize, 1300), connection.pmtudCurrentSize());
+    try std.testing.expectEqual(@as(u8, 0), connection.pmtud.black_hole_counter);
+
+    const suspicious_packet_numbers = [_]u64{ 20, 22, 24, 26 };
+    const first_suspicious_index = connection.sent.packets.items.len;
+    for (suspicious_packet_numbers, 0..) |packet_number, index| {
+        try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            100,
+            1300,
+            .not_ect,
+            packet_number + 1,
+            path_epoch,
+        );
+        connection.sent.packets.items[first_suspicious_index + index]
+            .lost_generation = 2;
+    }
+    one_rtt.testing.reportLostPmtuEvidence(&connection, 2, 200);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        connection.pmtudCurrentSize(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 200 + quic.pmtu.black_hole_cooldown_ns),
+        connection.pmtuProbeDeadline(),
+    );
+}
+
 test "QUIC 1-RTT ignores stale PMTU probe ACK after path reset" {
     const allocator = std.testing.allocator;
 

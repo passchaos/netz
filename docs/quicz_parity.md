@@ -339,11 +339,15 @@ remain green after the change.
 QUIC PMTU handling now also detects path MTU black holes from ordinary
 non-probe loss bursts instead of only explicit probe loss. The implementation
 records the protected datagram size for each sent packet, clears black-hole
-evidence only when an ACK validates a current-MTU-sized packet, collapses one
-contiguous loss episode into one signal, falls back to the base 1200-byte QUIC
-datagram size after the fourth distinct qualifying burst, and rearms probing
-only after a 60-second cooldown. Completed searches separately re-arm a safe
-reprobe after 600 seconds. When PMTU changes, the 1-RTT connection immediately
+evidence only when an ACK validates a current-MTU-sized packet, and evaluates
+each complete contiguous non-probe loss burst by its smallest datagram. A burst
+containing a base-sized packet is therefore ordinary congestion rather than
+MTU evidence regardless of whether the large or small loss is reported first;
+PMTU probes do not bridge two ordinary bursts. After the fourth distinct
+all-large burst, the path falls back to the base 1200-byte QUIC datagram size
+and rearms probing only after a 60-second cooldown. Completed searches
+separately re-arm a safe reprobe after 600 seconds. When PMTU changes, the
+1-RTT connection immediately
 retunes congestion and pacing datagram-size assumptions so steady-state burst
 and cwnd heuristics remain coherent with the new path size. Dedicated
 PING/PADDING probes stay outside generic retransmission ownership; their sent
