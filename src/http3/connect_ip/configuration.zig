@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const capsules = @import("capsules.zig");
+const packet = @import("packet.zig");
 
 pub const Limits = struct {
     max_request_ids_per_direction: usize = 1024,
@@ -267,6 +268,35 @@ pub const State = struct {
         );
     }
 
+    /// Validate an outgoing packet against the latest assignment and route
+    /// snapshots received from the peer. Structural parsing walks IPv6
+    /// extension headers before applying protocol-specific routes.
+    pub fn localPacketAllowed(
+        self: *const State,
+        bytes: []const u8,
+    ) packet.Error!bool {
+        const view = try packet.parse(bytes);
+        return self.sourceIsAssigned(view.source) and routesAllow(
+            self.routes.items,
+            view.destination,
+            view.ip_protocol,
+        );
+    }
+
+    /// Validate a received peer packet against the latest assignment and
+    /// route snapshots completely committed by this endpoint.
+    pub fn peerPacketAllowed(
+        self: *const State,
+        bytes: []const u8,
+    ) packet.Error!bool {
+        const view = try packet.parse(bytes);
+        return self.peerSourceIsAssigned(view.source) and routesAllow(
+            self.sent_routes.items,
+            view.destination,
+            view.ip_protocol,
+        );
+    }
+
     fn collectRequestIds(
         self: *State,
         iterator: *capsules.AddressIterator,
@@ -452,7 +482,7 @@ fn rangesOverlap(a: capsules.Route, b: capsules.Route) bool {
 fn routesAllow(
     routes: []const capsules.Route,
     destination: capsules.IpAddress,
-    ip_protocol: u8,
+    ip_protocol: ?u8,
 ) bool {
     for (routes) |route| {
         if (route.version() != destination.version() or
@@ -469,11 +499,10 @@ fn routesAllow(
         {
             continue;
         }
-        if (route.protocol() == 0 or route.protocol() == ip_protocol or
-            isIcmp(destination.version(), ip_protocol))
-        {
-            return true;
-        }
+        if (route.protocol() == 0) return true;
+        const resolved = ip_protocol orelse continue;
+        if (route.protocol() == resolved or
+            isIcmp(destination.version(), resolved)) return true;
     }
     return false;
 }

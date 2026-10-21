@@ -863,6 +863,13 @@ framing, and caller-buffer ADDRESS_ASSIGN, ADDRESS_REQUEST, and ordered
 ROUTE_ADVERTISEMENT Capsule codecs. Malformed address families, non-network
 prefixes, zero or per-Capsule duplicate emitted Request IDs,
 reversed/overlapping routes, and short output are rejected transactionally.
+An allocation-free packet view validates IPv4 header/total lengths and IPv6
+payload lengths, extracts source/destination addresses, follows the RFC 8200
+Hop-by-Hop, Routing, Fragment, Authentication, and Destination Options chain,
+and recognizes encrypted ESP as opaque. A non-initial fragment or ESP packet
+with no statelessly visible final protocol remains unresolved and is
+eligible only for a protocol-zero route; forwarding helpers also decrement
+IPv4 TTL with a recomputed header checksum or IPv6 Hop Limit.
 Encrypted HTTP/1.1 and HTTP/2 typed Sessions now multiplex configuration and IP
 packet Capsules without implicit event loss. The authenticated HTTP/3 Session
 retains its streaming CONNECT reader for ADDRESS/ROUTE Capsules while routing
@@ -874,15 +881,19 @@ gate, `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast`, uses the audited
 `~/Work/h3` `Protocol::CONNECT_IP` token plus an independent Rust
 ADDRESS_REQUEST/ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT, and Context-ID codec. Netz
 and h3/Quinn each run as client and server, exchange an advertised route and
-empty-snapshot withdrawal plus 20/40-byte IP packets with delivery ack, and
-independently observe request and response FIN before connection shutdown.
+empty-snapshot withdrawal plus policy-matching 20-byte IPv4 packets in both
+directions with delivery ack, and independently observe request and response
+FIN before connection shutdown.
 An optional per-tunnel `ConfigurationState` adds the cross-Capsule rules that a
 stateless codec cannot enforce: lifetime Request ID uniqueness, bounded
 assignment/route snapshots in both directions, empty-list withdrawal, and
 two-phase local ID and snapshot commit across timed writes. Outgoing nonzero
 assignment IDs must correlate to peer requests; peer updates are transactional;
 and symmetric source/route queries include RFC 9484's ICMP exception. H1/H2
-payload-only reads cannot bypass configuration validation or state application,
+`localPacketAllowed` and `peerPacketAllowed` queries consume the parsed packet
+view directly, including IPv6 extension traversal and unresolved-protocol
+fail-closed behavior. H1/H2 payload-only reads cannot bypass configuration
+validation or state application,
 and a local allocation failure leaves the Capsule retryable without a false
 protocol reset. Kernel interface and forwarding policy remain
 application-owned.

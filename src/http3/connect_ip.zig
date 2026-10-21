@@ -12,6 +12,7 @@ const capsule = @import("capsule.zig");
 const config_capsules = @import("connect_ip/capsules.zig");
 const capsule_session = @import("connect_udp/capsule_session.zig");
 const configuration = @import("connect_ip/configuration.zig");
+const packet_module = @import("connect_ip/packet.zig");
 const session_module = @import("connect_udp/session.zig");
 const scope_module = @import("connect_ip/scope.zig");
 const template_module = @import("connect_ip/template.zig");
@@ -41,6 +42,13 @@ pub fn Protocol(comptime Http3: type) type {
         pub const ConfigurationState = configuration.State;
         pub const ConfigurationLimits = configuration.Limits;
         pub const ConfigurationApplyResult = configuration.ApplyResult;
+        pub const packets = packet_module;
+        pub const IpPacket = packet_module.View;
+        pub const PacketError = packet_module.Error;
+
+        pub fn parseIpPacket(packet: []const u8) PacketError!IpPacket {
+            return packet_module.parse(packet);
+        }
 
         pub const request_headers = [_]Http3.Qpack.HeaderField{
             .{ .name = ":protocol", .value = protocol },

@@ -3,8 +3,14 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const client_packet = [_]u8{ 0x45, 0, 0, 20 } ++ [_]u8{0x71} ** 16;
-const server_packet = [_]u8{ 0x60, 0, 0, 0 } ++ [_]u8{0x82} ** 36;
+const client_packet = [_]u8{
+    0x45, 0, 0, 20, 0,   1, 0,   0,  64, 6, 0, 0,
+    192,  0, 2, 21, 203, 0, 113, 42,
+};
+const server_packet = [_]u8{
+    0x45, 0, 0,   20, 0,   2,  0,   0,  64, 17, 0, 0,
+    203,  0, 113, 42, 198, 51, 100, 42,
+};
 const client_route = netz.http3.connect_ip.capsules.Route{ .ipv4 = .{
     .start = .{ 198, 51, 100, 0 },
     .end = .{ 198, 51, 100, 255 },
@@ -134,6 +140,17 @@ fn runClient(
     const request = try netz.http3.connect_ip.capsules
         .writeAddressRequestInto(&encoded, &requested);
     try ip.sendCapsuleWithDeadline(request, deadline);
+    const peer_assignment = [_]netz.http3.connect_ip.capsules.AddressPrefix{.{
+        .request_id = 0,
+        .address = .{ .ipv4 = .{ 203, 0, 113, 42 } },
+        .prefix_length = 32,
+    }};
+    const assign_peer = try netz.http3.connect_ip.capsules
+        .writeAddressAssignInto(&encoded, &peer_assignment);
+    try ip.sendCapsuleWithDeadline(assign_peer, deadline);
+    try std.testing.expect(configuration.peerSourceIsAssigned(.{
+        .ipv4 = .{ 203, 0, 113, 42 },
+    }));
     const route = try netz.http3.connect_ip.capsules
         .writeRouteAdvertisementInto(&encoded, &.{client_route});
     try ip.sendCapsuleWithDeadline(route, deadline);
@@ -141,17 +158,6 @@ fn runClient(
         .{ .ipv4 = .{ 198, 51, 100, 42 } },
         17,
     ));
-    const withdrawn = try netz.http3.connect_ip.capsules
-        .writeRouteAdvertisementInto(&encoded, &.{});
-    try ip.sendCapsuleWithDeadline(withdrawn, deadline);
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        configuration.sentAdvertisedRoutes().len,
-    );
-    try ip.sendWithDeadline(&client_packet, deadline);
-    var incoming = try ip.receiveWithDeadline(deadline);
-    defer incoming.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, &server_packet, incoming.payload);
     var assignment = try ip.receiveCapsuleWithDeadline(deadline);
     defer assignment.deinit(allocator);
     var assigned = try netz.http3.connect_ip.capsules.parseAddressAssign(
@@ -177,6 +183,23 @@ fn runClient(
         .{ .ipv4 = .{ 203, 0, 113, 42 } },
         6,
     ));
+    try std.testing.expect(try configuration.localPacketAllowed(
+        &client_packet,
+    ));
+    try std.testing.expect(try configuration.peerPacketAllowed(
+        &server_packet,
+    ));
+    try ip.sendWithDeadline(&client_packet, deadline);
+    var incoming = try ip.receiveWithDeadline(deadline);
+    defer incoming.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &server_packet, incoming.payload);
+    const withdrawn = try netz.http3.connect_ip.capsules
+        .writeRouteAdvertisementInto(&encoded, &.{});
+    try ip.sendCapsuleWithDeadline(withdrawn, deadline);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        configuration.sentAdvertisedRoutes().len,
+    );
     var route_withdrawal = try ip.receiveCapsuleWithDeadline(deadline);
     defer route_withdrawal.deinit(allocator);
     try std.testing.expectEqual(
@@ -198,7 +221,7 @@ fn runClient(
         "CONNECT-IP complete",
     );
     std.debug.print(
-        "netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true client_io=zio-std-io server_io=h3-quinn-tokio\n",
+        "netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true client_io=zio-std-io server_io=h3-quinn-tokio\n",
         .{ client_packet.len, server_packet.len },
     );
 }
@@ -264,9 +287,6 @@ fn runServer(
     );
     defer configuration.deinit();
     try ip.bindConfigurationState(&configuration);
-    var incoming = try ip.receiveWithTimeout(.fromSeconds(5));
-    defer incoming.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, &client_packet, incoming.payload);
     var address_request = try ip.receiveCapsuleWithTimeout(.fromSeconds(5));
     defer address_request.deinit(allocator);
     var requested = try netz.http3.connect_ip.capsules.parseAddressRequest(
@@ -276,18 +296,26 @@ fn runServer(
         @as(u62, 21),
         (try requested.next()).?.request_id,
     );
+    var address_assignment = try ip.receiveCapsuleWithTimeout(.fromSeconds(5));
+    defer address_assignment.deinit(allocator);
+    var peer_assignments = try netz.http3.connect_ip.capsules
+        .parseAddressAssign(address_assignment.value);
+    const peer_assignment = (try peer_assignments.next()).?;
+    try std.testing.expectEqual(@as(u62, 0), peer_assignment.request_id);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 203, 0, 113, 42 },
+        peer_assignment.address.bytes(),
+    );
+    try std.testing.expect(configuration.sourceIsAssigned(.{
+        .ipv4 = .{ 203, 0, 113, 42 },
+    }));
     var advertised = try ip.receiveCapsuleWithTimeout(.fromSeconds(5));
     defer advertised.deinit(allocator);
     try std.testing.expect(configuration.routeAllows(
         .{ .ipv4 = .{ 198, 51, 100, 42 } },
         17,
     ));
-    var route_withdrawal = try ip.receiveCapsuleWithTimeout(.fromSeconds(5));
-    defer route_withdrawal.deinit(allocator);
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        configuration.advertisedRoutes().len,
-    );
     const assigned = [_]netz.http3.connect_ip.capsules.AddressPrefix{.{
         .request_id = 21,
         .address = .{ .ipv4 = .{ 192, 0, 2, 21 } },
@@ -307,6 +335,22 @@ fn runServer(
         .{ .ipv4 = .{ 203, 0, 113, 42 } },
         6,
     ));
+    try std.testing.expect(try configuration.localPacketAllowed(
+        &server_packet,
+    ));
+    try std.testing.expect(try configuration.peerPacketAllowed(
+        &client_packet,
+    ));
+    var incoming = try ip.receiveWithTimeout(.fromSeconds(5));
+    defer incoming.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &client_packet, incoming.payload);
+    try ip.sendWithTimeout(&server_packet, .fromSeconds(5));
+    var route_withdrawal = try ip.receiveCapsuleWithTimeout(.fromSeconds(5));
+    defer route_withdrawal.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        configuration.advertisedRoutes().len,
+    );
     const withdrawn = try netz.http3.connect_ip.capsules
         .writeRouteAdvertisementInto(&encoded, &.{});
     try ip.sendCapsuleWithTimeout(withdrawn, .fromSeconds(5));
@@ -314,7 +358,6 @@ fn runServer(
         @as(usize, 0),
         configuration.sentAdvertisedRoutes().len,
     );
-    try ip.sendWithTimeout(&server_packet, .fromSeconds(5));
     var ack = try ip.receiveWithTimeout(.fromSeconds(5));
     defer ack.deinit(allocator);
     try std.testing.expectEqualStrings("h3-ip-ack", ack.payload);
@@ -324,7 +367,7 @@ fn runServer(
     );
     try ip.closeWrite();
     std.debug.print(
-        "netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true client_io=h3-quinn-tokio server_io=zio-std-io\n",
+        "netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true client_io=h3-quinn-tokio server_io=zio-std-io\n",
         .{ client_packet.len, server_packet.len },
     );
 }

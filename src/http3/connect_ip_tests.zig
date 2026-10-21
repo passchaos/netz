@@ -896,6 +896,16 @@ test "CONNECT-IP configuration state applies snapshots transactionally" {
         .{ .ipv4 = .{ 192, 0, 2, 7 } },
         1,
     ));
+    var local_packet = [_]u8{
+        0x45, 0, 0, 20, 0,   1, 0, 0, 64, 6, 0, 0,
+        192,  0, 2, 99, 192, 0, 2, 7,
+    };
+    try std.testing.expect(try state.localPacketAllowed(&local_packet));
+    local_packet[9] = 17;
+    try std.testing.expect(!try state.localPacketAllowed(&local_packet));
+    local_packet[9] = 6;
+    local_packet[12..16].* = .{ 198, 51, 100, 1 };
+    try std.testing.expect(!try state.localPacketAllowed(&local_packet));
 
     const unknown_assignment = [_]capsules.AddressPrefix{.{
         .request_id = 4,
@@ -1014,6 +1024,13 @@ test "CONNECT-IP configuration state commits sent snapshots transactionally" {
         .{ .ipv4 = .{ 203, 0, 113, 42 } },
         17,
     ));
+    var peer_packet = [_]u8{
+        0x45, 0, 0, 20, 0,   2, 0,   0,  64, 6, 0, 0,
+        192,  0, 2, 81, 203, 0, 113, 42,
+    };
+    try std.testing.expect(try state.peerPacketAllowed(&peer_packet));
+    peer_packet[16..20].* = .{ 198, 51, 100, 1 };
+    try std.testing.expect(!try state.peerPacketAllowed(&peer_packet));
 
     const empty_assign = try capsules.writeAddressAssignInto(&encoded, &.{});
     try state.prepareLocalCapsule(
@@ -1034,6 +1051,66 @@ test "CONNECT-IP configuration state commits sent snapshots transactionally" {
     try std.testing.expectEqual(@as(usize, 0), state.sentAdvertisedRoutes().len);
     try std.testing.expectEqual(@as(u64, 2), state.sent_assignment_revision);
     try std.testing.expectEqual(@as(u64, 2), state.sent_route_revision);
+}
+
+test "CONNECT-IP packet policy admits unresolved fragments only on wildcard routes" {
+    const allocator = std.testing.allocator;
+    var state = connect_ip.ConfigurationState.init(allocator, .{});
+    defer state.deinit();
+    var encoded: [256]u8 = undefined;
+
+    const source = [_]capsules.AddressPrefix{.{
+        .request_id = 0,
+        .address = .{ .ipv6 = [_]u8{ 0x20, 0x01, 0x0d, 0xb8 } ++
+            [_]u8{0} ** 11 ++ [_]u8{1} },
+        .prefix_length = 128,
+    }};
+    const assigned = try capsules.writeAddressAssignInto(&encoded, &source);
+    _ = try state.applyPeerCapsule(
+        capsules.address_assign_type,
+        (try http3.capsule.parse(assigned)).capsule.value,
+    );
+    const destination = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1 } ++
+        [_]u8{0} ** 9 ++ [_]u8{2};
+    const wildcard = [_]capsules.Route{.{ .ipv6 = .{
+        .start = destination,
+        .end = destination,
+        .ip_protocol = 0,
+    } }};
+    const wildcard_capsule = try capsules.writeRouteAdvertisementInto(
+        &encoded,
+        &wildcard,
+    );
+    _ = try state.applyPeerCapsule(
+        capsules.route_advertisement_type,
+        (try http3.capsule.parse(wildcard_capsule)).capsule.value,
+    );
+
+    var fragment = [_]u8{0} ** 48;
+    fragment[0] = 0x60;
+    fragment[5] = 8;
+    fragment[6] = 44;
+    fragment[7] = 64;
+    fragment[8..24].* = source[0].address.ipv6;
+    fragment[24..40].* = destination;
+    fragment[40] = 60;
+    fragment[43] = 8;
+    try std.testing.expect(try state.localPacketAllowed(&fragment));
+
+    const udp_only = [_]capsules.Route{.{ .ipv6 = .{
+        .start = destination,
+        .end = destination,
+        .ip_protocol = 17,
+    } }};
+    const udp_capsule = try capsules.writeRouteAdvertisementInto(
+        &encoded,
+        &udp_only,
+    );
+    _ = try state.applyPeerCapsule(
+        capsules.route_advertisement_type,
+        (try http3.capsule.parse(udp_capsule)).capsule.value,
+    );
+    try std.testing.expect(!try state.localPacketAllowed(&fragment));
 }
 
 test "CONNECT-IP configuration state bounds peer IDs and route rollback" {

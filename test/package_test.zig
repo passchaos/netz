@@ -3353,6 +3353,10 @@ test "public modules are reachable" {
         "ConfigurationState",
         "ConfigurationLimits",
         "ConfigurationApplyResult",
+        "IpPacket",
+        "PacketError",
+        "parseIpPacket",
+        "packets",
     }) |decl| {
         try std.testing.expect(@hasDecl(netz.http3.connect_ip, decl));
     }
@@ -3372,9 +3376,24 @@ test "public modules are reachable" {
         "routeAllows",
         "peerSourceIsAssigned",
         "peerRouteAllows",
+        "localPacketAllowed",
+        "peerPacketAllowed",
     }) |decl| {
         try std.testing.expect(@hasDecl(
             netz.http3.connect_ip.ConfigurationState,
+            decl,
+        ));
+    }
+    inline for (&.{
+        "View",
+        "Version",
+        "parse",
+        "decrementHopLimit",
+        "ipv4HeaderChecksum",
+        "ipv4HeaderChecksumValid",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.connect_ip.packets,
             decl,
         ));
     }

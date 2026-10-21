@@ -25,13 +25,10 @@ const CLIENT_PAYLOAD_LEN: usize = 513;
 const SERVER_PAYLOAD_LEN: usize = 777;
 const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
 const CLIENT_IP_PACKET: [u8; 20] = [
-    0x45, 0, 0, 20, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
-    0x71, 0x71, 0x71,
+    0x45, 0, 0, 20, 0, 1, 0, 0, 64, 6, 0, 0, 192, 0, 2, 21, 203, 0, 113, 42,
 ];
-const SERVER_IP_PACKET: [u8; 40] = [
-    0x60, 0, 0, 0, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82,
-    0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82,
-    0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82,
+const SERVER_IP_PACKET: [u8; 20] = [
+    0x45, 0, 0, 20, 0, 2, 0, 0, 64, 17, 0, 0, 203, 0, 113, 42, 198, 51, 100, 42,
 ];
 const CLIENT_ROUTE_START: [u8; 4] = [198, 51, 100, 0];
 const CLIENT_ROUTE_END: [u8; 4] = [198, 51, 100, 255];
@@ -146,22 +143,18 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
         .ok_or("missing CONNECT-IP ADDRESS_REQUEST")?;
     let request_capsule = request_data.copy_to_bytes(request_data.remaining());
     validate_address_request(&request_capsule, 21)?;
+    let mut assignment_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP client ADDRESS_ASSIGN timeout")??
+        .ok_or("missing CONNECT-IP client ADDRESS_ASSIGN")?;
+    let client_assignment = assignment_data.copy_to_bytes(assignment_data.remaining());
+    validate_address_assign(&client_assignment, 0, [203, 0, 113, 42])?;
     let mut route_data = timeout(IO_TIMEOUT, stream.recv_data())
         .await
         .map_err(|_| "CONNECT-IP ROUTE_ADVERTISEMENT timeout")??
         .ok_or("missing CONNECT-IP ROUTE_ADVERTISEMENT")?;
     let route_capsule = route_data.copy_to_bytes(route_data.remaining());
     validate_route_advertisement(&route_capsule, CLIENT_ROUTE_START, CLIENT_ROUTE_END, 17)?;
-    let mut withdrawal_data = timeout(IO_TIMEOUT, stream.recv_data())
-        .await
-        .map_err(|_| "CONNECT-IP route withdrawal timeout")??
-        .ok_or("missing CONNECT-IP route withdrawal")?;
-    let withdrawal = withdrawal_data.copy_to_bytes(withdrawal_data.remaining());
-    validate_route_withdrawal(&withdrawal)?;
-    let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
-    if packet != CLIENT_IP_PACKET {
-        return Err("invalid CONNECT-IP client packet".into());
-    }
     stream
         .send_data(Bytes::from(encode_address_assign(21, [192, 0, 2, 21])))
         .await?;
@@ -172,10 +165,20 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
             6,
         )))
         .await?;
+    let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
+    if packet != CLIENT_IP_PACKET {
+        return Err("invalid CONNECT-IP client packet".into());
+    }
+    send_context_zero(&mut datagram_sender, &SERVER_IP_PACKET)?;
+    let mut withdrawal_data = timeout(IO_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| "CONNECT-IP route withdrawal timeout")??
+        .ok_or("missing CONNECT-IP route withdrawal")?;
+    let withdrawal = withdrawal_data.copy_to_bytes(withdrawal_data.remaining());
+    validate_route_withdrawal(&withdrawal)?;
     stream
         .send_data(Bytes::from(encode_route_withdrawal()))
         .await?;
-    send_context_zero(&mut datagram_sender, &SERVER_IP_PACKET)?;
     let ack = read_context_zero(&mut datagram_reader, stream_id).await?;
     if ack != b"netz-ip-ack" {
         return Err("invalid CONNECT-IP delivery acknowledgment".into());
@@ -193,7 +196,7 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())
@@ -256,20 +259,15 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
         .send_data(Bytes::from(encode_address_request(21)))
         .await?;
     stream
+        .send_data(Bytes::from(encode_address_assign(0, [203, 0, 113, 42])))
+        .await?;
+    stream
         .send_data(Bytes::from(encode_route_advertisement(
             CLIENT_ROUTE_START,
             CLIENT_ROUTE_END,
             17,
         )))
         .await?;
-    stream
-        .send_data(Bytes::from(encode_route_withdrawal()))
-        .await?;
-    send_context_zero(&mut datagram_sender, &CLIENT_IP_PACKET)?;
-    let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
-    if packet != SERVER_IP_PACKET {
-        return Err("invalid CONNECT-IP server packet".into());
-    }
     let mut response_data = timeout(IO_TIMEOUT, stream.recv_data())
         .await
         .map_err(|_| "CONNECT-IP ADDRESS_ASSIGN timeout")??
@@ -282,6 +280,14 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
         .ok_or("missing CONNECT-IP ROUTE_ADVERTISEMENT")?;
     let route = route_data.copy_to_bytes(route_data.remaining());
     validate_route_advertisement(&route, SERVER_ROUTE_START, SERVER_ROUTE_END, 6)?;
+    send_context_zero(&mut datagram_sender, &CLIENT_IP_PACKET)?;
+    let packet = read_context_zero(&mut datagram_reader, stream_id).await?;
+    if packet != SERVER_IP_PACKET {
+        return Err("invalid CONNECT-IP server packet".into());
+    }
+    stream
+        .send_data(Bytes::from(encode_route_withdrawal()))
+        .await?;
     let mut withdrawal_data = timeout(IO_TIMEOUT, stream.recv_data())
         .await
         .map_err(|_| "CONNECT-IP route withdrawal timeout")??
@@ -300,7 +306,7 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())

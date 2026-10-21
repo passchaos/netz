@@ -1620,7 +1620,14 @@ Context ID 0 IP packets; and provides allocation-free ADDRESS_ASSIGN,
 ADDRESS_REQUEST and ROUTE_ADVERTISEMENT Capsule codecs. Prefix host bits,
 nonzero/per-Capsule-unique emitted Request IDs, route ordering, same-protocol
 overlap and protocol-zero cross-protocol overlap are checked before writers
-touch caller storage. Typed encrypted HTTP/1.1 Upgrade and HTTP/2 Extended
+touch caller storage. Its allocation-free IP inspector validates exact IPv4
+header/total lengths and IPv6 payload lengths, extracts both endpoint
+addresses, walks Hop-by-Hop, Routing, Fragment, Authentication, and Destination
+Options headers, and recognizes encrypted ESP as an opaque boundary.
+Non-initial fragments or ESP packets that cannot expose the final protocol
+remain explicitly unresolved instead of being misclassified. It also provides
+IPv4-checksum-aware TTL and IPv6 Hop Limit decrement helpers. Typed encrypted
+HTTP/1.1 Upgrade and HTTP/2 Extended
 CONNECT Sessions now carry configuration and IP packets through one ordered
 Capsule event stream. HTTP/3 keeps the reliable CONNECT DATA reader attached
 for configuration Capsules while the same Session routes Context ID 0 packets
@@ -1643,8 +1650,10 @@ nonzero local assignment IDs against requests received from the peer. Peer
 snapshots apply transactionally, empty snapshots withdraw prior state, and
 unknown response IDs plus protocol-zero route overlap fail closed. Symmetric
 source-prefix and destination/protocol queries cover packets originated by
-either endpoint. H1/H2 payload-only reads still validate and apply skipped
-configuration Capsules, so an API choice cannot bypass RFC state, while local
+either endpoint. `localPacketAllowed` and `peerPacketAllowed` apply those
+snapshots directly to structurally parsed packets; unresolved protocols are
+accepted only by protocol-zero routes. H1/H2 payload-only reads still validate
+and apply skipped configuration Capsules, so an API choice cannot bypass RFC state, while local
 allocation failure leaves the Capsule unconsumed and retryable without falsely
 resetting the stream as a peer violation. This state remains separate from OS
 TUN/routing policy and is optional for deployments with wholly out-of-band
@@ -1653,9 +1662,12 @@ configuration.
 bidirectional h3/Quinn process gate that independently uses
 `Protocol::CONNECT_IP`, its own Capsule/varint codec, and Quinn DATAGRAMs. Both
 role pairings exchange ADDRESS_REQUEST/ADDRESS_ASSIGN, ROUTE_ADVERTISEMENT plus
-an empty withdrawal, 20/40-byte IP packets, delivery acknowledgments, request
-FIN and response FIN without treating QUIC connection close as stream
-completion.
+an empty withdrawal, structurally valid 20-byte IPv4 packets in both
+directions, delivery acknowledgments, request FIN and response FIN without
+treating QUIC connection close as stream completion. Each Netz role checks the
+actual packet source, destination, and extracted protocol against the live
+bidirectional assignment/route snapshots before the packets cross the process
+boundary.
 The Capsule Session also has caller-buffer receive variants matching the H3
 DATAGRAM surface. A short output leaves the complete datagram pending for a
 larger retry, while warmed reads avoid the owning API's per-payload allocation.
