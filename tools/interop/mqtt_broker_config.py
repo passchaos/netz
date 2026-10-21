@@ -135,6 +135,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-authentication-takeover", action="store_true")
     selected.add_argument("--only-empty-password-reload", action="store_true")
     selected.add_argument("--only-empty-acl", action="store_true")
+    selected.add_argument("--only-memory-limit", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
@@ -2290,6 +2291,91 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
             "overlong MQTT 3.1 bridge Client ID did not fail before serving: "
             + result.stdout
         )
+
+
+def run_memory_limit_case(broker: Path, directory: Path) -> None:
+    rejected_port = free_port()
+    rejected_config = directory / "memory-limit-rejected.conf"
+    rejected_config.write_text(
+        "memory_limit 1\n"
+        f"listener {rejected_port} 127.0.0.1\n"
+        "listener_allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    rejected = subprocess.run(
+        [str(broker), f"--config={rejected_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if rejected.returncode == 0 or "OutOfMemory" not in rejected.stdout:
+        raise AssertionError(
+            "one-byte memory_limit did not reject broker startup: "
+            + rejected.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", rejected_port)) == 0:
+            raise AssertionError("memory-limited broker bound before failure")
+
+    port = free_port()
+    config = directory / "memory-limit-reload.conf"
+    initial_limit = 64 * 1024 * 1024
+    reloaded_limit = 60 * 1024 * 1024
+
+    def write_config(limit: int) -> None:
+        config.write_text(
+            f"memory_limit {limit}\n"
+            f"listener {port} 127.0.0.1\n"
+            "listener_allow_anonymous true\n"
+            "max_connections 4\n"
+        )
+
+    write_config(initial_limit)
+    environment = os.environ.copy()
+    environment.pop(FINITE_TEST_ENV, None)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdout is not None
+    client: socket.socket | None = None
+    try:
+        wait_process_line(
+            process,
+            "configured 1 listeners global_max_connections=",
+            "memory-limited broker startup",
+        )
+        read_listener_lines(process, 1, "memory-limited broker startup")
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(connect_packet("memory-limit-live"))
+        if connack_reason(read_mqtt_packet(client)) != 0:
+            raise AssertionError("memory-limited broker rejected CONNECT")
+
+        write_config(reloaded_limit)
+        process.send_signal(signal.SIGHUP)
+        wait_process_line(
+            process,
+            f"memory limit reload completed: bytes={reloaded_limit}",
+            "memory-limit reload",
+        )
+        mqtt_ping(client)
+    finally:
+        if client is not None:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
@@ -7414,6 +7500,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_memory_limit:
+            run_memory_limit_case(args.broker, directory)
+            print(
+                "MQTT broker memory limit integration passed: "
+                "startup_oom=fail-before-listen reload=atomic "
+                "live_client=continuous "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -7595,6 +7691,7 @@ def main() -> None:
         run_system_interval_case(args.broker, directory)
         run_runtime_delivery_policy_reload_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
+        run_memory_limit_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
         run_empty_acl_case(args.broker, directory)
@@ -7632,6 +7729,7 @@ def main() -> None:
         "MQTT broker config integration passed: missing-root exit=3, "
         "CRLF mqttv311+mqttv5, strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
+        "hard heap memory limit with live SIGHUP reload, "
         "source-locked Unix listener lifecycle, "
         "source-locked mTLS CN/Subject SIGHUP continuity, "
         "source-locked change-count autosave and restore, "

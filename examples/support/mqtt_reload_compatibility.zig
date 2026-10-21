@@ -17,6 +17,7 @@ const FieldClass = enum {
     autosave,
     scheduling,
     delivery_policy,
+    memory_limit,
     client_id_policy,
     restart_required,
 };
@@ -61,6 +62,7 @@ fn fieldClass(comptime name: []const u8) FieldClass {
     {
         return .delivery_policy;
     }
+    if (std.mem.eql(u8, name, "memory_limit")) return .memory_limit;
     if (std.mem.eql(u8, name, "client_id_prefixes")) {
         return .client_id_policy;
     }
@@ -179,6 +181,7 @@ test "runtime-owned MQTT globals remain reload-compatible" {
     candidate.upgrade_outgoing_qos = true;
     candidate.check_retain_source = false;
     candidate.persistent_client_expiration_seconds = 1;
+    candidate.memory_limit = 1024;
     candidate.client_id_prefixes = @constCast("dynamic-");
 
     try validateRestartRequiredGlobals(&initial, &candidate);

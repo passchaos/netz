@@ -946,6 +946,26 @@ pub fn build(b: *std.Build) void {
     const run_websocket_send_shape_tests = b.addRunArtifact(
         websocket_send_shape_tests,
     );
+    const mqtt_memory_limiter_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "examples/support/memory_limiter.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = test_filters,
+    });
+    const run_mqtt_memory_limiter_tests = b.addRunArtifact(
+        mqtt_memory_limiter_tests,
+    );
+    const mqtt_memory_limiter_step = b.step(
+        "test-mqtt-memory-limiter",
+        "Test the MQTT broker hard heap-allocation limit",
+    );
+    mqtt_memory_limiter_step.dependOn(
+        &run_mqtt_memory_limiter_tests.step,
+    );
     const mqtt_reloadable_security_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -1265,6 +1285,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_websocket_h3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
+    test_step.dependOn(&run_mqtt_memory_limiter_tests.step);
     test_step.dependOn(&run_mqtt_reloadable_security_tests.step);
     test_step.dependOn(&run_mqtt_reload_compatibility_tests.step);
     test_step.dependOn(&run_mqtt_reloadable_identity_tests.step);

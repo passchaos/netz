@@ -1862,12 +1862,17 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/Unix/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication
 # rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified
+# hard broker-owned heap limits with live SIGHUP updates,
 # optional/required TLS client authentication, acceptable CA names and
 # certificate CN/full-Subject username/Client-ID mapping, P-256/P-384/RSA/Ed25519
 # signed CRL revocation, strict
 # key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
 # bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
+# Prove that a one-byte memory_limit fails before listen, then lower a live
+# broker's hard allocation ceiling without interrupting an admitted client.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-memory-limit --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's global/listener anonymous-admission matrix across
 # MQTT 3.1.1 and MQTT 5, including explicit per-listener precedence.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

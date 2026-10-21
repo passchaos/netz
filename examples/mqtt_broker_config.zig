@@ -18,6 +18,7 @@ const configured_bridges = @import(
 const reload_compatibility = @import(
     "support/mqtt_reload_compatibility.zig",
 );
+const MemoryLimiter = @import("support/memory_limiter.zig").MemoryLimiter;
 const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
 
 const mqtt = netz.mqtt;
@@ -647,11 +648,13 @@ fn identityPathsForConfig(
 }
 
 pub fn run(
-    allocator: std.mem.Allocator,
+    base_allocator: std.mem.Allocator,
     io: std.Io,
     config_path: []const u8,
     run_options: RunOptions,
 ) !void {
+    var memory_limiter = MemoryLimiter.init(base_allocator, 0);
+    const allocator = memory_limiter.allocator();
     var config = try mqtt.broker_config.load(
         allocator,
         io,
@@ -659,6 +662,7 @@ pub fn run(
         config_path,
     );
     defer config.deinit(allocator);
+    memory_limiter.setLimit(config.memory_limit);
 
     const connection_count = try config.totalMaxConnections();
     const active_connection_limit = try config.activeConnectionLimit();
@@ -1088,6 +1092,7 @@ pub fn run(
     if (config.persistence or reload_signal != null or bridges.len() != 0) {
         try serveWithManagement(
             allocator,
+            &memory_limiter,
             &broker,
             service,
             io,
@@ -1108,6 +1113,7 @@ pub fn run(
 
 fn serveWithManagement(
     allocator: std.mem.Allocator,
+    memory_limiter: *MemoryLimiter,
     broker: *mqtt.broker.Broker,
     service: Service,
     io: std.Io,
@@ -1192,6 +1198,7 @@ fn serveWithManagement(
                 if (ReloadSignal.take()) {
                     switch (reloadConfiguredState(
                         allocator,
+                        memory_limiter,
                         io,
                         config_path,
                         initial_config,
@@ -1276,6 +1283,12 @@ fn serveWithManagement(
                                 },
                             );
                             std.debug.print(
+                                "netz MQTT memory limit reload " ++
+                                    "completed: bytes={d} source=SIGHUP " ++
+                                    "server_io=zio-std-io\n",
+                                .{success.memory_limit},
+                            );
+                            std.debug.print(
                                 "netz MQTT Client ID prefix reload " ++
                                     "completed: length={d} source=SIGHUP " ++
                                     "server_io=zio-std-io\n",
@@ -1321,6 +1334,7 @@ const ReloadOutcome = union(enum) {
         persistence_enabled: bool,
         scheduling_policy: mqtt.broker.RuntimeSchedulingPolicy,
         delivery_policy: mqtt.broker.RuntimeDeliveryPolicy,
+        memory_limit: usize,
         required_client_id_prefix_length: usize,
     },
     failure: struct {
@@ -1331,6 +1345,7 @@ const ReloadOutcome = union(enum) {
 
 fn reloadConfiguredState(
     allocator: std.mem.Allocator,
+    memory_limiter: *MemoryLimiter,
     io: std.Io,
     config_path: []const u8,
     initial_config: *const mqtt.broker_config.Config,
@@ -1538,6 +1553,7 @@ fn reloadConfiguredState(
     broker.setRuntimeDeliveryPolicy(
         reloaded_delivery_policy,
     ) catch unreachable;
+    memory_limiter.setLimit(reloaded_config.memory_limit);
     autosave.commitReload(&prepared_autosave);
     bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
@@ -1553,6 +1569,7 @@ fn reloadConfiguredState(
         .persistence_enabled = reloaded_persistence_path != null,
         .scheduling_policy = reloaded_scheduling_policy,
         .delivery_policy = reloaded_delivery_policy,
+        .memory_limit = reloaded_config.memory_limit,
         .required_client_id_prefix_length = required_client_id_prefix_length,
     } };
 }

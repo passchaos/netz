@@ -150,6 +150,8 @@ pub const Config = struct {
     max_inflight_bytes: usize = 0,
     max_queued_messages: usize = default_max_queued_messages,
     max_queued_bytes: usize = 0,
+    /// Hard limit for broker-owned heap allocations. Zero means unlimited.
+    memory_limit: usize = 0,
     retain_available: bool = true,
     check_retain_source: bool = true,
     client_id_prefixes: []u8 = &.{},
@@ -334,6 +336,7 @@ const GlobalSeen = struct {
     max_inflight_bytes: bool = false,
     max_queued_messages: bool = false,
     max_queued_bytes: bool = false,
+    memory_limit: bool = false,
     retain_available: bool = false,
     check_retain_source: bool = false,
     client_id_prefixes: bool = false,
@@ -588,6 +591,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "max_queued_bytes")) {
                 try markOnce(&global_seen.max_queued_bytes);
                 config.max_queued_bytes = try parseOneInteger(u31, &words);
+            } else if (std.mem.eql(u8, directive, "memory_limit")) {
+                try markOnce(&global_seen.memory_limit);
+                config.memory_limit = try parseOneInteger(usize, &words);
             } else if (std.mem.eql(u8, directive, "retain_available")) {
                 try markOnce(&global_seen.retain_available);
                 config.retain_available = try parseOneBool(&words);
@@ -1332,6 +1338,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_inflight_bytes 2048
         \\max_queued_messages 23
         \\max_queued_bytes 4096
+        \\memory_limit 16777216
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
@@ -1388,6 +1395,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 23), config.max_queued_messages);
     try std.testing.expectEqual(@as(usize, 23), config.effectiveMaxQueuedMessages());
     try std.testing.expectEqual(@as(usize, 4096), config.max_queued_bytes);
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), config.memory_limit);
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
@@ -3195,6 +3203,17 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     try std.testing.expectError(
         error.UnsupportedDirective,
         parse(allocator, "include_dir listeners.d\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "memory_limit -1\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(
+            allocator,
+            "memory_limit 1024\nmemory_limit 2048\nlistener 1883",
+        ),
     );
     try std.testing.expectError(
         error.DirectiveRequiresListener,
