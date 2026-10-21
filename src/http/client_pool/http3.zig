@@ -65,6 +65,10 @@ pub const Options = struct {
     /// Maximum proxy-resolved domain mappings retained by one shared SOCKS5
     /// endpoint. Zero is invalid when both options are enabled.
     max_socks5_shared_routes: usize = 1024,
+    /// Maximum distinct real source tuples remembered for one logical domain
+    /// route. This bounds DNS load-balancing aliases without masking later
+    /// QUIC migration candidates.
+    max_socks5_route_sources: usize = 64,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
@@ -121,6 +125,12 @@ pub const State = struct {
         if (options.shared_endpoint and options.socks5_proxy != null and
             (options.max_socks5_shared_routes == 0 or
                 options.max_socks5_shared_routes > 65_535))
+        {
+            return error.InvalidProxyRouteCapacity;
+        }
+        if (options.shared_endpoint and options.socks5_proxy != null and
+            (options.max_socks5_route_sources == 0 or
+                options.max_socks5_route_sources > 65_535))
         {
             return error.InvalidProxyRouteCapacity;
         }
@@ -264,7 +274,10 @@ pub const State = struct {
         endpoint.* = quic.runtime.Endpoint.fromSocks5AssociationForDomains(
             self.allocator,
             &association,
-            self.options.max_socks5_shared_routes,
+            .{
+                .max_routes = self.options.max_socks5_shared_routes,
+                .max_sources_per_route = self.options.max_socks5_route_sources,
+            },
             self.options.limits.quic,
         ) catch |err| {
             self.allocator.destroy(endpoint);

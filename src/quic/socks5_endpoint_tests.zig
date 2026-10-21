@@ -233,7 +233,7 @@ test "SOCKS5 QUIC endpoint routes one logical peer by proxy DNS" {
     try std.testing.expect(received.from.eql(&logical_peer));
     try std.testing.expectEqualStrings("initial-response", received.bytes);
 
-    const preferred = try net.IpAddress.parse("198.51.100.9", 8443);
+    const preferred = try net.IpAddress.parse("2001:db8::9", 8443);
     try endpoint.sendBytes(preferred, "preferred");
     const preferred_request = try relay.receiveTimeout(
         io,
@@ -293,7 +293,7 @@ test "SOCKS5 QUIC endpoint retains bounded shared domain routes" {
     var endpoint = try runtime.Endpoint.fromSocks5AssociationForDomains(
         allocator,
         &association,
-        2,
+        .{ .max_routes = 2, .max_sources_per_route = 2 },
         .{ .max_datagram_size = 1200 },
     );
     defer endpoint.deinit();
@@ -329,8 +329,34 @@ test "SOCKS5 QUIC endpoint retains bounded shared domain routes" {
 
     const actual = try net.IpAddress.parse("203.0.113.10", 443);
     try std.testing.expect(endpoint.normalizeSocks5RoutedPeer(alpha, actual).eql(
+        &actual,
+    ));
+    try std.testing.expect((try endpoint.normalizeSocks5PendingPeer(
+        alpha,
+        actual,
+    )).eql(
         &alpha,
     ));
+    try std.testing.expect(endpoint.normalizeSocks5RoutedPeer(alpha, actual).eql(
+        &alpha,
+    ));
+    const migration = try net.IpAddress.parse("2001:db8::20", 443);
+    try std.testing.expect(endpoint.normalizeSocks5RoutedPeer(
+        alpha,
+        migration,
+    ).eql(&migration));
+    const second_source = try net.IpAddress.parse("203.0.113.11", 443);
+    try std.testing.expect((try endpoint.normalizeSocks5PendingPeer(
+        alpha,
+        second_source,
+    )).eql(&alpha));
+    try std.testing.expectError(
+        error.ProxyRouteSourceLimitReached,
+        endpoint.normalizeSocks5PendingPeer(
+            alpha,
+            try net.IpAddress.parse("203.0.113.12", 443),
+        ),
+    );
     try std.testing.expect(endpoint.releaseSocks5DomainRoute(alpha));
     try std.testing.expectEqual(@as(usize, 2), endpoint.socks5DomainRouteCount());
     try std.testing.expect(endpoint.releaseSocks5DomainRoute(alpha));
@@ -385,7 +411,7 @@ test "SOCKS5 QUIC dispatcher restores routed logical peer" {
     var endpoint = try runtime.Endpoint.fromSocks5AssociationForDomains(
         allocator,
         &association,
-        2,
+        .{ .max_routes = 2, .max_sources_per_route = 2 },
         .{ .max_datagram_size = 1200 },
     );
     defer endpoint.deinit();

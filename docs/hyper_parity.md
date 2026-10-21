@@ -2270,7 +2270,12 @@ construction and TCP fallback remain free of proxy network side effects. Its
 bounded `max_socks5_shared_routes` registry assigns stable per-domain logical
 peers; outbound packets retain proxy DNS, while the CID dispatcher restores the
 right logical source only after it has identified the pending or established
-connection. A two-origin extension proves two remote-only hostnames and two
+connection. Each route also bounds its real DNS source aliases: pending
+handshakes register authenticated-by-CID initial sources, established traffic
+restores only those aliases, and a new IPv4/IPv6 tuple remains visible to QUIC
+preferred-address/path validation. Because the UDP socket addresses only the
+SOCKS relay, one endpoint can encapsulate targets from either IP family without
+binding a second local socket. A two-origin extension proves two remote-only hostnames and two
 QUIC connections share one endpoint/association, retain independent TLS and
 `:authority`, and reuse the first origin without confusing identical relay
 source IP/port tuples.

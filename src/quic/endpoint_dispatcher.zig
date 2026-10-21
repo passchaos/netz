@@ -1887,7 +1887,7 @@ pub const Dispatcher = struct {
             if (pending) |routed_pending| {
                 if (routed_pending.route.peer_address) |peer| {
                     const received_on = owned.received_on orelse self.endpoint;
-                    owned.from = received_on.normalizeSocks5RoutedPeer(
+                    owned.from = try received_on.normalizeSocks5PendingPeer(
                         peer,
                         owned.from,
                     );

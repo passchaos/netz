@@ -1369,6 +1369,10 @@ pub fn Pool(comptime Runtime: type) type {
             self: *const Self,
             peer: std.Io.net.IpAddress,
         ) ?*quic.runtime.Endpoint {
+            // A SOCKS5 UDP socket addresses only its relay. The encapsulated
+            // destination may use either IP family, so local socket family is
+            // not an eligibility constraint.
+            if (self.endpoint.usesSocks5Udp()) return self.endpoint;
             if (sameAddressFamily(self.endpoint.address(), peer)) {
                 return self.endpoint;
             }
