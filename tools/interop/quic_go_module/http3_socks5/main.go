@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,10 +22,17 @@ func main() {
 	address := flag.String("addr", "127.0.0.1:4433", "UDP listen address")
 	certPath := flag.String("cert", "", "server certificate")
 	keyPath := flag.String("key", "", "server private key")
-	expectedAuthority := flag.String("authority", "", "expected HTTP authority")
+	expectedAuthority := flag.String("authority", "", "comma-separated expected HTTP authorities")
 	flag.Parse()
 	if *certPath == "" || *keyPath == "" || *expectedAuthority == "" {
 		log.Fatal("-cert, -key, and -authority are required")
+	}
+	authorities := make(map[string]struct{})
+	for _, authority := range strings.Split(*expectedAuthority, ",") {
+		if authority == "" {
+			log.Fatal("empty expected authority")
+		}
+		authorities[authority] = struct{}{}
 	}
 	certificate, err := tls.LoadX509KeyPair(*certPath, *keyPath)
 	if err != nil {
@@ -37,7 +45,7 @@ func main() {
 	defer packetConn.Close()
 
 	var connections atomic.Uint32
-	results := make(chan error, 2)
+	results := make(chan error, 3)
 	server := &http3.Server{
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{certificate},
@@ -55,16 +63,19 @@ func main() {
 	}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("quic-go SOCKS5 HTTP/3 request path=%s host=%s\n", r.URL.RequestURI(), r.Host)
-		if r.Method != http.MethodGet || r.Host != *expectedAuthority {
+		_, authorityAccepted := authorities[r.Host]
+		if r.Method != http.MethodGet || !authorityAccepted {
 			results <- fmt.Errorf("unexpected request: method=%s host=%q", r.Method, r.Host)
 			return
 		}
 		var requestErr error
 		switch r.URL.RequestURI() {
-		case "/h3-one":
-			_, requestErr = w.Write([]byte("h3-socks-one"))
-		case "/h3-two":
-			_, requestErr = w.Write([]byte("h3-socks-two"))
+		case "/h3-a-one":
+			_, requestErr = w.Write([]byte("h3-socks-a-one"))
+		case "/h3-a-two":
+			_, requestErr = w.Write([]byte("h3-socks-a-two"))
+		case "/h3-b-one":
+			_, requestErr = w.Write([]byte("h3-socks-b-one"))
 		default:
 			requestErr = fmt.Errorf("unexpected target %q", r.URL.RequestURI())
 		}
@@ -74,7 +85,7 @@ func main() {
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(packetConn) }()
 	fmt.Printf("quic-go SOCKS5 HTTP/3 server listening=%s\n", packetConn.LocalAddr())
-	for range 2 {
+	for range 3 {
 		select {
 		case err := <-results:
 			if err != nil {
@@ -87,11 +98,11 @@ func main() {
 		}
 	}
 	time.Sleep(150 * time.Millisecond)
-	if connections.Load() != 1 {
-		log.Fatalf("expected one QUIC connection, got %d", connections.Load())
+	if connections.Load() != uint32(len(authorities)) {
+		log.Fatalf("expected %d QUIC connections, got %d", len(authorities), connections.Load())
 	}
 	if err := server.Close(); err != nil {
 		log.Fatalf("close HTTP/3 server: %v", err)
 	}
-	fmt.Println("quic-go SOCKS5 HTTP/3 server passed: requests=2 connections=1")
+	fmt.Printf("quic-go SOCKS5 HTTP/3 server passed: requests=3 connections=%d\n", len(authorities))
 }

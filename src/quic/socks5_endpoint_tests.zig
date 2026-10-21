@@ -1,6 +1,8 @@
 const std = @import("std");
 const runtime = @import("runtime.zig");
 const packet_space = @import("packet_space.zig");
+const Dispatcher = @import("endpoint_dispatcher.zig").Dispatcher;
+const Inbox = @import("handshake_inbox.zig").Inbox;
 const socks5 = @import("../proxy/socks5.zig");
 
 const net = std.Io.net;
@@ -252,6 +254,170 @@ test "SOCKS5 QUIC endpoint routes one logical peer by proxy DNS" {
     defer migrated.deinit(allocator);
     try std.testing.expect(migrated.from.eql(&preferred));
     try std.testing.expectEqualStrings("preferred-response", migrated.bytes);
+}
+
+test "SOCKS5 QUIC endpoint retains bounded shared domain routes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control_listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer control_listener.deinit(io);
+    const control_client = try control_listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const control_server = try control_listener.accept(io);
+    defer control_server.close(io);
+    const udp_bind = net.IpAddress{ .ip4 = .loopback(0) };
+    const client_socket = try udp_bind.bind(
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    const relay = try udp_bind.bind(
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    defer relay.close(io);
+    var association = socks5.UdpAssociation.init(
+        io,
+        .{ .io = io, .stream = control_client, .deadline = null },
+        client_socket,
+        relay.address,
+    );
+    var endpoint = try runtime.Endpoint.fromSocks5AssociationForDomains(
+        allocator,
+        &association,
+        2,
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+
+    const alpha = try endpoint.retainSocks5DomainRoute("alpha.example", 443);
+    const alpha_again = try endpoint.retainSocks5DomainRoute(
+        "ALPHA.example",
+        443,
+    );
+    try std.testing.expect(alpha.eql(&alpha_again));
+    const beta = try endpoint.retainSocks5DomainRoute("beta.example", 443);
+    try std.testing.expect(!alpha.eql(&beta));
+    try std.testing.expectEqual(@as(usize, 2), endpoint.socks5DomainRouteCount());
+    try std.testing.expectError(
+        error.ProxyRouteLimitReached,
+        endpoint.retainSocks5DomainRoute("gamma.example", 443),
+    );
+
+    const peers = [_]net.IpAddress{ alpha, beta };
+    const hosts = [_][]const u8{ "alpha.example", "beta.example" };
+    for (peers, hosts) |peer, host| {
+        try endpoint.sendBytes(peer, host);
+        var storage: [256]u8 = undefined;
+        const message = try relay.receiveTimeout(
+            io,
+            &storage,
+            awakeTimeout(.fromSeconds(2)),
+        );
+        const datagram = try socks5.udp.decodeDatagram(message.data);
+        try std.testing.expectEqualStrings(host, datagram.source.domain.host);
+        try std.testing.expectEqualStrings(host, datagram.payload);
+    }
+
+    const actual = try net.IpAddress.parse("203.0.113.10", 443);
+    try std.testing.expect(endpoint.normalizeSocks5RoutedPeer(alpha, actual).eql(
+        &alpha,
+    ));
+    try std.testing.expect(endpoint.releaseSocks5DomainRoute(alpha));
+    try std.testing.expectEqual(@as(usize, 2), endpoint.socks5DomainRouteCount());
+    try std.testing.expect(endpoint.releaseSocks5DomainRoute(alpha));
+    try std.testing.expectEqual(@as(usize, 1), endpoint.socks5DomainRouteCount());
+    try endpoint.sendBytes(alpha, "released");
+    var released_storage: [256]u8 = undefined;
+    const released_message = try relay.receiveTimeout(
+        io,
+        &released_storage,
+        awakeTimeout(.fromSeconds(2)),
+    );
+    const released = try socks5.udp.decodeDatagram(released_message.data);
+    try std.testing.expect(released.source.ip.eql(&alpha));
+    _ = try endpoint.retainSocks5DomainRoute("gamma.example", 443);
+    try std.testing.expectEqual(@as(usize, 2), endpoint.socks5DomainRouteCount());
+}
+
+test "SOCKS5 QUIC dispatcher restores routed logical peer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control_listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer control_listener.deinit(io);
+    const control_client = try control_listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const control_server = try control_listener.accept(io);
+    defer control_server.close(io);
+    const udp_bind = net.IpAddress{ .ip4 = .loopback(0) };
+    const client_socket = try udp_bind.bind(
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    const relay = try udp_bind.bind(
+        io,
+        .{ .mode = .dgram, .protocol = .udp },
+    );
+    defer relay.close(io);
+    var association = socks5.UdpAssociation.init(
+        io,
+        .{ .io = io, .stream = control_client, .deadline = null },
+        client_socket,
+        relay.address,
+    );
+    var endpoint = try runtime.Endpoint.fromSocks5AssociationForDomains(
+        allocator,
+        &association,
+        2,
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    const logical = try endpoint.retainSocks5DomainRoute("route.example", 443);
+    var inbox = try Inbox.init(allocator, io, &.{"server"}, logical, 2);
+    defer inbox.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(7, &inbox);
+
+    const packet = [_]u8{
+        0xc0, 0,   0,   0,   1,   6,
+        's',  'e', 'r', 'v', 'e', 'r',
+        0,
+    };
+    var framed_storage: [128]u8 = undefined;
+    const framed = try socks5.udp.encodeDatagram(
+        &framed_storage,
+        .{ .ip = try net.IpAddress.parse("203.0.113.21", 443) },
+        &packet,
+    );
+    const endpoint_address = endpoint.address();
+    try relay.send(io, &endpoint_address, framed);
+    var raw = try endpoint.receiveBytesWithTimeout(.fromSeconds(2));
+    try std.testing.expect(!raw.from.eql(&logical));
+    const event = try dispatcher.dispatch(raw);
+    raw = undefined;
+    try std.testing.expectEqual(@as(usize, 7), event.pending_handshake);
+    var routed = try inbox.receiveWithTimeout(.fromSeconds(2));
+    defer routed.deinit(allocator);
+    try std.testing.expect(routed.from.eql(&logical));
+    try std.testing.expectEqualSlices(u8, &packet, routed.bytes);
 }
 
 fn awakeTimeout(duration: std.Io.Duration) std.Io.Timeout {

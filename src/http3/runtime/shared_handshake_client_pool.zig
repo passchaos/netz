@@ -54,6 +54,10 @@ pub fn Options(comptime Runtime: type) type {
         /// cancelable pending task, so service discovery or cached/DoH lookup
         /// never takes endpoint receive ownership.
         resolver: ?address_resolver.Resolver = null,
+        /// Resolve URI/Alt-Svc domains into endpoint-owned logical peers. The
+        /// endpoint emits the original domain in SOCKS5 UDP headers; no local
+        /// origin DNS lookup occurs.
+        proxy_domain_routing: bool = false,
         idle: http3.origin_pool.Config = .{},
         /// Maximum established plus in-progress connections. Zero is
         /// unbounded. Independent pending handshakes may overlap, while one
@@ -573,25 +577,11 @@ pub fn Pool(comptime Runtime: type) type {
             }
 
             fn resolveAddresses(self: *@This()) ResolveCompletion {
-                const resolver = self.pool.options.resolver orelse
-                    self.pool.options.client.address_resolver;
-                return switch (self.route) {
-                    .origin => Runtime.resolveEndpointWithResolverBefore(
-                        self.uri_endpoint,
-                        self.pool.allocator,
-                        self.pool.io,
-                        resolver,
-                        self.deadline,
-                    ),
-                    .alt_svc => |target| Runtime.resolveHostPortWithResolverBefore(
-                        self.pool.allocator,
-                        self.pool.io,
-                        target.connect_host,
-                        target.port,
-                        resolver,
-                        self.deadline,
-                    ),
-                };
+                return self.pool.resolveAddressesForRoute(
+                    self.uri_endpoint,
+                    self.route,
+                    self.deadline,
+                );
             }
 
             fn prepareEarly(self: *@This()) !void {
@@ -1205,24 +1195,8 @@ pub fn Pool(comptime Runtime: type) type {
             io: std.Io,
             options: Options(Runtime),
         ) !Self {
-            switch (options.client.address_connect_policy) {
-                .ordered => {},
-                .happy_eyeballs => |policy| happy_eyeballs.validate(
-                    policy,
-                ) catch return error.InvalidPoolOptions,
-            }
-            if (options.client.alternate_local_address) |alternate| {
-                const migration = options.migration_local_address orelse
-                    return error.InvalidPoolOptions;
-                if (!alternate.eql(&migration)) {
-                    return error.InvalidPoolOptions;
-                }
-            }
-            if (options.idle.max_idle_per_origin >
-                options.idle.max_idle_total or
-                options.handshake_inbox_capacity == 0 or
-                options.handshake_poll_interval.nanoseconds <= 0)
-            {
+            try validateOptions(options);
+            if (options.proxy_domain_routing) {
                 return error.InvalidPoolOptions;
             }
             const endpoint = try allocator.create(quic.runtime.Endpoint);
@@ -1285,6 +1259,63 @@ pub fn Pool(comptime Runtime: type) type {
                 .migration_receive_storage = migration_receive_storage,
                 .pending_multi_endpoint_storage = pending_multi_endpoint_storage,
             };
+        }
+
+        /// Adopt a caller-created endpoint while preserving the pool's single
+        /// receive owner. Ownership transfers only after this function
+        /// returns successfully.
+        pub fn initWithOwnedEndpoint(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            options: Options(Runtime),
+            endpoint: *quic.runtime.Endpoint,
+        ) !Self {
+            try validateOptions(options);
+            if (options.migration_local_address != null or
+                options.client.alternate_local_address != null or
+                (options.proxy_domain_routing and
+                    !endpoint.usesSocks5Udp()) or
+                !sameAddressFamily(options.local_address, endpoint.address()))
+            {
+                return error.InvalidPoolOptions;
+            }
+            const dispatcher = try allocator.create(
+                quic.endpoint_dispatcher.Dispatcher,
+            );
+            errdefer allocator.destroy(dispatcher);
+            dispatcher.* = .init(allocator, endpoint);
+            return .{
+                .allocator = allocator,
+                .io = io,
+                .options = options,
+                .endpoint = endpoint,
+                .dispatcher = dispatcher,
+            };
+        }
+
+        fn validateOptions(options: Options(Runtime)) !void {
+            switch (options.client.address_connect_policy) {
+                .ordered => {},
+                .happy_eyeballs => |policy| happy_eyeballs.validate(
+                    policy,
+                ) catch return error.InvalidPoolOptions,
+            }
+            if (options.client.alternate_local_address) |alternate| {
+                const migration = options.migration_local_address orelse
+                    return error.InvalidPoolOptions;
+                if (!alternate.eql(&migration)) {
+                    return error.InvalidPoolOptions;
+                }
+            }
+            if (options.idle.max_idle_per_origin >
+                options.idle.max_idle_total or
+                options.handshake_inbox_capacity == 0 or
+                options.handshake_poll_interval.nanoseconds <= 0 or
+                (options.proxy_domain_routing and
+                    options.migration_local_address != null))
+            {
+                return error.InvalidPoolOptions;
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -1830,25 +1861,11 @@ pub fn Pool(comptime Runtime: type) type {
                 }
             }
 
-            const resolver = self.options.resolver orelse
-                self.options.client.address_resolver;
-            const addresses = switch (route) {
-                .origin => try Runtime.resolveEndpointWithResolverBefore(
-                    endpoint,
-                    self.allocator,
-                    self.io,
-                    resolver,
-                    deadline,
-                ),
-                .alt_svc => |target| try Runtime.resolveHostPortWithResolverBefore(
-                    self.allocator,
-                    self.io,
-                    target.connect_host,
-                    target.port,
-                    resolver,
-                    deadline,
-                ),
-            };
+            const addresses = try self.resolveAddressesForRoute(
+                endpoint,
+                route,
+                deadline,
+            );
             defer self.allocator.free(addresses);
             var last_error: ?anyerror = null;
             var next_early = early;
@@ -1925,6 +1942,50 @@ pub fn Pool(comptime Runtime: type) type {
                 };
             }
             return last_error orelse error.AddressFamilyUnsupported;
+        }
+
+        fn resolveAddressesForRoute(
+            self: *Self,
+            endpoint: Runtime.UriEndpoint,
+            route: ConnectRoute,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) ![]std.Io.net.IpAddress {
+            if (self.options.proxy_domain_routing) {
+                const host, const port = switch (route) {
+                    .origin => .{ endpoint.tls_host, endpoint.port },
+                    .alt_svc => |target| .{
+                        target.connect_host,
+                        target.port,
+                    },
+                };
+                const peer = std.Io.net.IpAddress.parse(host, port) catch
+                    try self.endpoint.ensureSocks5DomainRoute(host, port);
+                const addresses = try self.allocator.alloc(
+                    std.Io.net.IpAddress,
+                    1,
+                );
+                addresses[0] = peer;
+                return addresses;
+            }
+            const resolver = self.options.resolver orelse
+                self.options.client.address_resolver;
+            return switch (route) {
+                .origin => Runtime.resolveEndpointWithResolverBefore(
+                    endpoint,
+                    self.allocator,
+                    self.io,
+                    resolver,
+                    deadline,
+                ),
+                .alt_svc => |target| Runtime.resolveHostPortWithResolverBefore(
+                    self.allocator,
+                    self.io,
+                    target.connect_host,
+                    target.port,
+                    resolver,
+                    deadline,
+                ),
+            };
         }
 
         fn validateConnectRoute(

@@ -184,8 +184,12 @@ def serve_auth(proxy: socket.socket, target_port: int) -> None:
 
 def create_identity(
     directory: Path,
-    host: str = "broker.internal",
+    host: str | tuple[str, ...] = "broker.internal",
 ) -> tuple[Path, Path, Path]:
+    hosts = (host,) if isinstance(host, str) else host
+    if not hosts:
+        raise ValueError("at least one certificate hostname is required")
+    primary_host = hosts[0]
     ca = directory / "ca.pem"
     ca_key = directory / "ca.key"
     key = directory / "server.key"
@@ -193,7 +197,9 @@ def create_identity(
     cert = directory / "server.pem"
     extensions = directory / "server.ext"
     extensions.write_text(
-        f"subjectAltName=DNS:{host}\n"
+        "subjectAltName="
+        + ",".join(f"DNS:{value}" for value in hosts)
+        + "\n"
         "extendedKeyUsage=serverAuth\n"
     )
     commands = (
@@ -204,7 +210,7 @@ def create_identity(
         ),
         (
             "openssl", "req", "-newkey", "rsa:2048", "-nodes",
-            "-subj", f"/CN={host}", "-keyout", str(key),
+            "-subj", f"/CN={primary_host}", "-keyout", str(key),
             "-out", str(csr),
         ),
         (

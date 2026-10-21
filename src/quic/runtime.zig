@@ -14,6 +14,8 @@ pub const Error = quic.Error || error{
     NoConnectionRoute,
     EcnUnavailable,
     ProxyDomainSourceUnsupported,
+    ProxyRouteLimitReached,
+    InvalidProxyRouteCapacity,
     UnexpectedRelaySource,
     InvalidGroSegment,
     CallerBufferReceiveWithGro,
@@ -174,10 +176,20 @@ const Socks5UdpState = struct {
         active: bool = true,
     };
 
+    const DomainRoute = struct {
+        host: []u8,
+        port: u16,
+        logical_peer: net.IpAddress,
+        references: usize = 1,
+    };
+
     control: net.Stream,
     relay: net.IpAddress,
     send_storage: []u8,
     fixed_domain: ?FixedDomain = null,
+    domain_routes: std.ArrayListUnmanaged(DomainRoute) = .empty,
+    max_domain_routes: usize = 0,
+    next_route_id: u32 = 1,
 };
 
 fn socks5FrameCapacity(max_datagram_size: usize) usize {
@@ -189,6 +201,42 @@ fn socks5FrameCapacity(max_datagram_size: usize) usize {
             socks5_udp.max_header_len,
         ) catch @as(usize, std.math.maxInt(u16)),
     );
+}
+
+fn nextSocks5LogicalPeer(
+    proxy: *Socks5UdpState,
+    local_address: net.IpAddress,
+    port: u16,
+) Error!net.IpAddress {
+    for (0..65_535) |_| {
+        const id = proxy.next_route_id;
+        proxy.next_route_id = if (id == 65_535) 1 else id + 1;
+        const candidate: net.IpAddress = switch (local_address) {
+            .ip4 => .{ .ip4 = .{
+                .bytes = .{
+                    198,
+                    18,
+                    @truncate(id >> 8),
+                    @truncate(id),
+                },
+                .port = port,
+            } },
+            .ip6 => .{ .ip6 = .{
+                .bytes = .{
+                    0xfd, 0, 0, 0, 0,                   0,                   0,                  0,
+                    0,    0, 0, 0, @truncate(id >> 24), @truncate(id >> 16), @truncate(id >> 8), @truncate(id),
+                },
+                .port = port,
+            } },
+        };
+        if (proxy.fixed_domain) |fixed| {
+            if (fixed.logical_peer.eql(&candidate)) continue;
+        }
+        for (proxy.domain_routes.items) |route| {
+            if (route.logical_peer.eql(&candidate)) break;
+        } else return candidate;
+    }
+    return error.ProxyRouteLimitReached;
 }
 
 pub const Server = struct {
@@ -357,6 +405,7 @@ pub const Endpoint = struct {
     send_mutex: std.Io.Mutex = .init,
     socket_receive_mutex: std.Io.Mutex = .init,
     pending_receive_mutex: std.Io.Mutex = .init,
+    socks5_route_mutex: std.Io.Mutex = .init,
     pending_received: std.ArrayList(OwnedBytes) = .empty,
     pending_receive_index: usize = 0,
     held_send: ?HeldSend = null,
@@ -392,6 +441,28 @@ pub const Endpoint = struct {
             association,
             limits,
             null,
+            0,
+        );
+    }
+
+    /// Build one association that can retain a bounded set of proxy-resolved
+    /// domain routes. Callers register a route before constructing each QUIC
+    /// connection and release it after the connection is fully unregistered.
+    pub fn fromSocks5AssociationForDomains(
+        allocator: std.mem.Allocator,
+        association: *socks5_proxy.UdpAssociation,
+        max_domain_routes: usize,
+        limits: Limits,
+    ) Error!Endpoint {
+        if (max_domain_routes == 0 or max_domain_routes > 65_535) {
+            return error.InvalidProxyRouteCapacity;
+        }
+        return initSocks5Association(
+            allocator,
+            association,
+            limits,
+            null,
+            max_domain_routes,
         );
     }
 
@@ -422,6 +493,7 @@ pub const Endpoint = struct {
                 .port = port,
                 .logical_peer = logical_peer,
             },
+            0,
         );
     }
 
@@ -430,12 +502,23 @@ pub const Endpoint = struct {
         association: *socks5_proxy.UdpAssociation,
         limits: Limits,
         fixed_domain: ?Socks5UdpState.FixedDomain,
+        max_domain_routes: usize,
     ) Error!Endpoint {
         const send_storage = try allocator.alloc(
             u8,
             socks5FrameCapacity(limits.max_datagram_size),
         );
         errdefer allocator.free(send_storage);
+        var domain_routes: std.ArrayListUnmanaged(
+            Socks5UdpState.DomainRoute,
+        ) = .empty;
+        errdefer domain_routes.deinit(allocator);
+        if (max_domain_routes != 0) {
+            try domain_routes.ensureTotalCapacity(
+                allocator,
+                max_domain_routes,
+            );
+        }
         const io = association.io;
         const socket = association.socket;
         const relay = association.relay;
@@ -450,6 +533,8 @@ pub const Endpoint = struct {
                 .relay = relay,
                 .send_storage = send_storage,
                 .fixed_domain = fixed_domain,
+                .domain_routes = domain_routes,
+                .max_domain_routes = max_domain_routes,
             },
             .limits = limits,
             .gso_send_enabled = false,
@@ -470,6 +555,11 @@ pub const Endpoint = struct {
             proxy.control.close(self.io);
             self.allocator.free(proxy.send_storage);
             if (proxy.fixed_domain) |fixed| self.allocator.free(fixed.host);
+            for (proxy.domain_routes.items) |route| {
+                self.allocator.free(route.host);
+            }
+            var routes = proxy.domain_routes;
+            routes.deinit(self.allocator);
         }
         self.* = undefined;
     }
@@ -494,6 +584,121 @@ pub const Endpoint = struct {
     /// envelope stripped before QUIC parses the datagram.
     pub fn receiveIntoCapacity(self: Endpoint) usize {
         return self.receiveBufferCapacity();
+    }
+
+    /// Retain one proxy-resolved domain and return its stable internal QUIC
+    /// peer. Repeated registrations share the same mapping by reference.
+    pub fn retainSocks5DomainRoute(
+        self: *Endpoint,
+        domain: []const u8,
+        port: u16,
+    ) Error!net.IpAddress {
+        return self.socks5DomainRoute(domain, port, true);
+    }
+
+    /// Return a persistent route without increasing its reference count.
+    /// Shared endpoint owners use this for their bounded lifetime route cache.
+    pub fn ensureSocks5DomainRoute(
+        self: *Endpoint,
+        domain: []const u8,
+        port: u16,
+    ) Error!net.IpAddress {
+        return self.socks5DomainRoute(domain, port, false);
+    }
+
+    fn socks5DomainRoute(
+        self: *Endpoint,
+        domain: []const u8,
+        port: u16,
+        retain_existing: bool,
+    ) Error!net.IpAddress {
+        _ = try socks5_udp.Address.fromHost(domain, port);
+        if (net.IpAddress.parse(domain, port)) |_| {
+            return error.InvalidHostName;
+        } else |_| {}
+        self.socks5_route_mutex.lockUncancelable(self.io);
+        defer self.socks5_route_mutex.unlock(self.io);
+        const proxy = if (self.socks5_udp) |*value| value else return error.InvalidProxyRouteCapacity;
+        if (proxy.max_domain_routes == 0) {
+            return error.InvalidProxyRouteCapacity;
+        }
+        for (proxy.domain_routes.items) |*route| {
+            if (route.port == port and
+                std.ascii.eqlIgnoreCase(route.host, domain))
+            {
+                if (retain_existing) {
+                    route.references = std.math.add(
+                        usize,
+                        route.references,
+                        1,
+                    ) catch return error.ProxyRouteLimitReached;
+                }
+                return route.logical_peer;
+            }
+        }
+        if (proxy.domain_routes.items.len >= proxy.max_domain_routes) {
+            return error.ProxyRouteLimitReached;
+        }
+        const logical_peer = try nextSocks5LogicalPeer(proxy, self.socket.address, port);
+        const owned_domain = try self.allocator.dupe(u8, domain);
+        proxy.domain_routes.appendAssumeCapacity(.{
+            .host = owned_domain,
+            .port = port,
+            .logical_peer = logical_peer,
+        });
+        return logical_peer;
+    }
+
+    /// Release one retained mapping. The final release waits for any active
+    /// send to finish before freeing its hostname storage.
+    pub fn releaseSocks5DomainRoute(
+        self: *Endpoint,
+        logical_peer: net.IpAddress,
+    ) bool {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        self.socks5_route_mutex.lockUncancelable(self.io);
+        defer self.socks5_route_mutex.unlock(self.io);
+        const proxy = if (self.socks5_udp) |*value| value else return false;
+        for (proxy.domain_routes.items, 0..) |*route, index| {
+            if (!route.logical_peer.eql(&logical_peer)) continue;
+            std.debug.assert(route.references != 0);
+            route.references -= 1;
+            if (route.references != 0) return true;
+            const removed = proxy.domain_routes.swapRemove(index);
+            self.allocator.free(removed.host);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn socks5DomainRouteCount(self: *Endpoint) usize {
+        self.socks5_route_mutex.lockUncancelable(self.io);
+        defer self.socks5_route_mutex.unlock(self.io);
+        return if (self.socks5_udp) |proxy|
+            proxy.domain_routes.items.len
+        else
+            0;
+    }
+
+    /// CID routing has already identified a connection when this is called.
+    /// Restore its logical domain peer without guessing from the proxy's
+    /// returned source IP, which may be shared by several hostnames.
+    pub fn normalizeSocks5RoutedPeer(
+        self: *Endpoint,
+        routed_peer: net.IpAddress,
+        received_from: net.IpAddress,
+    ) net.IpAddress {
+        self.socks5_route_mutex.lockUncancelable(self.io);
+        defer self.socks5_route_mutex.unlock(self.io);
+        const proxy = self.socks5_udp orelse return received_from;
+        if (proxy.fixed_domain) |fixed| {
+            if (fixed.logical_peer.eql(&routed_peer)) return routed_peer;
+        }
+        for (proxy.domain_routes.items) |route| {
+            if (route.logical_peer.eql(&routed_peer)) return routed_peer;
+        }
+        return received_from;
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
@@ -2102,7 +2307,7 @@ pub const Endpoint = struct {
     }
 
     fn validateSocks5DatagramSize(
-        self: Endpoint,
+        self: *Endpoint,
         to: net.IpAddress,
         datagrams: []const []const u8,
     ) Error!void {
@@ -2113,7 +2318,7 @@ pub const Endpoint = struct {
     }
 
     fn validateSocks5PayloadSize(
-        self: Endpoint,
+        self: *Endpoint,
         to: net.IpAddress,
         payload_len: usize,
     ) Error!void {
@@ -2127,14 +2332,22 @@ pub const Endpoint = struct {
     }
 
     fn socks5Destination(
-        self: *const Endpoint,
+        self: *Endpoint,
         to: net.IpAddress,
     ) socks5_udp.Address {
+        self.socks5_route_mutex.lockUncancelable(self.io);
+        defer self.socks5_route_mutex.unlock(self.io);
         if (self.socks5_udp) |proxy| {
             if (proxy.fixed_domain) |fixed| {
                 if (to.eql(&fixed.logical_peer)) return .{ .domain = .{
                     .host = fixed.host,
                     .port = fixed.port,
+                } };
+            }
+            for (proxy.domain_routes.items) |route| {
+                if (to.eql(&route.logical_peer)) return .{ .domain = .{
+                    .host = route.host,
+                    .port = route.port,
                 } };
             }
         }

@@ -35,6 +35,24 @@ test "unified HTTP pool configures HTTP3 through SOCKS5 without bypass" {
     );
     defer pool.deinit();
     try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
+
+    try std.testing.expectError(
+        error.InvalidProxyRouteCapacity,
+        http.Pool.init(
+            std.testing.allocator,
+            threaded.io(),
+            .{
+                .client = .{ .socks5_proxy = .{ .host = "proxy.invalid" } },
+                .http3 = .{
+                    .handshake = .{ .handshake = .{
+                        .original_destination_connection_id = &.{1},
+                        .local_connection_id = &.{2},
+                    } },
+                    .max_socks5_shared_routes = 0,
+                },
+            },
+        ),
+    );
 }
 
 test "unified HTTP pool retains negotiated h1 and h2 connections by origin" {

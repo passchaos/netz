@@ -8,11 +8,12 @@ fn parsePort(text: []const u8) !u16 {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 5) return error.InvalidArgument;
+    if (args.len != 6) return error.InvalidArgument;
     const proxy_port = try parsePort(args[1]);
-    const origin_port = try parsePort(args[2]);
-    _ = try parsePort(args[3]);
-    if (!std.Io.Dir.path.isAbsolute(args[4])) return error.InvalidArgument;
+    const origin_a_port = try parsePort(args[2]);
+    const origin_b_port = try parsePort(args[3]);
+    _ = try parsePort(args[4]);
+    if (!std.Io.Dir.path.isAbsolute(args[5])) return error.InvalidArgument;
 
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
@@ -24,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         now,
-        args[4],
+        args[5],
     );
     var ca_lock: std.Io.RwLock = .init;
     var bundle_verifier = netz.quic.tls.trust.BundleVerifier{
@@ -33,8 +34,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var pool = try netz.http.Pool.init(allocator, io, .{
-        .max_connections = 1,
-        .max_idle_connections = 1,
+        .max_connections = 2,
+        .max_idle_connections = 2,
         .max_idle_per_origin = 1,
         .client = .{
             .socks5_proxy = .{
@@ -60,27 +61,42 @@ pub fn main(init: std.process.Init) !void {
                 .local_connection_id = &.{},
                 .server_auth = bundle_verifier.clientVerifier(),
             } },
-            .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 1 },
-            .max_connections = 1,
+            .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 2 },
+            .max_connections = 2,
             .fallback = .never,
         },
     });
     defer pool.deinit();
-    const base = try std.fmt.allocPrint(
+    const base_a = try std.fmt.allocPrint(
         allocator,
-        "https://origin.internal:{d}",
-        .{origin_port},
+        "https://origin-a.internal:{d}",
+        .{origin_a_port},
     );
-    defer allocator.free(base);
-    const paths = [_][]const u8{ "/discover", "/h3-one", "/h3-two" };
-    const protocols = [_]netz.http.Protocol{ .http1, .http3, .http3 };
-    const bodies = [_][]const u8{
-        "tcp-discovery",
-        "h3-socks-one",
-        "h3-socks-two",
+    defer allocator.free(base_a);
+    const base_b = try std.fmt.allocPrint(
+        allocator,
+        "https://origin-b.internal:{d}",
+        .{origin_b_port},
+    );
+    defer allocator.free(base_b);
+    const requests = [_]struct {
+        base: []const u8,
+        path: []const u8,
+        protocol: netz.http.Protocol,
+        body: []const u8,
+    }{
+        .{ .base = base_a, .path = "/discover", .protocol = .http1, .body = "tcp-discovery-a" },
+        .{ .base = base_a, .path = "/h3-a-one", .protocol = .http3, .body = "h3-socks-a-one" },
+        .{ .base = base_b, .path = "/discover", .protocol = .http1, .body = "tcp-discovery-b" },
+        .{ .base = base_b, .path = "/h3-b-one", .protocol = .http3, .body = "h3-socks-b-one" },
+        .{ .base = base_a, .path = "/h3-a-two", .protocol = .http3, .body = "h3-socks-a-two" },
     };
-    for (paths, protocols, bodies) |path, expected_protocol, expected_body| {
-        const uri = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base, path });
+    for (requests) |request| {
+        const uri = try std.fmt.allocPrint(
+            allocator,
+            "{s}{s}",
+            .{ request.base, request.path },
+        );
         defer allocator.free(uri);
         var response = try pool.requestUriWithTimeout(
             uri,
@@ -88,14 +104,15 @@ pub fn main(init: std.process.Init) !void {
             .fromSeconds(8),
         );
         defer response.deinit();
-        try std.testing.expectEqual(expected_protocol, response.protocol());
-        try std.testing.expectEqualStrings(expected_body, response.body());
+        try std.testing.expectEqual(request.protocol, response.protocol());
+        try std.testing.expectEqualStrings(request.body, response.body());
     }
-    try std.testing.expectEqual(@as(usize, 1), pool.http3ConnectionCount());
-    try std.testing.expectEqual(@as(usize, 1), pool.http3IdleCount());
+    try std.testing.expectEqual(@as(usize, 2), pool.http3ConnectionCount());
+    try std.testing.expectEqual(@as(usize, 2), pool.http3IdleCount());
     std.debug.print(
-        "HTTP/3 SOCKS5 pool passed: discovery=http1 h3_requests=2 " ++
-            "udp_associations=1 quic_connections=1 remote_dns=true " ++
+        "HTTP/3 SOCKS5 pool passed: origins=2 discovery=http1 " ++
+            "h3_requests=3 udp_associations=1 quic_connections=2 " ++
+            "domain_routes=2 remote_dns=true shared_endpoint=true " ++
             "pool_reuse=true tls_verified=true client_io=zio-std-io\n",
         .{},
     );

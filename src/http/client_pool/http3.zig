@@ -6,6 +6,8 @@ const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const http3 = @import("../../http3/mod.zig");
 const http3_socks5 = @import("../../http3/socks5_runtime.zig");
+const proxy_socks5 = @import("../../proxy/socks5.zig");
+const quic = @import("../../quic/mod.zig");
 const runtime = @import("../../http3/runtime.zig");
 const client_types = @import("../client/types.zig");
 const remembered_settings = @import("http3_settings.zig");
@@ -57,8 +59,12 @@ pub const Options = struct {
     /// a cancelable pending phase and inherits the request/connect deadline.
     address_resolver: ?runtime.SharedHandshakeClientPoolAddressResolver = null,
     /// Route HTTP/3 UDP through one SOCKS5 proxy. Domain targets remain
-    /// proxy-resolved; each exclusive pooled connection owns one association.
+    /// proxy-resolved. Shared mode lazily owns one association and dispatcher;
+    /// exclusive mode retains one association per QUIC connection.
     socks5_proxy: ?client_types.Socks5Proxy = null,
+    /// Maximum proxy-resolved domain mappings retained by one shared SOCKS5
+    /// endpoint. Zero is invalid when both options are enabled.
+    max_socks5_shared_routes: usize = 1024,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
@@ -69,12 +75,14 @@ pub const State = struct {
     options: Options,
     connector: runtime.HandshakeClientPoolDefaultConnector,
     socks5_transport: ?Socks5Transport,
+    shared_connection_budget: *connection_budget.Budget,
     pool: runtime.HandshakeClientPool,
     dispatcher: runtime.HandshakeClientPoolSharedDispatcher,
     driver: DriverState,
     shared_pool: ?runtime.SharedHandshakeClientPool,
     shared_dispatcher: ?runtime.SharedHandshakeClientPoolRequestDispatcher,
     shared_driver: ?DriverState,
+    shared_init_mutex: std.Io.Mutex = .init,
     cache: alt_svc_cache.Cache,
     settings_mutex: std.Io.Mutex = .init,
     settings: remembered_settings.Cache,
@@ -110,13 +118,21 @@ pub const State = struct {
         options: Options,
         shared_connection_budget: *connection_budget.Budget,
     ) !*State {
+        if (options.shared_endpoint and options.socks5_proxy != null and
+            (options.max_socks5_shared_routes == 0 or
+                options.max_socks5_shared_routes > 65_535))
+        {
+            return error.InvalidProxyRouteCapacity;
+        }
         const self = try allocator.create(State);
         errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.io = io;
         self.options = options;
         self.settings_mutex = .init;
+        self.shared_init_mutex = .init;
         self.closed = false;
+        self.shared_connection_budget = shared_connection_budget;
         self.shared_pool = null;
         self.shared_dispatcher = null;
         self.shared_driver = null;
@@ -201,6 +217,110 @@ pub const State = struct {
         return self;
     }
 
+    fn ensureSocks5SharedEndpoint(
+        self: *State,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
+        if (!self.options.shared_endpoint or
+            self.options.socks5_proxy == null or
+            self.shared_pool != null)
+        {
+            return;
+        }
+        if (self.options.max_socks5_shared_routes == 0) {
+            return error.InvalidPoolOptions;
+        }
+        self.shared_init_mutex.lockUncancelable(self.io);
+        defer self.shared_init_mutex.unlock(self.io);
+        if (self.shared_pool != null) return;
+        if (self.closed) return error.PoolClosed;
+        const proxy = self.options.socks5_proxy.?;
+        var association = if (deadline) |absolute|
+            try proxy_socks5.associateUdpHostWithDeadline(
+                self.allocator,
+                self.io,
+                proxy.host,
+                proxy.port,
+                .{
+                    .socks5 = proxy.options,
+                    .bind_address = self.options.local_address,
+                },
+                absolute,
+            )
+        else
+            try proxy_socks5.associateUdpHost(
+                self.allocator,
+                self.io,
+                proxy.host,
+                proxy.port,
+                .{
+                    .socks5 = proxy.options,
+                    .bind_address = self.options.local_address,
+                },
+            );
+        var association_owned = true;
+        defer if (association_owned) association.deinit();
+        const endpoint = try self.allocator.create(quic.runtime.Endpoint);
+        endpoint.* = quic.runtime.Endpoint.fromSocks5AssociationForDomains(
+            self.allocator,
+            &association,
+            self.options.max_socks5_shared_routes,
+            self.options.limits.quic,
+        ) catch |err| {
+            self.allocator.destroy(endpoint);
+            return err;
+        };
+        association_owned = false;
+        var endpoint_owned = true;
+        defer if (endpoint_owned) {
+            endpoint.deinit();
+            self.allocator.destroy(endpoint);
+        };
+        var client_options = self.options.handshake;
+        client_options.alternate_local_address = null;
+        const pool = try runtime.SharedHandshakeClientPool.initWithOwnedEndpoint(
+            self.allocator,
+            self.io,
+            .{
+                .local_address = self.options.local_address,
+                .limits = self.options.limits,
+                .client = client_options,
+                .resolver = null,
+                .proxy_domain_routing = true,
+                .idle = self.options.idle,
+                .max_connections = self.options.max_connections,
+                .shared_connection_budget = self.shared_connection_budget,
+                .peer_settings_observer = .{
+                    .context = self,
+                    .observe = observePeerSettings,
+                },
+            },
+            endpoint,
+        );
+        endpoint_owned = false;
+        self.shared_pool = pool;
+        errdefer {
+            self.shared_pool.?.deinit();
+            self.shared_pool = null;
+        }
+        self.shared_dispatcher = try .init(
+            self.allocator,
+            self.io,
+            &self.shared_pool.?,
+            .{
+                .max_queued_requests = self.options.shared_requests.max_queued_requests,
+                .max_active_connections = self.options.shared_requests.max_connection_drivers,
+                .max_requests_per_connection = self.options.shared_requests.max_batch_requests,
+            },
+        );
+        errdefer {
+            self.shared_dispatcher.?.deinit();
+            self.shared_dispatcher = null;
+        }
+        self.shared_driver = .{};
+        self.shared_driver.?.future = self.io.async(SharedDriver.run, .{self});
+    }
+
     pub fn deinit(self: *State) void {
         const allocator = self.allocator;
         self.close();
@@ -215,6 +335,8 @@ pub const State = struct {
     }
 
     pub fn close(self: *State) void {
+        self.shared_init_mutex.lockUncancelable(self.io);
+        defer self.shared_init_mutex.unlock(self.io);
         if (self.shared_dispatcher) |*dispatcher| dispatcher.close();
         self.dispatcher.close();
         if (self.shared_pool) |*pool| pool.close();
@@ -286,6 +408,7 @@ pub const State = struct {
         forward_client_identity: bool,
         reclaimer: connection_budget.Reclaimer,
     ) !RequestResult {
+        try self.ensureSocks5SharedEndpoint(deadline);
         const redirect: ?runtime.HandshakeClientPoolRedirectConnectContext =
             if (crossed_origin) .{
                 .cross_origin = true,

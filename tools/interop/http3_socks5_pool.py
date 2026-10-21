@@ -113,6 +113,7 @@ def relay_udp(
     control: socket.socket,
     relay: socket.socket,
     h3_port: int,
+    target_hosts: set[str],
     stats: dict[str, int],
 ) -> None:
     with control:
@@ -143,18 +144,20 @@ def relay_udp(
                 stats["responses"] += 1
                 continue
             host, port, payload = parse_udp_packet(packet)
-            if host != "origin.internal" or port != h3_port:
+            if host not in target_hosts or port != h3_port:
                 raise AssertionError(f"HTTP/3 proxy target mismatch: {host}:{port}")
             client_address = source
             stats["remote_dns_packets"] += 1
+            stats[f"domain:{host}"] += 1
             relay.sendto(payload, server_address)
 
 
 def serve_proxy(
     proxy: socket.socket,
     relay: socket.socket,
-    origin_port: int,
+    origin_routes: dict[tuple[str, int], int],
     h3_port: int,
+    target_hosts: set[str],
     trace: list[str],
     stats: dict[str, int],
 ) -> None:
@@ -167,18 +170,19 @@ def serve_proxy(
         except BaseException as error:
             worker_errors.append(error)
 
-    for _ in range(2):
+    for _ in range(3):
         client, _ = proxy.accept()
         client.settimeout(10)
         authenticate(client)
         command, host, port = read_request(client)
         if command == 1:
-            if host != "origin.internal" or port != origin_port:
+            target_port = origin_routes.get((host, port))
+            if target_port is None:
                 raise AssertionError(f"CONNECT target mismatch: {host}:{port}")
             trace.append("connect")
             worker = threading.Thread(
                 target=run_worker,
-                args=(relay_tcp, client, origin_port),
+                args=(relay_tcp, client, target_port),
             )
         elif command == 3:
             if host != "0.0.0.0" or port == 0:
@@ -186,7 +190,7 @@ def serve_proxy(
             trace.append("udp-associate")
             worker = threading.Thread(
                 target=run_worker,
-                args=(relay_udp, client, relay, h3_port, stats),
+                args=(relay_udp, client, relay, h3_port, target_hosts, stats),
             )
         else:
             client.close()
@@ -205,6 +209,8 @@ def serve_discovery(
     server: socket.socket,
     context: ssl.SSLContext,
     h3_port: int,
+    expected_host: str,
+    body: bytes,
 ) -> None:
     raw, _ = server.accept()
     with raw:
@@ -212,9 +218,10 @@ def serve_discovery(
             request, headers = parse_headers(read_head(client))
             if request != b"GET /discover HTTP/1.1":
                 raise AssertionError(f"wrong discovery request: {request!r}")
-            if not headers.get(b"host", b"").startswith(b"origin.internal:"):
+            if not headers.get(b"host", b"").startswith(
+                expected_host.encode() + b":"
+            ):
                 raise AssertionError("discovery request lost origin authority")
-            body = b"tcp-discovery"
             client.sendall(
                 b"HTTP/1.1 200 OK\r\nContent-Length: "
                 + str(len(body)).encode()
@@ -271,7 +278,11 @@ def main() -> None:
     module = script_dir / "quic_go_module"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        ca, cert, key = create_identity(directory, "origin.internal")
+        origin_hosts = {"origin-a.internal", "origin-b.internal"}
+        ca, cert, key = create_identity(
+            directory,
+            ("origin-a.internal", "origin-b.internal"),
+        )
         go_server = directory / "http3-socks5-server"
         subprocess.run(
             (go, "build", "-mod=readonly", "-o", str(go_server), "./http3_socks5"),
@@ -280,13 +291,15 @@ def main() -> None:
             check=True,
             timeout=60,
         )
-        discovery = listener()
+        discovery_a = listener()
+        discovery_b = listener()
         proxy = listener()
         relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         relay.bind(("127.0.0.1", 0))
         relay.settimeout(10)
         h3_port = free_udp_port()
-        authority = f"origin.internal:{discovery.getsockname()[1]}"
+        authority_a = f"origin-a.internal:{discovery_a.getsockname()[1]}"
+        authority_b = f"origin-b.internal:{discovery_b.getsockname()[1]}"
         go_log = directory / "go-server.log"
         with go_log.open("w") as output:
             go_process = subprocess.Popen(
@@ -295,7 +308,7 @@ def main() -> None:
                     "-addr", f"127.0.0.1:{h3_port}",
                     "-cert", str(cert),
                     "-key", str(key),
-                    "-authority", authority,
+                    "-authority", f"{authority_a},{authority_b}",
                 ),
                 text=True,
                 stdout=output,
@@ -313,7 +326,12 @@ def main() -> None:
         tls_context.load_cert_chain(cert, key)
         errors: list[BaseException] = []
         trace: list[str] = []
-        stats = {"remote_dns_packets": 0, "responses": 0}
+        stats = {
+            "remote_dns_packets": 0,
+            "responses": 0,
+            "domain:origin-a.internal": 0,
+            "domain:origin-b.internal": 0,
+        }
 
         def run(function, *arguments) -> None:
             try:
@@ -324,7 +342,25 @@ def main() -> None:
         threads = (
             threading.Thread(
                 target=run,
-                args=(serve_discovery, discovery, tls_context, h3_port),
+                args=(
+                    serve_discovery,
+                    discovery_a,
+                    tls_context,
+                    h3_port,
+                    "origin-a.internal",
+                    b"tcp-discovery-a",
+                ),
+            ),
+            threading.Thread(
+                target=run,
+                args=(
+                    serve_discovery,
+                    discovery_b,
+                    tls_context,
+                    h3_port,
+                    "origin-b.internal",
+                    b"tcp-discovery-b",
+                ),
             ),
             threading.Thread(
                 target=run,
@@ -332,8 +368,14 @@ def main() -> None:
                     serve_proxy,
                     proxy,
                     relay,
-                    discovery.getsockname()[1],
+                    {
+                        ("origin-a.internal", discovery_a.getsockname()[1]):
+                            discovery_a.getsockname()[1],
+                        ("origin-b.internal", discovery_b.getsockname()[1]):
+                            discovery_b.getsockname()[1],
+                    },
                     h3_port,
+                    origin_hosts,
                     trace,
                     stats,
                 ),
@@ -345,7 +387,8 @@ def main() -> None:
             (
                 str(args.client),
                 str(proxy.getsockname()[1]),
-                str(discovery.getsockname()[1]),
+                str(discovery_a.getsockname()[1]),
+                str(discovery_b.getsockname()[1]),
                 str(h3_port),
                 str(ca),
             ),
@@ -357,7 +400,8 @@ def main() -> None:
         )
         for thread in threads:
             thread.join(timeout=5)
-        discovery.close()
+        discovery_a.close()
+        discovery_b.close()
         proxy.close()
         relay.close()
         if result.returncode != 0 or errors:
@@ -382,13 +426,16 @@ def main() -> None:
             raise TimeoutError("HTTP/3 SOCKS5 peer did not terminate")
         if go_process.returncode != 0:
             raise RuntimeError(go_log.read_text())
-        if trace != ["connect", "udp-associate"]:
+        if trace != ["connect", "udp-associate", "connect"]:
             raise AssertionError(f"unexpected SOCKS command trace: {trace}")
-        if stats["remote_dns_packets"] == 0 or stats["responses"] == 0:
+        if (stats["remote_dns_packets"] == 0 or stats["responses"] == 0 or
+            stats["domain:origin-a.internal"] == 0 or
+            stats["domain:origin-b.internal"] == 0):
             raise AssertionError(f"missing UDP relay traffic: {stats}")
         expected = (
-            "HTTP/3 SOCKS5 pool passed: discovery=http1 h3_requests=2 "
-            "udp_associations=1 quic_connections=1 remote_dns=true "
+            "HTTP/3 SOCKS5 pool passed: origins=2 discovery=http1 "
+            "h3_requests=3 udp_associations=1 quic_connections=2 "
+            "domain_routes=2 remote_dns=true shared_endpoint=true "
             "pool_reuse=true tls_verified=true client_io=zio-std-io"
         )
         if expected not in result.stdout:
@@ -396,9 +443,10 @@ def main() -> None:
         if "quic-go SOCKS5 HTTP/3 server passed" not in go_log.read_text():
             raise AssertionError(go_log.read_text())
         print(
-            "HTTP/3 SOCKS5 interoperability passed: discovery=http1 "
-            "h3_requests=2 tcp_tunnels=1 udp_associations=1 "
-            "quic_connections=1 remote_dns=true pool_reuse=true "
+            "HTTP/3 SOCKS5 interoperability passed: origins=2 discovery=http1 "
+            "h3_requests=3 tcp_tunnels=2 udp_associations=1 "
+            "quic_connections=2 domain_routes=2 remote_dns=true "
+            "shared_endpoint=true pool_reuse=true "
             "tls13=true client_io=zio-std-io server_io=quic-go-netpoll"
         )
 

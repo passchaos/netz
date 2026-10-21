@@ -1885,6 +1885,13 @@ pub const Dispatcher = struct {
                 else => |other| return other,
             };
             if (pending) |routed_pending| {
+                if (routed_pending.route.peer_address) |peer| {
+                    const received_on = owned.received_on orelse self.endpoint;
+                    owned.from = received_on.normalizeSocks5RoutedPeer(
+                        peer,
+                        owned.from,
+                    );
+                }
                 const entry = self.pending_handshakes.getPtr(
                     routed_pending.route.connection_index,
                 ) orelse return error.StaleConnectionRoute;
@@ -1931,6 +1938,13 @@ pub const Dispatcher = struct {
             owns_datagram = false;
             return classifyUnrouted(owned);
         };
+        if (routed.route.peer_address) |peer| {
+            const received_on = owned.received_on orelse self.endpoint;
+            owned.from = received_on.normalizeSocks5RoutedPeer(
+                peer,
+                owned.from,
+            );
+        }
         const entry = self.connections.getPtr(
             routed.route.connection_index,
         ) orelse return error.StaleConnectionRoute;

@@ -2265,8 +2265,15 @@ proxy setup plus QUIC/TLS, and falls back from optional 0-RTT through the same
 route rather than bypassing it. A Python/quic-go process gate proves HTTPS
 discovery through one TCP tunnel followed by two certificate-verified H3
 requests over one UDP association and one reused QUIC connection. Shared-H3
-endpoint mode remains disabled for this configuration until one association
-can own multiple domain-to-logical-peer mappings without weakening routing.
+mode now initializes that association lazily on the first H3 request, so Pool
+construction and TCP fallback remain free of proxy network side effects. Its
+bounded `max_socks5_shared_routes` registry assigns stable per-domain logical
+peers; outbound packets retain proxy DNS, while the CID dispatcher restores the
+right logical source only after it has identified the pending or established
+connection. A two-origin extension proves two remote-only hostnames and two
+QUIC connections share one endpoint/association, retain independent TLS and
+`:authority`, and reuse the first origin without confusing identical relay
+source IP/port tuples.
 
 ## Remaining evidence
 
