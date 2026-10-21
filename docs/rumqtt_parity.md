@@ -74,6 +74,14 @@ budget. The cross-protocol peer gate proves remote proxy DNS, Host/SNI
 isolation, TLS 1.3 hostname verification, and MQTT CONNECT/PING/DISCONNECT over
 both WS and WSS.
 
+MQTT-over-WebSocket HTTP redirects and reconnect connectors also accept the
+same first-class SOCKS5 route. Every reconnect restarts the complete redirect
+chain and opens a new tunnel for every authority; one caller deadline spans the
+SOCKS, TLS, Upgrade, MQTT authentication, and CONNACK phases. The independent
+multi-authority gate runs the connector twice, requires four WSS tunnels after
+the two-tunnel WS redirect, and proves Authorization is present at each initial
+origin but absent after the cross-port redirect.
+
 ## One-way inbound broker bridge
 
 `mqtt.bridge.Bridge` is deliberately a small, inbound-only topology primitive.

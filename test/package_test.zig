@@ -27,6 +27,10 @@ test "public modules are reachable" {
         netz.websocket.runtime.Client,
         "connectAcceptedTlsStreamWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Client,
+        "connectUriViaSocks5WithDeadline",
+    ));
     inline for (&.{ "connect", "io", "socket_options", "tls" }) |decl|
         try std.testing.expect(@hasDecl(netz.stream, decl));
     try std.testing.expect(@hasDecl(netz.runtime, "Backend"));

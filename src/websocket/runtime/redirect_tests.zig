@@ -5,6 +5,24 @@ const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
 
+test "WebSocket redirect rejects competing proxy routes before I/O" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidRedirect,
+        runtime.Client.connectUriFollowingRedirectsAttempt(
+            std.testing.allocator,
+            threaded.io(),
+            "ws://origin.invalid/start",
+            .{},
+            .{
+                .proxy = .{ .uri = "http://proxy.invalid" },
+                .socks5_proxy = .{ .host = "socks.invalid" },
+            },
+        ),
+    );
+}
+
 test "WebSocket URI follows relative redirect under one deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

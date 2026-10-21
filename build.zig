@@ -1611,6 +1611,33 @@ pub fn build(b: *std.Build) void {
     http_websocket_socks5_step.dependOn(&http_websocket_socks5.step);
     test_step.dependOn(&http_websocket_socks5.step);
 
+    const websocket_socks5_redirect_client = b.addExecutable(.{
+        .name = "netz-websocket-socks5-redirect-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_socks5_redirect_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_socks5_redirect = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/websocket_socks5_redirect.py",
+    });
+    websocket_socks5_redirect.addArtifactArg(
+        websocket_socks5_redirect_client,
+    );
+    const websocket_socks5_redirect_step = b.step(
+        "interop-websocket-socks5-redirect",
+        "Verify redirects and reconnects through fresh SOCKS5 tunnels",
+    );
+    websocket_socks5_redirect_step.dependOn(
+        &websocket_socks5_redirect.step,
+    );
+    test_step.dependOn(&websocket_socks5_redirect.step);
+
     const mqtt_broker_config = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

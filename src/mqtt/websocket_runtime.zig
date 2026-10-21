@@ -30,10 +30,12 @@ pub const StapledOcspPolicy = websocket_runtime.StapledOcspPolicy;
 pub const HttpProxyOptions = websocket_runtime.HttpProxyOptions;
 pub const HttpRedirectPolicy = websocket_runtime.RedirectPolicy;
 pub const HttpRedirectProxy = websocket_runtime.RedirectProxy;
+pub const Socks5RedirectProxy = websocket_runtime.Socks5RedirectProxy;
 
 pub const HttpRedirectOptions = struct {
     policy: HttpRedirectPolicy = .{},
     proxy: ?HttpRedirectProxy = null,
+    socks5_proxy: ?Socks5RedirectProxy = null,
 };
 
 /// MQTT-over-WebSocket listener.
@@ -3736,6 +3738,7 @@ fn websocketRedirectOptions(
         .policy = redirect_options.policy,
         .tls = options.tls,
         .proxy = redirect_options.proxy,
+        .socks5_proxy = redirect_options.socks5_proxy,
     };
 }
 

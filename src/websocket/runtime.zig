@@ -30,6 +30,7 @@ const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
 const socket_options = @import("../internal/socket_options.zig");
+const proxy_socks5 = @import("../proxy/socks5.zig");
 const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
 
@@ -49,6 +50,7 @@ const max_batched_payload_slices: usize = 64;
 const transport_read_scratch_len: usize = 16 * 1024;
 
 pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
+    proxy_socks5.Error ||
     http_cookies.Error ||
     cookie_handshake.Error || http2_runtime.Error || tls_stream.Error || error{
     HeadersTooLarge,
@@ -2014,6 +2016,7 @@ pub const TlsClientIdentityOptions = tls_client_identity.Options;
 pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
 pub const CookieHandshakeOptions = cookie_handshake.Options;
 pub const HttpProxyOptions = http1_runtime.ProxyOptions;
+pub const Socks5Options = proxy_socks5.Options;
 pub const RedirectPolicy = redirect.Policy;
 pub const AddressResolver = address_resolver.Resolver;
 pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
@@ -2022,6 +2025,12 @@ pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
 pub const RedirectProxy = struct {
     uri: []const u8,
     options: HttpProxyOptions = .{},
+};
+
+pub const Socks5RedirectProxy = struct {
+    host: []const u8,
+    port: u16 = 1080,
+    options: Socks5Options = .{},
 };
 
 pub const CookieRedirectOptions = struct {
@@ -2037,6 +2046,7 @@ pub const RedirectOptions = struct {
     policy: RedirectPolicy = .{},
     tls: http1_runtime.TlsClientOptions = .{},
     proxy: ?RedirectProxy = null,
+    socks5_proxy: ?Socks5RedirectProxy = null,
     cookies: ?CookieRedirectOptions = null,
 };
 
@@ -2474,6 +2484,11 @@ pub const Client = struct {
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(io, absolute);
         }
+        var effective_tls_options = tls_options;
+        if (effective_tls_options.handshake_timeout == null) {
+            effective_tls_options.handshake_timeout =
+                options.tls_handshake_timeout;
+        }
         if (options.vail_tls orelse options.tls_identity) |identity| {
             const tls_conn = if (deadline) |absolute|
                 try tls_client_identity.initWithDeadline(
@@ -2481,7 +2496,7 @@ pub const Client = struct {
                     io,
                     stream,
                     server_name,
-                    tls_options,
+                    effective_tls_options,
                     identity,
                     absolute,
                 )
@@ -2491,7 +2506,7 @@ pub const Client = struct {
                     io,
                     stream,
                     server_name,
-                    tls_options,
+                    effective_tls_options,
                     identity,
                 );
             stream_owned = false;
@@ -2511,7 +2526,7 @@ pub const Client = struct {
                 io,
                 stream,
                 server_name,
-                tls_options,
+                effective_tls_options,
                 absolute,
             )
         else
@@ -2520,7 +2535,7 @@ pub const Client = struct {
                 io,
                 stream,
                 server_name,
-                tls_options,
+                effective_tls_options,
             );
         stream_owned = false;
         errdefer tls_conn.deinit();
@@ -3499,6 +3514,133 @@ pub const Client = struct {
         );
     }
 
+    /// Establish WS/WSS through a SOCKS5 CONNECT tunnel. Destination DNS stays
+    /// at the proxy, while Host, SNI, and certificate verification remain bound
+    /// to the origin URI.
+    pub fn connectUriViaSocks5(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        var attempt = try connectUriViaSocks5AttemptBefore(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            null,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriViaSocks5Attempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
+        return connectUriViaSocks5AttemptBefore(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn connectUriViaSocks5WithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var attempt = try connectUriViaSocks5AttemptBefore(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriViaSocks5AttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectUriViaSocks5AttemptBefore(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriViaSocks5WithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriViaSocks5WithDeadline(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectUriViaSocks5AttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriViaSocks5AttemptWithDeadline(
+            allocator,
+            io,
+            proxy,
+            uri_text,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Follow bounded HTTP Upgrade redirects until one WebSocket is accepted.
     /// Relative Location values use RFC 3986 resolution. By default WSS cannot
     /// downgrade to WS, cross-origin custom fields are stripped, and a client
@@ -3684,6 +3826,11 @@ pub const Client = struct {
         redirect_options: RedirectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!RedirectConnectAttempt {
+        if (redirect_options.proxy != null and
+            redirect_options.socks5_proxy != null)
+        {
+            return error.InvalidRedirect;
+        }
         var chain = redirect.Chain.init(
             allocator,
             redirect_options.policy,
@@ -3764,6 +3911,26 @@ pub const Client = struct {
                         current_uri,
                         effective_options,
                         proxy.options,
+                        redirect_options.tls,
+                    )
+            else if (redirect_options.socks5_proxy) |socks_proxy|
+                if (deadline) |absolute|
+                    try connectUriViaSocks5AttemptWithDeadline(
+                        allocator,
+                        io,
+                        socks_proxy,
+                        current_uri,
+                        effective_options,
+                        redirect_options.tls,
+                        absolute,
+                    )
+                else
+                    try connectUriViaSocks5Attempt(
+                        allocator,
+                        io,
+                        socks_proxy,
+                        current_uri,
+                        effective_options,
                         redirect_options.tls,
                     )
             else if (deadline) |absolute|
@@ -4180,6 +4347,107 @@ pub const Client = struct {
         );
         stream_owned = false;
         return attempt;
+    }
+
+    fn connectUriViaSocks5AttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: Socks5RedirectProxy,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
+        const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
+        if (!is_ws and !is_wss) return error.UnsupportedScheme;
+        if ((options.tls_identity != null or options.vail_tls != null) and
+            !is_wss)
+        {
+            return error.UnsupportedScheme;
+        }
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(
+            allocator,
+            uri,
+            if (is_wss) 443 else 80,
+        );
+        defer endpoint.deinit();
+        var effective_proxy_options = proxy.options;
+        if (effective_proxy_options.connect_timeout == null) {
+            effective_proxy_options.connect_timeout = options.connect_timeout;
+        }
+        if (effective_proxy_options.address_resolver == null) {
+            effective_proxy_options.address_resolver = options.address_resolver;
+        }
+        if (effective_proxy_options.address_connect_policy == null) {
+            effective_proxy_options.address_connect_policy =
+                options.address_connect_policy;
+        }
+        const stream = if (deadline) |absolute|
+            try proxy_socks5.connectHostWithDeadline(
+                allocator,
+                io,
+                proxy.host,
+                proxy.port,
+                endpoint.tls_host,
+                endpoint.port,
+                effective_proxy_options,
+                absolute,
+            )
+        else
+            try proxy_socks5.connectHost(
+                allocator,
+                io,
+                proxy.host,
+                proxy.port,
+                endpoint.tls_host,
+                endpoint.port,
+                effective_proxy_options,
+            );
+        var connect_options = options;
+        connect_options.target = target;
+        if (connect_options.host.len == 0) {
+            connect_options.host = endpoint.authority;
+        }
+        if (is_wss) {
+            return if (deadline) |absolute|
+                connectAcceptedTlsStreamAttemptWithDeadline(
+                    allocator,
+                    io,
+                    stream,
+                    endpoint.tls_host,
+                    connect_options,
+                    tls_options,
+                    absolute,
+                )
+            else
+                connectAcceptedTlsStreamAttempt(
+                    allocator,
+                    io,
+                    stream,
+                    endpoint.tls_host,
+                    connect_options,
+                    tls_options,
+                );
+        }
+        return if (deadline) |absolute|
+            connectAcceptedStreamAttemptWithDeadline(
+                allocator,
+                io,
+                stream,
+                connect_options,
+                absolute,
+            )
+        else
+            connectAcceptedStreamAttempt(
+                allocator,
+                io,
+                stream,
+                connect_options,
+            );
     }
 
     fn connectUriViaProxyAttemptBefore(

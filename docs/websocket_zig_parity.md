@@ -1090,6 +1090,16 @@ surface for MQTT-over-WS/WSS with strict `mqtt` subprotocol negotiation,
 CONNECT/CONNACK, PING, and DISCONNECT. Invalid zero budgets close the
 caller-supplied stream before returning.
 
+URI clients and redirect chains now accept a first-class SOCKS5 route in
+addition to the existing HTTP CONNECT route; configuring both fails before
+network I/O. Each redirect authority opens a fresh remote-DNS SOCKS tunnel
+under the original absolute deadline, while existing cross-origin policy strips
+end-to-end credentials and clears origin TLS tickets as before. A two-authority
+independent gate checks one WS redirect plus two WSS reconnect chains, exact
+six-tunnel ordering, Authorization isolation, TLS 1.3 hostname verification,
+and retained rejection metadata. That gate found and now guards a duplicate
+rejection-transport close in the initial adapter implementation.
+
 ## Remaining evidence before a broad completion claim
 
 The shared `fuzz-parsers` target feeds bounded arbitrary bytes through
