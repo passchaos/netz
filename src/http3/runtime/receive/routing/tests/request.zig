@@ -678,6 +678,7 @@ test "HTTP/3 request router preserves reordered and consumed WebTransport uni pr
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
 
     const bytes = [_]u8{ 0x40, 0x54, 0x00, 'w', 't' };
     const suffix = quic.Frame{ .stream = .{
@@ -812,6 +813,7 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
 
     const bytes = [_]u8{ 0x40, 0x41, 0x00, 'w', 't' };
     const suffix = quic.Frame{ .stream = .{
@@ -1076,6 +1078,7 @@ test "HTTP/3 request router preserves reset WebTransport uni stream" {
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
 
     const prefix = quic.Frame{ .stream = .{
         .stream_id = 2,

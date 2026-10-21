@@ -648,6 +648,7 @@ test "HTTP/3 response router preserves reordered and consumed WebTransport uni p
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
     var state: response_routing.State = .{
         .allocator = allocator,
         .connection = &connection,
@@ -764,6 +765,7 @@ test "HTTP/3 response router preserves reset WebTransport uni stream" {
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
     var state: response_routing.State = .{
         .allocator = allocator,
         .connection = &connection,
@@ -848,6 +850,7 @@ test "HTTP/3 response router preserves reordered WebTransport bidi reset" {
     });
     defer detached.deinit();
     try detached.register(0);
+    try detached.markStreamDetached(0);
     var state: response_routing.State = .{
         .allocator = allocator,
         .connection = &connection,

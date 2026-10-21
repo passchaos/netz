@@ -10156,8 +10156,10 @@ pub const Connection = struct {
         try self.sendNewToken(token);
     }
 
-    pub fn switchToNextPeerConnectionId(self: *Connection) bool {
-        const entry = self.peer_connection_ids.consumeUnused() orelse return false;
+    pub fn switchToNextPeerConnectionId(self: *Connection) Error!bool {
+        const entry = (try self.peer_connection_ids.rotateToUnused(
+            self.config.peer_connection_id,
+        )) orelse return false;
         self.setPeerConnectionId(entry.slice());
         self.resetSpinValueForConnectionId();
         self.rememberCurrentValidatedPeerPath();

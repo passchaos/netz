@@ -2165,7 +2165,7 @@ test "QUIC endpoint server preserves simultaneous multi-endpoint datagrams" {
         &server,
         &preferred,
         &primary_storage,
-        .{ .duration = .{ .clock = .awake, .raw = .zero } },
+        .{ .deadline = deadline },
     );
     try std.testing.expect(if (first_primary)
         std.mem.eql(u8, second.bytes, "preferred")

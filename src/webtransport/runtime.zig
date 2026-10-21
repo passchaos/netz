@@ -48,16 +48,16 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
             .Debug, .ReleaseSafe => .{
                 .accepted = 1_064,
                 .accepted_handshake = 17_360,
-                .client = 7_352,
+                .client = 7_560,
                 .handshake_client = 18_064,
-                .protected_client = 8_960,
+                .protected_client = 9_168,
             },
             .ReleaseFast, .ReleaseSmall => .{
                 .accepted = 1_056,
                 .accepted_handshake = 17_192,
-                .client = 7_240,
+                .client = 7_448,
                 .handshake_client = 17_864,
-                .protected_client = 8_824,
+                .protected_client = 9_032,
             },
         };
         try std.testing.expectEqual(

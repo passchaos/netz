@@ -1809,7 +1809,10 @@ coalesces all missing NEW_CONNECTION_ID frames into one protected datagram, so
 the default four-CID target adds three routes with one UDP send. A
 real two-connection handshake switches away from seq=0, sends both retirement
 confirmations, observes derived-token seq=4 replacements, and finishes with four
-live routes per connection. A separate real UDP state-loss regression completes
+live routes per connection. Explicit peer-CID rotation now reserves the bounded
+retirement queue before changing state, removes the prior CID only after that
+reservation succeeds, and surfaces queue exhaustion without changing the
+selected CID or use counts. A separate real UDP state-loss regression completes
 an authenticated handshake, removes the server connection and every CID route,
 then sends through the client's still-active old CID. The shared server answers
 with the handshake-advertised derived token, and the client enters three-PTO

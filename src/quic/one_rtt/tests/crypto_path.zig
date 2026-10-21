@@ -5501,7 +5501,7 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     );
     spin_received.deinit(allocator);
     try std.testing.expect(client.nextSpinBit());
-    try std.testing.expect(client.switchToNextPeerConnectionId());
+    try std.testing.expect(try client.switchToNextPeerConnectionId());
     try std.testing.expectEqualStrings("server-new-cid", client.config.peer_connection_id);
     try std.testing.expect(!client.nextSpinBit());
     var reset_datagram: std.ArrayList(u8) = .empty;
@@ -5643,19 +5643,28 @@ test "QUIC 1-RTT replacement CID can retire prior IDs at peer active limit" {
     try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
     try std.testing.expectEqual(@as(usize, 1), client.pendingRetireConnectionIdCount());
 
-    try std.testing.expect(client.switchToNextPeerConnectionId());
+    try std.testing.expect(try client.switchToNextPeerConnectionId());
     try std.testing.expectEqualStrings("server-rotated-cid", client.config.peer_connection_id);
-    try std.testing.expectEqual(@as(usize, 1), try client.sendPendingRetireConnectionIds());
+    try std.testing.expectEqual(@as(usize, 2), try client.sendPendingRetireConnectionIds());
     try std.testing.expectEqual(@as(usize, 0), client.pendingRetireConnectionIdCount());
 
     var router = quic.connection_router.Router.init(allocator);
     defer router.deinit();
     try router.register("server-rotated-cid", .{ .connection_index = 0, .sequence_number = 2 });
-    var routed = try server_endpoint.receiveRoutedBytes(router);
-    defer routed.deinit(allocator);
-    var retire = (try server.receiveRoutedDatagram(routed)).?;
-    defer retire.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
+    for ([_]u64{ 0, 1 }, 0..) |sequence_number, index| {
+        var routed = try server_endpoint.receiveRoutedBytes(router);
+        defer routed.deinit(allocator);
+        var retire = (try server.receiveRoutedDatagram(routed)).?;
+        defer retire.deinit(allocator);
+        try std.testing.expectEqual(
+            sequence_number,
+            retire.frames[0].retire_connection_id.sequence_number,
+        );
+        try std.testing.expectEqual(
+            2 - index,
+            server.local_connection_ids.count(),
+        );
+    }
 }
 
 test "QUIC 1-RTT derives local CID stateless reset tokens from config key" {

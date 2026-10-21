@@ -199,6 +199,35 @@ pub const PeerPool = struct {
         return null;
     }
 
+    /// Rotate one active path to a fresh peer CID and queue retirement of the
+    /// previous identifier as one transaction. Failure to reserve the bounded
+    /// retirement queue leaves both CID entries and use counts unchanged.
+    pub fn rotateToUnused(
+        self: *PeerPool,
+        current_connection_id: []const u8,
+    ) Error!?*Entry {
+        var current: ?*Entry = null;
+        var replacement: ?*Entry = null;
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) continue;
+            if (entry.in_use and
+                std.mem.eql(u8, entry.slice(), current_connection_id))
+            {
+                current = entry;
+            } else if (!entry.in_use and replacement == null) {
+                replacement = entry;
+            }
+        }
+        const old = current orelse return error.UnknownConnectionId;
+        const next = replacement orelse return null;
+        try self.queueRetire(old.sequence_number);
+        old.* = .{};
+        self.in_use_count -|= 1;
+        next.in_use = true;
+        self.in_use_count += 1;
+        return next;
+    }
+
     pub fn markInUse(self: *PeerPool, sequence_number: u64) Error!void {
         const entry = self.find(sequence_number) orelse return error.UnknownConnectionId;
         if (!entry.in_use) self.in_use_count += 1;
@@ -590,6 +619,46 @@ test "QUIC peer CID pool stores retires and consumes IDs" {
     try std.testing.expectEqualStrings("cid-two", entry.slice());
     try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
     try std.testing.expect(pool.consumeUnused() == null);
+}
+
+test "QUIC peer CID rotation retires and releases the previous ID" {
+    var pool = PeerPool{};
+    try pool.addInitial("initial");
+    try pool.add(1, "replacement", [_]u8{1} ** 16);
+
+    const replacement = (try pool.rotateToUnused("initial")) orelse
+        return error.UnknownConnectionId;
+    try std.testing.expectEqual(@as(u64, 1), replacement.sequence_number);
+    try std.testing.expectEqualStrings("replacement", replacement.slice());
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
+    try std.testing.expectEqual(@as(usize, 1), pool.pendingRetireCount());
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        pool.peekRetireFrame().?.retire_connection_id.sequence_number,
+    );
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        pool.rotateToUnused("initial"),
+    );
+}
+
+test "QUIC peer CID rotation rolls back when retirement queue is full" {
+    var pool = PeerPool{};
+    try pool.addInitial("initial");
+    try pool.add(1, "replacement", [_]u8{1} ** 16);
+    for (0..max_retire_queue_len) |sequence_number| {
+        try pool.queueRetire(@intCast(sequence_number + 10));
+    }
+
+    try std.testing.expectError(
+        error.RetireQueueFull,
+        pool.rotateToUnused("initial"),
+    );
+    try std.testing.expectEqual(@as(usize, 2), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
+    try std.testing.expectEqualStrings("initial", pool.entries[0].slice());
+    try std.testing.expect(!pool.entries[1].in_use);
 }
 
 test "QUIC peer CID pool permits only the initial ID to be empty" {
