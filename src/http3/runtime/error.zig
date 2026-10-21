@@ -1,11 +1,13 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const proxy_socks5 = @import("../../proxy/socks5.zig");
 
 const net = std.Io.net;
 
 pub const Error = http3.Error || quic.runtime.Error ||
     quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error ||
+    proxy_socks5.UdpAssociateError ||
     net.HostName.ValidateError || net.HostName.LookupError || error{
     MissingStreamFrame,
     MissingDatagram,

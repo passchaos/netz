@@ -8500,14 +8500,27 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        var h3_client = try http3.runtime.HandshakeClient.connectUri(
-            allocator,
-            io,
-            local_address,
-            uri,
-            options.limits.http3,
-            webTransportHandshakeClientOptions(h3_options),
-        );
+        const effective_h3 = webTransportHandshakeClientOptions(h3_options);
+        var h3_client = if (options.socks5_proxy) |proxy|
+            try http3.socks5_runtime.connectHost(
+                allocator,
+                io,
+                local_address,
+                proxy,
+                endpoint.tls_host,
+                endpoint.port,
+                options.limits.http3,
+                effective_h3,
+            )
+        else
+            try http3.runtime.HandshakeClient.connectUri(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.limits.http3,
+                effective_h3,
+            );
         errdefer h3_client.deinit();
         return connectStatefulAttempt(
             &h3_client,
@@ -8540,15 +8553,29 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        var h3_client = try http3.runtime.HandshakeClient.connectUriWithDeadline(
-            allocator,
-            io,
-            local_address,
-            uri,
-            options.limits.http3,
-            webTransportHandshakeClientOptions(h3_options),
-            deadline,
-        );
+        const effective_h3 = webTransportHandshakeClientOptions(h3_options);
+        var h3_client = if (options.socks5_proxy) |proxy|
+            try http3.socks5_runtime.connectHostWithDeadline(
+                allocator,
+                io,
+                local_address,
+                proxy,
+                endpoint.tls_host,
+                endpoint.port,
+                options.limits.http3,
+                effective_h3,
+                deadline,
+            )
+        else
+            try http3.runtime.HandshakeClient.connectUriWithDeadline(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.limits.http3,
+                effective_h3,
+                deadline,
+            );
         errdefer h3_client.deinit();
         return connectStatefulAttempt(
             &h3_client,
@@ -12764,6 +12791,9 @@ pub const HandshakeUriConnectOptions = struct {
     /// resolver. Literal IP hosts bypass it; returned addresses do not replace
     /// URI authority or TLS identity.
     h3: http3.runtime.HandshakeClientOptions,
+    /// Route QUIC through SOCKS5 UDP ASSOCIATE without locally resolving the
+    /// URI host. TLS and `:authority` remain bound to the WebTransport URL.
+    socks5_proxy: ?http3.socks5_runtime.Proxy = null,
 };
 
 pub const EstablishedConnectOptions = struct {
@@ -12803,6 +12833,18 @@ test "WebTransport URI connect rejects non-HTTPS and userinfo before I/O" {
             .{ .ip4 = .loopback(0) },
             "https://user@example.com/wt",
             options,
+        ),
+    );
+    var proxied = options;
+    proxied.socks5_proxy = .{ .host = "127.0.0.1", .port = 0 };
+    try std.testing.expectError(
+        error.InvalidProxyPort,
+        HandshakeClientSession.connectUri(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://proxy-only.invalid/wt",
+            proxied,
         ),
     );
 }

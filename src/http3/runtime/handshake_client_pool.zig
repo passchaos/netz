@@ -95,9 +95,26 @@ pub fn RequestResult(comptime Runtime: type) type {
     };
 }
 
+pub fn TransportConnector(comptime Runtime: type) type {
+    return struct {
+        context: *anyopaque,
+        connect: *const fn (
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            target_host: []const u8,
+            target_port: u16,
+            limits: Runtime.Limits,
+            options: Runtime.HandshakeClientOptions,
+        ) Runtime.Error!Runtime.HandshakeClient,
+    };
+}
+
 pub fn DefaultConnectorContext(comptime Runtime: type) type {
     return struct {
         options: Runtime.HandshakeClientOptions,
+        transport: ?TransportConnector(Runtime) = null,
 
         pub fn connector(self: *@This()) Connector(Runtime) {
             return .{
@@ -135,6 +152,19 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
+            if (options.handshake.server_name == null) {
+                options.handshake.server_name = endpoint.tls_host;
+            }
+            if (self.transport) |transport| return transport.connect(
+                transport.context,
+                allocator,
+                io,
+                local_address,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                options,
+            );
             return Runtime.HandshakeClient.connectUri(
                 allocator,
                 io,
@@ -171,6 +201,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 return error.Unexpected;
             std.Io.randomSecure(io, &local_cid) catch
                 return error.Unexpected;
+            var endpoint = try Runtime.uriEndpoint(allocator, uri);
+            defer endpoint.deinit();
             var options = isolateRedirectOptions(
                 self.options,
                 redirect.forward_client_identity,
@@ -178,6 +210,19 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
+            if (options.handshake.server_name == null) {
+                options.handshake.server_name = endpoint.tls_host;
+            }
+            if (self.transport) |transport| return transport.connect(
+                transport.context,
+                allocator,
+                io,
+                local_address,
+                endpoint.tls_host,
+                endpoint.port,
+                limits,
+                options,
+            );
             return Runtime.HandshakeClient.connectUri(
                 allocator,
                 io,
@@ -213,6 +258,18 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
+            options.handshake.server_name = endpoint.tls_host;
+            options.handshake.alpn_protocols = &.{target.alpn};
+            if (self.transport) |transport| return transport.connect(
+                transport.context,
+                allocator,
+                io,
+                local_address,
+                target.connect_host,
+                target.port,
+                limits,
+                options,
+            );
             return Runtime.HandshakeClient.connectUriAltSvc(
                 allocator,
                 io,
@@ -255,6 +312,18 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
+            options.handshake.server_name = endpoint.tls_host;
+            options.handshake.alpn_protocols = &.{target.alpn};
+            if (self.transport) |transport| return transport.connect(
+                transport.context,
+                allocator,
+                io,
+                local_address,
+                target.connect_host,
+                target.port,
+                limits,
+                options,
+            );
             return Runtime.HandshakeClient.connectUriAltSvc(
                 allocator,
                 io,
@@ -277,6 +346,18 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             early_request: *const Runtime.PreparedEarlyRequest,
         ) Runtime.Error!EarlyConnected(Runtime) {
             const self: *@This() = @ptrCast(@alignCast(context));
+            // A custom transport must explicitly opt into typed 0-RTT. Until
+            // then, preserve routing by opening a normal connection through
+            // the transport instead of bypassing it via the default URI path.
+            if (self.transport != null) return .{ .client = try connectAltSvc(
+                context,
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                limits,
+            ) };
             var endpoint = try Runtime.uriEndpoint(allocator, uri);
             defer endpoint.deinit();
             var options = scopeAutoResumption(

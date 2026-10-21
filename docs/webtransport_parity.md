@@ -1,7 +1,7 @@
 # netz WebTransport parity audit
 
 This audit compares netz with the WebTransport implementations available under
-`~/Work`: `quicz` and modern Rust `wtransport`. It records wire-version
+`/nav_env/Work`: `quicz` and modern Rust `wtransport`. It records wire-version
 differences explicitly because draft WebTransport stream association changed
 over time.
 
@@ -31,7 +31,7 @@ WEBTRANSPORT_FIREFOX_STOP_SENDING=1 FIREFOX=/path/to/firefox \
   zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 ```
 
-The external interoperability gate builds the audited `~/Work/wtransport`
+The external interoperability gate builds the audited `/nav_env/Work/wtransport`
 checkout at `d96cbb8` and exercises both directions over real TLS
 1.3/QUIC/HTTP/3 connections. Every netz process in the native interop,
 benchmark, loss, and reorder gates now runs on zio behind the `std.Io` protocol
@@ -71,6 +71,13 @@ follow an Initial ACK in the same UDP datagram, modern peers may omit the older
 Capsule-Protocol and per-session stream-limit settings, and HTTP/3 critical
 stream IDs must not be hidden from WebTransport association based only on
 their numeric values.
+WebTransport's handshake URI client and multi-session `EndpointClient` now
+accept the same SOCKS5 UDP route as HTTP/3. They keep URI DNS inside the proxy,
+retain origin SNI/`:authority`, move the association into the sole QUIC socket
+owner, and preserve one absolute deadline through proxy, QUIC/TLS, SETTINGS,
+and Extended CONNECT. IP preferred-address traffic remains inside the same
+association while destination-path ECN and GSO/GRO explicitly fall back rather
+than reusing relay-hop metadata.
 Both native endpoint roles now expose the negotiated WebTransport application
 payload limit as `maxDatagramSize`, subtracting QUIC DATAGRAM framing and the
 session-ID prefix. The underlying QUIC query also subtracts the current path

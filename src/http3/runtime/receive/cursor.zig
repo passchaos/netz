@@ -21,7 +21,7 @@ const RawDatagramBatch = struct {
         max_datagrams: usize,
     ) Error!?RawDatagramBatch {
         const allocator = connection.endpoint.allocator;
-        const datagram_size = connection.endpoint.limits.max_datagram_size;
+        const datagram_size = connection.endpoint.receiveIntoCapacity();
         const slot_count = receive_policy.rawDatagramSlotCount(
             datagram_size,
             max_datagrams,

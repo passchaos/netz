@@ -9,7 +9,7 @@ const std = @import("std");
 
 const net = std.Io.net;
 
-pub const max_header_len: usize = 3 + 1 + 16 + 2;
+pub const max_header_len: usize = 3 + 1 + 1 + 255 + 2;
 
 pub const AddressError = net.HostName.ValidateError || error{
     InvalidTargetPort,
@@ -71,6 +71,22 @@ pub const Datagram = struct {
     source: Address,
     payload: []u8,
 };
+
+pub fn headerLen(address: Address) CodecError!usize {
+    return switch (address) {
+        .ip => |ip| switch (ip) {
+            .ip4 => 3 + 1 + 4 + 2,
+            .ip6 => 3 + 1 + 16 + 2,
+        },
+        .domain => |domain| blk: {
+            _ = try net.HostName.init(domain.host);
+            if (domain.host.len > 255) {
+                return error.ProxyAddressTypeUnsupported;
+            }
+            break :blk 3 + 1 + 1 + domain.host.len + 2;
+        },
+    };
+}
 
 /// Encode one complete SOCKS5 UDP request into caller-owned storage.
 pub fn encodeDatagram(
@@ -320,4 +336,22 @@ test "SOCKS5 UDP rejects fragments malformed packets and short storage" {
             "x",
         ),
     );
+}
+
+test "SOCKS5 UDP reserves the complete 255-byte domain header" {
+    var host: [255]u8 = @splat('a');
+    host[63] = '.';
+    host[127] = '.';
+    host[191] = '.';
+    const destination = Address{ .domain = .{
+        .host = &host,
+        .port = 443,
+    } };
+    try std.testing.expectEqual(max_header_len, try headerLen(destination));
+    var storage: [max_header_len + 1]u8 = undefined;
+    const encoded = try encodeDatagram(&storage, destination, "x");
+    try std.testing.expectEqual(storage.len, encoded.len);
+    const decoded = try decodeDatagram(@constCast(encoded));
+    try std.testing.expectEqualStrings(&host, decoded.source.domain.host);
+    try std.testing.expectEqualStrings("x", decoded.payload);
 }

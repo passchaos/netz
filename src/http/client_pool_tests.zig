@@ -19,23 +19,22 @@ test "unified HTTP pool exposes bounded lifecycle counters" {
     try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
 }
 
-test "unified HTTP pool refuses SOCKS5 bypass through HTTP3" {
+test "unified HTTP pool configures HTTP3 through SOCKS5 without bypass" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
-    try std.testing.expectError(
-        error.InvalidPoolOptions,
-        http.Pool.init(
-            std.testing.allocator,
-            threaded.io(),
-            .{
-                .client = .{ .socks5_proxy = .{ .host = "proxy.invalid" } },
-                .http3 = .{ .handshake = .{ .handshake = .{
-                    .original_destination_connection_id = &.{1},
-                    .local_connection_id = &.{2},
-                } } },
-            },
-        ),
+    var pool = try http.Pool.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{
+            .client = .{ .socks5_proxy = .{ .host = "proxy.invalid" } },
+            .http3 = .{ .handshake = .{ .handshake = .{
+                .original_destination_connection_id = &.{1},
+                .local_connection_id = &.{2},
+            } } },
+        },
     );
+    defer pool.deinit();
+    try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
 }
 
 test "unified HTTP pool retains negotiated h1 and h2 connections by origin" {

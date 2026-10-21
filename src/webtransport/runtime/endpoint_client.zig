@@ -33,6 +33,8 @@ pub const Options = struct {
     h3: http3.runtime.HandshakeClientOptions,
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
+    /// Optional SOCKS5 UDP route used by URI connection helpers.
+    socks5_proxy: ?http3.socks5_runtime.Proxy = null,
 };
 
 pub const SessionOptions = struct {
@@ -425,6 +427,126 @@ pub const Client = struct {
             options,
             .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
+    }
+
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: Options,
+    ) Error!Client {
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            null,
+        );
+    }
+
+    pub fn connectUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        return connectUriBefore(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: Options,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectUriBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri_text: []const u8,
+        options: Options,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Client {
+        if (options.max_sessions == 0) return error.InvalidSessionState;
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        var h3_options = resolvedH3Options(options.h3);
+        if (h3_options.handshake.server_name == null) {
+            h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        const h3_client = if (options.socks5_proxy) |proxy|
+            if (deadline) |absolute|
+                try http3.socks5_runtime.connectHostWithDeadline(
+                    allocator,
+                    io,
+                    local_address,
+                    proxy,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    options.limits,
+                    h3_options,
+                    absolute,
+                )
+            else
+                try http3.socks5_runtime.connectHost(
+                    allocator,
+                    io,
+                    local_address,
+                    proxy,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    options.limits,
+                    h3_options,
+                )
+        else if (deadline) |absolute|
+            try http3.runtime.HandshakeClient.connectUriWithDeadline(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.limits,
+                h3_options,
+                absolute,
+            )
+        else
+            try http3.runtime.HandshakeClient.connectUri(
+                allocator,
+                io,
+                local_address,
+                uri,
+                options.limits,
+                h3_options,
+            );
+        return .{
+            .allocator = allocator,
+            .h3 = h3_client,
+            .max_sessions = options.max_sessions,
+        };
     }
 
     pub fn deinit(self: *Client) void {
@@ -1097,6 +1219,27 @@ test "WebTransport endpoint option normalization preserves resolver" {
     );
     try std.testing.expect(
         resolved.session.local_settings.enable_connect_protocol,
+    );
+}
+
+test "WebTransport endpoint URI routes through configured SOCKS5" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidProxyPort,
+        Client.connectUri(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://proxy-only.invalid/wt",
+            .{
+                .h3 = .{ .handshake = .{
+                    .original_destination_connection_id = "origin",
+                    .local_connection_id = "local",
+                } },
+                .socks5_proxy = .{ .host = "127.0.0.1", .port = 0 },
+            },
+        ),
     );
 }
 

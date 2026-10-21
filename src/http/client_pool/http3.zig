@@ -5,7 +5,9 @@ const alt_svc_cache = @import("../alt_svc_cache.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const http3 = @import("../../http3/mod.zig");
+const http3_socks5 = @import("../../http3/socks5_runtime.zig");
 const runtime = @import("../../http3/runtime.zig");
+const client_types = @import("../client/types.zig");
 const remembered_settings = @import("http3_settings.zig");
 
 pub const FallbackPolicy = enum {
@@ -54,6 +56,9 @@ pub const Options = struct {
     /// Optional resolver for shared-endpoint acquisitions. Resolution runs as
     /// a cancelable pending phase and inherits the request/connect deadline.
     address_resolver: ?runtime.SharedHandshakeClientPoolAddressResolver = null,
+    /// Route HTTP/3 UDP through one SOCKS5 proxy. Domain targets remain
+    /// proxy-resolved; each exclusive pooled connection owns one association.
+    socks5_proxy: ?client_types.Socks5Proxy = null,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
@@ -63,6 +68,7 @@ pub const State = struct {
     io: std.Io,
     options: Options,
     connector: runtime.HandshakeClientPoolDefaultConnector,
+    socks5_transport: ?Socks5Transport,
     pool: runtime.HandshakeClientPool,
     dispatcher: runtime.HandshakeClientPoolSharedDispatcher,
     driver: DriverState,
@@ -114,7 +120,17 @@ pub const State = struct {
         self.shared_pool = null;
         self.shared_dispatcher = null;
         self.shared_driver = null;
-        self.connector = .{ .options = options.handshake };
+        self.socks5_transport = if (options.socks5_proxy) |proxy|
+            .{ .proxy = proxy }
+        else
+            null;
+        self.connector = .{
+            .options = options.handshake,
+            .transport = if (self.socks5_transport) |*transport|
+                transport.connector()
+            else
+                null,
+        };
         self.cache = try .init(allocator, io, options.alt_svc);
         errdefer self.cache.deinit();
         self.settings = try .init(
@@ -143,7 +159,7 @@ pub const State = struct {
         );
         errdefer self.dispatcher.deinit();
         self.driver = .{};
-        if (options.shared_endpoint) {
+        if (options.shared_endpoint and options.socks5_proxy == null) {
             self.shared_pool = try .init(allocator, io, .{
                 .local_address = options.local_address,
                 .migration_local_address = options.migration_local_address,
@@ -382,6 +398,41 @@ pub const State = struct {
             deadline,
             reclaimer,
         ) };
+    }
+};
+
+const Socks5Transport = struct {
+    proxy: client_types.Socks5Proxy,
+
+    fn connector(self: *Socks5Transport) runtime.HandshakeClientPoolTransportConnector {
+        return .{ .context = self, .connect = connect };
+    }
+
+    fn connect(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: std.Io.net.IpAddress,
+        target_host: []const u8,
+        target_port: u16,
+        limits: runtime.Limits,
+        options: runtime.HandshakeClientOptions,
+    ) runtime.Error!runtime.HandshakeClient {
+        const self: *Socks5Transport = @ptrCast(@alignCast(context));
+        return http3_socks5.connectHost(
+            allocator,
+            io,
+            local_address,
+            .{
+                .host = self.proxy.host,
+                .port = self.proxy.port,
+                .options = self.proxy.options,
+            },
+            target_host,
+            target_port,
+            limits,
+            options,
+        );
     }
 };
 

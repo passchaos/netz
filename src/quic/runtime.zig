@@ -167,9 +167,17 @@ const HeldSend = struct {
 };
 
 const Socks5UdpState = struct {
+    const FixedDomain = struct {
+        host: []u8,
+        port: u16,
+        logical_peer: net.IpAddress,
+        active: bool = true,
+    };
+
     control: net.Stream,
     relay: net.IpAddress,
     send_storage: []u8,
+    fixed_domain: ?FixedDomain = null,
 };
 
 fn socks5FrameCapacity(max_datagram_size: usize) usize {
@@ -379,10 +387,55 @@ pub const Endpoint = struct {
         association: *socks5_proxy.UdpAssociation,
         limits: Limits,
     ) Error!Endpoint {
+        return initSocks5Association(
+            allocator,
+            association,
+            limits,
+            null,
+        );
+    }
+
+    /// Route one logical QUIC peer through a proxy-resolved DNS target. This
+    /// preserves SOCKS5h-style DNS privacy while QUIC retains one stable path
+    /// identity for the initial origin. Other peer addresses (for example a
+    /// validated preferred address) continue through the association as IPs.
+    pub fn fromSocks5AssociationForDomain(
+        allocator: std.mem.Allocator,
+        association: *socks5_proxy.UdpAssociation,
+        domain: []const u8,
+        port: u16,
+        logical_peer: net.IpAddress,
+        limits: Limits,
+    ) Error!Endpoint {
+        _ = try socks5_udp.Address.fromHost(domain, port);
+        if (net.IpAddress.parse(domain, port)) |_| {
+            return error.InvalidHostName;
+        } else |_| {}
+        const owned_domain = try allocator.dupe(u8, domain);
+        errdefer allocator.free(owned_domain);
+        return initSocks5Association(
+            allocator,
+            association,
+            limits,
+            .{
+                .host = owned_domain,
+                .port = port,
+                .logical_peer = logical_peer,
+            },
+        );
+    }
+
+    fn initSocks5Association(
+        allocator: std.mem.Allocator,
+        association: *socks5_proxy.UdpAssociation,
+        limits: Limits,
+        fixed_domain: ?Socks5UdpState.FixedDomain,
+    ) Error!Endpoint {
         const send_storage = try allocator.alloc(
             u8,
             socks5FrameCapacity(limits.max_datagram_size),
         );
+        errdefer allocator.free(send_storage);
         const io = association.io;
         const socket = association.socket;
         const relay = association.relay;
@@ -396,6 +449,7 @@ pub const Endpoint = struct {
                 .control = control,
                 .relay = relay,
                 .send_storage = send_storage,
+                .fixed_domain = fixed_domain,
             },
             .limits = limits,
             .gso_send_enabled = false,
@@ -415,6 +469,7 @@ pub const Endpoint = struct {
         if (self.socks5_udp) |proxy| {
             proxy.control.close(self.io);
             self.allocator.free(proxy.send_storage);
+            if (proxy.fixed_domain) |fixed| self.allocator.free(fixed.host);
         }
         self.* = undefined;
     }
@@ -433,6 +488,12 @@ pub const Endpoint = struct {
 
     pub fn usesSocks5Udp(self: Endpoint) bool {
         return self.socks5_udp != null;
+    }
+
+    /// Caller storage needed for one socket receive, including any transport
+    /// envelope stripped before QUIC parses the datagram.
+    pub fn receiveIntoCapacity(self: Endpoint) usize {
+        return self.receiveBufferCapacity();
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
@@ -501,12 +562,16 @@ pub const Endpoint = struct {
         try self.validateSocks5PayloadSize(to, bytes.len);
         try self.applyOutgoingEcnMark(ecn);
         if (self.socks5_udp) |*proxy| {
+            const destination = self.socks5Destination(to);
             const framed = try socks5_udp.encodeDatagram(
                 proxy.send_storage,
-                .{ .ip = to },
+                destination,
                 bytes,
             );
             try self.socket.send(self.io, &proxy.relay, framed);
+            if (proxy.fixed_domain) |*fixed| {
+                fixed.active = to.eql(&fixed.logical_peer);
+            }
             self.recordSocketSent(1, framed.len);
             return;
         }
@@ -1756,7 +1821,7 @@ pub const Endpoint = struct {
     }
 
     fn finishSocks5Incoming(
-        self: Endpoint,
+        self: *Endpoint,
         incoming: net.IncomingMessage,
     ) Error!net.IncomingMessage {
         const proxy = self.socks5_udp orelse return incoming;
@@ -1765,8 +1830,21 @@ pub const Endpoint = struct {
         }
         const datagram = try socks5_udp.decodeDatagram(incoming.data);
         const source = switch (datagram.source) {
-            .ip => |ip| ip,
-            .domain => return error.ProxyDomainSourceUnsupported,
+            .ip => |ip| if (proxy.fixed_domain) |fixed|
+                if (fixed.active and ip.getPort() == fixed.port)
+                    fixed.logical_peer
+                else
+                    ip
+            else
+                ip,
+            .domain => |domain| if (proxy.fixed_domain) |fixed|
+                if (fixed.active and domain.port == fixed.port and
+                    std.ascii.eqlIgnoreCase(domain.host, fixed.host))
+                    fixed.logical_peer
+                else
+                    return error.ProxyDomainSourceUnsupported
+            else
+                return error.ProxyDomainSourceUnsupported,
         };
         var normalized = incoming;
         normalized.from = source;
@@ -2040,13 +2118,27 @@ pub const Endpoint = struct {
         payload_len: usize,
     ) Error!void {
         if (self.socks5_udp == null) return;
-        const header_len: usize = switch (to) {
-            .ip4 => 3 + 1 + 4 + 2,
-            .ip6 => socks5_udp.max_header_len,
-        };
+        const header_len = try socks5_udp.headerLen(
+            self.socks5Destination(to),
+        );
         if (payload_len > std.math.maxInt(u16) - header_len) {
             return error.DatagramTooLarge;
         }
+    }
+
+    fn socks5Destination(
+        self: *const Endpoint,
+        to: net.IpAddress,
+    ) socks5_udp.Address {
+        if (self.socks5_udp) |proxy| {
+            if (proxy.fixed_domain) |fixed| {
+                if (to.eql(&fixed.logical_peer)) return .{ .domain = .{
+                    .host = fixed.host,
+                    .port = fixed.port,
+                } };
+            }
+        }
+        return .{ .ip = to };
     }
 
     fn enableGroReceive(self: *Endpoint) void {

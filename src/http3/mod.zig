@@ -9,6 +9,7 @@ const quic = @import("../quic/mod.zig");
 const header_fields = @import("codec/header_storage.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const socks5_runtime = @import("socks5_runtime.zig");
 pub const capsule = @import("capsule.zig");
 pub const connect_udp = @import("connect_udp.zig").Protocol(@This());
 pub const connect_ip = @import("connect_ip.zig").Protocol(@This());

@@ -1684,6 +1684,29 @@ pub fn build(b: *std.Build) void {
     socks5_udp_step.dependOn(&socks5_udp.step);
     test_step.dependOn(&socks5_udp.step);
 
+    const http3_socks5_pool_client = b.addExecutable(.{
+        .name = "netz-http3-socks5-pool-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_socks5_pool_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_socks5_pool = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_socks5_pool.py",
+    });
+    http3_socks5_pool.addArtifactArg(http3_socks5_pool_client);
+    const http3_socks5_pool_step = b.step(
+        "interop-http3-socks5-pool",
+        "Verify unified HTTP/3 pool reuse through SOCKS5 UDP ASSOCIATE",
+    );
+    http3_socks5_pool_step.dependOn(&http3_socks5_pool.step);
+    test_step.dependOn(&http3_socks5_pool.step);
+
     const mqtt_broker_config = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

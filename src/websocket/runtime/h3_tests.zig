@@ -841,6 +841,18 @@ test "WebSocket HTTP3 URI rejects non-HTTPS and userinfo before I/O" {
             .zero,
         ),
     );
+    var proxied = options;
+    proxied.socks5_proxy = .{ .host = "127.0.0.1", .port = 0 };
+    try std.testing.expectError(
+        error.InvalidProxyPort,
+        h3.Client.connectUri(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            "https://proxy-only.invalid/chat",
+            proxied,
+        ),
+    );
 }
 
 test "WebSocket HTTP3 connect attempt preserves rejection metadata" {

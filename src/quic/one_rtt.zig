@@ -11730,9 +11730,10 @@ pub const Connection = struct {
         {
             return error.BufferTooShort;
         }
+        const receive_capacity = self.endpoint.receiveIntoCapacity();
         const required = std.math.mul(
             usize,
-            self.endpoint.limits.max_datagram_size,
+            receive_capacity,
             output.len,
         ) catch return error.BufferTooShort;
         if (storage.len < required) return error.BufferTooShort;
@@ -11785,7 +11786,7 @@ pub const Connection = struct {
                     caller_deadline,
                 )) continue;
                 const datagram = (try self.receiveBytesIntoAfterBlockedTimer(
-                    storage[0..self.endpoint.limits.max_datagram_size],
+                    storage[0..receive_capacity],
                     now_ns,
                     caller_deadline,
                 )) orelse continue;
@@ -11813,8 +11814,7 @@ pub const Connection = struct {
                     )) {
                         const datagram = (try self
                             .receiveBytesIntoAfterBlockedTimer(
-                            storage[0..self.endpoint.limits
-                                .max_datagram_size],
+                            storage[0..receive_capacity],
                             timeout_ns,
                             caller_deadline,
                         )) orelse continue;
@@ -11828,7 +11828,7 @@ pub const Connection = struct {
                         return error.ConcurrencyUnavailable;
                     }
                     output[0] = try self.endpoint.receiveBytesInto(
-                        storage[0..self.endpoint.limits.max_datagram_size],
+                        storage[0..receive_capacity],
                     );
                     return 1;
                 },

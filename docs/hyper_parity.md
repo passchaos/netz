@@ -2247,10 +2247,9 @@ remote-DNS tunnels while pooled requests to one authority reuse the negotiated
 connection. Cross-origin credential and TLS-ticket policy remains in the shared
 redirect engine. A Python peer gate verifies a two-origin HTTP/1 redirect with
 Authorization stripping, certificate-verified TLS 1.3 selecting HTTP/2, and
-two pooled HTTP/1 requests over exactly one SOCKS tunnel. Configuring both this
-TCP proxy and HTTP/3 remains rejected at pool construction rather than silently
-bypassing the proxy with QUIC. The public proxy layer now implements RFC 1928
-UDP ASSOCIATE with a control-connection-owned lifetime, IPv4/IPv6/domain
+two pooled HTTP/1 requests over exactly one SOCKS tunnel. The same unified Pool
+now composes this route with HTTP/3 through RFC 1928 UDP ASSOCIATE with a
+control-connection-owned lifetime, IPv4/IPv6/domain
 datagram framing, explicit fragment rejection, wildcard relay normalization,
 caller-buffer sends/receives, relay-source validation, and an independent
 Python UDP relay gate. `quic.runtime.Endpoint.fromSocks5Association` now moves
@@ -2259,9 +2258,15 @@ prefix progress, restores each relayed source address, keeps the TCP control
 stream alive, and explicitly disables destination-path ECN plus GSO/GRO rather
 than applying relay-hop metadata to QUIC. Existing caller-owned
 `HandshakeClient.connectFrom` and WebTransport endpoint-client surfaces can use
-this endpoint without a second UDP reader. The high-level HTTP pool still
-rejects a simultaneous SOCKS5/HTTP3 configuration until route creation,
-hostname resolution, and endpoint ownership are integrated there.
+this endpoint without a second UDP reader. The default H3 pool connector now
+opens one association per exclusive QUIC connection, keeps origin and Alt-Svc
+DNS at the proxy, preserves SNI/`:authority`, carries the request deadline over
+proxy setup plus QUIC/TLS, and falls back from optional 0-RTT through the same
+route rather than bypassing it. A Python/quic-go process gate proves HTTPS
+discovery through one TCP tunnel followed by two certificate-verified H3
+requests over one UDP association and one reused QUIC connection. Shared-H3
+endpoint mode remains disabled for this configuration until one association
+can own multiple domain-to-logical-peer mappings without weakening routing.
 
 ## Remaining evidence
 

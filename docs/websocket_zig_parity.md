@@ -1100,6 +1100,15 @@ six-tunnel ordering, Authorization isolation, TLS 1.3 hostname verification,
 and retained rejection metadata. That gate found and now guards a duplicate
 rejection-transport close in the initial adapter implementation.
 
+RFC 9220 URI clients now expose the same SOCKS5 route through HTTP/3 UDP
+ASSOCIATE. The URI host remains proxy-resolved while TLS SNI, certificate
+identity, `:authority`, Cookie scope, and the Extended CONNECT path remain
+bound to the HTTPS origin. One caller deadline spans proxy authentication,
+association creation, QUIC/TLS, peer SETTINGS, and the WebSocket CONNECT
+response; the shared HTTP/3 transport gate independently proves the underlying
+remote-DNS and connection-lifecycle path before the unchanged RFC 9220 codec is
+adopted.
+
 ## Remaining evidence before a broad completion claim
 
 The shared `fuzz-parsers` target feeds bounded arbitrary bytes through

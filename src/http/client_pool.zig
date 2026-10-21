@@ -85,12 +85,6 @@ pub const Pool = struct {
         if (options.max_idle_per_origin > options.max_idle_connections) {
             return error.InvalidPoolOptions;
         }
-        if (options.client.socks5_proxy != null and options.http3 != null) {
-            // HTTP/3 uses UDP. Silently bypassing the configured TCP proxy is
-            // a privacy violation; enable this combination only after a
-            // SOCKS5 UDP ASSOCIATE transport exists.
-            return error.InvalidPoolOptions;
-        }
         const idle_timeout_ms = if (options.idle_timeout) |timeout| blk: {
             if (timeout.nanoseconds <= 0) return error.InvalidPoolOptions;
             break :blk durationMillisecondsCeil(timeout);
@@ -111,6 +105,7 @@ pub const Pool = struct {
                 effective_http3.address_resolver =
                     options.client.address_resolver;
             }
+            effective_http3.socks5_proxy = options.client.socks5_proxy;
             break :blk try h3_support.State.create(
                 allocator,
                 io,

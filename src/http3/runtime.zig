@@ -12216,6 +12216,144 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Move a preconfigured endpoint into a new authenticated HTTP/3 client.
+    /// This is the owning composition point for transports such as SOCKS5 UDP
+    /// ASSOCIATE that must construct the socket before QUIC/TLS starts.
+    /// `endpoint_value` becomes invalid only after ownership transfers.
+    pub fn connectAdoptingEndpoint(
+        allocator: std.mem.Allocator,
+        endpoint_value: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        return connectAdoptingEndpointBefore(
+            allocator,
+            endpoint_value,
+            server,
+            options,
+            try connectDeadline(endpoint_value.io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectAdoptingEndpointWithDeadline(
+        allocator: std.mem.Allocator,
+        endpoint_value: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectAdoptingEndpointBefore(
+            allocator,
+            endpoint_value,
+            server,
+            options,
+            try cappedConnectDeadline(
+                endpoint_value.io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn connectAdoptingEndpointBefore(
+        allocator: std.mem.Allocator,
+        endpoint_value: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        const endpoint = try allocator.create(quic.runtime.Endpoint);
+        endpoint.* = endpoint_value.*;
+        endpoint_value.* = undefined;
+        return connectOwningEndpointBefore(
+            endpoint,
+            server,
+            options,
+            deadline,
+        );
+    }
+
+    /// Take ownership of an allocator-created endpoint pointer immediately.
+    /// On failure this function closes and destroys it; on success ownership
+    /// moves into the returned client.
+    pub fn connectOwningEndpoint(
+        endpoint: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        return connectOwningEndpointBefore(
+            endpoint,
+            server,
+            options,
+            try connectDeadline(endpoint.io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectOwningEndpointWithDeadline(
+        endpoint: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectOwningEndpointBefore(
+            endpoint,
+            server,
+            options,
+            try cappedConnectDeadline(
+                endpoint.io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn connectOwningEndpointBefore(
+        endpoint: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        const allocator = endpoint.allocator;
+        errdefer {
+            endpoint.deinit();
+            allocator.destroy(endpoint);
+        }
+        try validateHandshakeSessionOptions(options.session);
+        var connect_options = options;
+        connect_options.connect_timeout = null;
+        var established = if (deadline) |absolute|
+            try quic.handshake.connectWithDeadline(
+                endpoint,
+                server,
+                connect_options.handshake,
+                absolute,
+            )
+        else
+            try quic.handshake.connect(
+                endpoint,
+                server,
+                connect_options.handshake,
+            );
+        errdefer established.deinit();
+        var client = try initOwnedEstablished(
+            allocator,
+            endpoint,
+            server,
+            established,
+            connect_options.session,
+            null,
+        );
+        errdefer client.deinit();
+        if (connect_options.handshake.auto_resumption) |automatic| {
+            try client.configureSessionTicketCache(
+                automatic.cache,
+                automatic.server_id,
+                automatic.now_ms,
+            );
+        }
+        return client;
+    }
+
     /// Complete a typed 0-RTT handshake on a caller-owned endpoint while
     /// consuming only the supplied CID-routed datagram source.
     pub fn connectFromWithEarlyRequest(
@@ -19845,6 +19983,8 @@ pub const HandshakeClientPoolRedirectConnectContext =
     handshake_client_pool.RedirectConnectContext;
 pub const HandshakeClientPoolDefaultConnector =
     handshake_client_pool.DefaultConnectorContext(@This());
+pub const HandshakeClientPoolTransportConnector =
+    handshake_client_pool.TransportConnector(@This());
 pub const HandshakeClientPoolStats = http3.origin_pool.Stats;
 pub const HandshakeClientPoolError = handshake_client_pool.Error;
 pub const HandshakeClientPoolUriBatchRequest =

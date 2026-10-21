@@ -307,6 +307,9 @@ pub const UriConnectOptions = struct {
     limits: common.Limits = .{},
     h3_limits: http3.runtime.Limits = .{},
     h3: http3.runtime.HandshakeClientOptions,
+    /// Route QUIC through SOCKS5 UDP ASSOCIATE while keeping URI DNS at the
+    /// proxy and TLS identity bound to the HTTPS origin.
+    socks5_proxy: ?http3.socks5_runtime.Proxy = null,
 };
 
 pub const AcceptOptions = struct {
@@ -4740,7 +4743,31 @@ pub const Client = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        var h3_client = if (deadline) |absolute|
+        var h3_client = if (options.socks5_proxy) |proxy|
+            if (deadline) |absolute|
+                try http3.socks5_runtime.connectHostWithDeadline(
+                    allocator,
+                    io,
+                    local_address,
+                    proxy,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    options.h3_limits,
+                    h3_options,
+                    absolute,
+                )
+            else
+                try http3.socks5_runtime.connectHost(
+                    allocator,
+                    io,
+                    local_address,
+                    proxy,
+                    endpoint.tls_host,
+                    endpoint.port,
+                    options.h3_limits,
+                    h3_options,
+                )
+        else if (deadline) |absolute|
             try http3.runtime.HandshakeClient.connectUriWithDeadline(
                 allocator,
                 io,
