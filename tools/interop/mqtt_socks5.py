@@ -182,7 +182,10 @@ def serve_auth(proxy: socket.socket, target_port: int) -> None:
             )
 
 
-def create_identity(directory: Path) -> tuple[Path, Path, Path]:
+def create_identity(
+    directory: Path,
+    host: str = "broker.internal",
+) -> tuple[Path, Path, Path]:
     ca = directory / "ca.pem"
     ca_key = directory / "ca.key"
     key = directory / "server.key"
@@ -190,7 +193,7 @@ def create_identity(directory: Path) -> tuple[Path, Path, Path]:
     cert = directory / "server.pem"
     extensions = directory / "server.ext"
     extensions.write_text(
-        "subjectAltName=DNS:broker.internal\n"
+        f"subjectAltName=DNS:{host}\n"
         "extendedKeyUsage=serverAuth\n"
     )
     commands = (
@@ -201,7 +204,7 @@ def create_identity(directory: Path) -> tuple[Path, Path, Path]:
         ),
         (
             "openssl", "req", "-newkey", "rsa:2048", "-nodes",
-            "-subj", "/CN=broker.internal", "-keyout", str(key),
+            "-subj", f"/CN={host}", "-keyout", str(key),
             "-out", str(csr),
         ),
         (

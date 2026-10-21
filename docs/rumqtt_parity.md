@@ -66,6 +66,14 @@ tunnels. This was implemented after auditing Mosquitto's
 `lib/socks_mosq.c` and its `03-publish-socks*.py` process cases under
 `~/Work/mosquitto`.
 
+The same SOCKS5 tunnel now composes with MQTT-over-WS/WSS without a second MQTT
+state machine: deadline-aware WebSocket caller-stream APIs perform cleartext or
+origin-authenticated TLS Upgrade, and `mqtt.websocket_runtime.Client` adopts
+the negotiated `mqtt` connection while preserving the remaining absolute
+budget. The cross-protocol peer gate proves remote proxy DNS, Host/SNI
+isolation, TLS 1.3 hostname verification, and MQTT CONNECT/PING/DISCONNECT over
+both WS and WSS.
+
 ## One-way inbound broker bridge
 
 `mqtt.bridge.Bridge` is deliberately a small, inbound-only topology primitive.

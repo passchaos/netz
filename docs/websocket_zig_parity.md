@@ -1080,6 +1080,16 @@ stream's exact reset, then completes a second WebSocket on the same reusable
 connection; an ordinarily completed Close remains an idempotent no-op at
 adapter destruction.
 
+Caller-connected WebSocket upgrades now expose matching timeout and absolute-
+deadline APIs for cleartext plus standard/vail TLS streams. This lets the
+public `proxy.socks5` layer bound proxy DNS/TCP/CONNECT and then carry the same
+deadline through origin TLS and the HTTP Upgrade without conflating proxy and
+origin authority. The independent Python peer verifies WS and hostname-checked
+WSS text, Ping/Pong, and bidirectional Close, then reuses the same adoption
+surface for MQTT-over-WS/WSS with strict `mqtt` subprotocol negotiation,
+CONNECT/CONNACK, PING, and DISCONNECT. Invalid zero budgets close the
+caller-supplied stream before returning.
+
 ## Remaining evidence before a broad completion claim
 
 The shared `fuzz-parsers` target feeds bounded arbitrary bytes through

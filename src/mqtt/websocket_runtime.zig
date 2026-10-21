@@ -938,6 +938,139 @@ fn ServeTask(comptime HandlerContext: type) type {
 /// negotiation. `connectUri*` supports both `ws://` and `wss://` through the
 /// existing WebSocket TLS client.
 pub const Client = struct {
+    /// Negotiate MQTT on an already-upgraded WebSocket. Ownership transfers at
+    /// entry on every outcome so proxy/tunnel adapters retain one clear owner.
+    pub fn adoptWebSocket(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try adoptWebSocketWithConnAck(allocator, ws, options);
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn adoptWebSocketWithConnAck(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try adoptWebSocketAttempt(allocator, ws, options);
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn adoptWebSocketAttempt(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        return connectWebSocketAttempt(allocator, ws, options);
+    }
+
+    pub fn adoptWebSocketWithDeadline(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try adoptWebSocketWithConnAckWithDeadline(
+            allocator,
+            ws,
+            options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn adoptWebSocketWithTimeout(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) {
+            var owned = ws;
+            owned.close();
+            return error.Timeout;
+        }
+        return adoptWebSocketWithDeadline(
+            allocator,
+            ws,
+            options,
+            .fromNow(ws.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn adoptWebSocketWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try adoptWebSocketAttemptWithDeadline(
+            allocator,
+            ws,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn adoptWebSocketWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) {
+            var owned = ws;
+            owned.close();
+            return error.Timeout;
+        }
+        return adoptWebSocketWithConnAckWithDeadline(
+            allocator,
+            ws,
+            options,
+            .fromNow(ws.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn adoptWebSocketAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        return connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn adoptWebSocketAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        options: runtime.ConnectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) {
+            var owned = ws;
+            owned.close();
+            return error.Timeout;
+        }
+        return adoptWebSocketAttemptWithDeadline(
+            allocator,
+            ws,
+            options,
+            .fromNow(ws.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connect(
         allocator: std.mem.Allocator,
         io: std.Io,

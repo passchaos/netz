@@ -2231,6 +2231,15 @@ regression sample, not a claim that this helper-only addition accelerates the
 runtime. h2spec strict remains 147/147, and the bidirectional Hyper h2c/TLS
 keep-alive, cancellation and GOAWAY gate remains green.
 
+HTTP/1 clients can now adopt a caller-connected SOCKS5 tunnel directly for
+cleartext requests or perform the origin TLS handshake under the caller's
+existing absolute deadline. The TLS adoption API copies the origin authority,
+retains the origin host for certificate verification, and owns stream cleanup
+on every validation or handshake failure. The independent Python gate sends
+remote-DNS SOCKS CONNECT requests and completes both HTTP and certificate- and
+hostname-verified HTTPS without exposing the proxy authority in Host or TLS
+identity.
+
 ## Remaining evidence
 
 The shared `fuzz-parsers` target exercises strict borrowed and owned HTTP/1

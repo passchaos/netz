@@ -1588,6 +1588,29 @@ pub fn build(b: *std.Build) void {
     mqtt_socks5_step.dependOn(&mqtt_socks5.step);
     test_step.dependOn(&mqtt_socks5.step);
 
+    const http_websocket_socks5_client = b.addExecutable(.{
+        .name = "netz-http-websocket-socks5-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http_websocket_socks5_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http_websocket_socks5 = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http_websocket_socks5.py",
+    });
+    http_websocket_socks5.addArtifactArg(http_websocket_socks5_client);
+    const http_websocket_socks5_step = b.step(
+        "interop-http-websocket-socks5",
+        "Verify HTTP(S), WebSocket, and MQTT-WS through SOCKS5",
+    );
+    http_websocket_socks5_step.dependOn(&http_websocket_socks5.step);
+    test_step.dependOn(&http_websocket_socks5.step);
+
     const mqtt_broker_config = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

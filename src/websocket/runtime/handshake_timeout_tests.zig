@@ -19,6 +19,63 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) !void {
         written += count;
     }
 }
+
+test "WebSocket caller-connected timeouts own stream cleanup" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    inline for (.{ false, true }) |secure| {
+        var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+            io,
+            .{ .reuse_address = true },
+        );
+        defer listener.deinit(io);
+        const client = try listener.socket.address.connect(
+            io,
+            .{ .mode = .stream },
+        );
+        const peer = try listener.accept(io);
+        defer peer.close(io);
+        if (secure) {
+            try std.testing.expectError(
+                error.Timeout,
+                runtime.Client.connectAcceptedTlsStreamWithTimeout(
+                    allocator,
+                    io,
+                    client,
+                    "origin.internal",
+                    .{ .host = "origin.internal" },
+                    .{ .verify_host = false },
+                    .zero,
+                ),
+            );
+        } else {
+            try std.testing.expectError(
+                error.Timeout,
+                runtime.Client.connectAcceptedStreamWithTimeout(
+                    allocator,
+                    io,
+                    client,
+                    .{ .host = "origin.internal" },
+                    .zero,
+                ),
+            );
+        }
+        var byte: [1]u8 = undefined;
+        var buffers = [_][]u8{&byte};
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try io.vtable.netRead(
+                io.userdata,
+                peer.socket.handle,
+                &buffers,
+            ),
+        );
+    }
+}
+
 test "WebSocket server handshake timeout is absolute across trickled bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

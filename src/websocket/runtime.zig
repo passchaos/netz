@@ -2247,6 +2247,88 @@ pub const Client = struct {
         return closeRejectedAttempt(&attempt);
     }
 
+    /// Apply one caller-owned deadline to the opening handshake on an already
+    /// connected cleartext tunnel. Ownership transfers at entry.
+    pub fn connectAcceptedStreamWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var attempt = try connectAcceptedStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAcceptedStreamAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        _ = try deadline_policy.usableAwake(io, deadline);
+        var attempt = try connectStreamAttemptMaybeBefore(
+            allocator,
+            io,
+            stream,
+            null,
+            options,
+            deadline,
+        );
+        stream_owned = false;
+        return closeRejectedAttempt(&attempt);
+    }
+
+    pub fn connectAcceptedStreamWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectAcceptedStreamWithDeadline(
+            allocator,
+            io,
+            stream,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectAcceptedStreamAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectAcceptedStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Perform TLS and WebSocket handshakes on a connected stream after an
     /// adapter has emitted a transport preface such as PROXY protocol.
     pub fn connectAcceptedTlsStream(
@@ -2277,17 +2359,141 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!ConnectAttempt {
+        return connectAcceptedTlsStreamAttemptMaybeBefore(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn connectAcceptedTlsStreamWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var attempt = try connectAcceptedTlsStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAcceptedTlsStreamAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectAcceptedTlsStreamAttemptMaybeBefore(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+            deadline,
+        );
+    }
+
+    pub fn connectAcceptedTlsStreamWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectAcceptedTlsStreamWithDeadline(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectAcceptedTlsStreamAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectAcceptedTlsStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectAcceptedTlsStreamAttemptMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(io, absolute);
+        }
         if (options.vail_tls orelse options.tls_identity) |identity| {
-            const tls_conn = try tls_client_identity.init(
-                allocator,
-                io,
-                stream,
-                server_name,
-                tls_options,
-                identity,
-            );
+            const tls_conn = if (deadline) |absolute|
+                try tls_client_identity.initWithDeadline(
+                    allocator,
+                    io,
+                    stream,
+                    server_name,
+                    tls_options,
+                    identity,
+                    absolute,
+                )
+            else
+                try tls_client_identity.init(
+                    allocator,
+                    io,
+                    stream,
+                    server_name,
+                    tls_options,
+                    identity,
+                );
             stream_owned = false;
             errdefer tls_conn.deinit();
             var attempt = try connectTransportAttempt(
@@ -2295,17 +2501,27 @@ pub const Client = struct {
                 io,
                 .{ .tls_vail = tls_conn },
                 options,
-                null,
+                deadline,
             );
             return closeRejectedAttempt(&attempt);
         }
-        const tls_conn = try http1_runtime.TlsClientConnection.init(
-            allocator,
-            io,
-            stream,
-            server_name,
-            tls_options,
-        );
+        const tls_conn = if (deadline) |absolute|
+            try http1_runtime.TlsClientConnection.initWithDeadline(
+                allocator,
+                io,
+                stream,
+                server_name,
+                tls_options,
+                absolute,
+            )
+        else
+            try http1_runtime.TlsClientConnection.init(
+                allocator,
+                io,
+                stream,
+                server_name,
+                tls_options,
+            );
         stream_owned = false;
         errdefer tls_conn.deinit();
         var attempt = try connectTransportAttempt(
@@ -2313,7 +2529,7 @@ pub const Client = struct {
             io,
             .{ .tls = tls_conn },
             options,
-            null,
+            deadline,
         );
         return closeRejectedAttempt(&attempt);
     }

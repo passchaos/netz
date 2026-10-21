@@ -2706,6 +2706,125 @@ pub const Client = struct {
         };
     }
 
+    /// Perform an origin-authenticated TLS handshake on a caller-connected
+    /// tunnel, then adopt it as an HTTP/1 client. Ownership of `stream`
+    /// transfers at entry on every outcome.
+    pub fn adoptTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+    ) Error!Client {
+        return adoptTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn adoptTlsStreamWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Client {
+        return adoptTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    pub fn adoptTlsStreamWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Client {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return adoptTlsStreamWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn adoptTlsStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Client {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (authority.len == 0) return error.InvalidHost;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(io, absolute);
+        }
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const tls_conn = if (deadline) |absolute|
+            try TlsClientConnection.initWithDeadline(
+                allocator,
+                io,
+                stream,
+                tls_host,
+                tls_options,
+                absolute,
+            )
+        else
+            try TlsClientConnection.init(
+                allocator,
+                io,
+                stream,
+                tls_host,
+                tls_options,
+            );
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const owned_authority = try allocator.dupe(u8, authority);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_authority,
+            .tls_conn = tls_conn,
+        };
+    }
+
     /// Adopt a certificate-verified vail TLS connection whose ALPN result is
     /// compatible with HTTP/1.1. A missing ALPN is accepted for legacy HTTPS;
     /// any selected protocol other than `http/1.1` fails closed. Ownership of

@@ -9,6 +9,47 @@ const tls_testing = @import("../tls/testing.zig");
 
 const max_packet_size: usize = 4096;
 
+test "MQTT WebSocket adoption owns invalid timeout cleanup" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    const ws = websocket_runtime.Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = client,
+        .role = .client,
+        .selected_protocol = try allocator.dupe(u8, "mqtt"),
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_ws.Client.adoptWebSocketWithTimeout(
+            allocator,
+            ws,
+            .{ .client_id = "owned-websocket" },
+            .zero,
+        ),
+    );
+    var byte: [1]u8 = undefined;
+    var buffers = [_][]u8{&byte};
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try io.vtable.netRead(
+            io.userdata,
+            peer.socket.handle,
+            &buffers,
+        ),
+    );
+}
+
 fn writeStreamAll(
     io: std.Io,
     stream: std.Io.net.Stream,
