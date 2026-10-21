@@ -21,6 +21,10 @@ const server_route = netz.http3.connect_ip.capsules.Route{ .ipv4 = .{
     .end = .{ 203, 0, 113, 255 },
     .ip_protocol = 6,
 } };
+const client_scope = netz.http3.connect_ip.Scope{
+    .target = "203.0.113.0/24",
+    .ip_protocol = 6,
+};
 const settings = netz.http3.Settings{
     .enable_connect_protocol = true,
     .h3_datagram = true,
@@ -98,7 +102,7 @@ fn runClient(
     _ = try client.receivePeerSettingsWithDeadline(deadline);
     var path_storage: [160]u8 = undefined;
     const stream_id = try client.startConnectIp(
-        .{},
+        client_scope,
         "localhost",
         &path_storage,
     );
@@ -189,6 +193,10 @@ fn runClient(
     try std.testing.expect(try configuration.peerPacketAllowed(
         &server_packet,
     ));
+    try std.testing.expectEqual(
+        netz.http3.connect_ip.PacketDecision.allowed,
+        try client_scope.packetDecision(&client_packet),
+    );
     try ip.sendWithDeadline(&client_packet, deadline);
     var incoming = try ip.receiveWithDeadline(deadline);
     defer incoming.deinit(allocator);
@@ -221,7 +229,7 @@ fn runClient(
         "CONNECT-IP complete",
     );
     std.debug.print(
-        "netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true client_io=zio-std-io server_io=h3-quinn-tokio\n",
+        "netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true client_io=zio-std-io server_io=h3-quinn-tokio\n",
         .{ client_packet.len, server_packet.len },
     );
 }
@@ -278,7 +286,8 @@ fn runServer(
         event.message.value.head.request,
         &target_storage,
     );
-    try std.testing.expectEqualStrings("*", scope.target);
+    try std.testing.expectEqualStrings(client_scope.target, scope.target);
+    try std.testing.expectEqual(client_scope.ip_protocol, scope.ip_protocol);
     var ip = try h3.connectIpSession(stream_id);
     defer ip.deinit();
     var configuration = netz.http3.connect_ip.ConfigurationState.init(
@@ -341,6 +350,10 @@ fn runServer(
     try std.testing.expect(try configuration.peerPacketAllowed(
         &client_packet,
     ));
+    try std.testing.expectEqual(
+        netz.http3.connect_ip.PacketDecision.allowed,
+        try scope.packetDecision(&client_packet),
+    );
     var incoming = try ip.receiveWithTimeout(.fromSeconds(5));
     defer incoming.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &client_packet, incoming.payload);
@@ -367,7 +380,7 @@ fn runServer(
     );
     try ip.closeWrite();
     std.debug.print(
-        "netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true client_io=h3-quinn-tokio server_io=zio-std-io\n",
+        "netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true client_io=h3-quinn-tokio server_io=zio-std-io\n",
         .{ client_packet.len, server_packet.len },
     );
 }

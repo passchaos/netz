@@ -1,6 +1,8 @@
 //! RFC 9484 request scope and default MASQUE path codec.
 
 const std = @import("std");
+const capsules = @import("capsules.zig");
+const packets = @import("packet.zig");
 
 const net = std.Io.net;
 
@@ -8,6 +10,18 @@ pub const Error = error{
     BufferTooShort,
     IntegerOverflow,
     InvalidScope,
+};
+
+pub const PacketError = Error || packets.Error;
+
+/// Result of applying a CONNECT-IP request scope to one tunneled packet.
+/// Indeterminate results keep DNS and fragment-reassembly ownership explicit
+/// instead of silently widening the request scope.
+pub const PacketDecision = enum {
+    allowed,
+    denied,
+    requires_dns_resolution,
+    requires_reassembly,
 };
 
 pub const default_path_prefix = "/.well-known/masque/ip/";
@@ -22,7 +36,132 @@ pub const Scope = struct {
     pub fn validate(self: Scope) error{InvalidScope}!void {
         try validateTarget(self.target);
     }
+
+    /// Apply this scope to one complete IPv4/IPv6 packet. A reg-name target
+    /// returns `requires_dns_resolution`; callers with an authoritative result
+    /// use `packetDecisionWithResolvedTargets` instead.
+    pub fn packetDecision(
+        self: Scope,
+        packet: []const u8,
+    ) PacketError!PacketDecision {
+        return self.packetDecisionView(try packets.parse(packet), null);
+    }
+
+    /// Apply this scope using the caller's current DNS result for a reg-name
+    /// target. An empty address set authoritatively denies every destination.
+    pub fn packetDecisionWithResolvedTargets(
+        self: Scope,
+        packet: []const u8,
+        resolved_targets: []const capsules.IpAddress,
+    ) PacketError!PacketDecision {
+        return self.packetDecisionView(
+            try packets.parse(packet),
+            resolved_targets,
+        );
+    }
+
+    fn packetDecisionView(
+        self: Scope,
+        packet: packets.View,
+        resolved_targets: ?[]const capsules.IpAddress,
+    ) PacketError!PacketDecision {
+        try self.validate();
+        const target = targetDecision(
+            self.target,
+            packet.destination,
+            resolved_targets,
+        );
+        const protocol = protocolDecision(
+            self.ip_protocol,
+            packet.version,
+            packet.ip_protocol,
+        );
+        if (target == .denied or protocol == .denied) return .denied;
+        if (target == .requires_dns_resolution) {
+            return .requires_dns_resolution;
+        }
+        if (protocol == .requires_reassembly) return .requires_reassembly;
+        return .allowed;
+    }
 };
+
+fn targetDecision(
+    target: []const u8,
+    destination: capsules.IpAddress,
+    resolved_targets: ?[]const capsules.IpAddress,
+) PacketDecision {
+    if (std.mem.eql(u8, target, "*")) return .allowed;
+    const slash = std.mem.indexOfScalar(u8, target, '/');
+    const address_text = if (slash) |index| target[0..index] else target;
+    if (std.mem.indexOfScalar(u8, address_text, ':') != null) {
+        const address = net.Ip6Address.parse(address_text, 0) catch
+            return .requires_dns_resolution;
+        if (destination.version() != 6) return .denied;
+        const prefix = if (slash) |index|
+            std.fmt.parseUnsigned(u8, target[index + 1 ..], 10) catch
+                return .denied
+        else
+            128;
+        return if (prefixContains(&address.bytes, &destination.ipv6, prefix))
+            .allowed
+        else
+            .denied;
+    }
+    if (net.Ip4Address.parse(address_text, 0)) |address| {
+        if (destination.version() != 4) return .denied;
+        const prefix = if (slash) |index|
+            std.fmt.parseUnsigned(u8, target[index + 1 ..], 10) catch
+                return .denied
+        else
+            32;
+        return if (prefixContains(&address.bytes, &destination.ipv4, prefix))
+            .allowed
+        else
+            .denied;
+    } else |_| {}
+    const resolved = resolved_targets orelse return .requires_dns_resolution;
+    for (resolved) |address| {
+        if (ipAddressEqual(address, destination)) return .allowed;
+    }
+    return .denied;
+}
+
+fn protocolDecision(
+    required: ?u8,
+    version: packets.Version,
+    actual: ?u8,
+) PacketDecision {
+    const expected = required orelse return .allowed;
+    const protocol = actual orelse return .requires_reassembly;
+    if (protocol == expected or
+        (version == .ipv4 and protocol == 1) or
+        (version == .ipv6 and protocol == 58))
+    {
+        return .allowed;
+    }
+    return .denied;
+}
+
+fn ipAddressEqual(a: capsules.IpAddress, b: capsules.IpAddress) bool {
+    if (a.version() != b.version()) return false;
+    return std.mem.eql(u8, a.bytes(), b.bytes());
+}
+
+fn prefixContains(
+    expected: []const u8,
+    actual: []const u8,
+    prefix_length: u8,
+) bool {
+    const full_bytes = prefix_length / 8;
+    if (!std.mem.eql(u8, expected[0..full_bytes], actual[0..full_bytes])) {
+        return false;
+    }
+    const partial_bits = prefix_length % 8;
+    if (partial_bits == 0) return true;
+    const shift: u3 = @intCast(8 - partial_bits);
+    const mask: u8 = @as(u8, 0xff) << shift;
+    return (expected[full_bytes] & mask) == (actual[full_bytes] & mask);
+}
 
 pub fn defaultPathLen(scope: Scope) Error!usize {
     try scope.validate();
@@ -261,4 +400,83 @@ fn decimalLen(value: u8) usize {
     if (value >= 100) return 3;
     if (value >= 10) return 2;
     return 1;
+}
+
+test "CONNECT-IP scope applies prefix protocol and ICMP policy to packets" {
+    const scope = Scope{
+        .target = "203.0.113.0/24",
+        .ip_protocol = 6,
+    };
+    var packet = [_]u8{
+        0x45, 0, 0, 20, 0,   1, 0,   0,  64, 6, 0, 0,
+        192,  0, 2, 21, 203, 0, 113, 42,
+    };
+    try std.testing.expectEqual(
+        PacketDecision.allowed,
+        try scope.packetDecision(&packet),
+    );
+    packet[9] = 17;
+    try std.testing.expectEqual(
+        PacketDecision.denied,
+        try scope.packetDecision(&packet),
+    );
+    packet[9] = 1;
+    try std.testing.expectEqual(
+        PacketDecision.allowed,
+        try scope.packetDecision(&packet),
+    );
+    packet[16..20].* = .{ 198, 51, 100, 42 };
+    try std.testing.expectEqual(
+        PacketDecision.denied,
+        try scope.packetDecision(&packet),
+    );
+}
+
+test "CONNECT-IP reg-name scope requires or consumes DNS results" {
+    const scope = Scope{ .target = "service.example" };
+    const packet = [_]u8{
+        0x45, 0, 0, 20, 0,   1, 0,   0,  64, 17, 0, 0,
+        192,  0, 2, 21, 203, 0, 113, 42,
+    };
+    try std.testing.expectEqual(
+        PacketDecision.requires_dns_resolution,
+        try scope.packetDecision(&packet),
+    );
+    try std.testing.expectEqual(
+        PacketDecision.allowed,
+        try scope.packetDecisionWithResolvedTargets(&packet, &.{
+            .{ .ipv4 = .{ 203, 0, 113, 42 } },
+        }),
+    );
+    try std.testing.expectEqual(
+        PacketDecision.denied,
+        try scope.packetDecisionWithResolvedTargets(&packet, &.{
+            .{ .ipv4 = .{ 203, 0, 113, 43 } },
+        }),
+    );
+}
+
+test "CONNECT-IP scoped protocol keeps unresolved fragments indeterminate" {
+    var fragment = [_]u8{0} ** 48;
+    fragment[0] = 0x60;
+    fragment[5] = 8;
+    fragment[6] = 44;
+    fragment[7] = 64;
+    fragment[24..40].* = [_]u8{ 0x20, 0x01, 0x0d, 0xb8 } ++
+        [_]u8{0} ** 11 ++ [_]u8{2};
+    fragment[40] = 60;
+    fragment[43] = 8;
+    const scoped = Scope{
+        .target = "2001:db8::/64",
+        .ip_protocol = 17,
+    };
+    try std.testing.expectEqual(
+        PacketDecision.requires_reassembly,
+        try scoped.packetDecision(&fragment),
+    );
+    const wildcard_protocol = Scope{ .target = "2001:db8::/64" };
+    try std.testing.expectEqual(
+        PacketDecision.allowed,
+        try wildcard_protocol.packetDecision(&fragment),
+    );
 }

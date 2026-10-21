@@ -3355,10 +3355,20 @@ test "public modules are reachable" {
         "ConfigurationApplyResult",
         "IpPacket",
         "PacketError",
+        "PacketDecision",
         "parseIpPacket",
         "packets",
     }) |decl| {
         try std.testing.expect(@hasDecl(netz.http3.connect_ip, decl));
+    }
+    inline for (&.{
+        "packetDecision",
+        "packetDecisionWithResolvedTargets",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.connect_ip.Scope,
+            decl,
+        ));
     }
     inline for (&.{
         "init",

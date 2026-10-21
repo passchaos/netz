@@ -23,7 +23,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const TARGET_PATH: &str = "/.well-known/masque/udp/dns.example/53/";
 const CLIENT_PAYLOAD_LEN: usize = 513;
 const SERVER_PAYLOAD_LEN: usize = 777;
-const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/*/*/";
+const CONNECT_IP_PATH: &str = "/.well-known/masque/ip/203.0.113.0%2F24/6/";
 const CLIENT_IP_PACKET: [u8; 20] = [
     0x45, 0, 0, 20, 0, 1, 0, 0, 64, 6, 0, 0, 192, 0, 2, 21, 203, 0, 113, 42,
 ];
@@ -196,7 +196,7 @@ async fn run_ip_server(port: u16, cert_path: &str, key_path: &str) -> Result<(),
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true received_ip={} sent_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())
@@ -306,7 +306,7 @@ async fn run_ip_client(port: u16, ca_path: &str) -> Result<(), Box<dyn Error>> {
     let _ = timeout(IO_TIMEOUT, driver).await;
     endpoint.wait_idle().await;
     println!(
-        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
+        "h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true sent_ip={} received_ip={} delivery_ack=true request_fin=true response_fin=true",
         CLIENT_IP_PACKET.len(), SERVER_IP_PACKET.len(),
     );
     Ok(())

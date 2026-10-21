@@ -1653,11 +1653,19 @@ source-prefix and destination/protocol queries cover packets originated by
 either endpoint. `localPacketAllowed` and `peerPacketAllowed` apply those
 snapshots directly to structurally parsed packets; unresolved protocols are
 accepted only by protocol-zero routes. H1/H2 payload-only reads still validate
-and apply skipped configuration Capsules, so an API choice cannot bypass RFC state, while local
-allocation failure leaves the Capsule unconsumed and retryable without falsely
+and apply skipped configuration Capsules, so an API choice cannot bypass RFC
+state, while local allocation failure leaves the Capsule unconsumed and
+retryable without falsely
 resetting the stream as a peer violation. This state remains separate from OS
 TUN/routing policy and is optional for deployments with wholly out-of-band
 configuration.
+Request scopes can now classify a parsed packet as allowed, denied, requiring
+DNS resolution, or requiring fragment reassembly. Literal IPv4/IPv6 prefixes
+match the packet destination directly; `ipproto` uses the extension-aware final
+protocol while retaining RFC 9484's ICMP exception. Reg-name scopes accept an
+authoritative caller-owned address set rather than performing hidden DNS, and
+unresolved fragment/ESP protocols never silently satisfy a protocol-specific
+scope.
 `zig build interop-connect-ip-h3 -Doptimize=ReleaseFast` is an offline-locked
 bidirectional h3/Quinn process gate that independently uses
 `Protocol::CONNECT_IP`, its own Capsule/varint codec, and Quinn DATAGRAMs. Both
@@ -1667,7 +1675,9 @@ directions, delivery acknowledgments, request FIN and response FIN without
 treating QUIC connection close as stream completion. Each Netz role checks the
 actual packet source, destination, and extracted protocol against the live
 bidirectional assignment/route snapshots before the packets cross the process
-boundary.
+boundary. The request itself uses the restricted
+`203.0.113.0%2F24`/TCP scope in both endpoint directions, and each Netz role
+proves the client-originated packet satisfies that parsed scope.
 The Capsule Session also has caller-buffer receive variants matching the H3
 DATAGRAM surface. A short output leaves the complete datagram pending for a
 larger retry, while warmed reads avoid the owning API's per-payload allocation.

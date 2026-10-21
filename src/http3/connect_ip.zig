@@ -36,6 +36,7 @@ pub fn Protocol(comptime Http3: type) type {
         };
 
         pub const Scope = scope_module.Scope;
+        pub const PacketDecision = scope_module.PacketDecision;
         pub const UriTemplate = template_module.Template;
         pub const Variable = template_module.Variable;
         pub const capsules = config_capsules;

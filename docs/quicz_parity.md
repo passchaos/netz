@@ -897,6 +897,14 @@ validation or state application,
 and a local allocation failure leaves the Capsule retryable without a false
 protocol reset. Kernel interface and forwarding policy remain
 application-owned.
+Parsed request scopes additionally classify packets as allowed, denied,
+requiring caller-owned DNS resolution, or requiring fragment reassembly.
+Literal IPv4/IPv6 prefixes and extension-aware `ipproto` values are enforced
+directly with the RFC 9484 ICMP exception; reg-name scopes can consume an
+authoritative resolved-address set without embedding resolver policy in the
+protocol core. The h3/Quinn matrix now uses a restricted
+`203.0.113.0%2F24`/TCP request instead of a wildcard and checks the actual
+client packet against it in both Netz endpoint roles.
 H1/H2 Capsule Sessions additionally expose caller-buffer receive with
 non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
 independently validates both endpoint roles over cleartext and TLS for both

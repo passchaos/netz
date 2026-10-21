@@ -85,10 +85,10 @@ if ! wait "$server_pid"; then
 fi
 server_pid=
 grep -Fq \
-  'netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip=20 received_ip=20 delivery_ack=true request_fin=true response_fin=true' \
+  'netz HTTP/3 CONNECT-IP client interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true sent_ip=20 received_ip=20 delivery_ack=true request_fin=true response_fin=true' \
   "$work/netz-client.log"
 grep -Fq \
-  'h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip=20 sent_ip=20 delivery_ack=true request_fin=true response_fin=true' \
+  'h3/quinn CONNECT-IP server interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true received_ip=20 sent_ip=20 delivery_ack=true request_fin=true response_fin=true' \
   "$work/h3-server.log"
 cat "$work/netz-client.log"
 cat "$work/h3-server.log"
@@ -113,10 +113,10 @@ if ! wait "$server_pid"; then
 fi
 server_pid=
 grep -Fq \
-  'h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true sent_ip=20 received_ip=20 delivery_ack=true request_fin=true response_fin=true' \
+  'h3/quinn CONNECT-IP client interoperated with netz: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true sent_ip=20 received_ip=20 delivery_ack=true request_fin=true response_fin=true' \
   "$work/h3-client.log"
 grep -Fq \
-  'netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true received_ip=20 sent_ip=20 delivery_ack=true request_fin=true response_fin=true' \
+  'netz HTTP/3 CONNECT-IP server interoperated with h3/quinn: address_request=true address_assign=true route_advertisement=true route_withdrawal=true packet_policy=true scope_policy=true received_ip=20 sent_ip=20 delivery_ack=true request_fin=true response_fin=true' \
   "$work/netz-server.log"
 cat "$work/h3-client.log"
 cat "$work/netz-server.log"
