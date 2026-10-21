@@ -8,6 +8,7 @@ pub const max_ipv4_udp_payload_size: usize = 1472;
 pub const max_ipv6_udp_payload_size: usize = 1452;
 pub const default_max_probe_failures: u8 = 3;
 pub const black_hole_threshold: u8 = 3;
+const suspicious_loss_burst_capacity = black_hole_threshold + 1;
 pub const black_hole_cooldown_ns: u64 = 60 * std.time.ns_per_s;
 pub const pmtu_raise_timer_ns: u64 = 600 * std.time.ns_per_s;
 
@@ -33,7 +34,10 @@ pub const State = struct {
     max_probe_failures: u8 = default_max_probe_failures,
     should_probe: bool = false,
     black_hole_counter: u8 = 0,
-    largest_acked_mtu_sized_packet: ?u64 = null,
+    suspicious_loss_burst_sizes: [suspicious_loss_burst_capacity]u16 =
+        [_]u16{0} ** suspicious_loss_burst_capacity,
+    largest_post_loss_packet: u64 = 0,
+    acked_mtu: u16 = min_udp_payload_size,
     raise_probe_after_ns: ?u64 = null,
     active_probe_packet_number: ?u64 = null,
     active_probe_epoch: u32 = 0,
@@ -66,6 +70,10 @@ pub const State = struct {
 
     pub fn currentSize(self: State) usize {
         return self.current_size;
+    }
+
+    pub fn ackedMtu(self: State) usize {
+        return self.acked_mtu;
     }
 
     pub fn shouldProbe(self: State) bool {
@@ -177,14 +185,33 @@ pub const State = struct {
 
     pub fn onMtuSizedPacketAcked(self: *State, packet_number: u64, datagram_size: usize) void {
         if (!self.enabled) return;
-        if (datagram_size < self.current_size) return;
-        if (self.largest_acked_mtu_sized_packet) |largest| {
-            if (packet_number <= largest) return;
+        const bounded_size = std.math.cast(u16, datagram_size) orelse
+            std.math.maxInt(u16);
+        if (bounded_size < self.acked_mtu) return;
+        if (bounded_size == self.acked_mtu) {
+            self.largest_post_loss_packet = @max(
+                self.largest_post_loss_packet,
+                packet_number,
+            );
+            return;
         }
-        self.black_hole_counter = 0;
-        self.largest_acked_mtu_sized_packet = packet_number;
-        self.last_loss_packet_number = null;
-        self.loss_burst_smallest_size = 0;
+        self.acked_mtu = bounded_size;
+        self.largest_post_loss_packet = packet_number;
+
+        // A successful datagram disproves only bursts whose smallest member
+        // was no larger. Keep larger bursts because this ACK says nothing
+        // about whether the path still carries them.
+        var retained: u8 = 0;
+        for (self.suspicious_loss_burst_sizes[0..self.black_hole_counter]) |size| {
+            if (size <= bounded_size) continue;
+            self.suspicious_loss_burst_sizes[retained] = size;
+            retained += 1;
+        }
+        @memset(
+            self.suspicious_loss_burst_sizes[retained..self.black_hole_counter],
+            0,
+        );
+        self.black_hole_counter = retained;
     }
 
     /// Observe one ordinary packet loss for PMTU black-hole detection.
@@ -256,13 +283,24 @@ pub const State = struct {
         {
             return .{};
         }
-        if (self.largest_acked_mtu_sized_packet) |largest| {
-            if (latest <= largest) return .{};
+        if (latest < self.largest_post_loss_packet and
+            smallest <= self.acked_mtu)
+        {
+            return .{};
         }
-        self.black_hole_counter +|= 1;
+        if (latest > self.largest_post_loss_packet) {
+            self.acked_mtu = min_udp_payload_size;
+        }
+        std.debug.assert(
+            self.black_hole_counter < suspicious_loss_burst_capacity,
+        );
+        self.suspicious_loss_burst_sizes[self.black_hole_counter] = smallest;
+        self.black_hole_counter += 1;
         if (self.black_hole_counter <= black_hole_threshold) return .{};
         self.black_hole_counter = 0;
-        self.largest_acked_mtu_sized_packet = null;
+        @memset(&self.suspicious_loss_burst_sizes, 0);
+        self.largest_post_loss_packet = 0;
+        self.acked_mtu = min_udp_payload_size;
         self.current_size = min_udp_payload_size;
         self.probe_size = null;
         self.failed_size = 0;
@@ -471,6 +509,34 @@ test "QUIC PMTUD black-hole evidence clears on acknowledged MTU-sized packet" {
     try std.testing.expect(!state.onNonProbeLost(16, 1300, true, 40).mtu_dropped);
     try std.testing.expect(!state.onNonProbeLost(18, 1300, true, 50).mtu_dropped);
     try std.testing.expect(!state.finishLossBurst(50).mtu_dropped);
+}
+
+test "QUIC PMTUD successful smaller datagram prunes only disproven bursts" {
+    var state = State.init(.{ .enabled = true, .max_probe_size = 1500 });
+    state.current_size = 1400;
+
+    try std.testing.expect(!state.onNonProbeLost(1, 1250, true, 10).mtu_dropped);
+    try std.testing.expect(!state.onNonProbeLost(3, 1350, true, 20).mtu_dropped);
+    try std.testing.expect(!state.finishLossBurst(20).mtu_dropped);
+    try std.testing.expectEqual(@as(u8, 2), state.black_hole_counter);
+
+    state.onMtuSizedPacketAcked(4, 1300);
+    try std.testing.expectEqual(@as(usize, 1300), state.ackedMtu());
+    try std.testing.expectEqual(@as(u8, 1), state.black_hole_counter);
+    try std.testing.expectEqual(
+        @as(u16, 1350),
+        state.suspicious_loss_burst_sizes[0],
+    );
+
+    // An older loss smaller than the later successful datagram is ordinary
+    // congestion. The same size sent after that ACK remains valid evidence.
+    try std.testing.expect(!state.onNonProbeLost(2, 1240, true, 30).mtu_dropped);
+    try std.testing.expect(!state.finishLossBurst(30).mtu_dropped);
+    try std.testing.expectEqual(@as(u8, 1), state.black_hole_counter);
+    try std.testing.expect(!state.onNonProbeLost(5, 1240, true, 40).mtu_dropped);
+    try std.testing.expect(!state.finishLossBurst(40).mtu_dropped);
+    try std.testing.expectEqual(@as(u8, 2), state.black_hole_counter);
+    try std.testing.expectEqual(min_udp_payload_size, state.ackedMtu());
 }
 
 test "QUIC PMTUD completed search rearms after raise timer" {

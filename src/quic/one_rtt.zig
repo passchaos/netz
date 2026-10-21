@@ -13329,7 +13329,7 @@ pub const Connection = struct {
                         frame.ack,
                         self.pmtud.active_probe_packet_number,
                         self.pmtud.active_probe_epoch,
-                        self.pmtud.currentSize(),
+                        self.pmtud.ackedMtu(),
                         self.pmtu_path_epoch,
                         validated_ack,
                     ) catch |err| switch (err) {
@@ -15126,7 +15126,7 @@ pub const Connection = struct {
             plain_ack,
             self.pmtud.active_probe_packet_number,
             self.pmtud.active_probe_epoch,
-            self.pmtud.currentSize(),
+            self.pmtud.ackedMtu(),
             self.pmtu_path_epoch,
             validated,
         );

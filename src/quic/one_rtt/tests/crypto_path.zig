@@ -1145,6 +1145,99 @@ test "QUIC 1-RTT PMTU black-hole evidence evaluates complete loss bursts" {
     );
 }
 
+test "QUIC 1-RTT PMTU ACK prunes smaller black-hole bursts" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "black-hole-ack-local",
+        .peer_connection_id = "black-hole-ack-peer",
+        .enable_pacing = false,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1400,
+    });
+    defer connection.deinit();
+    connection.pmtud.current_size = 1400;
+    connection.pmtud.should_probe = false;
+    const path_epoch = one_rtt.testing.currentPathEpoch(&connection);
+
+    for ([_]u64{ 0, 2, 4, 6 }) |packet_number| {
+        try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            100,
+            1240,
+            .not_ect,
+            packet_number + 1,
+            path_epoch,
+        );
+    }
+    try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+        10,
+        true,
+        100,
+        1250,
+        .not_ect,
+        11,
+        path_epoch,
+    );
+    try one_rtt.testing.applyReceivedFrames(&connection, 100, &.{.{ .ack = .{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }}, 100, .not_ect);
+    try std.testing.expectEqual(@as(usize, 1400), connection.pmtudCurrentSize());
+    try std.testing.expectEqual(@as(usize, 1250), connection.pmtud.ackedMtu());
+    try std.testing.expectEqual(@as(u8, 0), connection.pmtud.black_hole_counter);
+
+    for ([_]u64{ 12, 14, 16, 18 }) |packet_number| {
+        try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            100,
+            1300,
+            .not_ect,
+            packet_number + 1,
+            path_epoch,
+        );
+    }
+    try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+        22,
+        true,
+        100,
+        quic.pmtu.min_udp_payload_size,
+        .not_ect,
+        23,
+        path_epoch,
+    );
+    try one_rtt.testing.applyReceivedFrames(&connection, 101, &.{.{ .ack = .{
+        .largest_acknowledged = 22,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }}, 200, .not_ect);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        connection.pmtudCurrentSize(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 200 + quic.pmtu.black_hole_cooldown_ns),
+        connection.pmtuProbeDeadline(),
+    );
+}
+
 test "QUIC 1-RTT ignores stale PMTU probe ACK after path reset" {
     const allocator = std.testing.allocator;
 

@@ -816,6 +816,9 @@ pub const SentPacketTracker = struct {
         active_pmtu_probe_packet_number: ?u64 = null,
         active_pmtu_probe_size: ?usize = null,
         active_pmtu_probe_epoch: u32 = 0,
+        /// Strongest newly acknowledged ordinary datagram at or above the
+        /// caller's PMTU evidence floor. Size wins first; packet number breaks
+        /// ties so a batch has the same final state as ascending ACK updates.
         largest_pmtu_acked_packet_number: ?u64 = null,
         largest_pmtu_acked_datagram_size: ?usize = null,
         current_path_largest_packet_number: ?u64 = null,
@@ -868,7 +871,11 @@ pub const SentPacketTracker = struct {
         }
 
         fn observeAckedPmtu(self: *AckResult, packet_number: u64, datagram_size: usize) void {
-            if (self.largest_pmtu_acked_packet_number == null or packet_number > self.largest_pmtu_acked_packet_number.?) {
+            if (self.largest_pmtu_acked_datagram_size == null or
+                datagram_size > self.largest_pmtu_acked_datagram_size.? or
+                (datagram_size == self.largest_pmtu_acked_datagram_size.? and
+                    packet_number > self.largest_pmtu_acked_packet_number.?))
+            {
                 self.largest_pmtu_acked_packet_number = packet_number;
                 self.largest_pmtu_acked_datagram_size = datagram_size;
             }
@@ -3308,6 +3315,35 @@ test "QUIC sent packet tracker ACK PMTU evidence keeps highest qualifying packet
     try std.testing.expectEqual(@as(?usize, 1300), result.largest_pmtu_acked_datagram_size);
     try std.testing.expectEqual(@as(?u64, 10), result.largest_nonprobe_packet_number);
     try std.testing.expectEqual(@as(?usize, 1299), result.largest_nonprobe_datagram_size);
+}
+
+test "QUIC sent packet tracker ACK PMTU evidence keeps strongest datagram" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(5, true, 100, 1400, .not_ect, 1_000, 7);
+    try sent.sentAtWithDatagramSizeAndPathEpoch(6, true, 100, 1300, .not_ect, 2_000, 7);
+    try sent.sentAtWithDatagramSizeAndPathEpoch(7, true, 100, 1400, .not_ect, 3_000, 7);
+    const result = try sent.applyAckDetailedForProbe(
+        .{
+            .largest_acknowledged = 7,
+            .ack_delay = 0,
+            .first_ack_range = 2,
+        },
+        null,
+        0,
+        1200,
+        7,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 7),
+        result.largest_pmtu_acked_packet_number,
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1400),
+        result.largest_pmtu_acked_datagram_size,
+    );
 }
 
 test "QUIC sent packet tracker skips packet-threshold scan before first packet" {
