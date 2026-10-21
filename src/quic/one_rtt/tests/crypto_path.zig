@@ -5274,6 +5274,113 @@ test "QUIC queued PATH_RESPONSE retains exact source across migration" {
     );
 }
 
+const NewPathReceiveMode = enum { owning, visiting };
+
+fn testNewPathPreservesQueuedPathResponse(mode: NewPathReceiveMode) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var migrated_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer migrated_peer.deinit();
+
+    var original_peer = migrated_peer.address();
+    original_peer.ip4.bytes = .{ 127, 0, 0, 2 };
+    const server_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const peer_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x65} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const peer_challenge = [_]u8{ 0x66, 1, 2, 3, 4, 5, 6, 7 };
+    try one_rtt.sendFrames(&migrated_peer, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{
+            .{ .path_challenge = .{ .data = peer_challenge } },
+            .{ .ping = {} },
+            .{ .padding = .{ .len = quic.pmtu.min_udp_payload_size } },
+        },
+    });
+
+    switch (mode) {
+        .owning => {
+            var packet = try server.receivePacket();
+            packet.deinit(allocator);
+        },
+        .visiting => {
+            const Visitor = struct {
+                fn visit(_: void, _: one_rtt.ReceivedPacketView) !void {}
+            };
+            try server.visitPacketAt(1_000, {}, Visitor.visit);
+        },
+    }
+    try std.testing.expectEqual(migrated_peer.address(), server.peerAddress());
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingResponseCount(),
+    );
+
+    try server.sendPendingPathResponse();
+    var response_datagram = try migrated_peer.receiveBytes();
+    defer response_datagram.deinit(allocator);
+    var response = try one_rtt.openReceivedBytes(
+        &migrated_peer,
+        response_datagram.from,
+        response_datagram.bytes,
+        keys,
+        peer_cid.len,
+        0,
+        4,
+    );
+    defer response.deinit(allocator);
+    var saw_response = false;
+    for (response.frames) |frame| {
+        if (frame == .path_response and
+            std.mem.eql(u8, &frame.path_response.data, &peer_challenge))
+        {
+            saw_response = true;
+        }
+    }
+    try std.testing.expect(saw_response);
+}
+
+test "QUIC owning new path preserves PATH_RESPONSE queued with non-probing frame" {
+    try testNewPathPreservesQueuedPathResponse(.owning);
+}
+
+test "QUIC visiting new path preserves PATH_RESPONSE queued with non-probing frame" {
+    try testNewPathPreservesQueuedPathResponse(.visiting);
+}
+
 test "QUIC 1-RTT PATH_RESPONSE targets use cursor discard" {
     const allocator = std.testing.allocator;
 

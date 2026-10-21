@@ -1,6 +1,7 @@
 const std = @import("std");
 const quic = @import("../mod.zig");
 const endpoint_server = @import("../endpoint_server.zig");
+const tls_testing = @import("../../tls/testing.zig");
 
 test "QUIC endpoint server rejects invalid admission limits" {
     const allocator = std.testing.allocator;
@@ -531,7 +532,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         .{ .max_datagram_size = 4096 },
     );
     defer server_endpoint.deinit();
-    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_key = try tls_testing.serverKeyPair();
     const server_public = server_key.public_key.toUncompressedSec1();
     const stateless_reset_key = [_]u8{0x91} **
         quic.stateless_reset.static_key_len;
@@ -573,6 +574,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         allocator: std.mem.Allocator,
         io: std.Io,
         peer: std.Io.net.IpAddress,
+        public_key: [65]u8,
         stateless_reset_key: [quic.stateless_reset.static_key_len]u8,
         index: u8,
         preferred_connection_id: [
@@ -618,7 +620,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                     .server_name = "localhost",
                     .alpn_protocols = &.{"netz-shared-endpoint-test"},
                     .server_auth = .{
-                        .pinned_ecdsa_p256_public_key = server_public,
+                        .pinned_ecdsa_p256_public_key = self.public_key,
                     },
                     .random = random,
                     .x25519_secret_key = secret,
@@ -693,7 +695,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                 quic.stateless_reset.min_datagram_len;
             const rotated_token = quic.stateless_reset.tokenForConnectionId(
                 self.stateless_reset_key,
-                &rotated_cid,
+                rotated_cid,
             );
             @memcpy(
                 reset_datagram[reset_datagram.len - rotated_token.len ..],
@@ -742,8 +744,8 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     };
 
     var clients = [_]Client{
-        .{ .allocator = allocator, .io = io, .peer = server.address(), .stateless_reset_key = stateless_reset_key, .index = 0 },
-        .{ .allocator = allocator, .io = io, .peer = server.address(), .stateless_reset_key = stateless_reset_key, .index = 1 },
+        .{ .allocator = allocator, .io = io, .peer = server.address(), .public_key = server_public, .stateless_reset_key = stateless_reset_key, .index = 0 },
+        .{ .allocator = allocator, .io = io, .peer = server.address(), .public_key = server_public, .stateless_reset_key = stateless_reset_key, .index = 1 },
     };
     var threads: [clients.len]std.Thread = undefined;
     var started: usize = 0;
@@ -887,7 +889,7 @@ test "QUIC endpoint server routes preferred address CID and path validation" {
         .{ .max_datagram_size = 4096 },
     );
     defer server_endpoint.deinit();
-    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_key = try tls_testing.serverKeyPair();
     const server_public = server_key.public_key.toUncompressedSec1();
     const reset_key = [_]u8{0x92} **
         quic.stateless_reset.static_key_len;
@@ -1172,7 +1174,7 @@ test "QUIC endpoint server advertises dual-stack preferred address" {
 }
 
 fn testDistinctPreferredEndpoint(
-    comptime family: enum { ipv4, ipv6 },
+    comptime family: quic.one_rtt.PreferredAddressFamily,
     comptime dual_stack: bool,
 ) !void {
     const allocator = std.testing.allocator;
@@ -1210,7 +1212,7 @@ fn testDistinctPreferredEndpoint(
         .{ .max_datagram_size = 4096 },
     );
     defer preferred_endpoint.deinit();
-    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_key = try tls_testing.serverKeyPair();
     const server_public = server_key.public_key.toUncompressedSec1();
     const reset_key = [_]u8{0x94} **
         quic.stateless_reset.static_key_len;
@@ -1657,7 +1659,7 @@ test "QUIC endpoint server resets a client after connection state loss" {
         .{ .max_datagram_size = 4096 },
     );
     defer server_endpoint.deinit();
-    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_key = try tls_testing.serverKeyPair();
     const server_public = server_key.public_key.toUncompressedSec1();
     const reset_key = [_]u8{0xa7} **
         quic.stateless_reset.static_key_len;

@@ -9083,10 +9083,11 @@ pub const Connection = struct {
         {
             return error.InvalidTransportParameter;
         }
-        const matching_family = switch (new_peer) {
-            .ip4 => local_endpoint.address() == .ip4,
-            .ip6 => local_endpoint.address() == .ip6,
-        };
+        const matching_family = local_endpoint.usesSocks5Udp() or
+            switch (new_peer) {
+                .ip4 => local_endpoint.address() == .ip4,
+                .ip6 => local_endpoint.address() == .ip6,
+            };
         if (!matching_family) return error.InvalidTransportParameter;
         var peer_connection_ids = self.peer_connection_ids;
         try peer_connection_ids.markInUse(1);
@@ -12467,6 +12468,8 @@ pub const Connection = struct {
             frames,
         );
         defer peer_address_update.deinit();
+        self.installPreparedPeerAddressUpdate(&peer_address_update);
+        defer self.rollbackPreparedPeerAddressUpdate(&peer_address_update);
         var peer_connection_id_before: [
             quic.connection_id.max_connection_id_len
         ]u8 = undefined;
@@ -12490,13 +12493,13 @@ pub const Connection = struct {
             packet.payload,
             true,
         );
-        self.commitReceiveEndpoint(received_on, frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
             self.config.peer_connection_id,
         );
         self.commitPeerAddressUpdate(&peer_address_update);
+        self.commitReceiveEndpoint(received_on, frames);
         if (spin_connection_id_changed) {
             self.resetSpinValueForConnectionId();
             self.rememberCurrentValidatedPeerPath();
@@ -12636,6 +12639,8 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
+        self.installPreparedPeerAddressUpdate(&peer_address_update);
+        defer self.rollbackPreparedPeerAddressUpdate(&peer_address_update);
         var peer_connection_id_before: [
             quic.connection_id.max_connection_id_len
         ]u8 = undefined;
@@ -12656,7 +12661,6 @@ pub const Connection = struct {
             packet.packet.payload,
             false,
         );
-        self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -12670,6 +12674,7 @@ pub const Connection = struct {
             );
         }
         self.commitPeerAddressUpdate(&peer_address_update);
+        self.commitReceiveEndpoint(received_on, packet.frames);
         if (spin_connection_id_changed) {
             self.resetSpinValueForConnectionId();
             self.rememberCurrentValidatedPeerPath();
@@ -12904,6 +12909,8 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
+        self.installPreparedPeerAddressUpdate(&peer_address_update);
+        defer self.rollbackPreparedPeerAddressUpdate(&peer_address_update);
         var peer_connection_id_before: [
             quic.connection_id.max_connection_id_len
         ]u8 = undefined;
@@ -12924,7 +12931,6 @@ pub const Connection = struct {
             packet.packet.payload,
             false,
         );
-        self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -12938,6 +12944,7 @@ pub const Connection = struct {
             );
         }
         self.commitPeerAddressUpdate(&peer_address_update);
+        self.commitReceiveEndpoint(received_on, packet.frames);
         if (spin_connection_id_changed) {
             self.resetSpinValueForConnectionId();
             self.rememberCurrentValidatedPeerPath();
@@ -13063,6 +13070,41 @@ pub const Connection = struct {
         } };
     }
 
+    /// Install the fallibly prepared path-validation clone before applying
+    /// authenticated frames. A new-path packet can itself carry
+    /// PATH_CHALLENGE or PATH_RESPONSE; applying those frames to the old state
+    /// and replacing it afterward would silently discard their effects.
+    fn installPreparedPeerAddressUpdate(
+        self: *Connection,
+        update: *PeerAddressUpdate,
+    ) void {
+        switch (update.*) {
+            .new_path => |*new_path| std.mem.swap(
+                quic.path_validation.State,
+                &self.path_validation,
+                &new_path.path_validation,
+            ),
+            else => {},
+        }
+    }
+
+    /// Restore the original path-validation state when frame application
+    /// fails. On success `commitPeerAddressUpdate` consumes the update first,
+    /// making this deferred rollback a no-op.
+    fn rollbackPreparedPeerAddressUpdate(
+        self: *Connection,
+        update: *PeerAddressUpdate,
+    ) void {
+        switch (update.*) {
+            .new_path => |*new_path| std.mem.swap(
+                quic.path_validation.State,
+                &self.path_validation,
+                &new_path.path_validation,
+            ),
+            else => {},
+        }
+    }
+
     fn commitPeerAddressUpdate(
         self: *Connection,
         update: *PeerAddressUpdate,
@@ -13094,6 +13136,12 @@ pub const Connection = struct {
                 self.setPeerAddressValidated(true);
             },
             .new_path => |*new_path| {
+                // `installPreparedPeerAddressUpdate` moved the prepared clone
+                // into the live connection before frame application. The
+                // value retained by the update is the previous path state.
+                // Discard it only after every frame has committed, preserving
+                // PATH_RESPONSE work queued by a PATH_CHALLENGE that shares a
+                // packet with non-probing traffic.
                 self.rememberCurrentValidatedPeerPath();
                 self.config.peer = new_path.from;
                 self.peer_address_validated = false;
@@ -13117,8 +13165,7 @@ pub const Connection = struct {
                     self.spin_largest_received_packet_number =
                         state.spin_largest_received_packet_number;
                 }
-                self.path_validation.deinit();
-                self.path_validation = new_path.path_validation;
+                new_path.path_validation.deinit();
                 self.path_validation.abandonPendingChallengesExceptPathEpoch(
                     self.pmtu_path_epoch,
                 );

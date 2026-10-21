@@ -149,15 +149,22 @@ pub const Inbox = struct {
     /// Retain a short-header packet that arrived after Client Finished but
     /// before the dispatcher observed handshake completion. The dispatcher
     /// has already matched its DCID; this method keeps a separate queue so the
-    /// handshake worker cannot consume and discard application data.
+    /// handshake worker cannot consume and discard application data. A packet
+    /// addressed to an already-advertised preferred-address CID may arrive
+    /// from that new tuple during this promotion window. It remains bounded
+    /// here and is authenticated by the established connection before any
+    /// peer-address state can change.
     pub fn pushApplicationRouted(
         self: *Inbox,
         datagram: quic.runtime.OwnedBytes,
+        allow_peer_change: bool,
     ) Error!void {
         if (datagram.bytes.len == 0 or (datagram.bytes[0] & 0x80) != 0) {
             return error.ConnectionIdMismatch;
         }
-        if (!sameAddress(self.peer, datagram.from)) return error.PeerMismatch;
+        if (!allow_peer_change and !sameAddress(self.peer, datagram.from)) {
+            return error.PeerMismatch;
+        }
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;

@@ -40,6 +40,7 @@ pub const resumption = @import("resumption/mod.zig");
 
 test {
     _ = @import("socks5_endpoint_tests.zig");
+    _ = @import("socks5_preferred_address_tests.zig");
 }
 
 pub const Error = wire.Error || error{

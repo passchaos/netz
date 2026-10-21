@@ -2841,6 +2841,8 @@ test "QUIC endpoint dispatcher routes a pending preferred address CID" {
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    var preferred_peer = std.Io.net.IpAddress{ .ip4 = .loopback(5556) };
+    preferred_peer.ip4.bytes = .{ 127, 0, 0, 2 };
     const initial_bytes = try allocator.dupe(u8, "initial");
     var initial_datagram = runtime.OwnedBytes{
         .from = peer,
@@ -2875,6 +2877,23 @@ test "QUIC endpoint dispatcher routes a pending preferred address CID" {
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0xf2} ** quic.protection.secret_len,
     );
+    const original_path_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = inbox.connectionIds()[1].slice(),
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    var rejected = try dispatcher.dispatch(.{
+        .from = preferred_peer,
+        .bytes = original_path_packet,
+    });
+    defer rejected.deinit(allocator);
+    try std.testing.expectEqual(@as(Event, .consumed), rejected);
+    try std.testing.expectEqual(@as(usize, 0), inbox.applicationCount());
+
     const preferred_id = inbox.connectionIds()[2];
     const packet = try quic.protection.sealShortPacket(allocator, keys, .{
         .destination_connection_id = preferred_id.slice(),
@@ -2882,7 +2901,7 @@ test "QUIC endpoint dispatcher routes a pending preferred address CID" {
         .payload = &.{@intFromEnum(quic.FrameType.ping)},
     });
     var event = try dispatcher.dispatch(.{
-        .from = peer,
+        .from = preferred_peer,
         .bytes = packet,
     });
     defer event.deinit(allocator);
@@ -2916,7 +2935,9 @@ test "QUIC endpoint dispatcher routes a pending preferred address CID" {
     try std.testing.expect(routed == .packet);
     try std.testing.expectEqual(@as(usize, 63), routed.packet.connection_handle);
     try std.testing.expectEqual(@as(u64, 1), routed.packet.connection_id_sequence);
+    try std.testing.expectEqual(preferred_peer, routed.packet.packet.from);
     try std.testing.expect(routed.packet.packet.frames[0] == .ping);
+    try std.testing.expectEqual(preferred_peer, connection.peerAddress());
     try std.testing.expect(try dispatcher.unregisterConnection(63));
 }
 

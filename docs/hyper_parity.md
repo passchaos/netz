@@ -2274,7 +2274,11 @@ handshakes register authenticated-by-CID initial sources, established traffic
 restores only those aliases, and a new IPv4/IPv6 tuple remains visible to QUIC
 preferred-address/path validation. Because the UDP socket addresses only the
 SOCKS relay, one endpoint can encapsulate targets from either IP family without
-binding a second local socket. Route references belong to the acquisition and
+binding a second local socket. A real QUIC gate now carries an IPv6 advertised
+preferred address through an IPv4 relay, preserves the first sequence-1 packet
+across server handshake promotion, completes path validation, switches the
+server's local endpoint, and exchanges a post-migration PING over that same
+association. Route references belong to the acquisition and
 transfer to its established entry; cancellation, failed handshakes, racing
 losers, idle eviction, and Pool close release them only after CID unregister
 and connection teardown. A failure test times out two different hostnames

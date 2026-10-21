@@ -980,6 +980,25 @@ pub const Dispatcher = struct {
         );
         errdefer inbox.deinit();
         try self.registerPendingHandshake(handle, inbox);
+        errdefer _ = self.unregisterPendingHandshake(handle) catch false;
+        // The first generated CID is the server's sequence 0 identifier. Any
+        // later generated identifier is advertised with its corresponding
+        // non-zero sequence (currently preferred_address sequence 1). Keep
+        // that distinction while pending so only a packet addressed to an
+        // advertised alternate CID can cross the original peer tuple during
+        // the handshake-promotion window. The promoted connection still
+        // authenticates it before applying any path state.
+        for (inbox.connectionIds()[1..], 0..) |*connection_id, sequence| {
+            try self.pending_router.registerOrReplace(
+                connection_id.slice(),
+                .{
+                    .connection_index = handle,
+                    .sequence_number = @intCast(sequence),
+                    .peer_address = inbox.peer,
+                    .active_migration_disabled = true,
+                },
+            );
+        }
         return inbox;
     }
 
@@ -1885,12 +1904,18 @@ pub const Dispatcher = struct {
                 else => |other| return other,
             };
             if (pending) |routed_pending| {
-                if (routed_pending.route.peer_address) |peer| {
-                    const received_on = owned.received_on orelse self.endpoint;
-                    owned.from = try received_on.normalizeSocks5PendingPeer(
-                        peer,
-                        owned.from,
-                    );
+                const advertised_alternate_cid =
+                    routed_pending.route.sequence_number != 0;
+                if (!advertised_alternate_cid) {
+                    if (routed_pending.route.peer_address) |peer| {
+                        const received_on = owned.received_on orelse
+                            self.endpoint;
+                        owned.from = try received_on
+                            .normalizeSocks5PendingPeer(
+                            peer,
+                            owned.from,
+                        );
+                    }
                 }
                 const entry = self.pending_handshakes.getPtr(
                     routed_pending.route.connection_index,
@@ -1898,7 +1923,10 @@ pub const Dispatcher = struct {
                 const push_result = if ((owned.bytes[0] & 0x80) != 0)
                     entry.inbox.push(owned)
                 else
-                    entry.inbox.pushApplicationRouted(owned);
+                    entry.inbox.pushApplicationRouted(
+                        owned,
+                        advertised_alternate_cid,
+                    );
                 push_result catch |err| switch (err) {
                     // A bounded or concurrently closed handshake must not
                     // terminate the sole endpoint receive loop. The inbox did

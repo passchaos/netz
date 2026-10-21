@@ -808,7 +808,7 @@ pub const Server = struct {
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!?VisitEvent {
         if (poll_interval.nanoseconds <= 0) return error.Timeout;
-        const deadline = .fromNow(self.endpoint.io, .{
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.endpoint.io, .{
             .raw = poll_interval,
             .clock = .awake,
         });

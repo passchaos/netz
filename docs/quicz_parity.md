@@ -692,8 +692,18 @@ can start preferred-address validation from a caller-owned local endpoint,
 enabling IPv4-to-IPv6 and IPv6-to-IPv4 migration while one dispatcher serially
 injects both sockets. Tests verify sequence-1 routing, delayed packets on the
 retained old path, PATH_RESPONSE, subsequent traffic, wrong-family rollback,
-and timeout restoration of peer address, CID, and local endpoint. The shared
-HTTP/3 client pool now owns an optional opposite-family endpoint and exposes
+and timeout restoration of peer address, CID, and local endpoint. New-path
+packets that combine PATH_CHALLENGE with non-probing traffic now apply against
+the prepared path state transactionally on both owning and visitor receives,
+so committing the migration cannot discard the queued PATH_RESPONSE. A real
+SOCKS5 gate carries an IPv6 preferred target through one IPv4 UDP relay,
+accepts the client's first sequence-1 packet during the bounded
+handshake-promotion window, completes PATH_CHALLENGE/PATH_RESPONSE, switches
+the server's local endpoint, and exchanges a post-migration PING. Ordinary
+pending sequence-0 CIDs retain strict original-peer isolation; only the
+already-advertised alternate CID admits a new tuple before promotion, and the
+established connection still authenticates it before changing path state. The
+shared HTTP/3 client pool now owns an optional opposite-family endpoint and exposes
 preferred migration through its lease. Its single receive owner races both
 sockets with `std.Io.Select`, folds the dispatcher timer into the same absolute
 deadline, preserves a simultaneous second datagram, and keeps its bounded
