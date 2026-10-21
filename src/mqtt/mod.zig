@@ -10,6 +10,7 @@ pub const broker = @import("broker.zig");
 pub const bridge = @import("bridge.zig");
 pub const websocket_runtime = @import("websocket_runtime.zig");
 pub const tls_runtime = @import("tls_runtime.zig");
+pub const socks5_runtime = @import("socks5_runtime.zig");
 pub const router = @import("router.zig");
 pub const retained = @import("retained/mod.zig");
 pub const session = @import("session/mod.zig");

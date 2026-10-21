@@ -12,6 +12,43 @@ const tls_server_max_packet_size: usize = 32 * 1024;
 const large_payload_bytes: usize = 20 * 1024;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
+test "MQTT TLS caller-connected stream closes on expired deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    try std.testing.expectError(
+        error.Timeout,
+        mqtt_tls.Client.connectStreamAttemptWithDeadline(
+            allocator,
+            io,
+            client,
+            "broker.internal",
+            .{ .mqtt = .{ .client_id = "owned-tls-stream" } },
+            .{ .raw = .zero, .clock = .awake },
+        ),
+    );
+    var byte: [1]u8 = undefined;
+    var buffers = [_][]u8{&byte};
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try io.vtable.netRead(
+            io.userdata,
+            peer.socket.handle,
+            &buffers,
+        ),
+    );
+}
+
 fn writeStreamAll(
     io: std.Io,
     stream: std.Io.net.Stream,

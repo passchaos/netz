@@ -390,6 +390,65 @@ fn ServerTask(comptime HandlerContext: type) type {
 /// handshake succeeds, all MQTT CONNECT/CONNACK and QoS state is handled by
 /// the same `mqtt.runtime.Connection` used for cleartext TCP and WebSocket.
 pub const Client = struct {
+    /// Negotiate TLS and MQTT on a caller-connected TCP tunnel. Ownership
+    /// transfers on every outcome; `tls_host` remains the origin identity and
+    /// is never replaced by a proxy authority.
+    pub fn connectStreamAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        options: ConnectOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        return connectOwnedStreamAttempt(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+        );
+    }
+
+    pub fn connectStreamAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        return connectOwnedStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn connectStreamAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -442,7 +501,7 @@ pub const Client = struct {
             options.mqtt.address_resolver,
             options.mqtt.address_connect_policy,
         );
-        return connectStreamAttempt(
+        return connectOwnedStreamAttempt(
             allocator,
             io,
             stream,
@@ -471,7 +530,7 @@ pub const Client = struct {
             options.mqtt.address_resolver,
             options.mqtt.address_connect_policy,
         );
-        return connectStreamAttempt(
+        return connectOwnedStreamAttempt(
             allocator,
             io,
             stream,
@@ -583,7 +642,7 @@ pub const Client = struct {
             options.mqtt.address_resolver,
             options.mqtt.address_connect_policy,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -617,7 +676,7 @@ pub const Client = struct {
             options.mqtt.address_resolver,
             options.mqtt.address_connect_policy,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -694,7 +753,7 @@ pub const Client = struct {
             address,
             options.mqtt.network_connect_timeout,
         );
-        return connectStreamAttempt(
+        return connectOwnedStreamAttempt(
             allocator,
             io,
             stream,
@@ -799,7 +858,7 @@ pub const Client = struct {
             address,
             network_deadline,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -891,7 +950,7 @@ pub const Client = struct {
             error.InvalidServerReference => error.InvalidUri,
             else => err,
         };
-        return connectStreamAttempt(
+        return connectOwnedStreamAttempt(
             allocator,
             io,
             stream,
@@ -1007,7 +1066,7 @@ pub const Client = struct {
             error.InvalidServerReference => error.InvalidUri,
             else => err,
         };
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1524,14 +1583,14 @@ fn reconnectOptionsWithTlsTickets(
     return options;
 }
 
-fn connectStreamAttempt(
+fn connectOwnedStreamAttempt(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
     tls_host: []const u8,
     options: ConnectOptions,
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-    return connectStreamAttemptMaybeBefore(
+    return connectOwnedStreamAttemptMaybeBefore(
         allocator,
         io,
         stream,
@@ -1541,7 +1600,7 @@ fn connectStreamAttempt(
     );
 }
 
-fn connectStreamAttemptBefore(
+fn connectOwnedStreamAttemptBefore(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
@@ -1549,8 +1608,11 @@ fn connectStreamAttemptBefore(
     options: ConnectOptions,
     deadline: std.Io.Clock.Timestamp,
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
-    _ = try deadline_policy.usableAwake(io, deadline);
-    return connectStreamAttemptMaybeBefore(
+    _ = deadline_policy.usableAwake(io, deadline) catch |err| {
+        stream.close(io);
+        return err;
+    };
+    return connectOwnedStreamAttemptMaybeBefore(
         allocator,
         io,
         stream,
@@ -1560,7 +1622,7 @@ fn connectStreamAttemptBefore(
     );
 }
 
-fn connectStreamAttemptMaybeBefore(
+fn connectOwnedStreamAttemptMaybeBefore(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,

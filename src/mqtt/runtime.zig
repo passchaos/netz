@@ -16,6 +16,7 @@ const proxy_protocol = @import("proxy_protocol.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
+const socks5_proxy = @import("../proxy/socks5.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const network_endpoint = @import("runtime/network_endpoint.zig");
 const protocol_error = @import("runtime/protocol_error.zig");
@@ -51,7 +52,8 @@ pub const Error = packet_transport.Error || error{
     InvalidAddressConnectPolicy,
     SocketOptionFailed,
     SocketOptionUnsupported,
-} || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
+} || auth_runtime.Error || proxy_protocol.Error || socks5_proxy.Error ||
+    websocket_runtime.Error ||
     net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
     net.HostName.ValidateError || net.HostName.ConnectError ||
@@ -1639,6 +1641,61 @@ pub const PendingAcceptedClient = struct {
 };
 
 pub const Client = struct {
+    /// Negotiate MQTT on a caller-connected TCP stream. Ownership transfers to
+    /// this call on every outcome, enabling reusable proxy/tunnel adapters
+    /// without duplicating MQTT CONNECT state.
+    pub fn connectStreamAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        return connectOwnedStreamAttempt(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+        );
+    }
+
+    pub fn connectStreamAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectOwnedStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+            deadline,
+        );
+    }
+
+    pub fn connectStreamAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
+        return connectStreamAttemptWithDeadline(
+            allocator,
+            io,
+            stream,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!Connection {
         var result = try connectWithConnAck(allocator, io, address, options);
         defer result.connack.deinit(allocator);
@@ -1731,7 +1788,7 @@ pub const Client = struct {
             address,
             options.network_connect_timeout,
         );
-        return connectStreamAttempt(allocator, io, stream, options, true);
+        return connectOwnedStreamAttempt(allocator, io, stream, options, true);
     }
 
     pub fn connectAttemptWithDeadline(
@@ -1751,7 +1808,7 @@ pub const Client = struct {
             address,
             network_deadline,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1832,7 +1889,7 @@ pub const Client = struct {
             options.address_resolver,
             options.address_connect_policy,
         );
-        return connectStreamAttempt(allocator, io, stream, options, true);
+        return connectOwnedStreamAttempt(allocator, io, stream, options, true);
     }
 
     /// Resolve a hostname and connect from one explicit local IP address.
@@ -1856,7 +1913,7 @@ pub const Client = struct {
             options.address_resolver,
             options.address_connect_policy,
         );
-        return connectStreamAttempt(allocator, io, stream, options, true);
+        return connectOwnedStreamAttempt(allocator, io, stream, options, true);
     }
 
     /// Resolve `host` and negotiate MQTT under one caller-owned deadline.
@@ -1884,7 +1941,7 @@ pub const Client = struct {
             options.address_resolver,
             options.address_connect_policy,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1918,7 +1975,7 @@ pub const Client = struct {
             options.address_resolver,
             options.address_connect_policy,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -2096,7 +2153,7 @@ pub const Client = struct {
             options.address_resolver,
             options.address_connect_policy,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -2306,7 +2363,7 @@ pub const Client = struct {
             address,
             options.network_connect_timeout,
         );
-        return connectStreamAttempt(allocator, io, stream, options, false);
+        return connectOwnedStreamAttempt(allocator, io, stream, options, false);
     }
 
     /// Connect a Unix socket and negotiate MQTT under one caller-owned
@@ -2333,7 +2390,7 @@ pub const Client = struct {
             address,
             network_deadline,
         );
-        return connectStreamAttemptBefore(
+        return connectOwnedStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -2421,17 +2478,17 @@ fn connectTargetAttempt(
         options.address_resolver,
         options.address_connect_policy,
     );
-    return connectStreamAttempt(allocator, io, stream, options, true);
+    return connectOwnedStreamAttempt(allocator, io, stream, options, true);
 }
 
-fn connectStreamAttempt(
+fn connectOwnedStreamAttempt(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
     options: ConnectOptions,
     tcp_nodelay_available: bool,
 ) Error!ConnectAttempt {
-    return connectStreamAttemptBefore(
+    return connectOwnedStreamAttemptBefore(
         allocator,
         io,
         stream,
@@ -2441,7 +2498,7 @@ fn connectStreamAttempt(
     );
 }
 
-fn connectStreamAttemptBefore(
+fn connectOwnedStreamAttemptBefore(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,

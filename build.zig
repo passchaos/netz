@@ -1565,6 +1565,29 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_listener_mount_step.dependOn(&mqtt_listener_mount.step);
 
+    const mqtt_socks5_client = b.addExecutable(.{
+        .name = "netz-mqtt-socks5-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/mqtt_socks5_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_socks5 = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_socks5.py",
+    });
+    mqtt_socks5.addArtifactArg(mqtt_socks5_client);
+    const mqtt_socks5_step = b.step(
+        "interop-mqtt-socks5",
+        "Verify native MQTT and TLS through independent SOCKS5 peers",
+    );
+    mqtt_socks5_step.dependOn(&mqtt_socks5.step);
+    test_step.dependOn(&mqtt_socks5.step);
+
     const mqtt_broker_config = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

@@ -48,6 +48,24 @@ the unchanged inode and exact PID contents owned by that process. Replacing the
 path externally cannot make the exiting broker delete the replacement. The
 path is restart-required on SIGHUP.
 
+Native MQTT clients now also expose SOCKS5 transport composition through the
+public, protocol-independent `proxy.socks5` module and
+`mqtt.socks5_runtime`. The RFC 1928 layer sends DNS names to the proxy instead
+of resolving the broker locally, supports IPv4/IPv6/domain CONNECT targets and
+all three reply address forms, maps every standard reply code, and keeps proxy
+DNS/TCP, RFC 1929 authentication, and CONNECT under one absolute deadline.
+Username/password callers may retain Mosquitto-compatible no-auth fallback or
+require authentication, in which case the client advertises only method 0x02
+and rejects downgrade. Cleartext and hostname-verified TLS clients expose
+ordinary, CONNACK-preserving, timeout/deadline, and reconnect adapters; the TLS
+reconnector retains TLS 1.2/1.3 tickets without changing the origin SNI. The
+independent Python gate covers delayed-method timeout, no-auth, successful and
+failed RFC 1929 authentication, remote-only broker DNS, MQTT 5 PING/DISCONNECT,
+TLS 1.3 certificate/hostname verification, and fresh cleartext/TLS reconnect
+tunnels. This was implemented after auditing Mosquitto's
+`lib/socks_mosq.c` and its `03-publish-socks*.py` process cases under
+`~/Work/mosquitto`.
+
 ## One-way inbound broker bridge
 
 `mqtt.bridge.Bridge` is deliberately a small, inbound-only topology primitive.

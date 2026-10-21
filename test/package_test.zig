@@ -16,6 +16,9 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz, "runtime"));
     try std.testing.expect(@hasDecl(netz, "stream"));
+    try std.testing.expect(@hasDecl(netz, "proxy"));
+    try std.testing.expect(@hasDecl(netz.proxy, "socks5"));
+    try std.testing.expect(@hasDecl(netz.proxy.socks5, "connectHost"));
     inline for (&.{ "connect", "io", "socket_options", "tls" }) |decl|
         try std.testing.expect(@hasDecl(netz.stream, decl));
     try std.testing.expect(@hasDecl(netz.runtime, "Backend"));
@@ -24,6 +27,11 @@ test "public modules are reachable" {
     try std.testing.expect(!@hasDecl(netz.runtime.Backend, "initThreaded"));
     try std.testing.expect(!@hasDecl(netz.runtime.Backend, "initAuto"));
     try std.testing.expect(!@hasDecl(netz.runtime, "zio"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "socks5_runtime"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.socks5_runtime,
+        "TlsReconnectConnector",
+    ));
     try std.testing.expect(@hasDecl(netz, "grpc"));
     try std.testing.expect(@hasDecl(netz.grpc, "Status"));
     try std.testing.expect(@hasDecl(netz.grpc, "MessageIterator"));
