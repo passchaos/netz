@@ -8,12 +8,13 @@ fn parsePort(text: []const u8) !u16 {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 6) return error.InvalidArgument;
+    if (args.len != 7) return error.InvalidArgument;
     const proxy_port = try parsePort(args[1]);
     const origin_a_port = try parsePort(args[2]);
     const origin_b_port = try parsePort(args[3]);
-    _ = try parsePort(args[4]);
-    if (!std.Io.Dir.path.isAbsolute(args[5])) return error.InvalidArgument;
+    const origin_c_port = try parsePort(args[4]);
+    _ = try parsePort(args[5]);
+    if (!std.Io.Dir.path.isAbsolute(args[6])) return error.InvalidArgument;
 
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
@@ -25,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         now,
-        args[5],
+        args[6],
     );
     var ca_lock: std.Io.RwLock = .init;
     var bundle_verifier = netz.quic.tls.trust.BundleVerifier{
@@ -63,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
             } },
             .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 2 },
             .max_connections = 2,
+            .max_socks5_shared_routes = 2,
             .fallback = .never,
         },
     });
@@ -79,6 +81,12 @@ pub fn main(init: std.process.Init) !void {
         .{origin_b_port},
     );
     defer allocator.free(base_b);
+    const base_c = try std.fmt.allocPrint(
+        allocator,
+        "https://origin-c.internal:{d}",
+        .{origin_c_port},
+    );
+    defer allocator.free(base_c);
     const requests = [_]struct {
         base: []const u8,
         path: []const u8,
@@ -89,6 +97,8 @@ pub fn main(init: std.process.Init) !void {
         .{ .base = base_a, .path = "/h3-a-one", .protocol = .http3, .body = "h3-socks-a-one" },
         .{ .base = base_b, .path = "/discover", .protocol = .http1, .body = "tcp-discovery-b" },
         .{ .base = base_b, .path = "/h3-b-one", .protocol = .http3, .body = "h3-socks-b-one" },
+        .{ .base = base_c, .path = "/discover", .protocol = .http1, .body = "tcp-discovery-c" },
+        .{ .base = base_c, .path = "/h3-c-one", .protocol = .http3, .body = "h3-socks-c-one" },
         .{ .base = base_a, .path = "/h3-a-two", .protocol = .http3, .body = "h3-socks-a-two" },
     };
     for (requests) |request| {
@@ -110,10 +120,11 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqual(@as(usize, 2), pool.http3ConnectionCount());
     try std.testing.expectEqual(@as(usize, 2), pool.http3IdleCount());
     std.debug.print(
-        "HTTP/3 SOCKS5 pool passed: origins=2 discovery=http1 " ++
-            "h3_requests=3 udp_associations=1 quic_connections=2 " ++
-            "domain_routes=2 remote_dns=true shared_endpoint=true " ++
-            "pool_reuse=true tls_verified=true client_io=zio-std-io\n",
+        "HTTP/3 SOCKS5 pool passed: origins=3 discovery=http1 " ++
+            "h3_requests=4 udp_associations=1 active_quic_connections=2 " ++
+            "total_quic_connections=4 domain_route_limit=2 " ++
+            "route_churn=true remote_dns=true shared_endpoint=true " ++
+            "tls_verified=true client_io=zio-std-io\n",
         .{},
     );
 }

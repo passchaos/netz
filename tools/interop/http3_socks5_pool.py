@@ -170,7 +170,7 @@ def serve_proxy(
         except BaseException as error:
             worker_errors.append(error)
 
-    for _ in range(3):
+    for _ in range(4):
         client, _ = proxy.accept()
         client.settimeout(10)
         authenticate(client)
@@ -278,10 +278,18 @@ def main() -> None:
     module = script_dir / "quic_go_module"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        origin_hosts = {"origin-a.internal", "origin-b.internal"}
+        origin_hosts = {
+            "origin-a.internal",
+            "origin-b.internal",
+            "origin-c.internal",
+        }
         ca, cert, key = create_identity(
             directory,
-            ("origin-a.internal", "origin-b.internal"),
+            (
+                "origin-a.internal",
+                "origin-b.internal",
+                "origin-c.internal",
+            ),
         )
         go_server = directory / "http3-socks5-server"
         subprocess.run(
@@ -293,6 +301,7 @@ def main() -> None:
         )
         discovery_a = listener()
         discovery_b = listener()
+        discovery_c = listener()
         proxy = listener()
         relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         relay.bind(("127.0.0.1", 0))
@@ -300,6 +309,7 @@ def main() -> None:
         h3_port = free_udp_port()
         authority_a = f"origin-a.internal:{discovery_a.getsockname()[1]}"
         authority_b = f"origin-b.internal:{discovery_b.getsockname()[1]}"
+        authority_c = f"origin-c.internal:{discovery_c.getsockname()[1]}"
         go_log = directory / "go-server.log"
         with go_log.open("w") as output:
             go_process = subprocess.Popen(
@@ -308,7 +318,7 @@ def main() -> None:
                     "-addr", f"127.0.0.1:{h3_port}",
                     "-cert", str(cert),
                     "-key", str(key),
-                    "-authority", f"{authority_a},{authority_b}",
+                    "-authority", f"{authority_a},{authority_b},{authority_c}",
                 ),
                 text=True,
                 stdout=output,
@@ -331,6 +341,7 @@ def main() -> None:
             "responses": 0,
             "domain:origin-a.internal": 0,
             "domain:origin-b.internal": 0,
+            "domain:origin-c.internal": 0,
         }
 
         def run(function, *arguments) -> None:
@@ -365,6 +376,17 @@ def main() -> None:
             threading.Thread(
                 target=run,
                 args=(
+                    serve_discovery,
+                    discovery_c,
+                    tls_context,
+                    h3_port,
+                    "origin-c.internal",
+                    b"tcp-discovery-c",
+                ),
+            ),
+            threading.Thread(
+                target=run,
+                args=(
                     serve_proxy,
                     proxy,
                     relay,
@@ -373,6 +395,8 @@ def main() -> None:
                             discovery_a.getsockname()[1],
                         ("origin-b.internal", discovery_b.getsockname()[1]):
                             discovery_b.getsockname()[1],
+                        ("origin-c.internal", discovery_c.getsockname()[1]):
+                            discovery_c.getsockname()[1],
                     },
                     h3_port,
                     origin_hosts,
@@ -389,6 +413,7 @@ def main() -> None:
                 str(proxy.getsockname()[1]),
                 str(discovery_a.getsockname()[1]),
                 str(discovery_b.getsockname()[1]),
+                str(discovery_c.getsockname()[1]),
                 str(h3_port),
                 str(ca),
             ),
@@ -402,6 +427,7 @@ def main() -> None:
             thread.join(timeout=5)
         discovery_a.close()
         discovery_b.close()
+        discovery_c.close()
         proxy.close()
         relay.close()
         if result.returncode != 0 or errors:
@@ -426,27 +452,30 @@ def main() -> None:
             raise TimeoutError("HTTP/3 SOCKS5 peer did not terminate")
         if go_process.returncode != 0:
             raise RuntimeError(go_log.read_text())
-        if trace != ["connect", "udp-associate", "connect"]:
+        if trace != ["connect", "udp-associate", "connect", "connect"]:
             raise AssertionError(f"unexpected SOCKS command trace: {trace}")
         if (stats["remote_dns_packets"] == 0 or stats["responses"] == 0 or
             stats["domain:origin-a.internal"] == 0 or
-            stats["domain:origin-b.internal"] == 0):
+            stats["domain:origin-b.internal"] == 0 or
+            stats["domain:origin-c.internal"] == 0):
             raise AssertionError(f"missing UDP relay traffic: {stats}")
         expected = (
-            "HTTP/3 SOCKS5 pool passed: origins=2 discovery=http1 "
-            "h3_requests=3 udp_associations=1 quic_connections=2 "
-            "domain_routes=2 remote_dns=true shared_endpoint=true "
-            "pool_reuse=true tls_verified=true client_io=zio-std-io"
+            "HTTP/3 SOCKS5 pool passed: origins=3 discovery=http1 "
+            "h3_requests=4 udp_associations=1 active_quic_connections=2 "
+            "total_quic_connections=4 domain_route_limit=2 "
+            "route_churn=true remote_dns=true shared_endpoint=true "
+            "tls_verified=true client_io=zio-std-io"
         )
         if expected not in result.stdout:
             raise AssertionError(f"missing client result: {result.stdout}")
         if "quic-go SOCKS5 HTTP/3 server passed" not in go_log.read_text():
             raise AssertionError(go_log.read_text())
         print(
-            "HTTP/3 SOCKS5 interoperability passed: origins=2 discovery=http1 "
-            "h3_requests=3 tcp_tunnels=2 udp_associations=1 "
-            "quic_connections=2 domain_routes=2 remote_dns=true "
-            "shared_endpoint=true pool_reuse=true "
+            "HTTP/3 SOCKS5 interoperability passed: origins=3 discovery=http1 "
+            "h3_requests=4 tcp_tunnels=3 udp_associations=1 "
+            "active_quic_connections=2 total_quic_connections=4 "
+            "domain_route_limit=2 route_churn=true remote_dns=true "
+            "shared_endpoint=true "
             "tls13=true client_io=zio-std-io server_io=quic-go-netpoll"
         )
 

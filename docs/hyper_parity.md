@@ -2263,8 +2263,7 @@ opens one association per exclusive QUIC connection, keeps origin and Alt-Svc
 DNS at the proxy, preserves SNI/`:authority`, carries the request deadline over
 proxy setup plus QUIC/TLS, and falls back from optional 0-RTT through the same
 route rather than bypassing it. A Python/quic-go process gate proves HTTPS
-discovery through one TCP tunnel followed by two certificate-verified H3
-requests over one UDP association and one reused QUIC connection. Shared-H3
+discovery followed by certificate-verified H3 over the proxy. Shared-H3
 mode now initializes that association lazily on the first H3 request, so Pool
 construction and TCP fallback remain free of proxy network side effects. Its
 bounded `max_socks5_shared_routes` registry assigns stable per-domain logical
@@ -2275,10 +2274,15 @@ handshakes register authenticated-by-CID initial sources, established traffic
 restores only those aliases, and a new IPv4/IPv6 tuple remains visible to QUIC
 preferred-address/path validation. Because the UDP socket addresses only the
 SOCKS relay, one endpoint can encapsulate targets from either IP family without
-binding a second local socket. A two-origin extension proves two remote-only hostnames and two
-QUIC connections share one endpoint/association, retain independent TLS and
-`:authority`, and reuse the first origin without confusing identical relay
-source IP/port tuples.
+binding a second local socket. Route references belong to the acquisition and
+transfer to its established entry; cancellation, failed handshakes, racing
+losers, idle eviction, and Pool close release them only after CID unregister
+and connection teardown. A failure test times out two different hostnames
+through a one-route endpoint and proves each failed pending route is reclaimed.
+The process gate uses a two-route limit while rotating through three remote-only
+origins and four QUIC connections over one association: creating C evicts A,
+then reconnecting A evicts B, proving churn reuses capacity without confusing
+identical relay source IP/port tuples or crossing TLS/`:authority` state.
 
 ## Remaining evidence
 

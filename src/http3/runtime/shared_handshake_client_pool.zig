@@ -121,6 +121,7 @@ pub fn Pool(comptime Runtime: type) type {
             close_pending: ?quic.one_rtt.TimerDeadline = null,
             pooled_at_ms: u64 = 0,
             release_sequence: u64 = 0,
+            proxy_route_peer: ?std.Io.net.IpAddress = null,
         };
 
         const ConnectCompletion = union(enum) {
@@ -281,7 +282,12 @@ pub fn Pool(comptime Runtime: type) type {
             }
         };
 
-        const ResolveCompletion = anyerror![]std.Io.net.IpAddress;
+        const ResolvedAddresses = struct {
+            items: []std.Io.net.IpAddress,
+            proxy_route_peer: ?std.Io.net.IpAddress = null,
+        };
+
+        const ResolveCompletion = anyerror!ResolvedAddresses;
 
         const PendingResolution = struct {
             owner: *PendingRequestAcquire,
@@ -331,8 +337,13 @@ pub fn Pool(comptime Runtime: type) type {
                     self.future_active = false;
                 }
                 if (self.completion_owned) {
-                    if (self.completion) |addresses| {
-                        pool.allocator.free(addresses);
+                    if (self.completion) |resolved| {
+                        pool.allocator.free(resolved.items);
+                        if (resolved.proxy_route_peer) |peer| {
+                            std.debug.assert(
+                                pool.endpoint.releaseSocks5DomainRoute(peer),
+                            );
+                        }
                     } else |_| {}
                 }
                 pool.allocator.destroy(self);
@@ -478,6 +489,7 @@ pub fn Pool(comptime Runtime: type) type {
             resolution: ?*PendingResolution = null,
             addresses: []std.Io.net.IpAddress = @constCast(&.{}),
             addresses_owned: bool = false,
+            proxy_route_peer: ?std.Io.net.IpAddress = null,
             next_address: usize = 0,
             deadline: ?std.Io.Clock.Timestamp,
             completion_event: *std.Io.Event,
@@ -500,15 +512,16 @@ pub fn Pool(comptime Runtime: type) type {
                 if (self.resolution) |resolution| {
                     const completion = resolution.takeCompletion() orelse
                         return null;
-                    const addresses = completion catch |err| {
+                    const resolved = completion catch |err| {
                         resolution.deinit();
                         self.resolution = null;
                         return err;
                     };
                     resolution.deinit();
                     self.resolution = null;
-                    self.addresses = addresses;
+                    self.addresses = resolved.items;
                     self.addresses_owned = true;
+                    self.proxy_route_peer = resolved.proxy_route_peer;
                     try self.prepareResolvedAddresses();
                     try self.attempts.ensureTotalCapacity(
                         self.pool.allocator,
@@ -802,6 +815,8 @@ pub fn Pool(comptime Runtime: type) type {
                 );
                 _ = pool.connection_count_snapshot.fetchAdd(1, .acq_rel);
                 _ = pool.leased_count_snapshot.fetchAdd(1, .acq_rel);
+                entry.proxy_route_peer = self.proxy_route_peer;
+                self.proxy_route_peer = null;
                 self.reservation_active = false;
                 promoted = false;
                 const handle = attempt.handle;
@@ -832,6 +847,11 @@ pub fn Pool(comptime Runtime: type) type {
                 if (self.early) |*early| early.deinit();
                 if (self.addresses_owned) {
                     pool.allocator.free(self.addresses);
+                }
+                if (self.proxy_route_peer) |peer| {
+                    std.debug.assert(
+                        pool.endpoint.releaseSocks5DomainRoute(peer),
+                    );
                 }
                 self.uri_endpoint.deinit();
                 if (self.reservation_active) pool.releaseShared(1);
@@ -1865,16 +1885,22 @@ pub fn Pool(comptime Runtime: type) type {
                 }
             }
 
-            const addresses = try self.resolveAddressesForRoute(
+            const resolved = try self.resolveAddressesForRoute(
                 endpoint,
                 route,
                 deadline,
             );
-            defer self.allocator.free(addresses);
+            defer self.allocator.free(resolved.items);
+            var proxy_route_peer = resolved.proxy_route_peer;
+            defer if (proxy_route_peer) |peer| {
+                std.debug.assert(
+                    self.endpoint.releaseSocks5DomainRoute(peer),
+                );
+            };
             var last_error: ?anyerror = null;
             var next_early = early;
             var early_path_failed = false;
-            for (addresses) |peer| {
+            for (resolved.items) |peer| {
                 if (self.endpointForPeer(peer) == null) continue;
                 var connected = self.connectOne(
                     &endpoint,
@@ -1926,6 +1952,7 @@ pub fn Pool(comptime Runtime: type) type {
                     .handle = connected.handle,
                     .client = connected.client,
                     .origin_key = origin_key,
+                    .proxy_route_peer = proxy_route_peer,
                 };
                 self.entries.putAssumeCapacityNoClobber(
                     connected.handle,
@@ -1933,6 +1960,7 @@ pub fn Pool(comptime Runtime: type) type {
                 );
                 _ = self.connection_count_snapshot.fetchAdd(1, .acq_rel);
                 _ = self.leased_count_snapshot.fetchAdd(1, .acq_rel);
+                proxy_route_peer = null;
                 reservation_active = false;
                 return .{
                     .pool = self,
@@ -1953,7 +1981,7 @@ pub fn Pool(comptime Runtime: type) type {
             endpoint: Runtime.UriEndpoint,
             route: ConnectRoute,
             deadline: ?std.Io.Clock.Timestamp,
-        ) ![]std.Io.net.IpAddress {
+        ) !ResolvedAddresses {
             if (self.options.proxy_domain_routing) {
                 const host, const port = switch (route) {
                     .origin => .{ endpoint.tls_host, endpoint.port },
@@ -1962,18 +1990,31 @@ pub fn Pool(comptime Runtime: type) type {
                         target.port,
                     },
                 };
-                const peer = std.Io.net.IpAddress.parse(host, port) catch
-                    try self.endpoint.ensureSocks5DomainRoute(host, port);
+                const parsed = std.Io.net.IpAddress.parse(host, port);
+                const peer = parsed catch
+                    try self.endpoint.retainSocks5DomainRoute(host, port);
+                const proxy_route_peer: ?std.Io.net.IpAddress = if (parsed) |_|
+                    null
+                else |_|
+                    peer;
+                errdefer if (proxy_route_peer) |owned_peer| {
+                    std.debug.assert(
+                        self.endpoint.releaseSocks5DomainRoute(owned_peer),
+                    );
+                };
                 const addresses = try self.allocator.alloc(
                     std.Io.net.IpAddress,
                     1,
                 );
                 addresses[0] = peer;
-                return addresses;
+                return .{
+                    .items = addresses,
+                    .proxy_route_peer = proxy_route_peer,
+                };
             }
             const resolver = self.options.resolver orelse
                 self.options.client.address_resolver;
-            return switch (route) {
+            const addresses = try switch (route) {
                 .origin => Runtime.resolveEndpointWithResolverBefore(
                     endpoint,
                     self.allocator,
@@ -1990,6 +2031,7 @@ pub fn Pool(comptime Runtime: type) type {
                     deadline,
                 ),
             };
+            return .{ .items = addresses };
         }
 
         fn validateConnectRoute(
@@ -3064,6 +3106,11 @@ pub fn Pool(comptime Runtime: type) type {
             if (self.last_event_handle == handle) self.last_event_handle = null;
             entry.client.deinit();
             self.allocator.destroy(entry.client);
+            if (entry.proxy_route_peer) |peer| {
+                std.debug.assert(
+                    self.endpoint.releaseSocks5DomainRoute(peer),
+                );
+            }
             entry.origin_key.deinit();
             self.allocator.destroy(entry);
             _ = self.total_dropped.fetchAdd(1, .monotonic);

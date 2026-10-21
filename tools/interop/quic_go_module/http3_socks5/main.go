@@ -45,7 +45,7 @@ func main() {
 	defer packetConn.Close()
 
 	var connections atomic.Uint32
-	results := make(chan error, 3)
+	results := make(chan error, 4)
 	server := &http3.Server{
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{certificate},
@@ -76,6 +76,8 @@ func main() {
 			_, requestErr = w.Write([]byte("h3-socks-a-two"))
 		case "/h3-b-one":
 			_, requestErr = w.Write([]byte("h3-socks-b-one"))
+		case "/h3-c-one":
+			_, requestErr = w.Write([]byte("h3-socks-c-one"))
 		default:
 			requestErr = fmt.Errorf("unexpected target %q", r.URL.RequestURI())
 		}
@@ -85,7 +87,7 @@ func main() {
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(packetConn) }()
 	fmt.Printf("quic-go SOCKS5 HTTP/3 server listening=%s\n", packetConn.LocalAddr())
-	for range 3 {
+	for range 4 {
 		select {
 		case err := <-results:
 			if err != nil {
@@ -98,11 +100,11 @@ func main() {
 		}
 	}
 	time.Sleep(150 * time.Millisecond)
-	if connections.Load() != uint32(len(authorities)) {
-		log.Fatalf("expected %d QUIC connections, got %d", len(authorities), connections.Load())
+	if connections.Load() != 4 {
+		log.Fatalf("expected 4 QUIC connections, got %d", connections.Load())
 	}
 	if err := server.Close(); err != nil {
 		log.Fatalf("close HTTP/3 server: %v", err)
 	}
-	fmt.Printf("quic-go SOCKS5 HTTP/3 server passed: requests=3 connections=%d\n", len(authorities))
+	fmt.Println("quic-go SOCKS5 HTTP/3 server passed: requests=4 connections=4")
 }

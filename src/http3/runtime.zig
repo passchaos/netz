@@ -35745,6 +35745,7 @@ test {
     _ = @import("runtime/handshake_client_pool/shared_authority_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_socks5_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_happy_eyeballs_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_request_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_dispatcher_tests.zig");
