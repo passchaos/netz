@@ -16,12 +16,15 @@ pub const AddressError = net.HostName.ValidateError || error{
     ProxyAddressTypeUnsupported,
 };
 
-pub const Error = AddressError || net.Socket.SendError ||
-    net.Socket.ReceiveTimeoutError || error{
+pub const CodecError = AddressError || error{
     BufferTooSmall,
-    DatagramTruncated,
     FragmentationUnsupported,
     MalformedDatagram,
+};
+
+pub const Error = CodecError || net.Socket.SendError ||
+    net.Socket.ReceiveTimeoutError || error{
+    DatagramTruncated,
     UnexpectedRelaySource,
 };
 
@@ -74,7 +77,7 @@ pub fn encodeDatagram(
     output: []u8,
     destination: Address,
     payload: []const u8,
-) Error![]const u8 {
+) CodecError![]const u8 {
     if (output.len < 4) return error.BufferTooSmall;
     output[0..3].* = .{ 0, 0, 0 };
     const payload_offset = try encodeAddress(output, 3, destination);
@@ -87,7 +90,7 @@ pub fn encodeDatagram(
 
 /// Decode one complete SOCKS5 UDP response in place. The returned hostname and
 /// payload borrow `bytes` and remain valid until the caller reuses that buffer.
-pub fn decodeDatagram(bytes: []u8) Error!Datagram {
+pub fn decodeDatagram(bytes: []u8) CodecError!Datagram {
     if (bytes.len < 4 or bytes[0] != 0 or bytes[1] != 0) {
         return error.MalformedDatagram;
     }
@@ -185,7 +188,7 @@ fn encodeAddress(
     output: []u8,
     initial_offset: usize,
     address: Address,
-) Error!usize {
+) CodecError!usize {
     var offset = initial_offset;
     if (output.len -| offset < 1) return error.BufferTooSmall;
     switch (address) {
@@ -231,7 +234,7 @@ fn encodeAddress(
 fn decodeAddress(
     bytes: []u8,
     initial_offset: usize,
-) Error!struct { address: Address, end: usize } {
+) CodecError!struct { address: Address, end: usize } {
     if (bytes.len -| initial_offset < 1) return error.MalformedDatagram;
     var offset = initial_offset + 1;
     const address: Address = switch (bytes[initial_offset]) {

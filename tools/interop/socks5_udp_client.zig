@@ -59,12 +59,41 @@ pub fn main(init: std.process.Init) !void {
         response.payload,
     );
 
-    association.deinit();
+    var endpoint = try netz.quic.runtime.Endpoint.fromSocks5Association(
+        allocator,
+        &association,
+        .{
+            .max_datagram_size = 1200,
+            .enable_gso_send = true,
+            .enable_gro_receive = true,
+        },
+    );
+    defer if (!closed) endpoint.deinit();
+    try std.testing.expect(endpoint.usesSocks5Udp());
+    try std.testing.expect(!endpoint.gsoSendEnabled());
+    try std.testing.expect(!endpoint.groReceiveEnabled());
+    const echo_address = try std.Io.net.IpAddress.parse(
+        "127.0.0.1",
+        echo_port,
+    );
+    try endpoint.sendBytes(echo_address, "quic endpoint payload");
+    var endpoint_response = try endpoint.receiveBytesWithTimeout(
+        .fromSeconds(3),
+    );
+    defer endpoint_response.deinit(allocator);
+    try std.testing.expect(endpoint_response.from.eql(&echo_address));
+    try std.testing.expectEqualStrings(
+        "peer:quic endpoint payload",
+        endpoint_response.bytes,
+    );
+
+    endpoint.deinit();
     closed = true;
     std.debug.print(
         "SOCKS5 UDP client passed: command=udp-associate auth=strict " ++
             "remote_dns=true wildcard_reply=true fragments=rejected " ++
-            "control_lifetime=true client_io=zio-std-io\n",
+            "control_lifetime=true quic_endpoint=true ecn_gso_gro=fallback " ++
+            "client_io=zio-std-io\n",
         .{},
     );
 }

@@ -78,8 +78,9 @@ def encode_ipv4_datagram(
 
 
 def serve_echo(echo: socket.socket) -> None:
-    payload, client = echo.recvfrom(65535)
-    echo.sendto(b"peer:" + payload, client)
+    for _ in range(2):
+        payload, client = echo.recvfrom(65535)
+        echo.sendto(b"peer:" + payload, client)
 
 
 def serve_proxy(
@@ -115,6 +116,31 @@ def serve_proxy(
         relay.sendto(
             encode_ipv4_datagram(source[0], source[1], echoed),
             udp_client,
+        )
+
+        endpoint_packet, endpoint_client = relay.recvfrom(65535)
+        if endpoint_packet[:3] != bytes((0, 0, 0)):
+            raise AssertionError("bad QUIC endpoint SOCKS prefix")
+        endpoint_host, endpoint_port, endpoint_payload_offset = read_address(
+            endpoint_packet,
+            3,
+        )
+        if endpoint_host != "127.0.0.1" or endpoint_port != echo_port:
+            raise AssertionError(
+                f"QUIC endpoint target mismatch: {endpoint_host}:{endpoint_port}"
+            )
+        relay.sendto(
+            endpoint_packet[endpoint_payload_offset:],
+            (endpoint_host, endpoint_port),
+        )
+        endpoint_echoed, endpoint_source = relay.recvfrom(65535)
+        relay.sendto(
+            encode_ipv4_datagram(
+                endpoint_source[0],
+                endpoint_source[1],
+                endpoint_echoed,
+            ),
+            endpoint_client,
         )
         if client.recv(1) != b"":
             raise AssertionError("UDP association control emitted trailing bytes")
@@ -172,7 +198,8 @@ def main() -> None:
     expected = (
         "SOCKS5 UDP client passed: command=udp-associate auth=strict "
         "remote_dns=true wildcard_reply=true fragments=rejected "
-        "control_lifetime=true client_io=zio-std-io"
+        "control_lifetime=true quic_endpoint=true ecn_gso_gro=fallback "
+        "client_io=zio-std-io"
     )
     if expected not in result.stdout:
         raise AssertionError(f"missing client result: {result.stdout}")
@@ -180,6 +207,7 @@ def main() -> None:
         "SOCKS5 UDP interoperability passed: command=udp-associate "
         "auth=rfc1929 remote_dns=true wildcard_reply=true "
         "fragments=rejected control_lifetime=true "
+        "quic_endpoint=true ecn_gso_gro=fallback "
         "client_io=zio-std-io peer_io=python-socket"
     )
 

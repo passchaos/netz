@@ -38,6 +38,10 @@ pub const keylog = @import("observability/keylog/mod.zig");
 pub const quic_lb = @import("load_balancing/quic_lb/mod.zig");
 pub const resumption = @import("resumption/mod.zig");
 
+test {
+    _ = @import("socks5_endpoint_tests.zig");
+}
+
 pub const Error = wire.Error || error{
     BufferTooShort,
     IntegerOverflow,

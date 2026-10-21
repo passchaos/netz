@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const quic = @import("mod.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const socks5_proxy = @import("../proxy/socks5.zig");
+const socks5_udp = socks5_proxy.udp;
 
 const net = std.Io.net;
 
@@ -11,9 +13,11 @@ pub const Error = quic.Error || error{
     TrailingBytes,
     NoConnectionRoute,
     EcnUnavailable,
+    ProxyDomainSourceUnsupported,
+    UnexpectedRelaySource,
     InvalidGroSegment,
     CallerBufferReceiveWithGro,
-} || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
+} || socks5_udp.CodecError || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 pub const ReceiveTimeoutError = Error ||
     std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
@@ -162,6 +166,23 @@ const HeldSend = struct {
     ecn: quic.packet_space.EcnCodepoint,
 };
 
+const Socks5UdpState = struct {
+    control: net.Stream,
+    relay: net.IpAddress,
+    send_storage: []u8,
+};
+
+fn socks5FrameCapacity(max_datagram_size: usize) usize {
+    return @min(
+        @as(usize, std.math.maxInt(u16)),
+        std.math.add(
+            usize,
+            max_datagram_size,
+            socks5_udp.max_header_len,
+        ) catch @as(usize, std.math.maxInt(u16)),
+    );
+}
+
 pub const Server = struct {
     endpoint: Endpoint,
 
@@ -308,6 +329,9 @@ pub const Endpoint = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     socket: net.Socket,
+    /// Present only when the socket belongs to an RFC 1928 UDP association.
+    /// The TCP stream must remain open for the complete endpoint lifetime.
+    socks5_udp: ?Socks5UdpState = null,
     limits: Limits = .{},
     receive_ecn_enabled: bool = false,
     send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
@@ -344,6 +368,43 @@ pub const Endpoint = struct {
         return endpoint;
     }
 
+    /// Transfer a live `proxy.socks5.UdpAssociation` into a QUIC endpoint.
+    ///
+    /// The association pointer becomes invalid on success. SOCKS5 cannot carry
+    /// destination-path ECN or preserve kernel GSO/GRO records, so the adapter
+    /// explicitly disables those capabilities while retaining exact batch
+    /// prefix progress through bounded per-datagram framing.
+    pub fn fromSocks5Association(
+        allocator: std.mem.Allocator,
+        association: *socks5_proxy.UdpAssociation,
+        limits: Limits,
+    ) Error!Endpoint {
+        const send_storage = try allocator.alloc(
+            u8,
+            socks5FrameCapacity(limits.max_datagram_size),
+        );
+        const io = association.io;
+        const socket = association.socket;
+        const relay = association.relay;
+        const control = association.control.takeStream();
+        association.* = undefined;
+        var endpoint: Endpoint = .{
+            .io = io,
+            .allocator = allocator,
+            .socket = socket,
+            .socks5_udp = .{
+                .control = control,
+                .relay = relay,
+                .send_storage = send_storage,
+            },
+            .limits = limits,
+            .gso_send_enabled = false,
+            .gro_receive_enabled = false,
+        };
+        endpoint.configureSocketReceiveBuffer();
+        return endpoint;
+    }
+
     pub fn deinit(self: *Endpoint) void {
         for (self.pending_received.items[self.pending_receive_index..]) |*pending| {
             pending.deinit(self.allocator);
@@ -351,6 +412,10 @@ pub const Endpoint = struct {
         self.pending_received.deinit(self.allocator);
         if (self.held_send) |held| self.allocator.free(held.bytes);
         self.socket.close(self.io);
+        if (self.socks5_udp) |proxy| {
+            proxy.control.close(self.io);
+            self.allocator.free(proxy.send_storage);
+        }
         self.* = undefined;
     }
 
@@ -364,6 +429,10 @@ pub const Endpoint = struct {
 
     pub fn groReceiveEnabled(self: Endpoint) bool {
         return self.gro_receive_enabled;
+    }
+
+    pub fn usesSocks5Udp(self: Endpoint) bool {
+        return self.socks5_udp != null;
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
@@ -429,7 +498,18 @@ pub const Endpoint = struct {
         bytes: []const u8,
         ecn: quic.packet_space.EcnCodepoint,
     ) Error!void {
+        try self.validateSocks5PayloadSize(to, bytes.len);
         try self.applyOutgoingEcnMark(ecn);
+        if (self.socks5_udp) |*proxy| {
+            const framed = try socks5_udp.encodeDatagram(
+                proxy.send_storage,
+                .{ .ip = to },
+                bytes,
+            );
+            try self.socket.send(self.io, &proxy.relay, framed);
+            self.recordSocketSent(1, framed.len);
+            return;
+        }
         try self.socket.send(self.io, &to, bytes);
         self.recordSocketSent(1, bytes.len);
     }
@@ -536,6 +616,30 @@ pub const Endpoint = struct {
             // committed. Recovery will retransmit the missing older packet.
             self.flushHeldSend() catch {};
             return .{ .sent_count = datagrams.len };
+        }
+        if (self.socks5_udp != null) {
+            try self.validateSocks5DatagramSize(to, datagrams);
+            try self.applyOutgoingEcnMark(ecn);
+            var sent_count: usize = 0;
+            for (datagrams) |bytes| {
+                self.sendSocketDatagram(to, bytes, ecn) catch |err| {
+                    if (endpointSocketSendError(err)) |send_error| {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = send_error,
+                        };
+                    }
+                    if (sent_count != 0) {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = error.Unexpected,
+                        };
+                    }
+                    return err;
+                };
+                sent_count += 1;
+            }
+            return .{ .sent_count = sent_count };
         }
         try self.applyOutgoingEcnMark(ecn);
 
@@ -655,6 +759,39 @@ pub const Endpoint = struct {
             }
             self.flushHeldSend() catch {};
             return .{ .sent_count = datagrams.len };
+        }
+        if (self.socks5_udp != null) {
+            for (datagrams) |datagram| {
+                try self.validateSocks5PayloadSize(
+                    datagram.to,
+                    datagram.bytes.len,
+                );
+            }
+            try self.applyOutgoingEcnMark(ecn);
+            var sent_count: usize = 0;
+            for (datagrams) |datagram| {
+                self.sendSocketDatagram(
+                    datagram.to,
+                    datagram.bytes,
+                    ecn,
+                ) catch |err| {
+                    if (endpointSocketSendError(err)) |send_error| {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = send_error,
+                        };
+                    }
+                    if (sent_count != 0) {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = error.Unexpected,
+                        };
+                    }
+                    return err;
+                };
+                sent_count += 1;
+            }
+            return .{ .sent_count = sent_count };
         }
         try self.applyOutgoingEcnMark(ecn);
 
@@ -1386,10 +1523,7 @@ pub const Endpoint = struct {
     }
 
     fn receiveKernelBytesBatchWithEcn(self: *Endpoint) Error!OwnedBytesBatch {
-        const receive_capacity = if (self.gro_receive_enabled)
-            std.math.maxInt(u16)
-        else
-            self.limits.max_datagram_size;
+        const receive_capacity = self.receiveBufferCapacity();
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
@@ -1506,17 +1640,19 @@ pub const Endpoint = struct {
         if (incoming.flags.trunc or incoming.flags.ctrunc) {
             return error.DatagramTooLarge;
         }
-        if (incoming.data.len > self.limits.max_datagram_size) {
+        const normalized = try self.finishSocks5Incoming(incoming);
+        if (normalized.data.len == 0) return error.EmptyDatagram;
+        if (normalized.data.len > self.limits.max_datagram_size) {
             return error.DatagramTooLarge;
         }
-        const control = receiveControlFromBytes(incoming.control);
+        const control = receiveControlFromBytes(normalized.control);
         if (control.gro_segment_size != null) {
             return error.CallerBufferReceiveWithGro;
         }
         return .{
-            .from = incoming.from,
+            .from = normalized.from,
             .received_on = self,
-            .bytes = incoming.data,
+            .bytes = normalized.data,
             .ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect,
         };
     }
@@ -1525,10 +1661,7 @@ pub const Endpoint = struct {
         self: *Endpoint,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytesBatch {
-        const receive_capacity = if (self.gro_receive_enabled)
-            std.math.maxInt(u16)
-        else
-            self.limits.max_datagram_size;
+        const receive_capacity = self.receiveBufferCapacity();
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
@@ -1556,6 +1689,9 @@ pub const Endpoint = struct {
         incoming: net.IncomingMessage,
     ) Error!OwnedBytesBatch {
         const view = try self.finishKernelBytesBatchView(incoming);
+        if (view.storage.ptr != buffer.ptr) {
+            @memmove(buffer[0..view.storage.len], view.storage);
+        }
         // Most allocator implementations can shrink this allocation in place.
         // Returning receive storage directly avoids an alloc-copy-free cycle.
         const storage = try self.allocator.realloc(buffer, view.storage.len);
@@ -1577,17 +1713,19 @@ pub const Endpoint = struct {
         if (incoming.flags.trunc or incoming.flags.ctrunc) {
             return error.DatagramTooLarge;
         }
-        const control = receiveControlFromBytes(incoming.control);
+        const normalized = try self.finishSocks5Incoming(incoming);
+        if (normalized.data.len == 0) return error.EmptyDatagram;
+        const control = receiveControlFromBytes(normalized.control);
         const ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect;
         const segment_size = control.gro_segment_size orelse {
-            if (incoming.data.len > self.limits.max_datagram_size) {
+            if (normalized.data.len > self.limits.max_datagram_size) {
                 return error.DatagramTooLarge;
             }
             return .{
-                .from = incoming.from,
+                .from = normalized.from,
                 .received_on = self,
-                .storage = incoming.data,
-                .segment_size = incoming.data.len,
+                .storage = normalized.data,
+                .segment_size = normalized.data.len,
                 .segment_count = 1,
                 .ecn = ecn,
             };
@@ -1595,26 +1733,54 @@ pub const Endpoint = struct {
         if (!self.gro_receive_enabled or
             segment_size == 0 or
             segment_size > self.limits.max_datagram_size or
-            incoming.data.len <= segment_size)
+            normalized.data.len <= segment_size)
         {
             return error.InvalidGroSegment;
         }
         const segment_count = std.math.divCeil(
             usize,
-            incoming.data.len,
+            normalized.data.len,
             segment_size,
         ) catch return error.InvalidGroSegment;
         if (segment_count < 2 or segment_count > udp_gro_max_segments) {
             return error.InvalidGroSegment;
         }
         return .{
-            .from = incoming.from,
+            .from = normalized.from,
             .received_on = self,
-            .storage = incoming.data,
+            .storage = normalized.data,
             .segment_size = segment_size,
             .segment_count = segment_count,
             .ecn = ecn,
         };
+    }
+
+    fn finishSocks5Incoming(
+        self: Endpoint,
+        incoming: net.IncomingMessage,
+    ) Error!net.IncomingMessage {
+        const proxy = self.socks5_udp orelse return incoming;
+        if (!incoming.from.eql(&proxy.relay)) {
+            return error.UnexpectedRelaySource;
+        }
+        const datagram = try socks5_udp.decodeDatagram(incoming.data);
+        const source = switch (datagram.source) {
+            .ip => |ip| ip,
+            .domain => return error.ProxyDomainSourceUnsupported,
+        };
+        var normalized = incoming;
+        normalized.from = source;
+        normalized.data = datagram.payload;
+        // Any ancillary ECN/GRO record describes the client-to-relay path, not
+        // the relayed destination path, so it must not enter QUIC validation.
+        normalized.control = normalized.data[0..0];
+        return normalized;
+    }
+
+    fn receiveBufferCapacity(self: Endpoint) usize {
+        if (self.gro_receive_enabled) return max_gro_receive_bytes;
+        if (self.socks5_udp == null) return self.limits.max_datagram_size;
+        return socks5FrameCapacity(self.limits.max_datagram_size);
     }
 
     fn validateBatchReceiveBuffer(
@@ -1622,10 +1788,7 @@ pub const Endpoint = struct {
         buffer: []u8,
     ) Error!void {
         if (buffer.len == 0) return error.BufferTooShort;
-        const required = if (self.gro_receive_enabled)
-            max_gro_receive_bytes
-        else
-            self.limits.max_datagram_size;
+        const required = self.receiveBufferCapacity();
         if (buffer.len < required) return error.BufferTooShort;
     }
 
@@ -1642,7 +1805,7 @@ pub const Endpoint = struct {
         }
         const required = std.math.mul(
             usize,
-            self.limits.max_datagram_size,
+            self.receiveBufferCapacity(),
             out.len,
         ) catch return error.BufferTooShort;
         if (buffer.len < required) return error.BufferTooShort;
@@ -1678,10 +1841,7 @@ pub const Endpoint = struct {
         self: *Endpoint,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes {
-        const receive_capacity = if (self.gro_receive_enabled)
-            std.math.maxInt(u16)
-        else
-            self.limits.max_datagram_size;
+        const receive_capacity = self.receiveBufferCapacity();
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
@@ -1704,12 +1864,14 @@ pub const Endpoint = struct {
         if (incoming.flags.trunc or incoming.flags.ctrunc) {
             return error.DatagramTooLarge;
         }
-        const control = receiveControlFromBytes(incoming.control);
+        const normalized = try self.finishSocks5Incoming(incoming);
+        if (normalized.data.len == 0) return error.EmptyDatagram;
+        const control = receiveControlFromBytes(normalized.control);
         if (control.gro_segment_size) |segment_size| {
             if (!self.gro_receive_enabled or
                 segment_size == 0 or
                 segment_size > self.limits.max_datagram_size or
-                incoming.data.len < segment_size)
+                normalized.data.len < segment_size)
             {
                 return error.InvalidGroSegment;
             }
@@ -1717,13 +1879,13 @@ pub const Endpoint = struct {
             // additional GRO segments into the same FIFO used by normal reads.
             const segment_count = std.math.divCeil(
                 usize,
-                incoming.data.len,
+                normalized.data.len,
                 segment_size,
             ) catch return error.InvalidGroSegment;
             if (segment_count > 1) {
                 const storage = try self.allocator.realloc(
                     buffer,
-                    incoming.data.len,
+                    normalized.data.len,
                 );
                 const shared = try self.allocator.create(
                     SharedReceiveBuffer,
@@ -1741,7 +1903,7 @@ pub const Endpoint = struct {
                     const start = index * segment_size;
                     const end = @min(start + segment_size, storage.len);
                     self.pending_received.appendAssumeCapacity(.{
-                        .from = incoming.from,
+                        .from = normalized.from,
                         .received_on = self,
                         .bytes = storage[start..end],
                         .ecn = if (self.receive_ecn_enabled)
@@ -1752,7 +1914,7 @@ pub const Endpoint = struct {
                     });
                 }
                 return .{
-                    .from = incoming.from,
+                    .from = normalized.from,
                     .received_on = self,
                     .bytes = storage[0..segment_size],
                     .ecn = if (self.receive_ecn_enabled)
@@ -1763,15 +1925,18 @@ pub const Endpoint = struct {
                 };
             }
         }
-        if (incoming.data.len > self.limits.max_datagram_size) {
+        if (normalized.data.len > self.limits.max_datagram_size) {
             return error.DatagramTooLarge;
+        }
+        if (normalized.data.ptr != buffer.ptr) {
+            @memmove(buffer[0..normalized.data.len], normalized.data);
         }
         const bytes = try self.allocator.realloc(
             buffer,
-            incoming.data.len,
+            normalized.data.len,
         );
         return .{
-            .from = incoming.from,
+            .from = normalized.from,
             .received_on = self,
             .bytes = bytes,
             .ecn = if (self.receive_ecn_enabled)
@@ -1858,6 +2023,32 @@ pub const Endpoint = struct {
         );
     }
 
+    fn validateSocks5DatagramSize(
+        self: Endpoint,
+        to: net.IpAddress,
+        datagrams: []const []const u8,
+    ) Error!void {
+        if (self.socks5_udp == null) return;
+        for (datagrams) |bytes| {
+            try self.validateSocks5PayloadSize(to, bytes.len);
+        }
+    }
+
+    fn validateSocks5PayloadSize(
+        self: Endpoint,
+        to: net.IpAddress,
+        payload_len: usize,
+    ) Error!void {
+        if (self.socks5_udp == null) return;
+        const header_len: usize = switch (to) {
+            .ip4 => 3 + 1 + 4 + 2,
+            .ip6 => socks5_udp.max_header_len,
+        };
+        if (payload_len > std.math.maxInt(u16) - header_len) {
+            return error.DatagramTooLarge;
+        }
+    }
+
     fn enableGroReceive(self: *Endpoint) void {
         if (!self.limits.enable_gro_receive or !udpGroSupported()) return;
         const enabled: u32 = 1;
@@ -1872,6 +2063,11 @@ pub const Endpoint = struct {
     fn applyOutgoingEcnMark(self: *Endpoint, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (self.test_force_ecn_unavailable and ecn != .not_ect) {
             return error.EcnUnavailable;
+        }
+        if (self.socks5_udp != null) {
+            if (ecn != .not_ect) return error.EcnUnavailable;
+            self.send_ecn_mark = .not_ect;
+            return;
         }
         if (ecn == self.send_ecn_mark) return;
         if (!socketEcnSupported()) {
@@ -2486,7 +2682,7 @@ pub const DatagramSource = struct {
             .receive_into_capacity = if (endpoint.gro_receive_enabled)
                 0
             else
-                endpoint.limits.max_datagram_size,
+                endpoint.receiveBufferCapacity(),
         };
     }
 

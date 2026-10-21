@@ -2253,9 +2253,15 @@ bypassing the proxy with QUIC. The public proxy layer now implements RFC 1928
 UDP ASSOCIATE with a control-connection-owned lifetime, IPv4/IPv6/domain
 datagram framing, explicit fragment rejection, wildcard relay normalization,
 caller-buffer sends/receives, relay-source validation, and an independent
-Python UDP relay gate. HTTP/3 enablement still requires an explicit QUIC
-endpoint adapter so the proxy framing does not discard batch progress, source
-addresses, or the deliberate ECN/GSO/GRO fallback policy.
+Python UDP relay gate. `quic.runtime.Endpoint.fromSocks5Association` now moves
+that association into the existing QUIC socket owner, preserves exact batch
+prefix progress, restores each relayed source address, keeps the TCP control
+stream alive, and explicitly disables destination-path ECN plus GSO/GRO rather
+than applying relay-hop metadata to QUIC. Existing caller-owned
+`HandshakeClient.connectFrom` and WebTransport endpoint-client surfaces can use
+this endpoint without a second UDP reader. The high-level HTTP pool still
+rejects a simultaneous SOCKS5/HTTP3 configuration until route creation,
+hostname resolution, and endpoint ownership are integrated there.
 
 ## Remaining evidence
 
