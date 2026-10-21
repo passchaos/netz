@@ -23,6 +23,7 @@ zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all --strea
 zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all --enable-gro-receive
 zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
+zig build interop-webtransport-socks5 -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
@@ -77,7 +78,10 @@ retain origin SNI/`:authority`, move the association into the sole QUIC socket
 owner, and preserve one absolute deadline through proxy, QUIC/TLS, SETTINGS,
 and Extended CONNECT. IP preferred-address traffic remains inside the same
 association while destination-path ECN and GSO/GRO explicitly fall back rather
-than reusing relay-hop metadata.
+than reusing relay-hop metadata. The independent wtransport gate now repeats
+the rejected and accepted connections through two authenticated associations,
+then verifies DATAGRAM limits and exchange, bidirectional and unidirectional
+streams, RESET_STREAM/STOP_SENDING recovery, connection reuse, and peer close.
 Both native endpoint roles now expose the negotiated WebTransport application
 payload limit as `maxDatagramSize`, subtracting QUIC DATAGRAM framing and the
 session-ID prefix. The underlying QUIC query also subtracts the current path

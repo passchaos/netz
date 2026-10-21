@@ -536,7 +536,7 @@ func benchmarkEchoRound(stream deadlineReadWriter, config benchmarkConfig, round
 func serveWebSocket(writer http.ResponseWriter, request *http.Request) error {
 	if request.Method != http.MethodConnect || request.Proto != "websocket" ||
 		request.ProtoMajor != 3 || request.URL.RequestURI() != websocketPath ||
-		request.Host != "localhost" || request.Header.Get("Origin") != origin ||
+		(request.Host != "localhost" && !strings.HasPrefix(request.Host, "localhost:")) || request.Header.Get("Origin") != origin ||
 		request.Header.Get("Sec-WebSocket-Version") != "13" ||
 		request.Header.Get("Sec-WebSocket-Protocol") != protocol ||
 		request.Header.Get("Sec-WebSocket-Extensions") != perMessageDeflate {

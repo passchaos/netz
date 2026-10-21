@@ -12,12 +12,32 @@ pub fn main(init: std.process.Init) !void {
     if (args.len >= 4 and std.mem.eql(u8, args[1], "bench-client")) {
         return runBenchmark(init, args[2..]);
     }
-    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 5) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
-    const version = try parseVersion(args[3..]);
+    var version: netz.quic.Version = .version_1;
+    var version_set = false;
+    var socks5_port: ?u16 = null;
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--version=2") and !version_set) {
+            version = .version_2;
+            version_set = true;
+        } else if (std.mem.startsWith(u8, arg, "--socks5-port=") and
+            socks5_port == null)
+        {
+            const value = try std.fmt.parseInt(
+                u16,
+                arg["--socks5-port=".len..],
+                10,
+            );
+            if (value == 0) return error.InvalidArgument;
+            socks5_port = value;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -42,46 +62,83 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.randomSecure(io, &original_dcid);
     try std.Io.randomSecure(io, &client_cid);
 
-    var connection = try netz.websocket.runtime.h3.Client.connect(
+    const h3_limits = netz.http3.runtime.Limits{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 16,
+    } };
+    const h3_options = netz.http3.runtime.HandshakeClientOptions{
+        .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .version = version,
+            .available_versions = availableVersions(version),
+            .server_name = "localhost",
+            .server_auth = verifier.clientVerifier(),
+            .max_crypto_buffer = 64 * 1024,
+            .initial_one_rtt_config = .{
+                .key_update_profile = if (version == .version_2)
+                    .quic_go_v0_59
+                else
+                    .rfc,
+            },
+        },
+        // Splitting HTTP/3 DATA prevents the external exchange from
+        // accidentally depending on one WebSocket frame per QUIC write.
+        // Five-byte DATA contributions push the pinned quic-go peer past
+        // its first automatic key update while RFC 9220 frames are split.
+        .session = .{ .max_stream_frame_data = 5 },
+    };
+    const connect_options = netz.websocket.runtime.h3.ConnectOptions{
+        .authority = "localhost",
+        .path = "/rfc9220",
+        .origin = "https://example.test",
+        .protocols = &.{"netz-chat"},
+        .enable_permessage_deflate = true,
+        .compression_threshold = 1,
+        .limits = websocketLimits(),
+    };
+    var connection = if (socks5_port) |proxy_port| blk: {
+        const uri = try std.fmt.allocPrint(
+            allocator,
+            "https://localhost:{d}/rfc9220",
+            .{port},
+        );
+        defer allocator.free(uri);
+        break :blk try netz.websocket.runtime.h3.Client.connectUriWithTimeout(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            .{
+                .protocols = connect_options.protocols,
+                .origin = connect_options.origin,
+                .enable_permessage_deflate = true,
+                .compression_threshold = 1,
+                .limits = connect_options.limits,
+                .h3_limits = h3_limits,
+                .h3 = h3_options,
+                .socks5_proxy = .{
+                    .host = "127.0.0.1",
+                    .port = proxy_port,
+                    .options = .{
+                        .credentials = .{
+                            .username = "user",
+                            .password = "secret",
+                        },
+                        .allow_no_authentication = false,
+                    },
+                },
+            },
+            .fromSeconds(8),
+        );
+    } else try netz.websocket.runtime.h3.Client.connect(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         .{ .ip4 = .loopback(port) },
-        .{ .quic = .{
-            .max_datagram_size = 4096,
-            .max_frames_per_datagram = 16,
-        } },
-        .{
-            .handshake = .{
-                .original_destination_connection_id = &original_dcid,
-                .local_connection_id = &client_cid,
-                .version = version,
-                .available_versions = availableVersions(version),
-                .server_name = "localhost",
-                .server_auth = verifier.clientVerifier(),
-                .max_crypto_buffer = 64 * 1024,
-                .initial_one_rtt_config = .{
-                    .key_update_profile = if (version == .version_2)
-                        .quic_go_v0_59
-                    else
-                        .rfc,
-                },
-            },
-            // Splitting HTTP/3 DATA prevents the external exchange from
-            // accidentally depending on one WebSocket frame per QUIC write.
-            // Five-byte DATA contributions push the pinned quic-go peer past
-            // its first automatic key update while RFC 9220 frames are split.
-            .session = .{ .max_stream_frame_data = 5 },
-        },
-        .{
-            .authority = "localhost",
-            .path = "/rfc9220",
-            .origin = "https://example.test",
-            .protocols = &.{"netz-chat"},
-            .enable_permessage_deflate = true,
-            .compression_threshold = 1,
-            .limits = websocketLimits(),
-        },
+        h3_limits,
+        h3_options,
+        connect_options,
     );
     defer connection.deinit();
     if (!std.mem.eql(u8, connection.negotiatedAlpn(), "h3") or
@@ -178,6 +235,13 @@ pub fn main(init: std.process.Init) !void {
         "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d} client_io=zio-std-io server_io=quic-go-netpoll\n",
         .{ versionNumber(version), local_key_updates, peer_key_updates },
     );
+    if (socks5_port != null) {
+        std.debug.print(
+            "netz RFC 9220 SOCKS5 route passed: udp_associations=1 " ++
+                "remote_dns=true tls_verified=true close=1000/done\n",
+            .{},
+        );
+    }
 }
 
 fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {

@@ -1,4 +1,4 @@
-# netz vs `~/Work/websocket.zig` parity audit
+# netz vs `/nav_env/Work/websocket.zig` parity audit
 
 This audit records direct evidence for the WebSocket portion of the broader
 netz improvement goal. It distinguishes feature coverage from measured hot
@@ -27,7 +27,7 @@ in-process tests and benchmark:
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 ```
 
-The gate builds the audited `~/Work/hyper` checkout offline, enables Hyper's
+The gate builds the audited `/nav_env/Work/hyper` checkout offline, enables Hyper's
 HTTP/2 Extended CONNECT setting, and verifies the `CONNECT` method,
 `:protocol = websocket`, path and WebSocket version before accepting its
 upgraded byte stream. A netz client then sends masked text split across three
@@ -1107,7 +1107,11 @@ bound to the HTTPS origin. One caller deadline spans proxy authentication,
 association creation, QUIC/TLS, peer SETTINGS, and the WebSocket CONNECT
 response; the shared HTTP/3 transport gate independently proves the underlying
 remote-DNS and connection-lifecycle path before the unchanged RFC 9220 codec is
-adopted.
+adopted. `zig build interop-websocket-h3-socks5 -Doptimize=ReleaseFast`
+then runs the complete independent quic-go exchange through that route:
+fragmented masked text, two no-context-takeover compressed messages,
+Ping/Pong, and Close 1000/`done`, with certificate verification and proxy-side
+`localhost` DNS asserted by the relay.
 
 ## Remaining evidence before a broad completion claim
 

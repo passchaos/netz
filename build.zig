@@ -2356,6 +2356,17 @@ pub fn build(b: *std.Build) void {
         "Run bidirectional RFC 9220 interoperability with quic-go",
     );
     websocket_h3_quic_go_step.dependOn(&websocket_h3_quic_go.step);
+    const websocket_h3_socks5 = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/websocket_h3_socks5.py",
+    });
+    websocket_h3_socks5.addArtifactArg(websocket_h3_quic_go_client);
+    const websocket_h3_socks5_step = b.step(
+        "interop-websocket-h3-socks5",
+        "Run RFC 9220 through an independent SOCKS5 UDP relay",
+    );
+    websocket_h3_socks5_step.dependOn(&websocket_h3_socks5.step);
+    test_step.dependOn(&websocket_h3_socks5.step);
     const websocket_h3_quic_go_bench = b.addSystemCommand(
         &.{"tools/interop/websocket_h3_quic_go.sh"},
     );
@@ -2895,6 +2906,17 @@ pub fn build(b: *std.Build) void {
     webtransport_wtransport_step.dependOn(
         &webtransport_wtransport.step,
     );
+    const webtransport_socks5 = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/webtransport_socks5.py",
+    });
+    webtransport_socks5.addArtifactArg(webtransport_wtransport_client);
+    const webtransport_socks5_step = b.step(
+        "interop-webtransport-socks5",
+        "Run WebTransport through independent SOCKS5 UDP relays",
+    );
+    webtransport_socks5_step.dependOn(&webtransport_socks5.step);
+    test_step.dependOn(&webtransport_socks5.step);
     const webtransport_wtransport_bench = b.addSystemCommand(&.{
         "tools/interop/webtransport_wtransport.sh",
     });

@@ -86,9 +86,21 @@ pub fn main(init: std.process.Init) !void {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-client")) {
         return runBenchmark(init, args[2..]);
     }
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const socks5_port: ?u16 = if (args.len == 3) blk: {
+        if (!std.mem.startsWith(u8, args[2], "--socks5-port=")) {
+            return error.InvalidArgument;
+        }
+        const value = try std.fmt.parseInt(
+            u16,
+            args[2]["--socks5-port=".len..],
+            10,
+        );
+        if (value == 0) return error.InvalidArgument;
+        break :blk value;
+    } else null;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -101,7 +113,32 @@ pub fn main(init: std.process.Init) !void {
         [_]u8{ 0x77, 0x74, 0x72, 0x65, 0x6a, 0x00, 0x00, 0x01 };
     const rejected_client_cid =
         [_]u8{ 0x77, 0x74, 0x72, 0x65, 0x6a, 0x00, 0x00, 0x02 };
-    try std.testing.expectError(
+    if (socks5_port) |proxy_port| {
+        const rejected_uri = try std.fmt.allocPrint(
+            allocator,
+            "https://localhost:{d}/rejected",
+            .{port},
+        );
+        defer allocator.free(rejected_uri);
+        try std.testing.expectError(
+            error.SessionRejected,
+            netz.webtransport.runtime.HandshakeClientSession.connectUri(
+                allocator,
+                io,
+                .{ .ip4 = .loopback(0) },
+                rejected_uri,
+                .{
+                    .h3 = .{ .handshake = .{
+                        .original_destination_connection_id = &rejected_original_dcid,
+                        .local_connection_id = &rejected_client_cid,
+                        .server_name = "localhost",
+                        .max_crypto_buffer = 64 * 1024,
+                    } },
+                    .socks5_proxy = socksProxy(proxy_port),
+                },
+            ),
+        );
+    } else try std.testing.expectError(
         error.SessionRejected,
         netz.webtransport.runtime.HandshakeClientSession.connect(
             allocator,
@@ -123,8 +160,8 @@ pub fn main(init: std.process.Init) !void {
 
     const uri = try std.fmt.allocPrint(
         allocator,
-        "https://127.0.0.1:{d}/interop",
-        .{port},
+        "https://{s}:{d}/interop",
+        .{ if (socks5_port != null) "localhost" else "127.0.0.1", port },
     );
     defer allocator.free(uri);
     var client = try netz.webtransport.runtime.HandshakeClientSession.connectUri(
@@ -162,6 +199,10 @@ pub fn main(init: std.process.Init) !void {
                     .max_stream_frame_data = 1200,
                 },
             },
+            .socks5_proxy = if (socks5_port) |proxy_port|
+                socksProxy(proxy_port)
+            else
+                null,
         },
     );
     defer client.deinit();
@@ -279,6 +320,28 @@ pub fn main(init: std.process.Init) !void {
         "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
         .{max_datagram_size},
     );
+    if (socks5_port != null) {
+        std.debug.print(
+            "netz WebTransport SOCKS5 route passed: udp_associations=2 " ++
+                "remote_dns=true rejection=404 datagram=true streams=true " ++
+                "peer_close=true\n",
+            .{},
+        );
+    }
+}
+
+fn socksProxy(port: u16) netz.http3.socks5_runtime.Proxy {
+    return .{
+        .host = "127.0.0.1",
+        .port = port,
+        .options = .{
+            .credentials = .{
+                .username = "user",
+                .password = "secret",
+            },
+            .allow_no_authentication = false,
+        },
+    };
 }
 
 fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
