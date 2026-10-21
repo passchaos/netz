@@ -1661,6 +1661,29 @@ pub fn build(b: *std.Build) void {
     http_socks5_step.dependOn(&http_socks5.step);
     test_step.dependOn(&http_socks5.step);
 
+    const socks5_udp_client = b.addExecutable(.{
+        .name = "netz-socks5-udp-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/socks5_udp_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const socks5_udp = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/socks5_udp.py",
+    });
+    socks5_udp.addArtifactArg(socks5_udp_client);
+    const socks5_udp_step = b.step(
+        "interop-socks5-udp",
+        "Verify RFC 1928 UDP ASSOCIATE against an independent relay",
+    );
+    socks5_udp_step.dependOn(&socks5_udp.step);
+    test_step.dependOn(&socks5_udp.step);
+
     const mqtt_broker_config = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

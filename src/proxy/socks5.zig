@@ -9,12 +9,16 @@ const address_resolver = @import("../internal/address_resolver.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const udp_impl = @import("socks5/udp.zig");
 
 const net = std.Io.net;
 
 pub const AddressResolver = address_resolver.Resolver;
 pub const AddressConnectPolicy = tcp_connect.AddressConnectPolicy;
 pub const HappyEyeballsOptions = tcp_connect.HappyEyeballsOptions;
+pub const udp = udp_impl;
+pub const Target = udp.Address;
+pub const ReplyAddress = udp.OwnedAddress;
 
 pub const Credentials = struct {
     username: []const u8,
@@ -70,6 +74,328 @@ const AddressType = enum(u8) {
     ipv6 = 0x04,
     _,
 };
+
+pub const Command = enum(u8) {
+    connect = 0x01,
+    bind = 0x02,
+    udp_associate = 0x03,
+};
+
+/// One authenticated SOCKS5 TCP control connection. The stored deadline spans
+/// proxy resolution, TCP, authentication, and the first command. A successful
+/// CONNECT may transfer the stream with `takeStream`; UDP ASSOCIATE callers keep
+/// this value alive for the complete association lifetime.
+pub const Control = struct {
+    io: std.Io,
+    stream: net.Stream,
+    deadline: ?std.Io.Clock.Timestamp,
+
+    pub fn openHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_host: []const u8,
+        proxy_port: u16,
+        options: Options,
+    ) Error!Control {
+        return openHostMaybeDeadline(
+            allocator,
+            io,
+            proxy_host,
+            proxy_port,
+            options,
+            try deadline_policy.fromTimeout(io, options.connect_timeout),
+        );
+    }
+
+    pub fn openHostWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_host: []const u8,
+        proxy_port: u16,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Control {
+        return openHostMaybeDeadline(
+            allocator,
+            io,
+            proxy_host,
+            proxy_port,
+            options,
+            try deadline_policy.capTimeout(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn openHostMaybeDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_host: []const u8,
+        proxy_port: u16,
+        options: Options,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Control {
+        if (proxy_port == 0) return error.InvalidProxyPort;
+        try validateCredentials(options.credentials);
+        const policy = options.address_connect_policy orelse .ordered;
+        try tcp_connect.validateAddressConnectPolicy(policy);
+        const stream = try connectProxy(
+            allocator,
+            io,
+            proxy_host,
+            proxy_port,
+            options.address_resolver,
+            policy,
+            deadline,
+        );
+        errdefer stream.close(io);
+        try negotiateAuthentication(
+            io,
+            stream,
+            options.credentials,
+            options.allow_no_authentication,
+            deadline,
+        );
+        return .{ .io = io, .stream = stream, .deadline = deadline };
+    }
+
+    pub fn command(
+        self: *Control,
+        command_value: Command,
+        target: Target,
+    ) Error!ReplyAddress {
+        var request: [4 + 1 + 255 + 2]u8 = undefined;
+        const request_len = try encodeCommandRequest(
+            &request,
+            command_value,
+            target,
+        );
+        try writeAll(
+            self.io,
+            self.stream,
+            request[0..request_len],
+            self.deadline,
+        );
+        return readCommandReply(self.io, self.stream, self.deadline);
+    }
+
+    pub fn takeStream(self: *Control) net.Stream {
+        const stream = self.stream;
+        self.* = undefined;
+        return stream;
+    }
+
+    pub fn deinit(self: *Control) void {
+        self.stream.close(self.io);
+        self.* = undefined;
+    }
+};
+
+pub const UdpAssociateOptions = struct {
+    socks5: Options = .{},
+    /// Bind the UDP side to this exact local address before requesting the
+    /// association. Null asks the proxy to infer the client endpoint and binds
+    /// an ephemeral wildcard socket matching the returned relay family.
+    bind_address: ?net.IpAddress = null,
+};
+
+pub const UdpAssociation = udp.Association(Control);
+
+pub const UdpAssociateError = Error || net.IpAddress.BindError || error{
+    ProxyInvalidRelayAddress,
+};
+
+/// Open an RFC 1928 UDP association while retaining its authenticated TCP
+/// control connection for the complete association lifetime.
+pub fn associateUdpHost(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_host: []const u8,
+    proxy_port: u16,
+    options: UdpAssociateOptions,
+) UdpAssociateError!UdpAssociation {
+    return associateUdpHostMaybeDeadline(
+        allocator,
+        io,
+        proxy_host,
+        proxy_port,
+        options,
+        try deadline_policy.fromTimeout(io, options.socks5.connect_timeout),
+    );
+}
+
+pub fn associateUdpHostWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_host: []const u8,
+    proxy_port: u16,
+    options: UdpAssociateOptions,
+    deadline: std.Io.Clock.Timestamp,
+) UdpAssociateError!UdpAssociation {
+    return associateUdpHostMaybeDeadline(
+        allocator,
+        io,
+        proxy_host,
+        proxy_port,
+        options,
+        try deadline_policy.capTimeout(
+            io,
+            deadline,
+            options.socks5.connect_timeout,
+        ),
+    );
+}
+
+fn associateUdpHostMaybeDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_host: []const u8,
+    proxy_port: u16,
+    options: UdpAssociateOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) UdpAssociateError!UdpAssociation {
+    var control = try Control.openHostMaybeDeadline(
+        allocator,
+        io,
+        proxy_host,
+        proxy_port,
+        options.socks5,
+        deadline,
+    );
+    errdefer control.deinit();
+
+    var bound_socket: ?net.Socket = if (options.bind_address) |bind_address|
+        try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp })
+    else
+        null;
+    errdefer if (bound_socket) |socket| socket.close(io);
+
+    const requested_client = if (bound_socket) |socket|
+        socket.address
+    else
+        net.IpAddress{ .ip4 = .unspecified(0) };
+    const reply = try control.command(
+        .udp_associate,
+        .{ .ip = requested_client },
+    );
+    const preferred_family: ?net.IpAddress.Family = if (bound_socket) |socket|
+        std.meta.activeTag(socket.address)
+    else
+        null;
+    var relay = try resolveRelayAddress(
+        allocator,
+        io,
+        reply,
+        options.socks5.address_resolver,
+        preferred_family,
+        deadline,
+    );
+    if (isUnspecified(relay)) {
+        relay = try resolveHostAddress(
+            allocator,
+            io,
+            proxy_host,
+            relay.getPort(),
+            options.socks5.address_resolver,
+            std.meta.activeTag(relay),
+            deadline,
+        );
+    }
+    if (relay.getPort() == 0) return error.ProxyInvalidRelayAddress;
+
+    if (bound_socket == null) {
+        const bind_address = switch (relay) {
+            .ip4 => net.IpAddress{ .ip4 = .unspecified(0) },
+            .ip6 => net.IpAddress{ .ip6 = .unspecified(0) },
+        };
+        bound_socket = try bind_address.bind(
+            io,
+            .{ .mode = .dgram, .protocol = .udp },
+        );
+    }
+    const socket = bound_socket.?;
+    if (std.meta.activeTag(socket.address) != std.meta.activeTag(relay)) {
+        return error.ProxyInvalidRelayAddress;
+    }
+    bound_socket = null;
+    return UdpAssociation.init(io, control, socket, relay);
+}
+
+fn resolveRelayAddress(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    reply: ReplyAddress,
+    resolver: ?AddressResolver,
+    preferred_family: ?net.IpAddress.Family,
+    deadline: ?std.Io.Clock.Timestamp,
+) UdpAssociateError!net.IpAddress {
+    return switch (reply) {
+        .ip => |ip| if (preferred_family == null or
+            preferred_family.? == std.meta.activeTag(ip))
+            ip
+        else
+            error.ProxyInvalidRelayAddress,
+        .domain => |domain| resolveHostAddress(
+            allocator,
+            io,
+            domain.bytes[0..domain.len],
+            domain.port,
+            resolver,
+            preferred_family,
+            deadline,
+        ),
+    };
+}
+
+fn resolveHostAddress(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    resolver: ?AddressResolver,
+    preferred_family: ?net.IpAddress.Family,
+    deadline: ?std.Io.Clock.Timestamp,
+) UdpAssociateError!net.IpAddress {
+    if (port == 0) return error.ProxyInvalidRelayAddress;
+    if (net.IpAddress.parse(host, port)) |ip| {
+        if (preferred_family == null or
+            preferred_family.? == std.meta.activeTag(ip)) return ip;
+        return error.ProxyInvalidRelayAddress;
+    } else |_| {}
+
+    const addresses = if (resolver) |configured|
+        try configured.resolve(
+            configured.context,
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        )
+    else
+        try address_resolver.resolveSystem(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
+    defer allocator.free(addresses);
+    for (addresses) |ip| {
+        if (preferred_family == null or
+            preferred_family.? == std.meta.activeTag(ip)) return ip;
+    }
+    return error.ProxyInvalidRelayAddress;
+}
+
+fn isUnspecified(ip: net.IpAddress) bool {
+    return switch (ip) {
+        .ip4 => |value| std.mem.allEqual(u8, &value.bytes, 0),
+        .ip6 => |value| std.mem.allEqual(u8, &value.bytes, 0),
+    };
+}
 
 /// Resolve and connect to a SOCKS5 proxy, then open one CONNECT tunnel.
 pub fn connectHost(
@@ -127,32 +453,20 @@ fn connectHostMaybeDeadline(
     options: Options,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!net.Stream {
-    if (proxy_port == 0) return error.InvalidProxyPort;
-    try validateTarget(target_host, target_port);
-    try validateCredentials(options.credentials);
-    const policy = options.address_connect_policy orelse .ordered;
-    try tcp_connect.validateAddressConnectPolicy(policy);
-
-    const stream = try connectProxy(
+    var control = try Control.openHostMaybeDeadline(
         allocator,
         io,
         proxy_host,
         proxy_port,
-        options.address_resolver,
-        policy,
+        options,
         deadline,
     );
-    errdefer stream.close(io);
-    try establishMaybeDeadline(
-        io,
-        stream,
-        target_host,
-        target_port,
-        options.credentials,
-        options.allow_no_authentication,
-        deadline,
+    errdefer control.deinit();
+    _ = try control.command(
+        .connect,
+        try Target.fromHost(target_host, target_port),
     );
-    return stream;
+    return control.takeStream();
 }
 
 /// Negotiate SOCKS5 over a caller-connected proxy stream. Ownership remains
@@ -261,6 +575,31 @@ fn establishMaybeDeadline(
     allow_no_authentication: bool,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
+    try negotiateAuthentication(
+        io,
+        stream,
+        credentials,
+        allow_no_authentication,
+        deadline,
+    );
+
+    var request: [4 + 1 + 255 + 2]u8 = undefined;
+    const request_len = try encodeCommandRequest(
+        &request,
+        .connect,
+        try Target.fromHost(target_host, target_port),
+    );
+    try writeAll(io, stream, request[0..request_len], deadline);
+    _ = try readCommandReply(io, stream, deadline);
+}
+
+fn negotiateAuthentication(
+    io: std.Io,
+    stream: net.Stream,
+    credentials: ?Credentials,
+    allow_no_authentication: bool,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
     var greeting: [4]u8 = .{ 0x05, 0x01, 0x00, 0x00 };
     const greeting_len: usize = if (credentials != null) blk: {
         if (allow_no_authentication) {
@@ -292,15 +631,6 @@ fn establishMaybeDeadline(
         .no_acceptable => return error.ProxyNoAcceptableAuthentication,
         _ => return error.ProxyUnsupportedAuthentication,
     }
-
-    var request: [4 + 1 + 255 + 2]u8 = undefined;
-    const request_len = try encodeConnectRequest(
-        &request,
-        target_host,
-        target_port,
-    );
-    try writeAll(io, stream, request[0..request_len], deadline);
-    try readConnectReply(io, stream, deadline);
 }
 
 fn authenticate(
@@ -331,42 +661,47 @@ fn authenticate(
     if (reply[1] != 0x00) return error.ProxyAuthenticationFailed;
 }
 
-fn encodeConnectRequest(
+fn encodeCommandRequest(
     output: *[4 + 1 + 255 + 2]u8,
-    host: []const u8,
-    port: u16,
+    command_value: Command,
+    target: Target,
 ) Error!usize {
-    output[0..3].* = .{ 0x05, 0x01, 0x00 };
+    output[0..3].* = .{ 0x05, @intFromEnum(command_value), 0x00 };
     var offset: usize = 4;
-    if (net.IpAddress.parse(host, port)) |address| switch (address) {
-        .ip4 => |value| {
-            output[3] = @intFromEnum(AddressType.ipv4);
-            @memcpy(output[offset..][0..4], &value.bytes);
-            offset += 4;
+    switch (target) {
+        .ip => |address| switch (address) {
+            .ip4 => |value| {
+                output[3] = @intFromEnum(AddressType.ipv4);
+                @memcpy(output[offset..][0..4], &value.bytes);
+                offset += 4;
+            },
+            .ip6 => |value| {
+                output[3] = @intFromEnum(AddressType.ipv6);
+                @memcpy(output[offset..][0..16], &value.bytes);
+                offset += 16;
+            },
         },
-        .ip6 => |value| {
-            output[3] = @intFromEnum(AddressType.ipv6);
-            @memcpy(output[offset..][0..16], &value.bytes);
-            offset += 16;
+        .domain => |domain| {
+            _ = try net.HostName.init(domain.host);
+            if (domain.host.len > 255) {
+                return error.ProxyAddressTypeUnsupported;
+            }
+            output[3] = @intFromEnum(AddressType.domain);
+            output[offset] = @intCast(domain.host.len);
+            offset += 1;
+            @memcpy(output[offset..][0..domain.host.len], domain.host);
+            offset += domain.host.len;
         },
-    } else |_| {
-        _ = try net.HostName.init(host);
-        if (host.len > 255) return error.ProxyAddressTypeUnsupported;
-        output[3] = @intFromEnum(AddressType.domain);
-        output[offset] = @intCast(host.len);
-        offset += 1;
-        @memcpy(output[offset..][0..host.len], host);
-        offset += host.len;
     }
-    std.mem.writeInt(u16, output[offset..][0..2], port, .big);
+    std.mem.writeInt(u16, output[offset..][0..2], target.getPort(), .big);
     return offset + 2;
 }
 
-fn readConnectReply(
+fn readCommandReply(
     io: std.Io,
     stream: net.Stream,
     deadline: ?std.Io.Clock.Timestamp,
-) Error!void {
+) Error!ReplyAddress {
     var prefix: [4]u8 = undefined;
     try readExact(io, stream, &prefix, deadline);
     if (prefix[0] != 0x05 or prefix[2] != 0x00) {
@@ -374,19 +709,45 @@ fn readConnectReply(
     }
     if (replyError(prefix[1])) |err| return err;
 
-    const address_len: usize = switch (@as(AddressType, @enumFromInt(prefix[3]))) {
-        .ipv4 => 4,
-        .ipv6 => 16,
+    return switch (@as(AddressType, @enumFromInt(prefix[3]))) {
+        .ipv4 => blk: {
+            var encoded: [4 + 2]u8 = undefined;
+            try readExact(io, stream, &encoded, deadline);
+            break :blk .{ .ip = .{ .ip4 = .{
+                .bytes = encoded[0..4].*,
+                .port = std.mem.readInt(u16, encoded[4..6], .big),
+            } } };
+        },
+        .ipv6 => blk: {
+            var encoded: [16 + 2]u8 = undefined;
+            try readExact(io, stream, &encoded, deadline);
+            break :blk .{ .ip = .{ .ip6 = .{
+                .bytes = encoded[0..16].*,
+                .port = std.mem.readInt(u16, encoded[16..18], .big),
+            } } };
+        },
         .domain => blk: {
             var length: [1]u8 = undefined;
             try readExact(io, stream, &length, deadline);
             if (length[0] == 0) return error.ProxyProtocolViolation;
-            break :blk length[0];
+            var result: ReplyAddress = .{ .domain = .{
+                .bytes = undefined,
+                .len = length[0],
+                .port = undefined,
+            } };
+            try readExact(
+                io,
+                stream,
+                result.domain.bytes[0..result.domain.len],
+                deadline,
+            );
+            var port: [2]u8 = undefined;
+            try readExact(io, stream, &port, deadline);
+            result.domain.port = std.mem.readInt(u16, &port, .big);
+            break :blk result;
         },
         _ => return error.ProxyProtocolViolation,
     };
-    var ignored: [255 + 2]u8 = undefined;
-    try readExact(io, stream, ignored[0 .. address_len + 2], deadline);
 }
 
 fn replyError(reply: u8) ?Error {
@@ -480,7 +841,11 @@ fn readExact(
 
 test "SOCKS5 encodes domain IPv4 and IPv6 CONNECT requests" {
     var storage: [4 + 1 + 255 + 2]u8 = undefined;
-    const domain_len = try encodeConnectRequest(&storage, "broker.example", 1883);
+    const domain_len = try encodeCommandRequest(
+        &storage,
+        .connect,
+        try Target.fromHost("broker.example", 1883),
+    );
     try std.testing.expectEqualSlices(
         u8,
         &.{ 5, 1, 0, 3, 14 },
@@ -493,7 +858,11 @@ test "SOCKS5 encodes domain IPv4 and IPv6 CONNECT requests" {
         .big,
     ));
 
-    const ip4_len = try encodeConnectRequest(&storage, "192.0.2.1", 8883);
+    const ip4_len = try encodeCommandRequest(
+        &storage,
+        .connect,
+        try Target.fromHost("192.0.2.1", 8883),
+    );
     try std.testing.expectEqual(@as(usize, 10), ip4_len);
     try std.testing.expectEqualSlices(
         u8,
@@ -501,7 +870,11 @@ test "SOCKS5 encodes domain IPv4 and IPv6 CONNECT requests" {
         storage[0..ip4_len],
     );
 
-    const ip6_len = try encodeConnectRequest(&storage, "2001:db8::1", 443);
+    const ip6_len = try encodeCommandRequest(
+        &storage,
+        .connect,
+        try Target.fromHost("2001:db8::1", 443),
+    );
     try std.testing.expectEqual(@as(usize, 22), ip6_len);
     try std.testing.expectEqual(@as(u8, 4), storage[3]);
     try std.testing.expectEqual(@as(u16, 443), std.mem.readInt(

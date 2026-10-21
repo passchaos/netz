@@ -2248,8 +2248,14 @@ connection. Cross-origin credential and TLS-ticket policy remains in the shared
 redirect engine. A Python peer gate verifies a two-origin HTTP/1 redirect with
 Authorization stripping, certificate-verified TLS 1.3 selecting HTTP/2, and
 two pooled HTTP/1 requests over exactly one SOCKS tunnel. Configuring both this
-TCP proxy and HTTP/3 is rejected at pool construction until SOCKS5 UDP
-ASSOCIATE exists, rather than silently bypassing the proxy with QUIC.
+TCP proxy and HTTP/3 remains rejected at pool construction rather than silently
+bypassing the proxy with QUIC. The public proxy layer now implements RFC 1928
+UDP ASSOCIATE with a control-connection-owned lifetime, IPv4/IPv6/domain
+datagram framing, explicit fragment rejection, wildcard relay normalization,
+caller-buffer sends/receives, relay-source validation, and an independent
+Python UDP relay gate. HTTP/3 enablement still requires an explicit QUIC
+endpoint adapter so the proxy framing does not discard batch progress, source
+addresses, or the deliberate ECN/GSO/GRO fallback policy.
 
 ## Remaining evidence
 

@@ -64,7 +64,7 @@ failed RFC 1929 authentication, remote-only broker DNS, MQTT 5 PING/DISCONNECT,
 TLS 1.3 certificate/hostname verification, and fresh cleartext/TLS reconnect
 tunnels. This was implemented after auditing Mosquitto's
 `lib/socks_mosq.c` and its `03-publish-socks*.py` process cases under
-`~/Work/mosquitto`.
+`/nav_env/Work/mosquitto`.
 
 The same SOCKS5 tunnel now composes with MQTT-over-WS/WSS without a second MQTT
 state machine: deadline-aware WebSocket caller-stream APIs perform cleartext or
