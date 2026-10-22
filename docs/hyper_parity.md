@@ -908,6 +908,15 @@ Reusable implementation changes behind these H2 results:
   receive mode instead of discarding it. The pending storage stays bounded to
   one frame because control returns to the caller immediately, paralleling
   Hyper's independently driven response future/body pipe;
+- an early response can finish with DATA or trailers before the server's
+  `RST_STREAM(NO_ERROR)` stopping the unfinished request body reaches the
+  client. Once the response owner has consumed `END_STREAM`, the connection
+  frame router now recognizes that later reset as a race on an already-closed
+  stream instead of handing it to the next request. A real two-request
+  regression verifies the first response body and trailers and then reuses the
+  same connection successfully; resets for active streams remain observable,
+  while idle stream IDs are still left to the owning parser's protocol-error
+  path rather than being mistaken for closed streams;
 - `RequestWriter.beginDuplex` and `Connection.acceptDuplexRequest` transfer a
   stream to a single-owner step driver whose request and response halves close
   independently. Client response and server request events expose owned heads,

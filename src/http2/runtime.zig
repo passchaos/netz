@@ -16199,8 +16199,21 @@ pub const Connection = struct {
                         self.push_state.localStatus(reset.stream_id) != null) or
                     (self.role == .client and
                         self.push_state.isRemoteReserved(reset.stream_id));
-                if (!reserved_push) return false;
-                try self.recordResetStream(reset);
+                if (reserved_push) {
+                    try self.recordResetStream(reset);
+                    return true;
+                }
+                if (self.outboundStreamIsActive(reset.stream_id) or
+                    self.streamIsIdle(reset.stream_id))
+                {
+                    return false;
+                }
+                // A complete response can race the server's RST_STREAM after
+                // it stops an unfinished request body (commonly NO_ERROR).
+                // The local stream owner has already consumed END_STREAM and
+                // released both halves, so this reset is terminal evidence for
+                // an already-closed stream rather than input for a later
+                // request. Ignore it without publishing a stale reset reason.
                 return true;
             },
             .origin => {

@@ -336,6 +336,159 @@ test "HTTP/2 request writer preserves early response while flow blocked" {
     try std.testing.expect(writer.completed);
 }
 
+test "HTTP/2 early response ignores trailing NO_ERROR reset before reuse" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const limits: Limits = .{
+        .max_body_bytes = 4096,
+        .max_frame_payload = 4096,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            const first_stream = try readRequestHeadersStreamId(&connection);
+            try runtime.testing.writeHeaders(
+                &connection,
+                first_stream,
+                &.{.{ .name = ":status", .value = "413" }},
+                false,
+            );
+            try runtime.testing.writeData(
+                &connection,
+                first_stream,
+                "early",
+                false,
+            );
+            try runtime.testing.writeHeaders(
+                &connection,
+                first_stream,
+                &.{.{ .name = "x-early", .value = "complete" }},
+                true,
+            );
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .rst_stream,
+                0,
+                first_stream,
+                &.{ 0, 0, 0, 0 },
+            );
+
+            // RequestWriter closes its request half after observing the early
+            // response. Consume the already-sent prefix through its zero-length
+            // DATA FIN before the next request, preserving exact frame order.
+            while (true) {
+                var frame = try runtime.testing.readOwnedFrame(&connection);
+                defer frame.deinit(server_ptr.allocator);
+                if (try runtime.testing.handleConnectionFrame(
+                    &connection,
+                    frame.frame,
+                )) continue;
+                if (frame.frame.header.stream_id == first_stream) {
+                    try std.testing.expectEqual(
+                        http2.FrameType.data,
+                        frame.frame.header.frame_type,
+                    );
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        runtime.testing.releasePeerStream(
+                            &connection,
+                            first_stream,
+                        );
+                    }
+                    continue;
+                }
+                try std.testing.expectEqual(
+                    http2.FrameType.headers,
+                    frame.frame.header.frame_type,
+                );
+                try runtime.testing.writeHeaders(
+                    &connection,
+                    frame.frame.header.stream_id,
+                    &.{.{ .name = ":status", .value = "200" }},
+                    false,
+                );
+                try runtime.testing.writeData(
+                    &connection,
+                    frame.frame.header.stream_id,
+                    "reused",
+                    true,
+                );
+                runtime.testing.releasePeerStream(
+                    &connection,
+                    frame.frame.header.stream_id,
+                );
+                return;
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+
+    var writer = try client.startRequest(.{
+        .path = "/early-reset",
+        .authority = "localhost",
+        .body_length = "firstsecond".len,
+    });
+    defer writer.deinit();
+    client.send_connection_window.value = "first".len;
+    (try runtime.testing.sendStreamWindow(
+        &client,
+        writer.stream_id,
+    )).value = "first".len;
+    try writer.write("first");
+    try std.testing.expectError(
+        error.ResponseAvailable,
+        writer.write("second"),
+    );
+    var first_response = try writer.readResponse();
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 413), first_response.status);
+    try std.testing.expectEqualStrings("early", first_response.body);
+    try std.testing.expectEqual(@as(usize, 1), first_response.trailers.len);
+    try std.testing.expectEqualStrings(
+        "complete",
+        first_response.trailers[0].value,
+    );
+
+    const second_result = client.request(.{
+        .path = "/after-early-reset",
+        .authority = "localhost",
+    });
+    thread.join();
+    if (shared.err) |err| return err;
+    var second_response = try second_result;
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqualStrings("reused", second_response.body);
+}
+
 test "HTTP/2 request writer reports peer reset while flow blocked" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
