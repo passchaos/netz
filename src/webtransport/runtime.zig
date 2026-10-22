@@ -33,6 +33,7 @@ const stream_batch = @import("runtime/stream/batch.zig");
 const stream_association = @import("runtime/stream_association.zig");
 const early_streams = @import("runtime/association/early_streams.zig");
 const server_terminal = @import("runtime/endpoint_server/terminal.zig");
+const server_close = @import("runtime/endpoint_server/close.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 pub const EndpointClient = endpoint_client.Client;
@@ -199,86 +200,7 @@ pub const Limits = struct {
 
 pub const max_connection_close_reason: usize = connection_lifecycle.max_close_reason;
 
-const PendingSessionClose = struct {
-    const inline_capacity: usize = 128;
-    const Storage = union(enum) {
-        local: [inline_capacity]u8,
-        heap: struct {
-            allocator: std.mem.Allocator,
-            bytes: []u8,
-        },
-    };
-
-    storage: Storage = .{ .local = undefined },
-    len: usize = 0,
-    committed: usize = 0,
-    code: u32 = 0,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        code: u32,
-        reason: []const u8,
-    ) Error!PendingSessionClose {
-        var pending: PendingSessionClose = .{ .code = code };
-        var encoded_storage: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const encoded = try session_control.writeCloseInto(
-            &encoded_storage,
-            code,
-            reason,
-        );
-        pending.len = encoded.len;
-        if (encoded.len <= inline_capacity) {
-            @memcpy(pending.storage.local[0..encoded.len], encoded);
-        } else {
-            pending.storage = .{ .heap = .{
-                .allocator = allocator,
-                .bytes = try allocator.dupe(u8, encoded),
-            } };
-        }
-        return pending;
-    }
-
-    fn bytes(self: *const PendingSessionClose) []const u8 {
-        return switch (self.storage) {
-            .local => |*storage| storage[0..self.len],
-            .heap => |owned| owned.bytes,
-        };
-    }
-
-    fn remaining(self: *const PendingSessionClose) []const u8 {
-        return self.bytes()[self.committed..];
-    }
-
-    fn deinit(self: *PendingSessionClose) void {
-        switch (self.storage) {
-            .local => |*storage| std.crypto.secureZero(
-                u8,
-                storage[0..self.len],
-            ),
-            .heap => |owned| {
-                std.crypto.secureZero(u8, owned.bytes);
-                owned.allocator.free(owned.bytes);
-            },
-        }
-        self.* = undefined;
-    }
-
-    fn matches(
-        self: *const PendingSessionClose,
-        code: u32,
-        reason: []const u8,
-    ) Error!bool {
-        var candidate_storage: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const candidate = try session_control.writeCloseInto(
-            &candidate_storage,
-            code,
-            reason,
-        );
-        return std.mem.eql(u8, self.bytes(), candidate);
-    }
-};
+const PendingSessionClose = @import("runtime/session_control/pending_close.zig").Pending;
 
 fn clearPendingSessionClose(slot: *?PendingSessionClose) void {
     if (slot.*) |*pending| pending.deinit();
@@ -2377,6 +2299,8 @@ pub const EndpointAcceptedSession = struct {
     /// A peer CLOSE was already reported to the application; the endpoint
     /// still owes the CONNECT response FIN and retries it from later turns.
     close_response_pending: bool = false,
+    pending_close: ?PendingSessionClose = null,
+    close_write: http3.runtime.BodyWriteState = .{},
 
     pub fn applicationProtocol(self: EndpointAcceptedSession) ?application_protocol.String {
         return self.selected_application_protocol;
@@ -2874,7 +2798,8 @@ pub const EndpointAcceptedSession = struct {
         code: u32,
         reason: []const u8,
     ) EndpointServerError!void {
-        if (self.control.local_close_sent) {
+        if (self.control.local_close_sent or self.control.local_close_failed) {
+            server_close.clear(self);
             const result = session_control.terminateStreamsOnce(
                 &self.h3.established.connection,
                 &self.streams,
@@ -2883,30 +2808,9 @@ pub const EndpointAcceptedSession = struct {
             _ = try result;
             return;
         }
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
-        );
-        const result = self.h3.trySendResponseBody(
-            self.session_id.value,
-            capsule,
-            true,
-        );
-        result catch |err| {
-            try self.refreshTimer();
-            return err;
-        };
-        // Local FIN closes only our send direction. Keep the CONNECT
-        // association registered until the peer's receive direction reaches
-        // FIN/reset so the endpoint can still route its close acknowledgement
-        // and any datagram that preceded that terminal signal.
-        try self.control.recordLocalClose(code);
-        try self.refreshTimer();
+        try server_close.prepare(self, code, reason);
+        while (self.pending_close != null) _ = try server_terminal.advanceOnce(self);
     }
 
     fn refreshTimer(self: *EndpointAcceptedSession) EndpointServerError!void {
@@ -2914,6 +2818,7 @@ pub const EndpointAcceptedSession = struct {
     }
 
     fn deinit(self: *EndpointAcceptedSession, allocator: std.mem.Allocator) void {
+        server_close.clear(self);
         self.h3.closeConnectDatagramAssociation(
             self.session_id.value,
         ) catch {};
@@ -19430,4 +19335,8 @@ test {
 
 test {
     _ = @import("runtime/endpoint_client/removal_tests.zig");
+}
+
+test {
+    _ = @import("runtime/endpoint_server/close_tests.zig");
 }

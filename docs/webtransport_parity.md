@@ -1183,6 +1183,21 @@ Session removal, connection removal and endpoint teardown. Regressions exercise
 those three paths, registered and unread FIN streams, socket failure before
 rejection and after CLOSE, a peer STOP_SENDING, and continued sibling delivery
 after the peer processes the removed CONNECT's close/reset exchange.
+Shared-server CLOSE now retains its encoded code/reason and a DATA-frame cursor
+until FIN is committed or protocol/connection termination cancels it. The same
+resumable HTTP/3 response writer handles one-frame packets and one-byte STREAM
+fragments. Direct close/removal calls advance while immediately writable;
+endpoint polling submits at most one pending-close fragment per turn. Backpressure
+or socket failure preserves the exact wire offset, and retries with different
+close parameters are rejected instead of replacing an unfinished Capsule.
+Removal resumes an already-pending detailed CLOSE rather than starting code zero.
+Peer termination cancels an incomplete DATA frame or replies with FIN before any
+frame bytes have been sent. Malformed/post-CLOSE handling stays ahead of this
+ordinary close path, and connection termination releases pending storage without
+another send. CLOSE storage is shared with the owning adapters, remains inline
+through 128 encoded bytes and allocates only the exact longer payload length.
+Tests cover wire-prefix retry, automatic polling, original-code retention during
+removal, heap teardown, peer termination and protocol-error precedence.
 The shared client's `removeSession` now also normally closes an active CONNECT
 before releasing the Session. A retained DATA-frame cursor records its exact
 wire offset, including a partially submitted frame header, so retry never inserts

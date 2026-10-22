@@ -2,27 +2,38 @@
 //! Removal uses the same nonblocking steps as endpoint polling.
 
 const webtransport = @import("../../mod.zig");
+const http3 = @import("../../../http3/mod.zig");
 const control_mod = @import("../session_control.zig");
 const lifecycle = @import("../connection_lifecycle.zig");
+const close_write = @import("close.zig");
 
 pub const Error = control_mod.Error;
 
 pub fn advanceOnce(target: anytype) Error!control_mod.TerminateProgress {
     if (lifecycle.observe(&target.control, target.h3, &target.streams)) {
         target.close_response_pending = false;
+        close_write.clear(target);
         return .complete;
     }
     observeSendTerminal(target);
-    if (target.control.handledInvalidCapsule()) target.close_response_pending = false;
+    if (target.control.handledInvalidCapsule()) {
+        target.close_response_pending = false;
+        close_write.clear(target);
+    }
     if (target.control.capsule_error_pending) {
         if (try target.control.tryRejectInvalidCapsule(&target.h3.established.connection)) {
             target.close_response_pending = false;
+            close_write.clear(target);
             return .submitted;
         }
     }
     if (try target.control.tryRejectPostTerminalData(&target.h3.established.connection)) {
         target.close_response_pending = false;
+        close_write.clear(target);
         return .submitted;
+    }
+    if (target.pending_close != null) {
+        if (try close_write.advanceOnce(target) == .submitted) return .submitted;
     }
     if (target.close_response_pending) {
         target.h3.trySendResponseBody(target.session_id.value, &.{}, true) catch |err| switch (err) {
@@ -49,7 +60,10 @@ pub fn finish(target: anytype) @TypeOf(target.close(0, "")) {
                 if (!target.control.handledInvalidCapsule()) target.control.capsule_error_pending = true;
                 break;
             },
-            else => return err,
+            else => {
+                try http3.runtime.closeConnectionForProtocolError(&target.h3.established.connection, err);
+                return err;
+            },
         };
         if (event) |value| {
             if (value == .closed and !target.control.local_close_sent and !target.control.local_close_failed) target.close_response_pending = true;
@@ -61,7 +75,7 @@ pub fn finish(target: anytype) @TypeOf(target.close(0, "")) {
         if (try advanceOnce(target) == .complete) break;
     }
     observeSendTerminal(target);
-    if (!target.control.state.closed) target.close(0, "") catch |err| switch (err) {
+    if (!target.control.state.closed and target.pending_close == null) target.close(0, "") catch |err| switch (err) {
         error.RequestCancelled, error.RequestRejected, error.StreamStopped => target.control.recordLocalCloseFailure(0),
         else => return err,
     };

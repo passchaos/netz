@@ -31,6 +31,7 @@ const runtime_error = @import("runtime/error.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
 const server_response = @import("runtime/server/response.zig");
 const body_sender = @import("runtime/send/body.zig");
+const body_fragment = @import("runtime/send/body_fragment.zig");
 const message_sender = @import("runtime/send/message.zig");
 const send_packetizer = @import("runtime/send/packetizer.zig");
 const protected_send_module = @import("runtime/send/protected.zig");
@@ -4150,6 +4151,7 @@ pub const BodyWriteProgress = struct {
     /// True only when the requested FIN was socket-visible.
     fin_committed: bool = false,
 };
+pub const BodyWriteState = body_fragment.State;
 
 pub const DevelopmentBodyWriteProgress = struct {
     /// True once at least one UDP submission was attempted. Development QUIC
@@ -9617,6 +9619,16 @@ pub const HandshakeServerSession = struct {
                 stream_id,
             );
         }
+    }
+
+    /// Commit at most one STREAM fragment of a retained DATA contribution.
+    /// The same payload and cursor resume partial framing after backpressure.
+    pub fn tryWriteResponseBody(self: *HandshakeServerSession, stream_id: u62, data: []const u8, fin: bool, state: *BodyWriteState) Error!void {
+        if (!state.complete) {
+            if (try self.finishPeerResponseCancellationOnce(stream_id)) |cancel| return responseResetError(cancel.application_error_code);
+        }
+        try body_fragment.write(&self.established.connection, &self.outbound_bodies, stream_id, data, fin, state, self.options);
+        if (state.complete and fin) finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     /// Submit several borrowed response slices as one DATA contribution and
