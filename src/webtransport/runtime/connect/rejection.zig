@@ -38,6 +38,7 @@ pub const Pending = struct {
     failure: ?Failure = null,
 
     pub fn submit(self: Pending, h3: *http3.runtime.HandshakeServerSession) http3.runtime.Error!void {
+        try h3.connect_datagrams.rejectEarlyAssociation(self.stream_id);
         try h3.tryCancelRequest(self.stream_id, self.application_error_code);
     }
 };

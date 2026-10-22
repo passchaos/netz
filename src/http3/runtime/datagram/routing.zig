@@ -175,7 +175,7 @@ pub fn routePacketInto(
         .datagram => |datagram| {
             defer datagram_index += 1;
             const routed = if (datagram_index >= dropped_datagrams)
-                registry.routeInto(datagram.data, target)
+                registry.routeIntoFromConnection(datagram.data, target, connection)
             else
                 connect_datagram.Registry.validate(datagram.data);
             routed catch |err| switch (err) {

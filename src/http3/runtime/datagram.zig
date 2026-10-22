@@ -1,6 +1,14 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const early = @import("datagram/early.zig");
+
+test {
+    _ = @import("datagram/tests/early.zig");
+    _ = @import("datagram/tests/registry.zig");
+}
+
+pub const EarlyLimits = early.Limits;
 
 /// One application payload removed from a detached Extended CONNECT
 /// association. Ownership transfers to the caller so polling one association
@@ -80,6 +88,7 @@ pub const Terminal = union(enum) {
 pub const Registry = struct {
     const Association = struct {
         stream_id: u62,
+        reserved: bool = false,
         stream_detached: bool = false,
         discard_on_connection_close: bool = false,
         queue: std.ArrayList([]u8) = .empty,
@@ -155,13 +164,22 @@ pub const Registry = struct {
                 self.compact();
             }
             try self.queue.ensureUnusedCapacity(allocator, 1);
+            self.pushOwned(allocator, owned, limits);
+        }
+
+        fn pushOwned(self: *Association, allocator: std.mem.Allocator, payload: []u8, limits: Limits) void {
+            if (limits.max_queued_per_association == 0 or payload.len > limits.max_queued_bytes_per_association) {
+                allocator.free(payload);
+                return;
+            }
             while (self.count() >= limits.max_queued_per_association or
                 self.queued_bytes > limits.max_queued_bytes_per_association - payload.len)
             {
                 self.dropOldest(allocator);
             }
-            self.queue.appendAssumeCapacity(owned);
-            self.queued_bytes += owned.len;
+            if (self.head != 0 and self.queue.items.len == self.queue.capacity) self.compact();
+            self.queue.appendAssumeCapacity(payload);
+            self.queued_bytes += payload.len;
         }
 
         fn pop(self: *Association) ?[]u8 {
@@ -184,6 +202,7 @@ pub const Registry = struct {
 
     allocator: std.mem.Allocator,
     limits: Limits,
+    early_datagrams: early.Queue = .{},
     associations: std.ArrayList(Association) = .empty,
     index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     receive_scratch: std.ArrayList(u8) = .empty,
@@ -195,7 +214,12 @@ pub const Registry = struct {
         return .{ .allocator = allocator, .limits = limits };
     }
 
+    pub fn initWithEarly(allocator: std.mem.Allocator, limits: Limits, io: std.Io, early_limits: EarlyLimits) Registry {
+        return .{ .allocator = allocator, .limits = limits, .early_datagrams = .init(io, early_limits) };
+    }
+
     pub fn deinit(self: *Registry) void {
+        self.early_datagrams.deinit(self.allocator);
         for (self.associations.items) |*association| association.deinit(self.allocator);
         self.send_batch_datagrams.deinit(self.allocator);
         self.send_batch_storage.deinit(self.allocator);
@@ -225,7 +249,28 @@ pub const Registry = struct {
         try validateStreamId(stream_id);
         const index = self.index.get(stream_id) orelse
             return error.UnexpectedStream;
-        self.associations.items[index].stream_detached = true;
+        const association = &self.associations.items[index];
+        if (association.reserved) {
+            self.early_datagrams.expire(self.allocator);
+            self.early_datagrams.commitRemember(stream_id);
+            association.compact();
+            var retaining = association.terminal == null;
+            while (self.early_datagrams.takeNewest(stream_id)) |payload| {
+                if (payload.len > self.limits.max_queued_bytes_per_association) {
+                    self.allocator.free(payload);
+                    continue;
+                }
+                if (association.count() >= self.limits.max_queued_per_association or association.queued_bytes > self.limits.max_queued_bytes_per_association - payload.len) retaining = false;
+                if (!retaining) {
+                    self.allocator.free(payload);
+                    continue;
+                }
+                association.queue.insertAssumeCapacity(0, payload);
+                association.queued_bytes += payload.len;
+            }
+            association.reserved = false;
+        }
+        association.stream_detached = true;
     }
 
     pub fn streamDetached(self: Registry, stream_id: u62) bool {
@@ -241,17 +286,58 @@ pub const Registry = struct {
     }
 
     pub fn register(self: *Registry, stream_id: u62) !void {
+        return self.registerInternal(stream_id, false);
+    }
+
+    /// Prepare an acceptance transaction without consuming early payloads or
+    /// recording a retired ID. Unregister rolls this reservation back.
+    pub fn reserve(self: *Registry, stream_id: u62) !void {
+        for (self.associations.items) |association| {
+            if (association.reserved) return error.UnexpectedStream;
+        }
+        return self.registerInternal(stream_id, true);
+    }
+
+    fn registerInternal(self: *Registry, stream_id: u62, reserved: bool) !void {
         try validateStreamId(stream_id);
         if (self.contains(stream_id)) return error.UnexpectedStream;
         if (self.associations.items.len >= self.limits.max_associations) {
             return error.ExcessiveLoad;
         }
+        self.early_datagrams.expire(self.allocator);
+        var association = Association{ .stream_id = stream_id, .reserved = reserved };
+        errdefer association.queue.deinit(self.allocator);
+        const early_count = self.early_datagrams.count(stream_id);
+        try association.queue.ensureTotalCapacity(self.allocator, if (reserved and early_count != 0) self.limits.max_queued_per_association else @min(early_count, self.limits.max_queued_per_association));
         const slot = try self.index.getOrPut(self.allocator, stream_id);
         std.debug.assert(!slot.found_existing);
         errdefer _ = self.index.remove(stream_id);
         const index = self.associations.items.len;
-        try self.associations.append(self.allocator, .{ .stream_id = stream_id });
+        try self.associations.ensureUnusedCapacity(self.allocator, 1);
+        if (reserved) {
+            try self.early_datagrams.prepareRestore(self.allocator);
+            try self.early_datagrams.prepareRemember(self.allocator, stream_id);
+        } else {
+            try self.early_datagrams.remember(self.allocator, stream_id);
+            while (self.early_datagrams.take(stream_id)) |payload| association.pushOwned(self.allocator, payload, self.limits);
+        }
+        self.associations.appendAssumeCapacity(association);
         slot.value_ptr.* = index;
+    }
+
+    /// Permanently suppress early DATAGRAMs for a CONNECT rejected before
+    /// registration. Call before exposing the rejection on the socket.
+    pub fn rejectEarlyAssociation(self: *Registry, stream_id: u62) !void {
+        try validateStreamId(stream_id);
+        try self.early_datagrams.remember(self.allocator, stream_id);
+        self.early_datagrams.discard(self.allocator, stream_id);
+    }
+
+    pub fn pruneClosedAssociations(self: *Registry, connection: *const quic.one_rtt.Connection) void {
+        if (!self.early_datagrams.enabled()) return;
+        const retired = if (connection.config.local_endpoint == .server) connection.closed_peer_bidi_streams else connection.closed_local_bidi_streams;
+        self.early_datagrams.known.foldFrom(retired);
+        self.early_datagrams.expire(self.allocator);
     }
 
     pub fn unregister(self: *Registry, stream_id: u62) void {
@@ -264,10 +350,14 @@ pub const Registry = struct {
             const moved = self.associations.items[index].stream_id;
             self.index.getPtr(moved).?.* = index;
         }
+        if (removed.reserved) {
+            while (removed.pop()) |payload| self.early_datagrams.restoreOwned(self.allocator, stream_id, payload);
+        }
         removed.deinit(self.allocator);
     }
 
     pub fn clear(self: *Registry) void {
+        self.early_datagrams.clear(self.allocator);
         for (self.associations.items) |*association| {
             association.deinit(self.allocator);
         }
@@ -283,11 +373,15 @@ pub const Registry = struct {
         stream_id: u62,
         state: Terminal,
     ) void {
-        const index = self.index.get(stream_id) orelse return;
+        const index = self.index.get(stream_id) orelse {
+            self.early_datagrams.discard(self.allocator, stream_id);
+            return;
+        };
         self.associations.items[index].markTerminal(self.allocator, state);
     }
 
     pub fn markAllTerminal(self: *Registry, state: Terminal) void {
+        if (state == .connection_closed) self.early_datagrams.clear(self.allocator);
         for (self.associations.items) |*association| {
             association.markTerminal(self.allocator, state);
         }
@@ -326,7 +420,7 @@ pub const Registry = struct {
     }
 
     /// Route one encoded RFC 9297 HTTP Datagram. Unknown associations are
-    /// deliberately ignored, including late datagrams for a closed CONNECT.
+    /// ignored unless early retention was explicitly enabled by the adapter.
     pub fn route(self: *Registry, encoded: []const u8) !void {
         return self.routeInto(encoded, null);
     }
@@ -342,7 +436,10 @@ pub const Registry = struct {
     ) !void {
         const datagram = try http3.Datagram.parse(encoded);
         const stream_id: u62 = @intCast(datagram.quarter_stream_id << 2);
-        const index = self.index.get(stream_id) orelse return;
+        const index = self.index.get(stream_id) orelse {
+            try self.early_datagrams.push(self.allocator, stream_id, datagram.payload);
+            return;
+        };
         // RFC 9297 requires silently dropping datagrams received after the
         // request stream's receive side has closed. A recorded terminal state
         // also protects against frame ordering within one QUIC packet.
@@ -359,6 +456,23 @@ pub const Registry = struct {
         );
     }
 
+    /// Transport state also suppresses unknown associations after FIN/reset or
+    /// retirement; those IDs must never enter the early queue again.
+    pub fn routeIntoFromConnection(self: *Registry, encoded: []const u8, target: ?*ReceiveIntoTarget, connection: *quic.one_rtt.Connection) !void {
+        if (self.early_datagrams.enabled()) {
+            self.pruneClosedAssociations(connection);
+            const datagram = try http3.Datagram.parse(encoded);
+            const stream_id: u62 = @intCast(datagram.quarter_stream_id << 2);
+            if (!self.contains(stream_id)) {
+                if (connection.closed() or connection.closing() or connection.draining() or connection.streamLifecycle(stream_id) == .closed) return;
+                if (connection.recvStreamStats(stream_id)) |stats| {
+                    if (stats.final_size != null or stats.reset != null) return;
+                }
+            }
+        }
+        return self.routeInto(encoded, target);
+    }
+
     pub fn validate(encoded: []const u8) http3.Error!void {
         _ = try http3.Datagram.parse(encoded);
     }
@@ -373,7 +487,7 @@ pub const Registry = struct {
             connection.endpoint.limits.max_datagram_size,
         );
         while (try connection.popDatagram(self.receive_scratch.items)) |encoded| {
-            try self.route(encoded);
+            try self.routeIntoFromConnection(encoded, null, connection);
         }
     }
 
@@ -391,7 +505,7 @@ pub const Registry = struct {
         const encoded = (try connection.popDatagram(
             self.receive_scratch.items,
         )) orelse return false;
-        try self.route(encoded);
+        try self.routeIntoFromConnection(encoded, null, connection);
         return true;
     }
 
@@ -502,286 +616,6 @@ pub const Registry = struct {
 pub fn validateStreamId(stream_id: u62) error{UnexpectedStream}!void {
     // HTTP request streams are client-initiated bidirectional QUIC streams.
     if (stream_id & 0x3 != 0) return error.UnexpectedStream;
-}
-
-test "HTTP/3 CONNECT datagram association detaches explicitly" {
-    var registry = Registry.init(std.testing.allocator, .{
-        .max_associations = 1,
-        .max_queued_per_association = 1,
-        .max_queued_bytes_per_association = 64,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-    try std.testing.expect(registry.contains(0));
-    try std.testing.expect(!registry.streamDetached(0));
-    try std.testing.expect(!registry.hasDetachedStreams());
-    try registry.markStreamDetached(0);
-    try std.testing.expect(registry.streamDetached(0));
-    try std.testing.expect(registry.hasDetachedStreams());
-    try std.testing.expectError(
-        error.UnexpectedStream,
-        registry.markStreamDetached(4),
-    );
-}
-
-test "HTTP/3 CONNECT datagram registry demultiplexes and bounds FIFO queues" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 2,
-        .max_queued_per_association = 2,
-        .max_queued_bytes_per_association = 8,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-    try registry.register(4);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http3.Datagram{ .quarter_stream_id = 1, .payload = "other" }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{ .quarter_stream_id = 0, .payload = "first" }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{ .quarter_stream_id = 0, .payload = "two" }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{ .quarter_stream_id = 0, .payload = "new" }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-
-    var other = (try registry.poll(4)).?;
-    defer other.deinit(allocator);
-    try std.testing.expectEqualStrings("other", other.payload);
-    // The item cap evicts "first" before retaining the newer payloads.
-    var first = (try registry.poll(0)).?;
-    defer first.deinit(allocator);
-    try std.testing.expectEqualStrings("two", first.payload);
-    var second = (try registry.poll(0)).?;
-    defer second.deinit(allocator);
-    try std.testing.expectEqualStrings("new", second.payload);
-    try std.testing.expectEqual(@as(?Owned, null), try registry.poll(0));
-
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{ .quarter_stream_id = 2, .payload = "unknown" }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    try std.testing.expectError(error.UnexpectedStream, registry.poll(8));
-    try std.testing.expectError(error.UnexpectedStream, registry.register(2));
-}
-
-test "HTTP/3 CONNECT datagram caller buffer preserves queue semantics" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 2,
-        .max_queued_per_association = 2,
-        .max_queued_bytes_per_association = 64,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-    try registry.register(4);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "direct",
-    }).write(&encoded, allocator);
-    var direct_storage: [6]u8 = undefined;
-    var direct = ReceiveIntoTarget.init(0, &direct_storage);
-    {
-        var no_alloc = std.testing.FailingAllocator.init(
-            allocator,
-            .{ .fail_index = 0 },
-        );
-        registry.allocator = no_alloc.allocator();
-        defer registry.allocator = allocator;
-        try registry.routeInto(encoded.items, &direct);
-        try std.testing.expect(!no_alloc.has_induced_failure);
-    }
-    try std.testing.expectEqualStrings("direct", (try direct.finish()).?);
-    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
-
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{
-        .quarter_stream_id = 1,
-        .payload = "other",
-    }).write(&encoded, allocator);
-    var unmatched = ReceiveIntoTarget.init(0, &direct_storage);
-    try registry.routeInto(encoded.items, &unmatched);
-    try std.testing.expect((try unmatched.finish()) == null);
-    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(4));
-
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "too-large",
-    }).write(&encoded, allocator);
-    var short_storage: [2]u8 = undefined;
-    var short = ReceiveIntoTarget.init(0, &short_storage);
-    try registry.routeInto(encoded.items, &short);
-    try std.testing.expectError(error.BufferTooShort, short.finish());
-    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(0));
-    try std.testing.expectError(
-        error.BufferTooShort,
-        registry.pollInto(0, &short_storage),
-    );
-    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(0));
-    var retry_storage: [9]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "too-large",
-        (try registry.pollInto(0, &retry_storage)).?,
-    );
-    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
-}
-
-test "HTTP/3 CONNECT datagram registry isolates unknown associations" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 2,
-        .max_queued_per_association = 2,
-        .max_queued_bytes_per_association = 64,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http3.Datagram{
-        .quarter_stream_id = 2,
-        .payload = "unknown",
-    }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
-
-    // A Quarter Stream ID whose reconstruction would exceed u62 is malformed.
-    encoded.clearRetainingCapacity();
-    try quic.varint.encode(
-        &encoded,
-        allocator,
-        http3.Datagram.max_quarter_stream_id + 1,
-    );
-    try encoded.appendSlice(allocator, "overflow");
-    try std.testing.expectError(error.InvalidFrame, registry.route(encoded.items));
-    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
-}
-
-test "HTTP/3 CONNECT datagram batch uses stable exact backing storage" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 1,
-        .max_queued_per_association = 1,
-        .max_queued_bytes_per_association = 64,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-
-    const payloads = [_][]const u8{ "one", &.{}, "three" };
-    const batch = try registry.encodeBatch(0, &payloads);
-    try std.testing.expectEqual(payloads.len, batch.datagrams.len);
-    try std.testing.expectEqual(
-        payloads[0].len + payloads[1].len + payloads[2].len + payloads.len,
-        batch.storage.len,
-    );
-    for (batch.datagrams, payloads) |encoded, expected| {
-        const datagram = try http3.Datagram.parse(encoded);
-        try std.testing.expectEqual(@as(u64, 0), datagram.quarter_stream_id);
-        try std.testing.expectEqualStrings(expected, datagram.payload);
-        try std.testing.expect(@intFromPtr(encoded.ptr) >=
-            @intFromPtr(batch.storage.ptr));
-        try std.testing.expect(@intFromPtr(encoded.ptr) + encoded.len <=
-            @intFromPtr(batch.storage.ptr) + batch.storage.len);
-    }
-
-    var failing = std.testing.FailingAllocator.init(allocator, .{
-        .fail_index = 0,
-    });
-    registry.allocator = failing.allocator();
-    const reused = try registry.encodeBatch(0, &payloads);
-    registry.allocator = allocator;
-    try std.testing.expectEqual(batch.storage.ptr, reused.storage.ptr);
-    try std.testing.expectEqual(batch.datagrams.ptr, reused.datagrams.ptr);
-    for (reused.datagrams, payloads) |encoded, expected| {
-        const datagram = try http3.Datagram.parse(encoded);
-        try std.testing.expectEqualStrings(expected, datagram.payload);
-    }
-}
-
-test "HTTP/3 CONNECT datagram queue allocation failure is transactional" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 1,
-        .max_queued_per_association = 1,
-        .max_queued_bytes_per_association = 32,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "retained",
-    }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-
-    var failing = std.testing.FailingAllocator.init(allocator, .{
-        .fail_index = 0,
-    });
-    registry.allocator = failing.allocator();
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "replacement",
-    }).write(&encoded, allocator);
-    try std.testing.expectError(error.OutOfMemory, registry.route(encoded.items));
-    registry.allocator = allocator;
-
-    var retained = (try registry.poll(0)).?;
-    defer retained.deinit(allocator);
-    try std.testing.expectEqualStrings("retained", retained.payload);
-}
-
-test "HTTP/3 CONNECT datagram terminal state drains payloads first" {
-    const allocator = std.testing.allocator;
-    var registry = Registry.init(allocator, .{
-        .max_associations = 1,
-        .max_queued_per_association = 2,
-        .max_queued_bytes_per_association = 64,
-    });
-    defer registry.deinit();
-    try registry.register(0);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "before reset",
-    }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-    registry.markTerminal(0, .{ .peer_reset = 0x10c });
-
-    // Late datagrams for a closed receive side are silently dropped.
-    encoded.clearRetainingCapacity();
-    try (http3.Datagram{
-        .quarter_stream_id = 0,
-        .payload = "after reset",
-    }).write(&encoded, allocator);
-    try registry.route(encoded.items);
-
-    try std.testing.expectEqual(@as(?Terminal, null), try registry.drainedTerminal(0));
-    var retained = (try registry.poll(0)).?;
-    defer retained.deinit(allocator);
-    try std.testing.expectEqualStrings("before reset", retained.payload);
-    try std.testing.expectEqualDeep(
-        Terminal{ .peer_reset = 0x10c },
-        (try registry.drainedTerminal(0)).?,
-    );
-    // Terminal observation is stable until the higher-level association is
-    // explicitly retired, which lets its opposite stream direction finish.
-    try std.testing.expectEqualDeep(
-        Terminal{ .peer_reset = 0x10c },
-        (try registry.drainedTerminal(0)).?,
-    );
-    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
 }
 
 test {

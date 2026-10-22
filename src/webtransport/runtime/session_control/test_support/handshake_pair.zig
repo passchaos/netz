@@ -22,6 +22,10 @@ pub const Pair = struct {
     }
 
     pub fn initWithSettings(self: *Pair, io: std.Io, client_settings: http3.Settings, server_settings: http3.Settings) !void {
+        return self.initWithSettingsAndEarlyDatagrams(io, client_settings, server_settings, .{});
+    }
+
+    pub fn initWithSettingsAndEarlyDatagrams(self: *Pair, io: std.Io, client_settings: http3.Settings, server_settings: http3.Settings, early_datagrams: http3.runtime.EarlyConnectDatagramLimits) !void {
         const allocator = std.testing.allocator;
         self.endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
         errdefer self.endpoint.deinit();
@@ -49,7 +53,7 @@ pub const Pair = struct {
         self.server.h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
             &self.endpoint,
             self.client.h3.established.connection.endpoint.address(),
-            .{ .local_settings = server_settings, .auto_date_header = false },
+            .{ .local_settings = server_settings, .auto_date_header = false, .early_connect_datagrams = early_datagrams },
             .{
                 .receive_keys = keys,
                 .send_keys = keys,
@@ -72,6 +76,10 @@ pub const Pair = struct {
         self.client.h3.control.settings.markReceived(server_settings);
         self.server.h3.control.settings.markSent(server_settings);
         self.server.h3.control.settings.markReceived(client_settings);
+        self.client.h3.qpack_encoder_prefix_sent = true;
+        self.client.h3.qpack_decoder_prefix_sent = true;
+        self.server.h3.qpack_encoder_prefix_sent = true;
+        self.server.h3.qpack_decoder_prefix_sent = true;
         const id = try self.client.h3.startRequest(.{
             .method = "CONNECT",
             .scheme = "https",

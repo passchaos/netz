@@ -207,6 +207,7 @@ pub const RedirectError = runtime_error.Error || uri_redirect.Error;
 pub const RedirectTimeoutError = runtime_error.ReceiveTimeoutError ||
     uri_redirect.Error;
 pub const OwnedConnectDatagram = connect_datagram.Owned;
+pub const EarlyConnectDatagramLimits = connect_datagram.EarlyLimits;
 pub const ShutdownState = stream_lifecycle.ShutdownState;
 pub const GoAwayRetryDisposition = stream_lifecycle.GoAwayRetryDisposition;
 
@@ -3786,6 +3787,9 @@ pub const HandshakeSessionOptions = struct {
     max_queued_connect_datagrams: usize = 16,
     /// Per-CONNECT byte bound shared by its queued application payloads.
     max_queued_connect_datagram_bytes: usize = 64 * 1024,
+    /// Opt-in connection-wide retention before CONNECT registration. The
+    /// default drops unknown associations; WebTransport enables this policy.
+    early_connect_datagrams: EarlyConnectDatagramLimits = .{},
     max_stream_frame_data: usize = 1200,
     max_informational_responses: usize =
         http3.default_max_informational_responses,
@@ -6317,11 +6321,11 @@ pub const HandshakeServerSession = struct {
                 .max_datagrams = resolved_options.max_receive_batch_datagrams,
             },
             .request_lifecycle = .init(allocator),
-            .connect_datagrams = .init(allocator, .{
+            .connect_datagrams = .initWithEarly(allocator, .{
                 .max_associations = resolved_options.max_concurrent_request_streams,
                 .max_queued_per_association = resolved_options.max_queued_connect_datagrams,
                 .max_queued_bytes_per_association = resolved_options.max_queued_connect_datagram_bytes,
-            }),
+            }, established.connection.endpoint.io, resolved_options.early_connect_datagrams),
             .outbound_bodies = .init(
                 allocator,
                 resolved_options.max_concurrent_request_streams,
@@ -7413,10 +7417,11 @@ pub const HandshakeServerSession = struct {
     ) ReceiveTimeoutError!void {
         try validateConnectAcceptance(response);
         const entry = try self.requestStreamPendingDetach(stream_id);
+        self.connect_datagrams.pruneClosedAssociations(&self.established.connection);
         if (self.connect_datagrams.contains(stream_id)) {
             return error.UnexpectedStream;
         }
-        try self.connect_datagrams.register(stream_id);
+        try self.connect_datagrams.reserve(stream_id);
         errdefer self.connect_datagrams.unregister(stream_id);
 
         const release_received = entry.reader.uncreditedConsumed();
@@ -7498,6 +7503,7 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
     ) Error!void {
         try validateConnectAcceptance(response);
+        self.connect_datagrams.pruneClosedAssociations(&self.established.connection);
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
         if (!entry.reader.canDetachRequest() or
@@ -7506,7 +7512,7 @@ pub const HandshakeServerSession = struct {
         {
             return error.UnexpectedStream;
         }
-        try self.connect_datagrams.register(stream_id);
+        try self.connect_datagrams.reserve(stream_id);
         errdefer self.connect_datagrams.unregister(stream_id);
         const release_received = entry.reader.uncreditedConsumed();
         try self.tryStartResponseLiteral(
@@ -7542,7 +7548,7 @@ pub const HandshakeServerSession = struct {
         {
             return error.UnexpectedStream;
         }
-        try self.connect_datagrams.register(stream_id);
+        try self.connect_datagrams.reserve(stream_id);
     }
 
     pub fn cancelPreparedConnectDatagramAssociation(
@@ -12727,11 +12733,11 @@ pub const HandshakeClient = struct {
                 allocator,
                 resolved_options.max_concurrent_request_streams,
             ),
-            .connect_datagrams = .init(allocator, .{
+            .connect_datagrams = .initWithEarly(allocator, .{
                 .max_associations = resolved_options.max_concurrent_request_streams,
                 .max_queued_per_association = resolved_options.max_queued_connect_datagrams,
                 .max_queued_bytes_per_association = resolved_options.max_queued_connect_datagram_bytes,
-            }),
+            }, established.connection.endpoint.io, resolved_options.early_connect_datagrams),
             .outbound_bodies = .init(
                 allocator,
                 resolved_options.max_concurrent_request_streams,

@@ -1550,6 +1550,25 @@ poisoning later polls. Rejected peer bidi streams receive one atomic
 are discarded to restore connection flow-control credit, terminal streams are
 retired from QUIC without consuming this session's registry limits, and both
 blocking and one-attempt pollers continue to a valid sibling.
-Buffering streams for a CONNECT that has not yet arrived, with dedicated
-connection-wide quotas and expiry, remains separate work; pending-Session
-preservation does not establish that part of draft-16 section 4.6.
+Authenticated and stateful WebTransport servers now retain DATAGRAMs that arrive
+before their CONNECT is registered. `Limits.early_connect_datagrams` defaults to
+64 payloads and 64 KiB per connection, with a 30-second age limit; packet routing
+and acceptance expire stale entries. Count/byte pressure evicts the oldest early
+payload, and an individually oversized payload is dropped. Accepted association
+queues retain their independent limits. Generic HTTP/3 leaves this behavior
+disabled unless `HandshakeSessionOptions.early_connect_datagrams` opts in.
+Acceptance reserves metadata and queue storage before sending 200, then transfers
+early payloads in order after the response is committed. A failed acceptance
+restores its reservation without consuming early data or recording a retired
+association. Explicit or protocol-level rejection discards only that CONNECT's
+early payloads. Retired association history is bounded and folds QUIC's retired
+stream ranges so completed data streams do not impose a lifetime Session limit.
+Late payloads cannot recreate a removed association; unknown FIN/reset and QUIC
+connection termination discard their early state. Tests cover allocation failure,
+FIFO/count/byte limits, age expiry, actual QUIC pre-CONNECT reordering, acceptance
+send failure/retry, a 403 rejection and continued sibling delivery.
+
+Streams for a CONNECT that has not yet arrived still need dedicated
+connection-wide quotas, expiry and rejected-Session cleanup. Pending-Session
+preservation and early DATAGRAM retention do not establish that remaining part
+of draft-16 section 4.6.

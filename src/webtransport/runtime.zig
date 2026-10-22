@@ -169,6 +169,7 @@ pub const EndpointServerError = Error ||
     http3.runtime.HandshakeAdmissionError;
 pub const HandshakeFailure = http3.runtime.HandshakeFailure;
 pub const OriginPolicy = connect_headers.OriginPolicy;
+pub const EarlyDatagramLimits = http3.runtime.EarlyConnectDatagramLimits;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
@@ -186,6 +187,9 @@ pub const Limits = struct {
     max_rejection_body_bytes: usize = 1024 * 1024,
     /// Client offers or server-supported protocols, in preference order.
     application_protocols: application_protocol.Policy = .{},
+    /// Connection-wide DATAGRAM retention before CONNECT acceptance. These
+    /// bounds are separate from each accepted association's receive queue.
+    early_connect_datagrams: EarlyDatagramLimits = .{ .max_datagrams = 64, .max_bytes = 64 * 1024 },
 };
 
 pub const max_connection_close_reason: usize = connection_lifecycle.max_close_reason;
@@ -1658,6 +1662,8 @@ pub const StatefulProtectedServer = struct {
         if (!http3.isHttp3Alpn(transport.alpn_protocol)) {
             return error.InvalidAlpn;
         }
+        var resolved_h3 = webTransportHandshakeSessionOptions(h3_options);
+        resolved_h3.early_connect_datagrams = limits.early_connect_datagrams;
         return .{
             .endpoint = try .bind(
                 allocator,
@@ -1666,7 +1672,7 @@ pub const StatefulProtectedServer = struct {
                 limits.http3.quic,
             ),
             .limits = limits,
-            .h3_options = webTransportHandshakeSessionOptions(h3_options),
+            .h3_options = resolved_h3,
             .transport = transport,
         };
     }
@@ -1926,7 +1932,7 @@ pub const HandshakeServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                try webTransportHandshakeServerOptions(options, capacity),
+                try webTransportHandshakeServerOptions(options, capacity, limits.early_connect_datagrams),
             ),
             .limits = limits,
         };
@@ -3238,6 +3244,7 @@ pub const EndpointServer = struct {
         if (becomes_idle) {
             try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
         }
+        try source.h3.connect_datagrams.rejectEarlyAssociation(source.session_id.value);
         const response_result = source.h3.trySendResponseLiteral(source.session_id.value, .{
             .status = status,
             .headers = response_headers,
@@ -5313,6 +5320,7 @@ pub const PendingHandshakeSession = struct {
             .request_method = "CONNECT",
             .extended_connect = true,
         };
+        try self.h3.connect_datagrams.rejectEarlyAssociation(self.session_id.value);
         if (self.deadline) |absolute| {
             try self.h3.sendResponsePacedWithDeadline(
                 self.session_id.value,
@@ -14505,12 +14513,14 @@ fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) Error!http
 fn webTransportHandshakeServerOptions(
     options: http3.runtime.HandshakeServerOptions,
     max_sessions: u64,
+    early_datagrams: EarlyDatagramLimits,
 ) Error!http3.runtime.HandshakeServerOptions {
     var out = options;
     out.session.local_settings = try webtransport.settingsWithSessionCapacity(
         out.session.local_settings,
         max_sessions,
     );
+    out.session.early_connect_datagrams = early_datagrams;
     return out;
 }
 
@@ -19384,4 +19394,8 @@ test {
 
 test {
     _ = @import("runtime/association/tests/discovery.zig");
+}
+
+test {
+    _ = @import("runtime/association/tests/early_datagram.zig");
 }

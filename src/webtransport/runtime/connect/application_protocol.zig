@@ -16,6 +16,7 @@ pub const Rejection = struct {
 
     pub fn poll(self: *Rejection, h3: *http3.runtime.HandshakeClient) Error!bool {
         if (!self.connect_cancelled) {
+            try h3.connect_datagrams.rejectEarlyAssociation(self.stream_id);
             try h3.tryCancelRequest(self.stream_id, webtransport.ApplicationErrorCode.alpn_error);
             self.connect_cancelled = true;
             return false;
