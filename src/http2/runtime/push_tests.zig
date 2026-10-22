@@ -143,6 +143,138 @@ test "HTTP/2 push promises require monotonic server stream IDs" {
     );
 }
 
+test "HTTP/2 reserved push promises consume peer stream capacity" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(
+            context: ?*anyopaque,
+            _: std.Io.net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            splat: usize,
+        ) std.Io.net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var total = header.len;
+            self.bytes.appendSlice(allocator, header) catch
+                return error.SystemResources;
+            for (data[0 .. data.len - 1]) |part| {
+                total += part.len;
+                self.bytes.appendSlice(allocator, part) catch
+                    return error.SystemResources;
+            }
+            for (0..splat) |_| {
+                const part = data[data.len - 1];
+                total += part.len;
+                self.bytes.appendSlice(allocator, part) catch
+                    return error.SystemResources;
+            }
+            return total;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    defer writer.bytes.deinit(allocator);
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{
+            .enable_push = true,
+            .max_concurrent_streams = 1,
+            .max_local_error_reset_streams = 2,
+        },
+    };
+    defer {
+        connection.push_state.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+    }
+    try runtime.testing.addActiveLocalStream(&connection, 1);
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/push" },
+        .{ .name = ":scheme", .value = "http" },
+    });
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try http2.PushPromisePayload.write(
+        &encoded,
+        allocator,
+        1,
+        2,
+        block.items,
+        .{},
+    );
+    try runtime.testing.receivePushPromise(
+        &connection,
+        try http2.Frame.parse(encoded.items),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.push_state.remoteReservedCount(),
+    );
+
+    encoded.clearRetainingCapacity();
+    try http2.PushPromisePayload.write(
+        &encoded,
+        allocator,
+        1,
+        4,
+        block.items,
+        .{},
+    );
+    try runtime.testing.receivePushPromise(
+        &connection,
+        try http2.Frame.parse(encoded.items),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.push_state.remoteReservedCount(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), connection.local_error_reset_streams);
+    const refused = try http2.Frame.parse(writer.bytes.items);
+    const reset = try http2.ResetStreamPayload.parse(refused);
+    try std.testing.expectEqual(@as(u31, 4), reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.refused_stream, reset.error_code);
+
+    // Releasing the first reservation restores capacity, and the refused ID
+    // still advances monotonic peer-stream validation for the next promise.
+    try std.testing.expect(connection.push_state.cancelRemote(allocator, 2));
+    encoded.clearRetainingCapacity();
+    try http2.PushPromisePayload.write(
+        &encoded,
+        allocator,
+        1,
+        6,
+        block.items,
+        .{},
+    );
+    try runtime.testing.receivePushPromise(
+        &connection,
+        try http2.Frame.parse(encoded.items),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.push_state.remoteReservedCount(),
+    );
+}
+
 test "HTTP/2 server push fragments large promised request headers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

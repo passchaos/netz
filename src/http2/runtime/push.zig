@@ -1,8 +1,9 @@
 //! HTTP/2 server-push reservation state.
 //!
-//! PUSH_PROMISE creates a reserved stream. Reserved streams deliberately do
-//! not count against SETTINGS_MAX_CONCURRENT_STREAMS; the runtime activates
-//! them only when pushed HEADERS are sent or consumed.
+//! PUSH_PROMISE creates a reserved stream. Although RFC 9113 excludes that
+//! state from SETTINGS_MAX_CONCURRENT_STREAMS, reserved promises retain owned
+//! headers and indexes. Netz follows current h2 and charges them to the local
+//! receive limit so a peer cannot grow reservations without opening streams.
 
 const std = @import("std");
 const http2 = @import("../mod.zig");
@@ -180,6 +181,19 @@ pub const State = struct {
             self.remote_index.contains(stream_id);
     }
 
+    pub fn remoteReservedCount(self: *const State) usize {
+        return self.remote.items.len;
+    }
+
+    pub fn notePeerStreamId(self: *State, stream_id: u31) void {
+        std.debug.assert((stream_id & 1) == 0 and stream_id != 0);
+        std.debug.assert(
+            self.last_peer_stream_id == null or
+                stream_id > self.last_peer_stream_id.?,
+        );
+        self.last_peer_stream_id = stream_id;
+    }
+
     pub fn releaseRemote(self: *State, stream_id: u31) bool {
         if (self.remote_index.count() == 0) return false;
         const index = self.remote_index.get(stream_id) orelse return false;
@@ -304,6 +318,26 @@ pub const LazyState = struct {
     pub fn isRemoteReserved(self: *const LazyState, stream_id: u31) bool {
         const state = self.state orelse return false;
         return state.isRemoteReserved(stream_id);
+    }
+
+    pub fn remoteReservedCount(self: *const LazyState) usize {
+        const state = self.state orelse return 0;
+        return state.remoteReservedCount();
+    }
+
+    pub fn notePeerStreamId(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+    ) std.mem.Allocator.Error!void {
+        if (self.state) |state| {
+            state.notePeerStreamId(stream_id);
+            return;
+        }
+        const state = try allocator.create(State);
+        state.* = .{};
+        state.notePeerStreamId(stream_id);
+        self.state = state;
     }
 
     pub fn releaseRemote(self: *LazyState, stream_id: u31) bool {

@@ -454,6 +454,10 @@ pub const Limits = struct {
     /// Local HPACK decoder capacity advertised as SETTINGS_HEADER_TABLE_SIZE.
     /// Values above u32 are rejected because the wire setting is 32-bit.
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
+    /// Local memory ceiling for the HPACK encoder table. The peer's
+    /// SETTINGS_HEADER_TABLE_SIZE grants permission up to its value but cannot
+    /// raise this independent cap. This setting is not advertised on wire.
+    max_encoder_table_size: u32 = http2.Hpack.default_dynamic_table_size,
     initial_window_size: u32 = @intCast(default_flow_window),
     /// Desired receive-side connection window. HTTP/2 starts every connection
     /// at 65,535 bytes, so values above that are established with an initial
@@ -8574,7 +8578,11 @@ pub const Connection = struct {
             return error.InvalidStreamId;
         }
         if (self.limits.max_concurrent_streams) |limit| {
-            if (self.active_peer_streams.items.len >= limit) {
+            const reservations = self.push_state.remoteReservedCount();
+            std.debug.assert(reservations != 0);
+            const used_without_current = self.active_peer_streams.items.len +
+                reservations - 1;
+            if (used_without_current >= limit) {
                 return error.FlowControlViolation;
             }
         }
@@ -11285,6 +11293,7 @@ pub const Connection = struct {
         }
         self.reservePeerStream(stream_id) catch |err| switch (err) {
             error.FlowControlViolation => {
+                try self.ensureLocalErrorResetBudget();
                 self.prepareLocallyResetStreams(1) catch |alloc_err| {
                     // The caller has already removed initial HEADERS from the
                     // transport. Without reset-history capacity it cannot
@@ -11351,6 +11360,7 @@ pub const Connection = struct {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
+            self.local_error_reset_streams +|= 1;
         }
     }
 
@@ -11436,6 +11446,7 @@ pub const Connection = struct {
         const admission: PeerRequestAdmission = blk: {
             self.reservePeerStream(stream_id) catch |err| switch (err) {
                 error.FlowControlViolation => {
+                    try self.ensureLocalErrorResetBudget();
                     // The original HEADERS remains queued for live HPACK
                     // replay, so make reset bookkeeping allocation-safe before
                     // its wire-visible refusal becomes irreversible.
@@ -11455,6 +11466,7 @@ pub const Connection = struct {
                         self.aggregate_timeout_unusable = true;
                         return write_err;
                     };
+                    self.local_error_reset_streams +|= 1;
                     break :blk .refused_reset_sent;
                 },
                 else => return err,
@@ -15774,6 +15786,22 @@ pub const Connection = struct {
         );
         errdefer freeHeaders(self.allocator, headers);
         try validateHeaderBlock(headers, .request);
+        if (self.limits.max_concurrent_streams) |limit| {
+            const used = self.active_peer_streams.items.len +
+                self.push_state.remoteReservedCount();
+            if (used >= limit) {
+                try self.push_state.notePeerStreamId(
+                    self.allocator,
+                    promise.promised_stream_id,
+                );
+                try self.writeLocalErrorResetStream(
+                    promise.promised_stream_id,
+                    .refused_stream,
+                );
+                freeHeaders(self.allocator, headers);
+                return;
+            }
+        }
         try self.push_state.queue(self.allocator, .{
             .parent_stream_id = promise.stream_id,
             .promised_stream_id = promise.promised_stream_id,
@@ -17193,7 +17221,13 @@ pub const Connection = struct {
                 },
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
                 .max_concurrent_streams => self.peer_max_concurrent_streams = setting.value,
-                .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
+                .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(
+                    self.allocator,
+                    @min(
+                        setting.value,
+                        self.limits.max_encoder_table_size,
+                    ),
+                ),
                 .no_rfc7540_priorities => {
                     if (setting.value > 1) return error.InvalidSetting;
                     const enabled = setting.value == 1;
@@ -17342,6 +17376,13 @@ pub const Connection = struct {
 
     fn applyLocalLimits(self: *Connection) void {
         self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
+        self.hpack_encoder.setMaxDynamicTableSize(
+            self.allocator,
+            @min(
+                http2.Hpack.default_dynamic_table_size,
+                self.limits.max_encoder_table_size,
+            ),
+        );
         self.recv_connection_window.value =
             self.limits.initial_connection_window_size;
         self.recv_connection_window_target =
@@ -21378,6 +21419,10 @@ pub const testing = struct {
         value: i64,
     ) void {
         connection.send_connection_window.value = value;
+    }
+
+    pub fn localErrorResetCount(connection: *const Connection) usize {
+        return connection.local_error_reset_streams;
     }
 
     pub fn findHeader(
@@ -37684,6 +37729,17 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     try std.testing.expectEqual(@as(usize, 128), connection.hpack_encoder.dynamic_table.size_limit);
     try std.testing.expect(connection.peer_no_rfc7540_priorities);
 
+    // A peer setting is permission, not an instruction to retain up to 4 GiB
+    // of encoder state. The default local ceiling remains 4 KiB.
+    try connection.applySettings(&.{.{
+        .id = .header_table_size,
+        .value = std.math.maxInt(u32),
+    }});
+    try std.testing.expectEqual(
+        http2.Hpack.default_dynamic_table_size,
+        connection.hpack_encoder.dynamic_table.size_limit,
+    );
+
     try connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 0 },
     });
@@ -37724,13 +37780,16 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     }));
 }
 
-test "HTTP/2 runtime applies local HPACK decoder table limit" {
+test "HTTP/2 runtime applies independent local HPACK table limits" {
     var connection = Connection{
         .io = undefined,
         .allocator = std.testing.allocator,
         .stream = undefined,
         .role = .server,
-        .limits = .{ .header_table_size = 32 },
+        .limits = .{
+            .header_table_size = 32,
+            .max_encoder_table_size = 128,
+        },
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
@@ -37742,6 +37801,18 @@ test "HTTP/2 runtime applies local HPACK decoder table limit" {
     }
     connection.applyLocalLimits();
     try std.testing.expectEqual(@as(usize, 32), connection.hpack_decoder.max_dynamic_table_size);
+    try std.testing.expectEqual(
+        @as(usize, 128),
+        connection.hpack_encoder.dynamic_table.size_limit,
+    );
+    try connection.applySettings(&.{.{
+        .id = .header_table_size,
+        .value = 1024,
+    }});
+    try std.testing.expectEqual(
+        @as(usize, 128),
+        connection.hpack_encoder.dynamic_table.size_limit,
+    );
 
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(std.testing.allocator);

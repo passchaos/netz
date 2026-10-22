@@ -129,7 +129,10 @@ fn exerciseReaderRefusal(path: ReaderPath) !void {
         .max_concurrent_streams = 1,
         .max_frame_payload = 4096,
         .max_body_bytes = 4096,
-        .max_local_error_reset_streams = 0,
+        // Capacity-driven REFUSED_STREAM now consumes the same peer-caused
+        // reset budget as current h2. Leave room for this test's one refusal;
+        // a zero budget intentionally upgrades it to terminal GOAWAY.
+        .max_local_error_reset_streams = 4,
         .enable_connect_protocol = path == .extended_connect,
     };
     var server = try runtime.Server.listen(
@@ -481,6 +484,10 @@ test "HTTP/2 refuses excess fragmented request without leaking stream state" {
             try std.testing.expectEqual(
                 @as(u31, 5),
                 runtime.testing.lastPeerClientStreamId(&connection),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                runtime.testing.localErrorResetCount(&connection),
             );
 
             try connection.writeResponse(next.stream_id, .{
