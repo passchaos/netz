@@ -2124,10 +2124,18 @@ Incremental control-stream parsing now rejects known-invalid frame declarations
 as soon as the type and payload-length varints complete: non-SETTINGS first
 frames, duplicate SETTINGS, oversized SETTINGS, impossible single-varint
 frames, forbidden DATA/HEADERS/PUSH_PROMISE, and empty or oversized
-PRIORITY_UPDATE frames never wait for or retain their declared payload. Each
-RFC 9218 update is capped at 256 encoded payload bytes, matching the audited
-quiche boundary, so the 256-entry state cap cannot multiply the independent
-64-KiB fragmented-control buffer into multi-megabyte retained values.
+PRIORITY_UPDATE frames never wait for or retain a payload declared above the
+connection's configured policy. Protected and handshake-backed clients and
+servers expose `max_priority_update_payload_size`; its 256-byte default matches
+quiche, zero rejects every nonempty update, and larger values remain subject to
+the independent 64-KiB fragmented-control hard bound. A policy violation maps
+to `H3_EXCESSIVE_LOAD` as RFC 9218 recommends, while an intrinsically empty
+payload remains `H3_FRAME_ERROR`. The incremental parser enforces the limit as
+soon as the length varint completes, and complete-frame calls share the same
+check, so the 256-entry state cap cannot multiply attacker-selected payloads
+into unbounded retained values. Raw codecs stay policy-neutral and can encode
+or parse a larger value for endpoints that deliberately raise the connection
+limit.
 Request, response, push, and development-runtime message assemblers also
 preflight HEADERS and PUSH_PROMISE once their frame header is contiguous. A
 field-section frame whose declared wire length cannot fit the configured

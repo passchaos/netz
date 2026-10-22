@@ -410,7 +410,7 @@ test "HTTP/3 role-aware control rejects oversized priority declaration transacti
     var control = http3.ControlState{};
     defer control.deinit(allocator);
     try std.testing.expectError(
-        error.InvalidFrame,
+        error.ExcessiveLoad,
         applyControlStreamFrameForRole(
             &control,
             allocator,

@@ -5039,10 +5039,22 @@ test "public modules are reachable" {
         netz.http3.Settings.max_supported_qpack_blocked_streams,
     );
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
+    try std.testing.expect(@hasDecl(
+        netz.http3,
+        "default_max_priority_update_payload_size",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.ControlState.Options,
+        "max_priority_update_payload_size",
+    ));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(
         netz.http3.runtime.ProtectedConfig,
         "max_priority_updates",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.ProtectedConfig,
+        "max_priority_update_payload_size",
     ));
     try std.testing.expect(@hasField(
         netz.http3.runtime.ProtectedConfig,
@@ -5063,6 +5075,11 @@ test "public modules are reachable" {
     try std.testing.expectEqual(
         netz.http3.default_max_priority_updates,
         (netz.http3.runtime.HandshakeSessionOptions{}).max_priority_updates,
+    );
+    try std.testing.expectEqual(
+        netz.http3.default_max_priority_update_payload_size,
+        (netz.http3.runtime.HandshakeSessionOptions{})
+            .max_priority_update_payload_size,
     );
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "qpack_encode"));

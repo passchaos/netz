@@ -19,7 +19,7 @@ test "HTTP/3 control stream rejects invalid declarations before payload" {
         .{ .settings_received = true, .frame_type = http3.FrameType.cancel_push, .payload_length = 0, .expected = error.InvalidFrame },
         .{ .settings_received = true, .frame_type = http3.FrameType.max_push_id, .payload_length = 9, .expected = error.InvalidFrame },
         .{ .settings_received = true, .frame_type = http3.FrameType.priority_update_request, .payload_length = 0, .expected = error.InvalidFrame },
-        .{ .settings_received = true, .frame_type = http3.FrameType.priority_update_push, .payload_length = http3.max_priority_update_payload_size + 1, .expected = error.InvalidFrame },
+        .{ .settings_received = true, .frame_type = http3.FrameType.priority_update_push, .payload_length = http3.max_priority_update_payload_size + 1, .expected = error.ExcessiveLoad },
         .{ .settings_received = true, .frame_type = http3.FrameType.data, .payload_length = 4096, .expected = error.UnexpectedFrame },
         .{ .settings_received = true, .frame_type = http3.FrameType.headers, .payload_length = 4096, .expected = error.UnexpectedFrame },
         .{ .settings_received = true, .frame_type = http3.FrameType.push_promise, .payload_length = 4096, .expected = error.UnexpectedFrame },
@@ -71,50 +71,118 @@ test "HTTP/3 control stream rejects invalid declarations before payload" {
     );
 }
 
-test "HTTP/3 PRIORITY_UPDATE payload is bounded transactionally" {
+test "HTTP/3 PRIORITY_UPDATE payload cap is configurable and transactional" {
     const allocator = std.testing.allocator;
-    var maximum = [_]u8{'a'} ** http3.max_priority_update_payload_size;
-    maximum[0] = 0;
-    const parsed = try http3.parsePriorityUpdatePayload(&maximum);
+    var expanded_payload =
+        [_]u8{'a'} ** (http3.max_priority_update_payload_size + 1);
+    expanded_payload[0] = 0;
+    const parsed = try http3.parsePriorityUpdatePayload(&expanded_payload);
     try std.testing.expectEqual(@as(u64, 0), parsed.prioritized_element_id);
     try std.testing.expectEqual(
-        http3.max_priority_update_payload_size - 1,
+        http3.max_priority_update_payload_size,
         parsed.field_value.len,
     );
-
-    var oversized =
-        [_]u8{'a'} ** (http3.max_priority_update_payload_size + 1);
-    oversized[0] = 0;
-    try std.testing.expectError(
-        error.InvalidFrame,
-        http3.parsePriorityUpdatePayload(&oversized),
-    );
-
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    const original = "stable-prefix";
-    try encoded.appendSlice(allocator, original);
+    try http3.writePriorityUpdateFrameRaw(
+        &encoded,
+        allocator,
+        http3.FrameType.priority_update_request,
+        0,
+        expanded_payload[1..],
+    );
+    const expanded_frame = try http3.Frame.parse(encoded.items);
+    try std.testing.expectEqual(
+        expanded_payload.len,
+        expanded_frame.payload.len,
+    );
+
+    var default_control = http3.ControlState{
+        .settings = .{ .received = true },
+    };
+    defer default_control.deinit(allocator);
     try std.testing.expectError(
-        error.InvalidPriorityUpdate,
-        http3.writePriorityUpdateFrameRaw(
-            &encoded,
+        error.ExcessiveLoad,
+        default_control.applyFrame(allocator, .{
+            .frame_type = http3.FrameType.priority_update_request,
+            .payload = &expanded_payload,
+            .consumed = 0,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        default_control.priorityUpdates().len,
+    );
+
+    var expanded = try http3.ControlState.init(.{
+        .max_priority_update_payload_size = expanded_payload.len,
+    });
+    defer expanded.deinit(allocator);
+    expanded.settings.received = true;
+    try expanded.applyFrame(allocator, .{
+        .frame_type = http3.FrameType.priority_update_request,
+        .payload = &expanded_payload,
+        .consumed = 0,
+    });
+    try std.testing.expectEqual(
+        expanded_payload.len,
+        expanded.priorityUpdates()[0].payload.field_value.len + 1,
+    );
+    var cloned = try expanded.clone(allocator);
+    defer cloned.deinit(allocator);
+    try std.testing.expectEqual(
+        expanded_payload.len,
+        cloned.max_priority_update_payload_size,
+    );
+
+    var strict = try http3.ControlState.init(.{
+        .max_priority_update_payload_size = 4,
+    });
+    defer strict.deinit(allocator);
+    strict.settings.received = true;
+    var declaration: std.ArrayList(u8) = .empty;
+    defer declaration.deinit(allocator);
+    try quic.varint.encode(
+        &declaration,
+        allocator,
+        http3.FrameType.priority_update_request,
+    );
+    try quic.varint.encode(&declaration, allocator, 5);
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        strict.appendControlPayload(
             allocator,
-            http3.FrameType.priority_update_request,
-            0,
-            oversized[1..],
+            declaration.items,
         ),
     );
-    try std.testing.expectEqualStrings(original, encoded.items);
-
-    try std.testing.expectError(
-        error.InvalidFrame,
-        (http3.Frame{
-            .frame_type = http3.FrameType.priority_update_request,
-            .payload = &oversized,
-            .consumed = 0,
-        }).write(&encoded, allocator),
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        strict.peer_control_stream_buffer.items.len,
     );
-    try std.testing.expectEqualStrings(original, encoded.items);
+    try std.testing.expectEqual(@as(usize, 0), strict.priorityUpdates().len);
+    try strict.applyFrame(allocator, .{
+        .frame_type = http3.FrameType.priority_update_request,
+        .payload = &.{ 0, 'u', '=', '1' },
+        .consumed = 0,
+    });
+    try std.testing.expectEqual(
+        @as(u3, 1),
+        strict.requestPriorityUpdate(0).?.priority().urgency,
+    );
+
+    var disabled = try http3.ControlState.init(.{
+        .max_priority_update_payload_size = 0,
+    });
+    defer disabled.deinit(allocator);
+    disabled.settings.received = true;
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        disabled.applyFrame(allocator, .{
+            .frame_type = http3.FrameType.priority_update_request,
+            .payload = &.{0},
+            .consumed = 0,
+        }),
+    );
 }
 
 test "HTTP/3 unknown control payload skips without allocation" {

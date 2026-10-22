@@ -3741,6 +3741,9 @@ pub const ProtectedConfig = struct {
     /// Maximum distinct RFC 9218 request/push priorities retained for this
     /// connection. Replacements do not consume another slot.
     max_priority_updates: usize = http3.default_max_priority_updates,
+    /// Maximum peer PRIORITY_UPDATE payload bytes retained per entry.
+    max_priority_update_payload_size: usize =
+        http3.default_max_priority_update_payload_size,
     /// Receive-side QUIC MAX_STREAMS limit used by this lightweight runtime
     /// when validating request IDs carried by PRIORITY_UPDATE. Unlike the
     /// application retention cap in `Limits`, this models protocol credit.
@@ -3776,6 +3779,9 @@ pub const HandshakeSessionOptions = struct {
     /// Maximum distinct RFC 9218 request/push priorities retained for this
     /// connection. Replacements do not consume another slot.
     max_priority_updates: usize = http3.default_max_priority_updates,
+    /// Maximum peer PRIORITY_UPDATE payload bytes retained per entry.
+    max_priority_update_payload_size: usize =
+        http3.default_max_priority_update_payload_size,
     /// Maximum HTTP/3 DATA bytes one paced helper attempt may hand to QUIC.
     ///
     /// Zero selects the direction-aware default: 5,000 bytes for client
@@ -6268,6 +6274,7 @@ pub const HandshakeServerSession = struct {
             .options = resolved_options,
             .control = try .init(.{
                 .max_priority_updates = resolved_options.max_priority_updates,
+                .max_priority_update_payload_size = resolved_options.max_priority_update_payload_size,
             }),
             .qpack_decode = .init(
                 allocator,
@@ -12616,6 +12623,7 @@ pub const HandshakeClient = struct {
             .options = resolved_options,
             .control = try .init(.{
                 .max_priority_updates = resolved_options.max_priority_updates,
+                .max_priority_update_payload_size = resolved_options.max_priority_update_payload_size,
             }),
             .qpack_decode = .init(
                 allocator,
@@ -20195,6 +20203,7 @@ pub const ProtectedServer = struct {
             .config = config,
             .control = try .init(.{
                 .max_priority_updates = config.max_priority_updates,
+                .max_priority_update_payload_size = config.max_priority_update_payload_size,
             }),
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
             // The peer's encoder capacity is not known until its SETTINGS
@@ -23058,6 +23067,7 @@ pub const ProtectedClient = struct {
             .config = config,
             .control = try .init(.{
                 .max_priority_updates = config.max_priority_updates,
+                .max_priority_update_payload_size = config.max_priority_update_payload_size,
             }),
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
             .qpack_encode = .initAwaitingPeerSettings(

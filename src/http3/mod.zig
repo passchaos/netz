@@ -62,7 +62,10 @@ pub const default_max_priority_updates: usize = 256;
 /// Bound each retained RFC 9218 PRIORITY_UPDATE payload. This matches quiche's
 /// control-frame limit and prevents the entry-count cap from multiplying the
 /// complete 64-KiB control-stream buffering allowance.
-pub const max_priority_update_payload_size: usize = 256;
+pub const default_max_priority_update_payload_size: usize = 256;
+/// Backwards-compatible name for the default per-connection receive policy.
+pub const max_priority_update_payload_size: usize =
+    default_max_priority_update_payload_size;
 /// Bound partial control-frame retention, including fragmented ORIGIN frames.
 pub const max_control_stream_buffer_size: usize = 64 * 1024;
 const max_control_frame_header_size: usize = 16;
@@ -997,6 +1000,11 @@ pub const ControlState = struct {
     pub const Options = struct {
         /// Shared cap across request- and push-element priority entries.
         max_priority_updates: usize = default_max_priority_updates,
+        /// Maximum accepted PRIORITY_UPDATE payload bytes. Zero rejects every
+        /// nonempty update with H3_EXCESSIVE_LOAD while retaining the protocol
+        /// error for an intrinsically invalid empty payload.
+        max_priority_update_payload_size: usize =
+            default_max_priority_update_payload_size,
     };
 
     const PriorityUpdateKey = struct {
@@ -1088,6 +1096,8 @@ pub const ControlState = struct {
     priority_update_index: std.AutoHashMapUnmanaged(PriorityUpdateKey, usize) = .empty,
     priority_update_generation: u64 = 0,
     max_priority_updates: usize = default_max_priority_updates,
+    max_priority_update_payload_size: usize =
+        default_max_priority_update_payload_size,
     /// Coarse retirement watermarks keep late updates from turning completed
     /// elements back into retained state. Advancing a watermark may also drop
     /// priority hints for lower idle request IDs or older promised push IDs;
@@ -1102,7 +1112,10 @@ pub const ControlState = struct {
 
     pub fn init(options: Options) Error!ControlState {
         if (options.max_priority_updates == 0) return error.InvalidSetting;
-        return .{ .max_priority_updates = options.max_priority_updates };
+        return .{
+            .max_priority_updates = options.max_priority_updates,
+            .max_priority_update_payload_size = options.max_priority_update_payload_size,
+        };
     }
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
@@ -1607,11 +1620,9 @@ pub const ControlState = struct {
             },
             FrameType.priority_update_request,
             FrameType.priority_update_push,
-            => if (header.payload_length == 0 or
-                header.payload_length > max_priority_update_payload_size)
-            {
-                return error.InvalidFrame;
-            },
+            => try self.validatePriorityUpdatePayloadSize(
+                header.payload_length,
+            ),
             FrameType.data,
             FrameType.headers,
             FrameType.push_promise,
@@ -1636,6 +1647,18 @@ pub const ControlState = struct {
             => true,
             else => false,
         };
+    }
+
+    fn validatePriorityUpdatePayloadSize(
+        self: ControlState,
+        payload_length: u64,
+    ) Error!void {
+        if (payload_length == 0) return error.InvalidFrame;
+        const limit = std.math.cast(
+            u64,
+            self.max_priority_update_payload_size,
+        ) orelse std.math.maxInt(u64);
+        if (payload_length > limit) return error.ExcessiveLoad;
     }
 
     pub fn registerControlStream(self: *ControlState, stream_id: u64) Error!void {
@@ -1708,6 +1731,9 @@ pub const ControlState = struct {
                 frame.payload,
             ),
             FrameType.priority_update_request => {
+                try self.validatePriorityUpdatePayloadSize(
+                    frame.payload.len,
+                );
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
                 validateRequestStreamId(
                     priority_update.prioritized_element_id,
@@ -1719,6 +1745,9 @@ pub const ControlState = struct {
                 );
             },
             FrameType.priority_update_push => {
+                try self.validatePriorityUpdatePayloadSize(
+                    frame.payload.len,
+                );
                 try self.storePriorityUpdate(
                     allocator,
                     frame.frame_type,
@@ -2464,9 +2493,6 @@ pub fn writePriorityUpdateFrameRaw(
     if (frame_type != FrameType.priority_update_request and frame_type != FrameType.priority_update_push) return error.InvalidPriorityUpdate;
     const id_len = try quic.varint.length(prioritized_element_id);
     const payload_len = std.math.add(usize, id_len, field_value.len) catch return error.IntegerOverflow;
-    if (payload_len > max_priority_update_payload_size) {
-        return error.InvalidPriorityUpdate;
-    }
     try writeVarintPayloadFrame(
         list,
         allocator,
@@ -2478,9 +2504,6 @@ pub fn writePriorityUpdateFrameRaw(
 }
 
 pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
-    if (payload.len > max_priority_update_payload_size) {
-        return error.InvalidFrame;
-    }
     var cursor = wire.Cursor.init(payload);
     const id = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     return .{ .prioritized_element_id = id, .field_value = payload[cursor.pos..] };
