@@ -541,7 +541,7 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         "cleansession false\n"
         "bridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
-        "remote_clientid configured-inbound-bridge\n"
+        "clientid configured-inbound-bridge\n"
         "restart_timeout 1 2 1\n"
     )
     upstream_log = directory / "bridge-upstream.log"

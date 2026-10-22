@@ -1793,9 +1793,9 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_tcp_keepalive 30 10 5
         \\bridge_tcp_user_timeout 30000
         \\local_clientid local-edge-bridge
-        \\remote_clientid edge-bridge
-        \\remote_username bridge-user
-        \\remote_password bridge-secret
+        \\clientid edge-bridge
+        \\username bridge-user
+        \\password bridge-secret
         \\restart_timeout 10 60 120
         \\bridge_cafile roots.pem
         \\bridge_capath roots.d
@@ -2538,6 +2538,23 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "address one.example\naddresses two.example\n" ++
             "topic # in 0\n"),
     );
+    for ([_][]const u8{
+        "remote_clientid modern\nclientid legacy\n",
+        "username legacy\nremote_username modern\n",
+        "remote_username user\npassword legacy\nremote_password modern\n",
+    }) |duplicate_aliases| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "{s}connection duplicate-bridge-alias\n" ++
+                "address localhost\ntopic # in 0\n{s}",
+            .{ listener, duplicate_aliases },
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.DuplicateDirective,
+            parse(allocator, source),
+        );
+    }
     try std.testing.expectError(
         error.DuplicateBridgeAddress,
         parse(allocator, listener ++
@@ -2685,9 +2702,9 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\round_robin true
         \\topic sensors/# in 1 local/ remote/
         \\topic commands/# in 2 command/ upstream/
-        \\remote_clientid allocation-bridge
-        \\remote_username user
-        \\remote_password secret
+        \\clientid allocation-bridge
+        \\username user
+        \\password secret
         \\bridge_cafile roots.pem
         \\bridge_capath roots.d
         \\bridge_certfile client.pem

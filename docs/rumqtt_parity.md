@@ -279,6 +279,12 @@ smaller configured/CONNACK outgoing packet size, and verifies both values of
 the outgoing RETAIN policy on forwarded PUBLISH packets. Network-source
 outbound tests are explicitly imported into the library gate as well.
 
+Bridge identity and upstream credentials accept Mosquitto's current
+`remote_clientid`, `remote_username`, and `remote_password` directives as well
+as their legacy `clientid`, `username`, and `password` aliases. Each pair maps
+to one owned field and shares duplicate-directive rejection, so an alias cannot
+silently override its modern spelling.
+
 Native MQTT TLS listeners advertise `mqtt` ALPN when the peer offers it while
 accepting legacy clients with no ALPN extension. An offered list without
 `mqtt` is rejected rather than silently accepting another protocol. Internal

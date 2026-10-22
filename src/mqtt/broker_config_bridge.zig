@@ -655,13 +655,19 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "local_clientid")) {
             try markOnce(&self.seen.local_client_id);
             self.local_client_id = try parseOwnedUtf8(allocator, words);
-        } else if (std.mem.eql(u8, directive, "remote_clientid")) {
+        } else if (std.mem.eql(u8, directive, "remote_clientid") or
+            std.mem.eql(u8, directive, "clientid"))
+        {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
-        } else if (std.mem.eql(u8, directive, "remote_username")) {
+        } else if (std.mem.eql(u8, directive, "remote_username") or
+            std.mem.eql(u8, directive, "username"))
+        {
             try markOnce(&self.seen.remote_username);
             self.remote_username = try parseOwnedUtf8(allocator, words);
-        } else if (std.mem.eql(u8, directive, "remote_password")) {
+        } else if (std.mem.eql(u8, directive, "remote_password") or
+            std.mem.eql(u8, directive, "password"))
+        {
             try markOnce(&self.seen.remote_password);
             self.remote_password = try parseOwnedUtf8(allocator, words);
         } else if (std.mem.eql(u8, directive, "restart_timeout")) {
@@ -1103,8 +1109,11 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_tcp_keepalive") or
         std.mem.eql(u8, value, "bridge_tcp_user_timeout") or
         std.mem.eql(u8, value, "local_clientid") or
+        std.mem.eql(u8, value, "clientid") or
         std.mem.eql(u8, value, "remote_clientid") or
+        std.mem.eql(u8, value, "username") or
         std.mem.eql(u8, value, "remote_username") or
+        std.mem.eql(u8, value, "password") or
         std.mem.eql(u8, value, "remote_password") or
         std.mem.eql(u8, value, "restart_timeout") or
         std.mem.eql(u8, value, "bridge_cafile") or

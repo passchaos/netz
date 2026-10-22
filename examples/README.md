@@ -188,15 +188,16 @@ The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
 `sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
-`autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
+`autosave_interval`, `autosave_on_changes`, `connection`, `address`, `addresses`, `topic`,
 `cleansession`, `local_cleansession`, `local_clientid`,
 `bridge_protocol_version`,
 `bridge_session_expiry_interval`, `keepalive_interval`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
 `bridge_attempt_unsubscribe`, `try_private`, `bridge_bind_address`,
-`bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `remote_clientid`,
-`remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
+`bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `clientid`, `remote_clientid`,
+`username`, `remote_username`, `password`, `remote_password`, `restart_timeout`,
+`bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_ciphers`, `bridge_ciphers_tls1.3`,
 `bridge_require_ocsp`, `bridge_insecure`,
@@ -269,8 +270,11 @@ attempt remains immediate. MQTT 3.1.1 is the bridge default;
 `bridge_protocol_version mqttv31` selects MQTT 3.1 and
 `bridge_protocol_version mqttv50` selects MQTT 5. `remote_username` and
 `remote_password` configure upstream authentication, with a password requiring
-a username. When `remote_clientid` is omitted, the unique connection name is
-used as the stable Client ID. MQTT 3.1 remote Client IDs must contain 1-23
+a username. Mosquitto's legacy `username`, `password`, and `clientid` spellings
+are exact aliases for the corresponding `remote_*` directives; mixing either
+spelling of the same field is a duplicate configuration error. When
+`remote_clientid` is omitted, the unique connection name is used as the stable
+Client ID. MQTT 3.1 remote Client IDs must contain 1-23
 characters, so longer connection names require an explicit shorter
 `remote_clientid`. Configured MQTT 3.1 bridges explicitly enable Mosquitto's
 non-standard CONNACK Session Present bit; low-level clients remain strict by
