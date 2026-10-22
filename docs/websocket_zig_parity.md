@@ -212,6 +212,14 @@ of a caller-owned session. A real QUIC/TLS regression drops the first final
 rejection datagram and requires PTO retransmission, exact status/header/body/
 trailers, and an empty delivery-recovery queue. Existing `accept*` methods
 remain immediate wrappers.
+Unsupported RFC 9220 versions now use that same recovery ownership for the
+automatic 426 advertisement. Caller-owned server sessions receive their H3
+state back with the response still represented in ACK/PTO recovery, then
+complete the existing rejection/drop sequence and an ordinary sibling request
+on that connection. Server-owned admission retains the `RejectedUpgrade`,
+performs its bounded delivery-only drain, restores the session to the outer
+owner, and only then returns typed `UnsupportedVersion` for teardown. Real
+authenticated QUIC tests validate the exact version header in both modes.
 `Client.connect*Attempt*` retains the complete non-2xx response body and
 trailers under `Limits.max_rejection_body_bytes`, rejects an oversized declared
 Content-Length before allocating or reading DATA, and skips bounded 1xx heads

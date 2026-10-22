@@ -5279,12 +5279,63 @@ fn receiveServerUpgradeBefore(
         try receiveRequestHeadWithDeadline(h3, absolute)
     else
         try receiveRequestHead(h3);
-    errdefer request.head.deinit(allocator);
-    errdefer h3.rejectRequest(request.stream_id) catch {};
-    try validateRequestHandshake(
+    var request_owned = true;
+    errdefer if (request_owned) request.head.deinit(allocator);
+    var request_pending = true;
+    errdefer if (request_pending) {
+        h3.rejectRequest(request.stream_id) catch {};
+    };
+    validateRequestHandshake(
         request.head,
         options.allowed_origins,
-    );
+    ) catch |err| switch (err) {
+        error.UnsupportedVersion => {
+            try validateRequestForVersionNegotiation(
+                request.head,
+                options.allowed_origins,
+            );
+            try validateVersionNegotiationHeaders(
+                allocator,
+                request.head.headers,
+                options.extra_headers,
+            );
+            const owned_h3 = h3.*;
+            h3.* = undefined;
+            request_owned = false;
+            request_pending = false;
+            var pending = PendingUpgrade{
+                .allocator = allocator,
+                .h3 = owned_h3,
+                // Always restore before returning the typed error. For an
+                // owning server this lets its outer errdefer close only after
+                // the bounded recovery drain below; caller-owned sessions
+                // keep the submitted response in their recovery state.
+                .restore_to = h3,
+                .options = options,
+                .deadline = deadline,
+                .request = request,
+                .selected_protocol = null,
+                .selected_extension = null,
+                .negotiated_extension = .{},
+            };
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var rejected = try pending.rejectUnsupportedVersionRetained();
+            pending_owned = false;
+            defer rejected.deinit();
+            if (restore_to == null) {
+                if (deadline) |absolute| {
+                    rejected.waitForRecoveryIdleWithDeadline(absolute) catch {};
+                } else {
+                    rejected.waitForRecoveryIdleWithTimeout(
+                        rejection_drain_timeout,
+                    ) catch {};
+                }
+            }
+            return err;
+        },
+        else => return err,
+    };
     const selected_protocol = try selectSubprotocol(
         allocator,
         request.head.headers,
@@ -5316,6 +5367,8 @@ fn receiveServerUpgradeBefore(
     try validateServerExtraHeaders(options.extra_headers);
     const owned_h3 = h3.*;
     h3.* = undefined;
+    request_owned = false;
+    request_pending = false;
     return .{
         .allocator = allocator,
         .h3 = owned_h3,
@@ -5561,9 +5614,38 @@ pub const PendingUpgrade = struct {
         body: []const u8,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!RejectedUpgrade {
-        if (status < 300 or status > 599) return error.InvalidStatus;
         try validateServerExtraHeaders(response_headers);
         try validateServerExtraHeaders(trailers);
+        return self.rejectWithBodyRetainedPrepared(
+            status,
+            response_headers,
+            body,
+            trailers,
+        );
+    }
+
+    fn rejectUnsupportedVersionRetained(
+        self: *PendingUpgrade,
+    ) Error!RejectedUpgrade {
+        return self.rejectWithBodyRetainedPrepared(
+            426,
+            &.{.{
+                .name = "sec-websocket-version",
+                .value = "13",
+            }},
+            &.{},
+            &.{},
+        );
+    }
+
+    fn rejectWithBodyRetainedPrepared(
+        self: *PendingUpgrade,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedUpgrade {
+        if (status < 300 or status > 599) return error.InvalidStatus;
         const response: http3.Response = .{
             .status = status,
             .headers = response_headers,
@@ -5833,6 +5915,27 @@ fn validateRequestHandshake(
     request: http3.DecodedRequestHead,
     allowed_origins: []const []const u8,
 ) Error!void {
+    try validateRequestHandshakePrefix(request);
+    try websocket.validateClientVersion(
+        try requiredHeader(request.headers, "sec-websocket-version"),
+    );
+    try validateRequestHandshakeSuffix(request, allowed_origins);
+}
+
+fn validateRequestForVersionNegotiation(
+    request: http3.DecodedRequestHead,
+    allowed_origins: []const []const u8,
+) Error!void {
+    try validateRequestHandshakePrefix(request);
+    try websocket.validateClientVersionSyntax(
+        try requiredHeader(request.headers, "sec-websocket-version"),
+    );
+    try validateRequestHandshakeSuffix(request, allowed_origins);
+}
+
+fn validateRequestHandshakePrefix(
+    request: http3.DecodedRequestHead,
+) Error!void {
     if (!std.mem.eql(u8, request.method, "CONNECT") or
         !std.mem.eql(u8, request.scheme, "https") or
         request.authority == null or request.path.len == 0 or
@@ -5840,17 +5943,32 @@ fn validateRequestHandshake(
             u8,
             try requiredHeader(request.headers, ":protocol"),
             "websocket",
-        ) or
-        !std.mem.eql(
-            u8,
-            try requiredHeader(request.headers, "sec-websocket-version"),
-            "13",
         ))
     {
         return error.InvalidHandshake;
     }
+}
+
+fn validateRequestHandshakeSuffix(
+    request: http3.DecodedRequestHead,
+    allowed_origins: []const []const u8,
+) Error!void {
     try rejectLegacyHeaders(request.headers);
     try validateOrigin(request.headers, allowed_origins);
+}
+
+fn validateVersionNegotiationHeaders(
+    allocator: std.mem.Allocator,
+    headers: []const http3.Qpack.HeaderField,
+    server_headers: []const http3.Qpack.HeaderField,
+) Error!void {
+    if (try selectSubprotocol(allocator, headers, &.{})) |protocol| {
+        allocator.free(protocol);
+    }
+    if (try acceptExtensions(allocator, headers, .{})) |extension| {
+        allocator.free(extension);
+    }
+    try validateServerExtraHeaders(server_headers);
 }
 
 fn validateServerHandshake(

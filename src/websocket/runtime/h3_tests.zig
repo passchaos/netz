@@ -54,6 +54,16 @@ fn countHeaders(
     return count;
 }
 
+fn findHeader(
+    headers: []const http3.Qpack.HeaderField,
+    name: []const u8,
+) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
+
 test "WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -855,6 +865,97 @@ test "WebSocket HTTP3 URI rejects non-HTTPS and userinfo before I/O" {
     );
 }
 
+test "WebSocket HTTP3 owning server drains unsupported version rejection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    const client_cid = [_]u8{ 0x79, 0x7a, 0x7b, 0x7c };
+    const server_cid = [_]u8{ 0x7d, 0x7e, 0x7f, 0x80 };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x81} ** 32,
+            .x25519_secret_key = [_]u8{0x82} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            std.testing.expectError(
+                error.UnsupportedVersion,
+                self.server.receiveUpgradeRequestWithTimeout(
+                    .{},
+                    .fromSeconds(3),
+                ),
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try http3.runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .random = [_]u8{0x83} ** 32,
+                .x25519_secret_key = [_]u8{0x84} ** 32,
+            },
+            .session = .{ .local_settings = .{
+                .enable_connect_protocol = true,
+            } },
+        },
+    );
+    defer client.deinit();
+    const stream_id = try client.sendRequestWithTimeout(.{
+        .method = "CONNECT",
+        .path = "/unsupported-version",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "websocket" },
+            .{ .name = "sec-websocket-version", .value = "12" },
+        },
+    }, .fromSeconds(3));
+    var response = try client.receiveResponseWithTimeout(
+        stream_id,
+        .fromSeconds(3),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 426), response.response.status);
+    try std.testing.expectEqualStrings(
+        "13",
+        findHeader(
+            response.response.headers,
+            "sec-websocket-version",
+        ).?,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket HTTP3 connect attempt preserves rejection metadata" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1385,6 +1486,16 @@ test "WebSocket HTTP3 caller server session restores after rejection" {
             var session = try self.server.accept();
             defer session.deinit();
 
+            try std.testing.expectError(
+                error.UnsupportedVersion,
+                h3.Server.receiveSessionUpgradeRequestWithTimeout(
+                    allocator,
+                    &session,
+                    .{},
+                    .fromSeconds(3),
+                ),
+            );
+
             var rejected = try h3.Server.receiveSessionUpgradeRequestWithTimeout(
                 allocator,
                 &session,
@@ -1457,6 +1568,32 @@ test "WebSocket HTTP3 caller server session restores after rejection" {
         },
     );
     defer client.deinit();
+
+    const version_stream = try client.sendRequestWithTimeout(.{
+        .method = "CONNECT",
+        .path = "/unsupported-version",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "websocket" },
+            .{ .name = "sec-websocket-version", .value = "12" },
+        },
+    }, .fromSeconds(3));
+    var version_response = try client.receiveResponseWithTimeout(
+        version_stream,
+        .fromSeconds(3),
+    );
+    defer version_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u16, 426),
+        version_response.response.status,
+    );
+    try std.testing.expectEqualStrings(
+        "13",
+        findHeader(
+            version_response.response.headers,
+            "sec-websocket-version",
+        ).?,
+    );
 
     var rejected = try h3.Client.connectSessionAttemptWithTimeout(
         allocator,
