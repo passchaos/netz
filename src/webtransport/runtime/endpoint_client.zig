@@ -23,6 +23,7 @@ const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
 const flow_write = @import("flow/write.zig");
+const body_fragment = @import("../../http3/runtime/send/body_fragment.zig");
 
 const net = std.Io.net;
 
@@ -119,6 +120,7 @@ pub const Session = struct {
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
     close_response_pending: bool = false,
+    removal_close: body_fragment.State = .{},
 
     pub fn applicationProtocol(self: Session) ?application_protocol.String {
         return application_protocol.selected(self.response.headers);
@@ -950,16 +952,23 @@ pub const Client = struct {
         };
     }
 
+    /// Close an active Session normally and complete terminal submissions
+    /// before releasing its owner. Failed writes retain exact CLOSE progress
+    /// for retry; ordinary pacing/credit waits service this connection owner.
     pub fn removeSession(
         self: *Client,
         session_id: webtransport.SessionId,
     ) Error!bool {
         const current = self.sessions.get(session_id.value) orelse return false;
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        if (self.h3.callback_reader_active) return error.ConcurrentRead;
+        current.control.bindFlow(current.streams.flow);
         try terminal.finish(
             &self.h3,
             &current.control,
             &current.streams,
             &current.close_response_pending,
+            &current.removal_close,
         );
         const removed = self.sessions.fetchRemove(session_id.value).?.value;
         removed.deinit(self);
@@ -1043,7 +1052,7 @@ pub const Client = struct {
             => return null,
             else => return err,
         };
-        if (cleanup == .submitted or session_value.control.state.closed) {
+        if (cleanup == .submitted or session_value.control.state.closed or session_value.control.local_close_started) {
             return null;
         }
         if (try incremental_stream.pollOnceShared(

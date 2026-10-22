@@ -1183,6 +1183,23 @@ Session removal, connection removal and endpoint teardown. Regressions exercise
 those three paths, registered and unread FIN streams, socket failure before
 rejection and after CLOSE, a peer STOP_SENDING, and continued sibling delivery
 after the peer processes the removed CONNECT's close/reset exchange.
+The shared client's `removeSession` now also normally closes an active CONNECT
+before releasing the Session. A retained DATA-frame cursor records its exact
+wire offset, including a partially submitted frame header, so retry never inserts
+a second header or repeats CLOSE bytes. The writer submits one bounded STREAM
+fragment at a time and works with a one-frame packet budget and one-byte stream
+frames. Socket/allocator failures keep the owner; ordinary pacing, congestion and
+stream-credit waits continue through the existing sole HTTP/3 receiver and retain
+sibling packets. While a CLOSE is pending, application data stays hidden for that
+Session and siblings remain usable. Buffered protocol rejection still precedes
+CLOSE/FIN, and forbidden CONNECT frames retain connection-level error handling.
+If the peer terminates while the sender waits for credit, an unwritten CLOSE can
+be acknowledged with FIN; an incomplete DATA frame is canceled with
+WT_SESSION_GONE and its HTTP/3 request state is released. Successful removal
+terminates registered streams and aborts an unfinished CONNECT receive direction
+before destroying the metadata. Regressions verify peer CLOSE decoding, failure
+before/after the close submission, one-byte-header retry, flow/congestion progress,
+peer termination without a further grant, registered-stream cleanup and siblings.
 Packet routing records FIN, RESET_STREAM, and connection close even when a
 packet carries no DATAGRAM, so a DATAGRAM arriving in a later packet is dropped
 before queue allocation. The client paced-send progress path also carries the

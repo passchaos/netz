@@ -19427,3 +19427,7 @@ test {
 test {
     _ = @import("runtime/endpoint_server/removal_tests.zig");
 }
+
+test {
+    _ = @import("runtime/endpoint_client/removal_tests.zig");
+}
