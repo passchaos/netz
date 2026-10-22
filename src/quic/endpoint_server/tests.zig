@@ -212,6 +212,128 @@ test "QUIC endpoint server rejects invalid admission limits" {
     );
 }
 
+test "QUIC endpoint server owns address token replay history by default" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0x61} ** quic.address_validation_token.secret_len;
+    const token = try quic.address_validation_token.encode(
+        allocator,
+        secret,
+        .{
+            .kind = .new_token,
+            .issued_ns = 1,
+            .lifetime_ns = 100,
+            .peer_address = "peer",
+            .nonce = [_]u8{0x62} **
+                quic.address_validation_token.nonce_len,
+        },
+    );
+    defer allocator.free(token);
+
+    {
+        var server = try endpoint_server.Server.init(
+            allocator,
+            &endpoint,
+            .{
+                .local_connection_id = &.{},
+                .address_validation_secrets = &.{secret},
+            },
+            .{ .address_validation_replay_capacity = 2 },
+        );
+        defer server.deinit();
+        try std.testing.expect(
+            server.ownsAddressValidationReplayFilter(),
+        );
+        const replay_filter = server.handshake_options
+            .address_validation_replay_filter.?;
+        try std.testing.expect(
+            replay_filter == server.worker_context.options
+                .address_validation_replay_filter.?,
+        );
+        try replay_filter.rememberValidated(token);
+        try std.testing.expectError(
+            error.TokenReplay,
+            replay_filter.rememberValidated(token),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            server.addressValidationReplayEntryCount(),
+        );
+    }
+
+    {
+        var disabled = try endpoint_server.Server.init(
+            allocator,
+            &endpoint,
+            .{
+                .local_connection_id = &.{},
+                .address_validation_secrets = &.{secret},
+            },
+            .{ .address_validation_replay_capacity = 0 },
+        );
+        defer disabled.deinit();
+        try std.testing.expect(
+            !disabled.ownsAddressValidationReplayFilter(),
+        );
+        try std.testing.expect(
+            disabled.handshake_options
+                .address_validation_replay_filter == null,
+        );
+    }
+
+    {
+        var retry_server = try endpoint_server.Server.init(
+            allocator,
+            &endpoint,
+            .{
+                .local_connection_id = &.{},
+                .retry = .{
+                    .secret = secret,
+                    .peer_address = "peer",
+                    .issued_ns = 1,
+                    .lifetime_ns = 100,
+                },
+            },
+            .{ .address_validation_replay_capacity = 2 },
+        );
+        defer retry_server.deinit();
+        try std.testing.expect(
+            retry_server.ownsAddressValidationReplayFilter(),
+        );
+    }
+
+    var caller_filter = try quic.address_validation_token
+        .SharedReplayFilter.init(allocator, io, 2);
+    defer caller_filter.deinit();
+    var borrowed = try endpoint_server.Server.init(
+        allocator,
+        &endpoint,
+        .{
+            .local_connection_id = &.{},
+            .address_validation_secrets = &.{secret},
+            .address_validation_replay_filter = &caller_filter,
+        },
+        .{ .address_validation_replay_capacity = 2 },
+    );
+    defer borrowed.deinit();
+    try std.testing.expect(!borrowed.ownsAddressValidationReplayFilter());
+    try std.testing.expect(
+        borrowed.handshake_options.address_validation_replay_filter.? ==
+            &caller_filter,
+    );
+}
+
 test "QUIC endpoint server keeps automatic stateless reset opt in" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

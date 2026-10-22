@@ -6,6 +6,10 @@ pub const secret_len = vail.crypto.mac.key_len;
 pub const nonce_len = 16;
 pub const mac_len = vail.crypto.mac.tag_len;
 pub const fingerprint_len = mac_len;
+/// Default endpoint-wide replay history for authenticated Retry/NEW_TOKEN
+/// values. This matches s2n-quic's bounded exact-set capacity while retaining
+/// Netz's FIFO eviction policy for long-lived token secrets.
+pub const default_replay_filter_entries: usize = 16 * 1024;
 
 const magic = "netz-av1";
 const version_len = 4;

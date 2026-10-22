@@ -28,6 +28,12 @@ pub const Options = struct {
     handshake_timeout_ms: u32 = 0,
     /// Bound how long a socket wait may hide a completed handshake worker.
     handshake_poll_interval: std.Io.Duration = .fromMilliseconds(5),
+    /// Endpoint-owned replay history installed automatically when Retry or
+    /// NEW_TOKEN validation is configured without a caller-owned filter.
+    /// Zero explicitly disables this convenience; an explicit filter in
+    /// `ServerOptions` always wins and remains caller-owned.
+    address_validation_replay_capacity: usize =
+        quic.address_validation_token.default_replay_filter_entries,
     /// Stable endpoint secret for server connection-ID reset tokens. Null
     /// preserves the historical behavior of returning unknown short-header
     /// datagrams to the application without sending a stateless reset.
@@ -205,6 +211,35 @@ comptime {
     std.debug.assert(@sizeOf(Completion) <= 4 * @sizeOf(usize));
 }
 
+fn createAddressValidationReplayFilter(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    capacity: usize,
+) std.mem.Allocator.Error!*quic.address_validation_token.SharedReplayFilter {
+    std.debug.assert(capacity != 0);
+    const replay_filter = try allocator.create(
+        quic.address_validation_token.SharedReplayFilter,
+    );
+    errdefer allocator.destroy(replay_filter);
+    replay_filter.* = quic.address_validation_token.SharedReplayFilter.init(
+        allocator,
+        io,
+        capacity,
+    ) catch |err| switch (err) {
+        error.InvalidCapacity => unreachable,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return replay_filter;
+}
+
+fn destroyAddressValidationReplayFilter(
+    allocator: std.mem.Allocator,
+    replay_filter: *quic.address_validation_token.SharedReplayFilter,
+) void {
+    replay_filter.deinit();
+    allocator.destroy(replay_filter);
+}
+
 const WorkerContext = struct {
     endpoint: *quic.runtime.Endpoint,
     options: quic.handshake.ServerOptions,
@@ -239,6 +274,7 @@ pub const Server = struct {
     options: Options,
     preferred_endpoints: PreferredEndpointSet = .{},
     handshake_options: quic.handshake.ServerOptions,
+    owned_address_validation_replay_filter: ?*quic.address_validation_token.SharedReplayFilter = null,
     last_stateless_reset_ns: ?u64 = null,
     connection_id_replenishment_failures: u64 = 0,
     next_handle: quic.endpoint_dispatcher.ConnectionHandle = 1,
@@ -330,6 +366,24 @@ pub const Server = struct {
             // leave peers unable to use them after this process loses state.
             return error.InvalidOptions;
         }
+        var owned_address_validation_replay_filter: ?*quic.address_validation_token.SharedReplayFilter = null;
+        if (effective_handshake_options.address_validation_replay_filter ==
+            null and options.address_validation_replay_capacity != 0 and
+            (effective_handshake_options.retry != null or
+                effective_handshake_options.address_validation_secrets.len != 0))
+        {
+            const replay_filter = try createAddressValidationReplayFilter(
+                allocator,
+                endpoint.io,
+                options.address_validation_replay_capacity,
+            );
+            owned_address_validation_replay_filter = replay_filter;
+            effective_handshake_options.address_validation_replay_filter =
+                replay_filter;
+        }
+        errdefer if (owned_address_validation_replay_filter) |replay_filter| {
+            destroyAddressValidationReplayFilter(allocator, replay_filter);
+        };
         const preferred_endpoints = try resolvePreferredEndpoints(
             endpoint,
             options,
@@ -383,6 +437,7 @@ pub const Server = struct {
             .options = effective_options,
             .preferred_endpoints = preferred_endpoints,
             .handshake_options = effective_handshake_options,
+            .owned_address_validation_replay_filter = owned_address_validation_replay_filter,
             .worker_context = worker_context,
             .completed_storage = completed_storage,
             .completed = completed,
@@ -432,6 +487,12 @@ pub const Server = struct {
         self.dispatcher.deinit();
         self.allocator.destroy(self.dispatcher);
         self.allocator.destroy(self.worker_context);
+        if (self.owned_address_validation_replay_filter) |replay_filter| {
+            destroyAddressValidationReplayFilter(
+                self.allocator,
+                replay_filter,
+            );
+        }
         self.allocator.destroy(self.completed);
         self.allocator.free(self.completed_storage);
         self.* = undefined;
@@ -447,6 +508,20 @@ pub const Server = struct {
 
     pub fn pendingHandshakeCount(self: *const Server) usize {
         return self.active_workers.load(.acquire);
+    }
+
+    /// Whether this server supplied the default process-local address-token
+    /// replay history rather than borrowing an explicit caller-owned filter.
+    pub fn ownsAddressValidationReplayFilter(self: *const Server) bool {
+        return self.owned_address_validation_replay_filter != null;
+    }
+
+    /// Current authenticated Retry/NEW_TOKEN fingerprints retained by the
+    /// effective replay filter, whether endpoint- or caller-owned.
+    pub fn addressValidationReplayEntryCount(self: *Server) usize {
+        const replay_filter = self.handshake_options
+            .address_validation_replay_filter orelse return 0;
+        return replay_filter.entryCount();
     }
 
     /// Number of established connection-ID routes retained by the endpoint.
