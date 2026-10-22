@@ -32,6 +32,7 @@ const protected_control =
 const stream_batch = @import("runtime/stream/batch.zig");
 const stream_association = @import("runtime/stream_association.zig");
 const early_streams = @import("runtime/association/early_streams.zig");
+const server_terminal = @import("runtime/endpoint_server/terminal.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 pub const EndpointClient = endpoint_client.Client;
@@ -2917,6 +2918,7 @@ pub const EndpointAcceptedSession = struct {
             self.session_id.value,
         ) catch {};
         self.request.deinit(allocator);
+        self.control.deinit();
         self.streams.deinit();
         self.* = undefined;
     }
@@ -3305,9 +3307,10 @@ pub const EndpointServer = struct {
         return self.h3.removeConnection(handle);
     }
 
-    /// Remove one accepted Session while retaining its HTTP/3 connection and
-    /// sibling Sessions. This releases its DATAGRAM association and stream
-    /// registry, allowing a later CONNECT to reuse the advertised capacity.
+    /// Terminate and remove one accepted Session while retaining its HTTP/3
+    /// connection and siblings. Active Sessions close normally with code zero.
+    /// Backpressure or send failure preserves the owner and completed terminal
+    /// progress; capacity is released only after cleanup submission succeeds.
     pub fn removeSession(
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -3317,12 +3320,13 @@ pub const EndpointServer = struct {
             .handle = handle,
             .session_id = session_id,
         };
-        if (!self.sessions.contains(key)) return false;
-        if (self.h3.session(handle)) |h3| try self.noteEarlyRejection(handle, h3, session_id.value);
+        const target = self.sessions.get(key) orelse return false;
         const becomes_idle = self.sessionCountForConnection(handle) == 1;
         if (becomes_idle) {
             try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
         }
+        if (self.h3.session(handle)) |h3| try self.noteEarlyRejection(handle, h3, session_id.value);
+        try server_terminal.finish(target);
         const removed = self.sessions.fetchRemove(key).?.value;
         removed.deinit(self.allocator);
         self.allocator.destroy(removed);
@@ -3956,7 +3960,7 @@ pub const EndpointServer = struct {
                 else => |other| return other,
             };
         if (close_progress == .submitted) return null;
-        if (target.control.terminal_reported) return null;
+        if (target.control.state.closed) return null;
         const stream_event = if (sessions) |known|
             try incremental_stream.pollOnceShared(
                 &target.h3.established.connection,
@@ -4130,42 +4134,7 @@ fn finishEndpointSessionEvent(
     }
 }
 
-fn advanceEndpointCloseOnce(
-    target: *EndpointAcceptedSession,
-) Error!session_control.TerminateProgress {
-    if (connection_lifecycle.observe(&target.control, target.h3, &target.streams)) {
-        target.close_response_pending = false;
-        return .complete;
-    }
-    if (try target.control.tryRejectPostTerminalData(
-        &target.h3.established.connection,
-    )) {
-        target.close_response_pending = false;
-        return .submitted;
-    }
-    if (target.close_response_pending) {
-        target.h3.trySendResponseBody(
-            target.session_id.value,
-            &.{},
-            true,
-        ) catch |err| switch (err) {
-            error.RequestCancelled, error.RequestRejected => {},
-            else => |other| return other,
-        };
-        target.close_response_pending = false;
-        target.control.local_close_sent = true;
-        return .submitted;
-    }
-    if (!target.control.local_close_sent and
-        !target.control.terminal_reported)
-    {
-        return .complete;
-    }
-    return session_control.terminateStreamsOnce(
-        &target.h3.established.connection,
-        &target.streams,
-    );
-}
+const advanceEndpointCloseOnce = server_terminal.advanceOnce;
 
 pub const AcceptedSession = struct {
     server: *Server,
@@ -19453,4 +19422,8 @@ test {
 
 test {
     _ = @import("runtime/association/tests/early_streams.zig");
+}
+
+test {
+    _ = @import("runtime/endpoint_server/removal_tests.zig");
 }

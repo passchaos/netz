@@ -299,6 +299,13 @@ fn terminateBufferedStreamsInternal(
                 }
                 return .submitted;
             }
+            if (connection.recvStreamStats(stream_id)) |stats| {
+                if (stats.stop_sending_sent != null) {
+                    const discarded = try connection.discardStoppedReceived(stream_id);
+                    if (single_attempt and discarded != 0) return .submitted;
+                }
+            }
+            _ = try connection.requestCompletedPeerStreamRelease(stream_id);
         }
         if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) return .complete;
@@ -316,7 +323,7 @@ fn bufferedPeerWebTransportDirection(
         .server => id.initiator() == .client,
     };
     if (!peer_initiated) return null;
-    const available = connection.availableReceivedStream(stream_id) orelse
+    const available = connection.retainedReceivedStream(stream_id) orelse
         return null;
     return switch (id.direction()) {
         .bidirectional => blk: {
@@ -359,7 +366,7 @@ fn bufferedReceiveNeedsStop(
     stream_id: u62,
 ) bool {
     const stats = connection.recvStreamStats(stream_id) orelse return false;
-    return stats.final_size == null and
-        stats.reset == null and
-        stats.stop_sending_sent == null;
+    if (stats.stop_sending_sent != null) return false;
+    return stats.final_size == null and stats.reset == null or
+        stats.bytes_read < (stats.final_size orelse stats.highest_received_offset);
 }

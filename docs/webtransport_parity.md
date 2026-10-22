@@ -1161,11 +1161,28 @@ server, and shared-endpoint server sessions retain receive routing until the
 peer CLOSE/FIN/reset is consumed, so a caller can send CLOSE and then await the
 peer's terminal acknowledgement without `UnexpectedStream`. New streams and
 DATAGRAM sends still fail immediately through the closed session state. Shared
-endpoint sessions remain addressable until explicit connection removal; after
+endpoint sessions remain addressable until explicit Session or connection removal; after
 their terminal event is delivered they stop producing application events but
 retain detached HTTP/3 routing for late ACK/terminal packets. Association
 storage is finally released by session or endpoint teardown; until then its
 stable terminal state rejects receives precisely and drops late datagrams.
+Shared-server `removeSession` now completes terminal work before dropping its
+Session owner. It observes buffered Capsules, gives malformed/post-CLOSE rejection
+priority over an ordinary FIN, and normally closes an active Session with code
+zero. Registered streams and complete but unread buffered streams receive
+WT_SESSION_GONE cleanup before their metadata is released. An unfinished CONNECT
+receive direction is stopped with the optional WT_SESSION_GONE signal. A failed
+send or pacing/credit limit keeps the Session addressable, retains completed FIN
+and reset/stop submissions, and leaves the advertised Session capacity occupied
+until retry succeeds; removal never claims a second socket reader. Already-reset
+CONNECT send directions proceed through cleanup instead of trying to replay CLOSE.
+Local CLOSE also suppresses queued stream/DATAGRAM delivery while the endpoint
+continues processing the peer's terminal acknowledgement and sibling Sessions.
+Shared Session destruction now releases heap-backed CLOSE reason storage on
+Session removal, connection removal and endpoint teardown. Regressions exercise
+those three paths, registered and unread FIN streams, socket failure before
+rejection and after CLOSE, a peer STOP_SENDING, and continued sibling delivery
+after the peer processes the removed CONNECT's close/reset exchange.
 Packet routing records FIN, RESET_STREAM, and connection close even when a
 packet carries no DATAGRAM, so a DATAGRAM arriving in a later packet is dropped
 before queue allocation. The client paced-send progress path also carries the
