@@ -301,6 +301,10 @@ serve-loop, and pooled-client paths share this rule, including pool eviction
 when a later response field carries `close`. This matches Hyper's `get_all`
 handling for connection-close reuse decisions rather than inspecting only the
 first field.
+When the serve loop must add `close` or HTTP/1.0 `keep-alive`, it now appends a
+missing token instead of replacing existing `Connection` fields. Hop-by-hop
+extension declarations such as `Connection: x-hop` therefore remain attached
+to their fields, while `close` still wins across the combined repeated list.
 
 Request framing also follows Hyper's smuggling hardening when both
 `Transfer-Encoding` and `Content-Length` are present: chunked decoding still

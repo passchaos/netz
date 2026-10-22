@@ -420,9 +420,10 @@ test "HTTP/1 graceful shutdown overrides conflicting keep-alive header" {
     var response = try client.request(.{ .target = "/override" });
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings(
-        "close",
+        "keep-alive",
         response.response.header("connection").?,
     );
+    try std.testing.expect(!response.response.keepAlive());
     try std.testing.expectEqualStrings(
         "preserved",
         response.response.header("x-test").?,

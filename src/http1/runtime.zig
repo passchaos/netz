@@ -5,6 +5,7 @@ const http3 = @import("../http3/mod.zig");
 const runtime_write = @import("runtime/write.zig");
 const connect_udp_runtime = @import("runtime/connect_udp.zig");
 const uri_redirect = @import("runtime/redirect.zig");
+const wire = @import("../internal/wire.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
@@ -8753,45 +8754,46 @@ fn adjustResponseForServeLoop(
     const request_keep_alive = request.keepAlive();
     const response_wants_keep_alive = responseOptionsKeepAlive(response);
     var adjusted = ServeLoopResponse{ .response = out };
+    errdefer adjusted.deinit(allocator);
 
     if (request.version == .http_1_0) {
         // Match Hyper's h1 behavior for old peers: speak HTTP/1.0 back to an
         // HTTP/1.0 request, and only keep the connection alive when both sides
         // opted in and the response would otherwise be persistent.
         out.version = .http_1_0;
-        if (request_keep_alive and response_wants_keep_alive and !hasHeader(out.headers, "connection")) {
-            adjusted = try addConnectionHeaderForServeLoop(allocator, out, "keep-alive");
+        adjusted.response = out;
+        if (request_keep_alive and response_wants_keep_alive) {
+            adjusted = try ensureConnectionTokenForServeLoop(
+                allocator,
+                adjusted,
+                "keep-alive",
+            );
             out = adjusted.response;
         }
     }
 
     if (graceful_shutdown) {
-        if (adjusted.headers_owned) adjusted.deinit(allocator);
-        adjusted = try replaceConnectionHeaderForServeLoop(
+        adjusted = try ensureConnectionTokenForServeLoop(
             allocator,
-            out,
+            adjusted,
             "close",
         );
         out = adjusted.response;
     } else if (request.must_close) {
         // TE+CL is locally decoded as chunked, but the response must not
-        // advertise persistence even when an application supplied its own
-        // Connection field. Replace every such field to make the wire signal
-        // agree with the serve loop's decision to retire the connection.
-        if (adjusted.headers_owned) adjusted.deinit(allocator);
-        adjusted = try replaceConnectionHeaderForServeLoop(
+        // advertise persistence even when an application supplied other
+        // Connection options. Preserve their hop-by-hop declarations and add
+        // close as another field so the strongest token wins.
+        adjusted = try ensureConnectionTokenForServeLoop(
             allocator,
-            out,
+            adjusted,
             "close",
         );
         out = adjusted.response;
-    } else if (!request_keep_alive and
-        !hasHeader(out.headers, "connection"))
-    {
-        if (adjusted.headers_owned) adjusted.deinit(allocator);
-        adjusted = try addConnectionHeaderForServeLoop(
+    } else if (!request_keep_alive) {
+        adjusted = try ensureConnectionTokenForServeLoop(
             allocator,
-            out,
+            adjusted,
             "close",
         );
         out = adjusted.response;
@@ -8845,6 +8847,80 @@ test "HTTP/1 serve response derives trailer capability from request" {
     try std.testing.expect(!refused.response.request_accepts_trailers);
 }
 
+test "HTTP/1 serve loop preserves hop-by-hop Connection options" {
+    const allocator = std.testing.allocator;
+    const extension_headers = [_]http1.Header{
+        .{ .name = "Connection", .value = "x-hop" },
+        .{ .name = "X-Hop", .value = "private" },
+    };
+
+    var close_headers = [_]http1.Header{.{
+        .name = "Connection",
+        .value = "close",
+    }};
+    var close = try adjustResponseForServeLoop(
+        allocator,
+        .{
+            .method = .GET,
+            .target = "/",
+            .version = .http_1_1,
+            .headers = &close_headers,
+            .body = &.{},
+            .consumed = 0,
+        },
+        .{ .headers = &extension_headers },
+        false,
+    );
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), close.response.headers.len);
+    try std.testing.expect(wire.anyHeaderContainsToken(
+        close.response.headers,
+        "connection",
+        "x-hop",
+    ));
+    try std.testing.expect(wire.anyHeaderContainsToken(
+        close.response.headers,
+        "connection",
+        "close",
+    ));
+    try std.testing.expect(close.response.headers[1].eqlName("x-hop"));
+    try std.testing.expectEqualStrings(
+        "private",
+        close.response.headers[1].value,
+    );
+    try std.testing.expect(!responseOptionsKeepAlive(close.response));
+
+    var keep_alive_headers = [_]http1.Header{.{
+        .name = "Connection",
+        .value = "keep-alive",
+    }};
+    var http10 = try adjustResponseForServeLoop(
+        allocator,
+        .{
+            .method = .GET,
+            .target = "/",
+            .version = .http_1_0,
+            .headers = &keep_alive_headers,
+            .body = &.{},
+            .consumed = 0,
+        },
+        .{ .headers = &extension_headers },
+        false,
+    );
+    defer http10.deinit(allocator);
+    try std.testing.expectEqual(http1.Version.http_1_0, http10.response.version);
+    try std.testing.expect(wire.anyHeaderContainsToken(
+        http10.response.headers,
+        "connection",
+        "x-hop",
+    ));
+    try std.testing.expect(wire.anyHeaderContainsToken(
+        http10.response.headers,
+        "connection",
+        "keep-alive",
+    ));
+}
+
 fn addConnectionHeaderForServeLoop(allocator: std.mem.Allocator, response: ResponseOptions, value: []const u8) Error!ServeLoopResponse {
     const headers = try allocator.alloc(http1.Header, response.headers.len + 1);
     @memcpy(headers[0..response.headers.len], response.headers);
@@ -8854,26 +8930,23 @@ fn addConnectionHeaderForServeLoop(allocator: std.mem.Allocator, response: Respo
     return .{ .response = out, .headers_owned = true };
 }
 
-fn replaceConnectionHeaderForServeLoop(
+fn ensureConnectionTokenForServeLoop(
     allocator: std.mem.Allocator,
-    response: ResponseOptions,
+    current: ServeLoopResponse,
     value: []const u8,
 ) Error!ServeLoopResponse {
-    var retained: usize = 0;
-    for (response.headers) |header| {
-        retained += @intFromBool(!header.eqlName("connection"));
-    }
-    const headers = try allocator.alloc(http1.Header, retained + 1);
-    var index: usize = 0;
-    for (response.headers) |header| {
-        if (header.eqlName("connection")) continue;
-        headers[index] = header;
-        index += 1;
-    }
-    headers[index] = .{ .name = "Connection", .value = value };
-    var out = response;
-    out.headers = headers;
-    return .{ .response = out, .headers_owned = true };
+    if (wire.anyHeaderContainsToken(
+        current.response.headers,
+        "connection",
+        value,
+    )) return current;
+    const replacement = try addConnectionHeaderForServeLoop(
+        allocator,
+        current.response,
+        value,
+    );
+    if (current.headers_owned) current.deinit(allocator);
+    return replacement;
 }
 
 fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
@@ -12893,9 +12966,15 @@ test "HTTP/1 serveConnection retires TE plus CL requests before pipeline suffix"
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("handled", response.response.body);
     try std.testing.expectEqualStrings(
-        "close",
+        "keep-alive",
         response.response.header("connection").?,
     );
+    try std.testing.expect(!response.response.keepAlive());
+    try std.testing.expect(wire.anyHeaderContainsToken(
+        response.response.headers,
+        "connection",
+        "close",
+    ));
 
     thread.join();
     joined = true;
