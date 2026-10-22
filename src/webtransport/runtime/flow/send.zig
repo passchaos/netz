@@ -22,6 +22,7 @@ pub fn commit(registry: *webtransport.StreamRegistry, bytes: usize) void {
 }
 
 pub fn wait(registry: *const webtransport.StreamRegistry, progress: ?flow_progress.Progress, deadline: ?std.Io.Clock.Timestamp) flow_progress.Error!void {
+    if (progress) |owner| try owner.maintain(deadline);
     while (available(registry) == 0) {
         const owning = progress orelse return error.FlowControlBlocked;
         try owning.run(deadline);

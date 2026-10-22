@@ -262,10 +262,31 @@ Deadline-bound complete sends report the exact committed application prefix on
 failure so callers can resume without duplication. Dispatcher-bound operations
 retain their one-attempt contract and leave socket receives to the shared owner.
 
-Automatic stream credit replenishment and resumable deadline-bound grant APIs
-still need runtime integration.
-Configured stream-retention bounds remain independent of cumulative opening
-credit. These tests therefore do not establish
+Negotiated flow-control sessions now replenish WT_MAX_STREAMS as peer streams
+are retired. Full registry records are reclaimed only after both applicable
+halves terminate, application FIN/RESET/STOP notifications are delivered, and
+QUIC compacts its ACK/recovery state. Cumulative byte and opening counters remain
+intact. Transport closed-ID ranges prevent old associations from being counted
+again, and explicit release of an already retired peer stream stays idempotent.
+Configured retention limits bound active and pending-terminal records; when an
+otherwise completed record awaits ACK, opening can wait for its reclamation.
+
+Owning incremental, targeted, complete-stream and DATAGRAM readers now service
+pending credits while waiting for the next application event, so stream reopening
+does not depend on a new stream-data packet. HTTP/3's optional maintenance callback
+preserves the owned and fresh caller-buffer/batch DATAGRAM paths, queued packet
+order, callback errors and one absolute deadline. Explicit transport servicing
+also observes registry retirement after ACK progress. Data/bidi/uni updates coalesce into one atomic
+CONNECT DATA submission. Failed submissions leave every advertised limit intact;
+pacing waits retain the same absolute deadline, and socket errors in an owning
+wait are returned for retry. Serial bidi/uni tests reuse one retained slot, and a
+lost grant recovers through QUIC while the reader waits for the next stream.
+Buffered DRAIN/CLOSE/reset notifications remain available to the application;
+unnegotiated MAX_* updates are ignored, prohibited HTTP/2 Capsules remain scoped
+session errors, and forbidden CONNECT frames retain connection-level handling.
+
+Resumable deadline-bound explicit grant APIs still need runtime integration.
+These tests therefore do not establish
 full draft-16 session-flow-control compliance; reliable association-prefix reset
 support must also be used by the WebTransport runtimes.
 
@@ -549,15 +570,18 @@ retaining cumulative WebTransport registry accounting. Bidirectional credit is
 emitted only after the local FIN/RESET and preceding reliable data are
 acknowledged; an early request is completed automatically by the QUIC ACK path.
 Released transport stream buffers are reclaimed behind compressed closed-ID
-ranges, while WebTransport's registry intentionally retains its separate
-per-session lifetime accounting. Stream discovery uses stable ID-based
+ranges, while WebTransport retains separate cumulative session accounting.
+Negotiated flow sessions additionally reclaim full terminal registry records
+after their application events are delivered. Stream discovery uses stable ID-based
 pagination so reclamation cannot skip a swap-moved active stream. A failed
 automatic credit update remains pending and retries through the aggregate QUIC
 connection timer without requiring another peer packet. Whole-stream and
 incremental WebTransport readers now register transport retirement when FIN or
 RESET_STREAM is delivered; local FIN/reset paths do the same, so associated
 streams are compacted after both applicable halves become terminal while the
-registry continues enforcing lifetime session limits.
+registry continues enforcing cumulative session limits. Negotiated WT_MAX_STREAMS
+updates return opening credit after registry retirement; unnegotiated adapters
+retain their existing bounded policy.
 Bounded receive entry points validate the caller's awake-clock deadline before
 polling already-buffered events. An expired or wrong-clock timestamp therefore
 cannot register an association, consume QUIC bytes, return flow-control credit,

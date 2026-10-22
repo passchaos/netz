@@ -14,6 +14,10 @@ pub const Fixture = struct {
 
     // Initialize in place: the peer connection borrows peer_endpoint.
     pub fn init(self: *Fixture, io: std.Io) !void {
+        return self.initWithSettings(io, try webtransport.settingsWithSessionCapacity(.{}, 2));
+    }
+
+    pub fn initWithSettings(self: *Fixture, io: std.Io, settings: http3.Settings) !void {
         const allocator = std.testing.allocator;
         self.peer_endpoint = try quic.runtime.Endpoint.bind(
             allocator,
@@ -27,7 +31,6 @@ pub const Fixture = struct {
         );
         var parameters = quic.practical_transport_parameters;
         parameters.max_datagram_frame_size = 1200;
-        const settings = try webtransport.settingsWithSessionCapacity(.{}, 2);
         self.client = .{
             .allocator = allocator,
             .max_sessions = 2,

@@ -209,8 +209,10 @@ pub const Control = struct {
         self.flow_state = state;
     }
 
+    /// Consume buffered control traffic while retaining application events.
+    /// Unnegotiated MAX_* capsules are ignored; terminal and prohibited control
+    /// messages still use the same parser and scoped error handling.
     pub fn progressFlow(self: *Control, connection: *quic.one_rtt.Connection) Error!void {
-        if (self.flow_state == null) return;
         while (true) {
             const event = self.pollInternal(connection, true) catch |err| switch (err) {
                 error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return,

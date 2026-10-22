@@ -307,6 +307,7 @@ fn identifyInternal(
     single_attempt: bool,
     sessions: ?SessionLookup,
 ) Error!Identification {
+    if (registry.get(stream_id) == null and connection.streamLifecycle(stream_id) == .closed) return .unclaimed;
     std.debug.assert(receive_mode != .unset);
     const direction: webtransport.StreamDirection =
         if (quic.StreamId.init(stream_id).direction() == .bidirectional)

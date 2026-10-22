@@ -111,6 +111,34 @@ test "WebTransport flow automatic data grants preserve the receive policy window
     try std.testing.expect(state.automaticDataGrant() == null);
 }
 
+test "WebTransport flow retired peer streams replenish cumulative opening windows" {
+    var state = try flow.State.init(settings(8, 1, 0), settings(8, 1, 1));
+    try state.openPeer(.bidirectional);
+    try state.retirePeer(.bidirectional);
+    try std.testing.expectEqual(@as(u64, 1), state.received.bidi);
+    try std.testing.expectEqual(@as(?u64, 2), state.automaticStreamGrant(.bidirectional));
+    const before = state;
+    try std.testing.expectError(error.FlowControlViolation, state.retirePeer(.bidirectional));
+    try std.testing.expectEqualDeep(before, state);
+    try state.commitGrant(try state.prepareGrantStreams(.bidirectional, 2));
+    try std.testing.expect(state.automaticStreamGrant(.bidirectional) == null);
+    try std.testing.expectEqual(@as(u64, 1), state.receive_stream_window.bidi);
+    // Explicit grants enlarge the active window without resetting closed count.
+    try state.commitGrant(try state.prepareGrantStreams(.bidirectional, 5));
+    try std.testing.expectEqual(@as(u64, 4), state.receive_stream_window.bidi);
+    try state.openPeer(.bidirectional);
+    try state.retirePeer(.bidirectional);
+    try std.testing.expectEqual(@as(?u64, 6), state.automaticStreamGrant(.bidirectional));
+    try std.testing.expect(state.automaticStreamGrant(.unidirectional) == null);
+    try state.commitGrant(try state.prepareGrantStreams(.unidirectional, 1));
+    try state.openPeer(.unidirectional);
+    try state.retirePeer(.unidirectional);
+    try std.testing.expectEqual(@as(?u64, 2), state.automaticStreamGrant(.unidirectional));
+    state.receive_limit.uni = flow.max_streams;
+    state.receive_stream_window.uni = flow.max_streams;
+    try std.testing.expect(state.automaticStreamGrant(.unidirectional) == null);
+}
+
 test "WebTransport flow keeps independent session budgets and advisory blocked values" {
     var first = try flow.State.init(settings(16, 1, 1), settings(16, 1, 1));
     var second = try flow.State.init(settings(16, 1, 1), settings(16, 1, 1));

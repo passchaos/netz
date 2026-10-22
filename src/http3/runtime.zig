@@ -445,15 +445,22 @@ fn sendProtectedFrames(
 const ensureConnectDatagramsNegotiated =
     connect_datagram_routing.ensureNegotiated;
 
+const NoConnectProgress = struct {
+    const ErrorSet = error{};
+    fn maintain(_: @This(), _: ?std.Io.Clock.Timestamp) ErrorSet!void {}
+};
+
 fn receiveConnectDatagramFromSession(
     session: anytype,
     stream_id: u62,
     deadline: ?std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!OwnedConnectDatagram {
+    progress: anytype,
+) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!OwnedConnectDatagram {
     while (true) {
         if (try session.pollConnectDatagram(stream_id)) |datagram| {
             return datagram;
         }
+        try progress.maintain(deadline);
         if (deadline) |absolute| {
             if (@TypeOf(session) == *HandshakeServerSession) {
                 if (session.connect_datagrams.streamDetached(stream_id))
@@ -497,11 +504,13 @@ fn receiveConnectDatagramIntoFromSession(
     stream_id: u62,
     output: []u8,
     deadline: ?std.Io.Clock.Timestamp,
-) ReceiveTimeoutError![]u8 {
+    progress: anytype,
+) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)![]u8 {
     while (true) {
         if (try session.pollConnectDatagramInto(stream_id, output)) |payload| {
             return payload;
         }
+        try progress.maintain(deadline);
         var target = connect_datagram.ReceiveIntoTarget.init(
             stream_id,
             output,
@@ -535,7 +544,8 @@ fn receiveConnectDatagramsIntoFromSession(
     outputs: [][]u8,
     received_count: *usize,
     deadline: ?std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!void {
+    progress: anytype,
+) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
     received_count.* = 0;
     for (outputs) |*output| {
         output.* = try receiveConnectDatagramIntoFromSession(
@@ -543,6 +553,7 @@ fn receiveConnectDatagramsIntoFromSession(
             stream_id,
             output.*,
             deadline,
+            progress,
         );
         received_count.* += 1;
     }
@@ -8238,12 +8249,35 @@ pub const HandshakeServerSession = struct {
         );
     }
 
+    /// Receive while servicing an owning protocol's maintenance callback.
+    /// The callback provides ErrorSet and maintain(?Timestamp), runs before an
+    /// idle socket wait, and retains this operation's receive ownership.
+    /// Callback errors and the original absolute deadline are preserved.
+    pub fn receiveConnectDatagramWithProgress(self: *HandshakeServerSession, stream_id: u62, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline, progress);
+    }
+
+    pub fn receiveConnectDatagramIntoWithProgress(self: *HandshakeServerSession, stream_id: u62, output: []u8, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramIntoFromSession(self, stream_id, output, deadline, progress);
+    }
+
+    pub fn receiveConnectDatagramsIntoWithProgress(self: *HandshakeServerSession, stream_id: u62, outputs: [][]u8, received_count: *usize, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramsIntoFromSession(self, stream_id, outputs, received_count, deadline, progress);
+    }
+
     pub fn receiveConnectDatagram(
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!OwnedConnectDatagram {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
+        return receiveConnectDatagramFromSession(self, stream_id, null, NoConnectProgress{}) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -8260,7 +8294,7 @@ pub const HandshakeServerSession = struct {
         return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
             self.connectionIo(),
             .{ .raw = timeout, .clock = .awake },
-        ));
+        ), NoConnectProgress{});
     }
 
     pub fn receiveConnectDatagramWithDeadline(
@@ -8270,7 +8304,7 @@ pub const HandshakeServerSession = struct {
     ) ReceiveTimeoutError!OwnedConnectDatagram {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        return receiveConnectDatagramFromSession(self, stream_id, deadline);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline, NoConnectProgress{});
     }
 
     pub fn receiveConnectDatagramInto(
@@ -8284,6 +8318,7 @@ pub const HandshakeServerSession = struct {
             stream_id,
             output,
             null,
+            NoConnectProgress{},
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -8321,6 +8356,7 @@ pub const HandshakeServerSession = struct {
             stream_id,
             output,
             deadline,
+            NoConnectProgress{},
         );
     }
 
@@ -8339,6 +8375,7 @@ pub const HandshakeServerSession = struct {
             outputs,
             received_count,
             null,
+            NoConnectProgress{},
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -8382,6 +8419,7 @@ pub const HandshakeServerSession = struct {
             outputs,
             received_count,
             deadline,
+            NoConnectProgress{},
         );
     }
 
@@ -17413,12 +17451,35 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Receive while servicing an owning protocol's maintenance callback.
+    /// The callback provides ErrorSet and maintain(?Timestamp), runs before an
+    /// idle socket wait, and retains this operation's receive ownership.
+    /// Callback errors and the original absolute deadline are preserved.
+    pub fn receiveConnectDatagramWithProgress(self: *HandshakeClient, stream_id: u62, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline, progress);
+    }
+
+    pub fn receiveConnectDatagramIntoWithProgress(self: *HandshakeClient, stream_id: u62, output: []u8, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramIntoFromSession(self, stream_id, output, deadline, progress);
+    }
+
+    pub fn receiveConnectDatagramsIntoWithProgress(self: *HandshakeClient, stream_id: u62, outputs: [][]u8, received_count: *usize, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return receiveConnectDatagramsIntoFromSession(self, stream_id, outputs, received_count, deadline, progress);
+    }
+
     pub fn receiveConnectDatagram(
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!OwnedConnectDatagram {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
+        return receiveConnectDatagramFromSession(self, stream_id, null, NoConnectProgress{}) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -17435,7 +17496,7 @@ pub const HandshakeClient = struct {
         return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
             self.connectionIo(),
             .{ .raw = timeout, .clock = .awake },
-        ));
+        ), NoConnectProgress{});
     }
 
     pub fn receiveConnectDatagramWithDeadline(
@@ -17445,7 +17506,7 @@ pub const HandshakeClient = struct {
     ) ReceiveTimeoutError!OwnedConnectDatagram {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        return receiveConnectDatagramFromSession(self, stream_id, deadline);
+        return receiveConnectDatagramFromSession(self, stream_id, deadline, NoConnectProgress{});
     }
 
     pub fn receiveConnectDatagramInto(
@@ -17459,6 +17520,7 @@ pub const HandshakeClient = struct {
             stream_id,
             output,
             null,
+            NoConnectProgress{},
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -17496,6 +17558,7 @@ pub const HandshakeClient = struct {
             stream_id,
             output,
             deadline,
+            NoConnectProgress{},
         );
     }
 
@@ -17514,6 +17577,7 @@ pub const HandshakeClient = struct {
             outputs,
             received_count,
             null,
+            NoConnectProgress{},
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -17557,6 +17621,7 @@ pub const HandshakeClient = struct {
             outputs,
             received_count,
             deadline,
+            NoConnectProgress{},
         );
     }
 

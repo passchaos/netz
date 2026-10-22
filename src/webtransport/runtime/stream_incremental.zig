@@ -7,8 +7,9 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_receive = @import("flow/receive.zig");
+const flow_progress = @import("flow/progress.zig");
 
-pub const Error = association.Error;
+pub const Error = association.Error || @import("session_control.zig").Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const Read = union(enum) {
@@ -49,16 +50,10 @@ pub fn read(
     session_id: webtransport.SessionId,
     out: []u8,
 ) Error!Read {
-    if (out.len == 0) return error.BufferTooShort;
-    while (true) {
-        if (try poll(connection, registry, session_id, out)) |event| {
-            return event;
-        }
-
-        // `poll` reads assembled QUIC stream state, so packet plaintext and
-        // frame arrays do not need ownership beyond transport processing.
-        try serviceReceive(connection);
-    }
+    return readWithProgress(connection, registry, session_id, null, out, null, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
 }
 
 /// Deadline-bounded counterpart to `read`. One absolute deadline spans all
@@ -70,14 +65,7 @@ pub fn readWithDeadline(
     out: []u8,
     deadline: std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!Read {
-    if (out.len == 0) return error.BufferTooShort;
-    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    while (true) {
-        if (try poll(connection, registry, session_id, out)) |event| {
-            return event;
-        }
-        try serviceReceiveWithDeadline(connection, deadline);
-    }
+    return readWithProgress(connection, registry, session_id, null, out, deadline, null);
 }
 
 /// Read the next event for one associated stream without consuming ready data
@@ -90,26 +78,10 @@ pub fn readId(
     stream_id: u62,
     out: []u8,
 ) Error!Read {
-    if (out.len == 0) return error.BufferTooShort;
-    while (true) {
-        _ = try association.drainAbandonedReceives(
-            connection,
-            registry,
-            false,
-        );
-        var transport_progressed = false;
-        if (try pollStream(
-            connection,
-            registry,
-            session_id,
-            stream_id,
-            out,
-            false,
-            &transport_progressed,
-            null,
-        )) |event| return event;
-        try serviceReceive(connection);
-    }
+    return readWithProgress(connection, registry, session_id, stream_id, out, null, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
 }
 
 /// Deadline-bounded targeted stream read. One absolute deadline spans sibling
@@ -122,26 +94,35 @@ pub fn readIdWithDeadline(
     out: []u8,
     deadline: std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!Read {
+    return readWithProgress(connection, registry, session_id, stream_id, out, deadline, null);
+}
+
+/// Owning-session read with maintenance before each buffered poll or socket
+/// wait. A nullable target preserves sibling state for stream-ID readers.
+pub fn readWithProgress(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    target: ?u62,
+    out: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
+) TimeoutError!Read {
     if (out.len == 0) return error.BufferTooShort;
-    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
     while (true) {
-        _ = try association.drainAbandonedReceives(
-            connection,
-            registry,
-            false,
-        );
-        var transport_progressed = false;
-        if (try pollStream(
-            connection,
-            registry,
-            session_id,
-            stream_id,
-            out,
-            false,
-            &transport_progressed,
-            null,
-        )) |event| return event;
-        try serviceReceiveWithDeadline(connection, deadline);
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
+        if (progress) |owner| try owner.maintain(deadline);
+        if (target) |stream_id| {
+            _ = try association.drainAbandonedReceives(connection, registry, false);
+            var advanced = false;
+            if (try pollStream(connection, registry, session_id, stream_id, out, false, &advanced, null)) |event| return event;
+        } else {
+            if (try poll(connection, registry, session_id, out)) |event| return event;
+        }
+        if (deadline) |absolute|
+            try serviceReceiveWithDeadline(connection, absolute)
+        else
+            try serviceReceive(connection);
     }
 }
 
@@ -900,6 +881,10 @@ fn pollStream(
             }
         }
     }
+    if (stream.stopped != null and !stream.stopped_reported) {
+        stream.stopped_reported = true;
+        return stoppedEvent(stream, stream_id);
+    }
     if (try pollKnownReset(connection, registry, stream_id)) |event| {
         return event;
     }
@@ -984,17 +969,13 @@ fn pollKnownStopped(
     registry: *webtransport.StreamRegistry,
 ) Error!?Read {
     for (registry.registered()) |*stream| {
-        const stats = connection.sendStreamStats(stream.stream_id) orelse
-            continue;
-        if (stats.reset) |reset_info| {
-            stream.send_reset =
-                .fromHttp3(reset_info.application_error_code);
+        if (connection.sendStreamStats(stream.stream_id)) |stats| {
+            if (stats.reset) |reset_info| stream.send_reset = .fromHttp3(reset_info.application_error_code);
+            if (stats.stopped) |stopped| {
+                if (stream.stopped == null) stream.stopped = .fromHttp3(stopped.application_error_code);
+            }
         }
-        const stopped = stats.stopped orelse continue;
-        if (stream.stopped == null) {
-            stream.stopped = .fromHttp3(stopped.application_error_code);
-        }
-        if (stream.stopped_reported) continue;
+        if (stream.stopped == null or stream.stopped_reported) continue;
         try association.requestAfterSendTerminal(connection, stream);
         stream.stopped_reported = true;
         return stoppedEvent(stream, stream.stream_id);

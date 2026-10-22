@@ -13,6 +13,11 @@ pub const prohibited_max_stream_data: u64 = 0x190b4d3e;
 pub const prohibited_stream_data_blocked: u64 = 0x190b4d42;
 pub const Direction = webtransport.StreamDirection;
 
+pub const StreamCounts = struct {
+    bidi: u64 = 0,
+    uni: u64 = 0,
+};
+
 pub const Limits = struct {
     data: u64 = 0,
     bidi: u64 = 0,
@@ -51,6 +56,8 @@ pub const State = struct {
     /// this window as consumption advances.
     receive_window: u64 = 0,
     consumed_data: u64 = 0,
+    receive_stream_window: StreamCounts = .{},
+    retired_peer: StreamCounts = .{},
     peer_data_blocked: ?u64 = null,
     peer_bidi_blocked: ?u64 = null,
     peer_uni_blocked: ?u64 = null,
@@ -60,7 +67,13 @@ pub const State = struct {
         const send_limit = Limits.fromSettings(peer);
         try receive_limit.validate();
         try send_limit.validate();
-        return .{ .enabled = negotiated(local, peer), .send_limit = send_limit, .receive_limit = receive_limit, .receive_window = receive_limit.data };
+        return .{
+            .enabled = negotiated(local, peer),
+            .send_limit = send_limit,
+            .receive_limit = receive_limit,
+            .receive_window = receive_limit.data,
+            .receive_stream_window = .{ .bidi = receive_limit.bidi, .uni = receive_limit.uni },
+        };
     }
 
     pub fn sendDataAvailable(self: State) u64 {
@@ -162,8 +175,14 @@ pub const State = struct {
                 try increase(&self.receive_limit.data, value, quic.varint.max_value);
                 self.receive_window = @max(self.receive_window, value -| self.consumed_data);
             },
-            .max_streams_bidi => |value| try increase(&self.receive_limit.bidi, value, max_streams),
-            .max_streams_uni => |value| try increase(&self.receive_limit.uni, value, max_streams),
+            .max_streams_bidi => |value| {
+                try increase(&self.receive_limit.bidi, value, max_streams);
+                self.receive_stream_window.bidi = @max(self.receive_stream_window.bidi, value -| self.retired_peer.bidi);
+            },
+            .max_streams_uni => |value| {
+                try increase(&self.receive_limit.uni, value, max_streams);
+                self.receive_stream_window.uni = @max(self.receive_stream_window.uni, value -| self.retired_peer.uni);
+            },
             else => return error.FlowControlViolation,
         }
     }
@@ -175,6 +194,29 @@ pub const State = struct {
         if (self.receive_limit.data -| self.consumed_data > self.receive_window / 2) return null;
         const maximum = @min(self.receive_window +| self.consumed_data, quic.varint.max_value);
         return if (maximum > self.receive_limit.data) maximum else null;
+    }
+
+    /// The runtime calls this once after retiring an associated peer stream.
+    /// Cumulative opening/data accounting remains intact after its record goes.
+    pub fn retirePeer(self: *State, direction: Direction) Error!void {
+        if (!self.enabled) return;
+        const retired = switch (direction) {
+            .bidirectional => &self.retired_peer.bidi,
+            .unidirectional => &self.retired_peer.uni,
+        };
+        if (retired.* >= streams(&self.received, direction).*) return error.FlowControlViolation;
+        retired.* += 1;
+    }
+
+    pub fn automaticStreamGrant(self: *const State, direction: Direction) ?u64 {
+        if (!self.enabled) return null;
+        const window, const retired, const previous = switch (direction) {
+            .bidirectional => .{ self.receive_stream_window.bidi, self.retired_peer.bidi, self.receive_limit.bidi },
+            .unidirectional => .{ self.receive_stream_window.uni, self.retired_peer.uni, self.receive_limit.uni },
+        };
+        if (window == 0) return null;
+        const maximum = @min(window +| retired, max_streams);
+        return if (maximum > previous) maximum else null;
     }
 };
 

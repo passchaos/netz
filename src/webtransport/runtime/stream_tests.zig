@@ -252,7 +252,8 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
     try std.testing.expect(saw_streamed_fin);
     try std.testing.expect(client.h3.established.connection
         .localStreamClosed(streamed));
-    try std.testing.expect(client.streams.get(streamed) != null);
+    try std.testing.expect(client.streams.get(streamed) == null);
+    try std.testing.expectEqual(@as(u64, stream_payload_len), client.streams.flow.?.sent.data);
     // RESET_STREAM can overtake its preceding STREAM packet. Both outcomes are
     // valid: when data arrives first it is delivered before reset; otherwise
     // the reset terminates the read direction without fabricating payload.

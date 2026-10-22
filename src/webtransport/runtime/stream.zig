@@ -406,7 +406,7 @@ pub fn sendSlicesWithProgress(
     const total_len = try slicesLength(parts);
     var cursor = SliceCursor{ .parts = parts };
     while (!cursor.done()) {
-        const stream = try writableStream(registry, stream_id);
+        var stream = try writableStream(registry, stream_id);
         try sendPrefixIfNeededUntil(
             connection,
             stream,
@@ -416,6 +416,8 @@ pub fn sendSlicesWithProgress(
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        // Maintenance can swap-remove a retired sibling from this registry.
+        stream = try writableStream(registry, stream_id);
         const packet_payload = @max(
             @as(usize, 1),
             connection.currentSendDatagramSize() -| 128,
@@ -576,7 +578,7 @@ pub fn sendWithProgress(
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     var offset: usize = 0;
     while (offset < payload.len) {
-        const stream = try writableStream(registry, stream_id);
+        var stream = try writableStream(registry, stream_id);
         try sendPrefixIfNeededUntil(
             connection,
             stream,
@@ -586,6 +588,8 @@ pub fn sendWithProgress(
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        // Maintenance can swap-remove a retired sibling from this registry.
+        stream = try writableStream(registry, stream_id);
         const packet_payload = @max(
             @as(usize, 1),
             connection.currentSendDatagramSize() -| 128,
@@ -792,7 +796,7 @@ pub fn writeSlicesWithProgress(
     progress: ?flow_progress.Progress,
 ) TimeoutError!usize {
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-    const stream = try writableStream(registry, stream_id);
+    var stream = try writableStream(registry, stream_id);
     const total_len = try slicesLength(parts);
     if (total_len == 0) return 0;
     const cursor = SliceCursor{ .parts = parts };
@@ -807,6 +811,8 @@ pub fn writeSlicesWithProgress(
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        // Maintenance can swap-remove a retired sibling from this registry.
+        stream = try writableStream(registry, stream_id);
         const credit = connection.streamSendCredit(stream_id);
         const packet_payload = @max(
             @as(usize, 1),
@@ -898,7 +904,7 @@ pub fn writeWithProgress(
     progress: ?flow_progress.Progress,
 ) TimeoutError!usize {
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-    const stream = try writableStream(registry, stream_id);
+    var stream = try writableStream(registry, stream_id);
     if (payload.len == 0) return 0;
 
     while (true) {
@@ -911,6 +917,8 @@ pub fn writeWithProgress(
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        // Maintenance can swap-remove a retired sibling from this registry.
+        stream = try writableStream(registry, stream_id);
         const credit = connection.streamSendCredit(stream_id);
         const max_frame_data = @max(
             @as(usize, 1),
@@ -1483,11 +1491,12 @@ pub fn receive(
     session_id: webtransport.SessionId,
     max_stream_bytes: usize,
 ) Error!OwnedHandshakeStream {
-    return receiveUntil(
+    return receiveWithProgress(
         connection,
         registry,
         session_id,
         max_stream_bytes,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -1503,23 +1512,27 @@ pub fn receiveWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return receiveUntil(
+    return receiveWithProgress(
         connection,
         registry,
         session_id,
         max_stream_bytes,
         deadline,
+        null,
     );
 }
 
-fn receiveUntil(
+pub fn receiveWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     max_stream_bytes: usize,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
     while (true) {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
+        if (progress) |owner| try owner.maintain(deadline);
         if (try poll(
             connection,
             registry,

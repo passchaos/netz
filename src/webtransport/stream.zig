@@ -156,6 +156,19 @@ pub const StreamState = struct {
         if (self.peer_fin) return .fin_received;
         return .open;
     }
+
+    /// Logical terminal notifications are complete. Runtime reclamation also
+    /// requires QUIC's final data/reset acknowledgement and closed-ID record.
+    pub fn readyForRetirement(self: StreamState) bool {
+        if (self.stopped != null and !self.stopped_reported) return false;
+        if (self.direction == .unidirectional and self.locally_initiated) {
+            return self.local_fin or self.send_reset != null or self.stopped_reported;
+        }
+        const received = if (self.receive_reset != null) self.reset_reported else self.peer_fin;
+        if (!received) return false;
+        if (self.direction == .unidirectional) return true;
+        return self.local_fin or self.send_reset != null or self.stopped_reported;
+    }
 };
 
 /// Session-scoped WebTransport stream registry and credit accounting.
@@ -272,10 +285,14 @@ pub const StreamRegistry = struct {
             .unidirectional => if (local) self.max_local_uni else self.max_peer_uni,
         };
         var retained: u64 = 0;
+        var closing = false;
         for (self.streams.items) |stream| {
-            if (stream.direction == direction and stream.locally_initiated == local) retained += 1;
+            if (stream.direction == direction and stream.locally_initiated == local) {
+                retained += 1;
+                closing = closing or stream.readyForRetirement();
+            }
         }
-        if (retained >= maximum) return error.StreamLimitExceeded;
+        if (retained >= maximum) return if (closing) error.FlowControlBlocked else error.StreamLimitExceeded;
     }
 
     fn syncFlowStreams(self: *StreamRegistry) void {
@@ -424,6 +441,9 @@ pub const StreamRegistry = struct {
         return stream_state;
     }
 
+    /// Borrow an active or pending-terminal record. Negotiated runtimes reclaim
+    /// it after terminal notification and QUIC retirement; lifetime counters
+    /// stay available in the registry/flow state. Subsequent mutation can move it.
     pub fn get(self: *StreamRegistry, stream_id: u62) ?*StreamState {
         const entry = self.index.get(stream_id) orelse return null;
         const position = entry.position;
@@ -519,8 +539,8 @@ pub const StreamRegistry = struct {
 
     /// Borrow all registered streams for allocation-free runtime polling.
     ///
-    /// The slice is invalidated by the next operation that can register a
-    /// stream. Runtime adapters use it to observe STOP_SENDING on local
+    /// The slice is invalidated by the next operation that can register or
+    /// reclaim a stream. Runtime adapters use it to observe STOP_SENDING on local
     /// unidirectional streams, which never appear in the receive-stream table.
     pub fn registered(self: *StreamRegistry) []StreamState {
         return self.streams.items;

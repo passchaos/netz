@@ -25,11 +25,12 @@ fn attempt(registry: *webtransport.StreamRegistry, id: ?u62, direction: webtrans
 
 fn prepareInternal(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: ?u62, direction: webtransport.StreamDirection, deadline: ?std.Io.Clock.Timestamp) (control_mod.Error || quic.runtime.ReceiveTimeoutError)!u62 {
     control.bindFlow(registry.flow);
+    var context = flow_progress.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
     while (true) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
         return attempt(registry, id, direction) catch |err| switch (err) {
             error.FlowControlBlocked => {
-                try flow_progress.buffered(control, &h3.established.connection);
+                try context.progress().maintain(deadline);
                 try control.ensureOpen();
                 if (attempt(registry, id, direction)) |value| return value else |retry_err| {
                     if (retry_err != error.FlowControlBlocked) return retry_err;
@@ -42,7 +43,7 @@ fn prepareInternal(control: *control_mod.Control, h3: anytype, registry: *webtra
                 } else {
                     try h3.receiveDetachedResponseProgressWithDeadline(control.session_id.value, absolute);
                 }
-                try flow_progress.buffered(control, &h3.established.connection);
+                try context.progress().maintain(deadline);
                 try control.ensureOpen();
                 continue;
             },

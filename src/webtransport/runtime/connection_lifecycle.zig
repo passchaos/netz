@@ -2,6 +2,8 @@
 
 const control_mod = @import("session_control.zig");
 const flow_receive = @import("flow/receive.zig");
+const flow_credits = @import("flow/credits.zig");
+const flow_streams = @import("flow/streams.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const max_close_reason: usize = 1024;
@@ -20,6 +22,10 @@ pub fn observe(control: *control_mod.Control, h3: anytype, registry: anytype) bo
     return observeInternal(control, h3, registry, true);
 }
 
+pub fn observeWithoutCredits(control: *control_mod.Control, h3: anytype, registry: anytype) bool {
+    return observeInternal(control, h3, registry, false);
+}
+
 /// Deferred observation can submit a flow grant or scoped rejection after a
 /// method's ordinary timer refresh. Mirror the resulting recovery/pacing work
 /// before the shared socket owner next waits for an event.
@@ -31,7 +37,8 @@ pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: an
 
 fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
     flow_receive.observeAll(&h3.established.connection, registry) catch {};
-    if (replenish) flow_receive.replenish(control, h3, registry);
+    flow_streams.observeClosed(&h3.established.connection, registry);
+    if (replenish) flow_credits.replenish(control, h3, registry);
     if (registry.flow_violation) {
         control.flow_violation = true;
         control.capsule_error_pending = !control.capsule_error_reported;

@@ -3,8 +3,6 @@
 
 const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
-const control_mod = @import("../session_control.zig");
-const flow_grant = @import("grant.zig");
 const std = @import("std");
 
 pub fn account(registry: *webtransport.StreamRegistry, stream: *webtransport.StreamState, stats: quic.one_rtt.RecvStreamStats) webtransport.Error!void {
@@ -44,15 +42,6 @@ pub fn consume(registry: *webtransport.StreamRegistry, stream: *webtransport.Str
 pub fn consumeAbandoned(registry: *webtransport.StreamRegistry, stream: *webtransport.StreamState) void {
     if (registry.flow == null) return;
     consume(registry, stream, (stream.receive_accounted_offset -| stream.receive_header_len) - stream.receive_credited_data);
-}
-
-/// Best-effort one-attempt credit return. Failed submissions retain the same
-/// target for the next owning-session operation or dispatcher poll.
-pub fn replenish(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry) void {
-    if (registry.flow_violation) return;
-    const flow = registry.flow orelse return;
-    const maximum = flow.automaticDataGrant() orelse return;
-    flow_grant.send(control, h3, registry, .{ .max_data = maximum }) catch {};
 }
 
 test {
