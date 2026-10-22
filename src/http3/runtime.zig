@@ -14909,6 +14909,17 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    /// Publish the complete critical-stream preface with configured packet
+    /// limits, retaining the ordinary transport pacing/recovery behavior.
+    pub fn ensureSettingsSent(self: *HandshakeClient) Error!void {
+        try sendConnectionSettings(&self.established.connection, &self.critical_stream_send_scratch, &self.control, &self.control_send, &self.qpack_encoder_send, &self.qpack_encoder_prefix_sent, &self.qpack_decoder_send, &self.qpack_decoder_prefix_sent, self.options, client_control_stream_id);
+    }
+
+    pub fn ensureSettingsSentWithDeadline(self: *HandshakeClient, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        try sendConnectionSettingsWithDeadline(&self.established.connection, &self.critical_stream_send_scratch, &self.control, &self.control_send, &self.qpack_encoder_send, &self.qpack_encoder_prefix_sent, &self.qpack_decoder_send, &self.qpack_decoder_prefix_sent, self.options, client_control_stream_id, deadline);
+    }
+
     /// Send the local SETTINGS/control preface without waiting for pacing.
     pub fn ensureSettingsSentOnce(self: *HandshakeClient) Error!void {
         try trySendConnectionSettings(

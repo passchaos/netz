@@ -1470,7 +1470,7 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
             );
             defer h3.deinit();
             const headers = [_]http3.Qpack.HeaderField{
-                .{ .name = ":protocol", .value = "webtransport" },
+                .{ .name = ":protocol", .value = "webtransport-h3" },
                 http3.capsule.protocol_header,
             };
             const session_ids = [_]u62{
@@ -1490,6 +1490,14 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
                 }, null),
             };
             try std.testing.expectEqualSlices(u62, &.{ 0, 4 }, &session_ids);
+            const malformed_id = try h3.startRequest(.{
+                .method = "CONNECT",
+                .path = "/malformed",
+                .scheme = "https",
+                .authority = "localhost",
+                .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+            }, null);
+            try std.testing.expectEqual(@as(u62, 8), malformed_id);
             const excess_session_id = try h3.startRequest(.{
                 .method = "CONNECT",
                 .path = "/excess",
@@ -1497,7 +1505,7 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
                 .authority = "localhost",
                 .headers = &headers,
             }, null);
-            try std.testing.expectEqual(@as(u62, 8), excess_session_id);
+            try std.testing.expectEqual(@as(u62, 12), excess_session_id);
             const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
                 .clock = .awake,
                 .raw = .fromSeconds(5),
@@ -1528,6 +1536,18 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
                 @as(u64, 2),
                 h3.control.settings.peer.webtransport_max_sessions,
             );
+            while (true) {
+                const maybe_event = h3.receiveResponseEventWithDeadline(malformed_id, deadline) catch |err| {
+                    try std.testing.expectEqual(error.RequestCancelled, err);
+                    break;
+                };
+                if (maybe_event) |value| {
+                    var unexpected = value;
+                    defer unexpected.deinit(allocator);
+                    return error.TestUnexpectedResult;
+                }
+            }
+            try std.testing.expectEqual(http3.ApplicationErrorCode.message_error, h3.established.connection.recvStreamStats(malformed_id).?.reset.?.application_error_code);
             while (true) {
                 const maybe_event = h3.receiveResponseEventWithDeadline(
                     excess_session_id,
@@ -1579,23 +1599,25 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
             var second_prefix_storage: [16]u8 = undefined;
             const second_prefix = try webtransport.BidirectionalStreamHeader
                 .writeInto(&second_prefix_storage, .init(session_ids[1]));
+            const first_stream_id = try h3.tryOpenClientBidirectionalStream();
+            const second_stream_id = try h3.tryOpenClientBidirectionalStream();
             try h3.established.connection.send(&.{
                 .{ .stream = .{
-                    .stream_id = 12,
+                    .stream_id = first_stream_id,
                     .data = first_prefix,
                 } },
                 .{ .stream = .{
-                    .stream_id = 12,
+                    .stream_id = first_stream_id,
                     .offset = first_prefix.len,
                     .data = "stream-first",
                     .fin = true,
                 } },
                 .{ .stream = .{
-                    .stream_id = 16,
+                    .stream_id = second_stream_id,
                     .data = second_prefix,
                 } },
                 .{ .stream = .{
-                    .stream_id = 16,
+                    .stream_id = second_stream_id,
                     .offset = second_prefix.len,
                     .data = "stream-second",
                     .fin = true,
@@ -1635,6 +1657,7 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
     var datagram_count: usize = 0;
     var stream_count: usize = 0;
     var close_count: usize = 0;
+    var malformed_count: usize = 0;
     var connection_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
     var stream_buffer: [64]u8 = undefined;
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
@@ -1642,13 +1665,19 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
         .raw = .fromSeconds(8),
     });
     while (accepted_count != 2 or datagram_count != 2 or
-        stream_count != 2 or close_count != 2)
+        stream_count != 2 or close_count != 2 or malformed_count != 1)
     {
-        var event = try endpoint.receiveWithDeadline(
+        var event = endpoint.receiveWithDeadline(
             &versions,
             deadline,
             &stream_buffer,
-        );
+        ) catch |err| switch (err) {
+            error.InvalidConnect => {
+                malformed_count += 1;
+                continue;
+            },
+            else => return err,
+        };
         defer event.deinit(allocator);
         switch (event) {
             .connected => |handle| connection_handle = handle,

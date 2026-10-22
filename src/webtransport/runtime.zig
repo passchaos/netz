@@ -8,6 +8,10 @@ const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 const connect_headers = @import("runtime/connect/headers.zig");
+const connect_negotiation = @import("runtime/connect/negotiation.zig");
+const connect_rejection = @import("runtime/connect/rejection.zig");
+const pending_connect_request = @import("runtime/connect/pending_request.zig");
+const pending_connect_preface = @import("runtime/connect/preface.zig");
 const datagram_codec = @import("runtime/datagram/codec.zig");
 const datagram_owned = @import("runtime/datagram/owned.zig");
 const datagram_send = @import("runtime/datagram/send.zig");
@@ -740,7 +744,7 @@ pub const ProtectedServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                webTransportProtectedConfig(config),
+                try webTransportProtectedConfig(config),
             ),
             .origin_policy = limits.origin_policy,
         };
@@ -2181,6 +2185,7 @@ pub const HandshakeAdmission = struct {
     /// Packet injection and CONNECT polling both check this same timestamp so
     /// promotion to an endpoint dispatcher cannot silently renew admission.
     deadline: ?std.Io.Clock.Timestamp = null,
+    rejection_pending: ?connect_rejection.Pending = null,
 
     pub fn deinit(self: *HandshakeAdmission) void {
         self.h3.deinit();
@@ -2205,6 +2210,15 @@ pub const HandshakeAdmission = struct {
         self: *HandshakeAdmission,
     ) Error!?PendingHandshakeSession {
         try self.ensureWithinDeadline();
+        if (self.rejection_pending) |pending| {
+            pending.submit(&self.h3) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
+                else => return err,
+            };
+            self.rejection_pending = null;
+            return pending.failure.?.cause();
+        }
+        if (!self.h3.control.settings.received) return null;
         while (try self.h3.pollRequestEventOnce()) |event_value| {
             var event = event_value;
             const allocator =
@@ -2215,11 +2229,17 @@ pub const HandshakeAdmission = struct {
                 .message => |*message| switch (message.value) {
                     .head => |*head| {
                         if (head.* != .request) return error.InvalidConnect;
-                        try validateConnectRequest(head.request);
-                        try webtransport.ensureDatagramsNegotiated(
-                            self.h3.options.local_settings,
-                            self.h3.control.settings.peer,
-                        );
+                        connect_negotiation.validateRequest(&self.h3, head.request) catch |err| {
+                            const failure = connect_rejection.Failure.fromError(err) orelse return err;
+                            const pending = connect_rejection.Pending{ .stream_id = message.stream_id, .failure = failure };
+                            self.rejection_pending = pending;
+                            pending.submit(&self.h3) catch |submission_error| switch (submission_error) {
+                                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
+                                else => return submission_error,
+                            };
+                            self.rejection_pending = null;
+                            return failure.cause();
+                        };
                         const session_id = webtransport.SessionId.init(
                             message.stream_id,
                         );
@@ -2400,10 +2420,7 @@ pub const EndpointAcceptedSession = struct {
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagram(
             self.session_id.value,
             payload,
@@ -2435,10 +2452,7 @@ pub const EndpointAcceptedSession = struct {
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagramWithDeadline(
             self.session_id.value,
             payload,
@@ -2458,10 +2472,7 @@ pub const EndpointAcceptedSession = struct {
         committed_count.* = 0;
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagrams(
             self.session_id.value,
             payloads,
@@ -2515,10 +2526,7 @@ pub const EndpointAcceptedSession = struct {
     ) EndpointServerError!u62 {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = flow_open.open(&self.control, self.h3, &self.streams, .bidirectional, null, true);
         try self.refreshTimer();
         return result catch |err| switch (err) {
@@ -2534,10 +2542,7 @@ pub const EndpointAcceptedSession = struct {
     ) EndpointServerError!u62 {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = flow_open.open(&self.control, self.h3, &self.streams, .unidirectional, null, true);
         try self.refreshTimer();
         return result catch |err| switch (err) {
@@ -2560,10 +2565,7 @@ pub const EndpointAcceptedSession = struct {
     }
 
     pub fn datagramsNegotiated(self: EndpointAcceptedSession) bool {
-        webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        ) catch return false;
+        connect_negotiation.ensure(&self.h3) catch return false;
         return self.h3.connectDatagramsNegotiated();
     }
 
@@ -2990,11 +2992,11 @@ pub const EndpointServer = struct {
     /// session. Handles remain stable across rehashes; if this one is removed,
     /// the poller simply falls back to a complete scan.
     last_session_event_key: ?EndpointSessionKey = null,
-    /// Additional CONNECT that exceeded the configured active capacity but
-    /// whose H3_REQUEST_REJECTED cancellation was temporarily paced.
+    /// Malformed or excess CONNECT whose stream cancellation awaits transport
+    /// credit. Other Sessions keep their connection and routing state.
     request_rejection_pending: std.AutoHashMapUnmanaged(
         quic.endpoint_dispatcher.ConnectionHandle,
-        u62,
+        connect_rejection.Pending,
     ) = .empty,
     /// Connections whose most recent Session was rejected and which currently
     /// have no active Session key. They remain eligible for a later CONNECT.
@@ -3572,27 +3574,39 @@ pub const EndpointServer = struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
         h3: *http3.runtime.HandshakeServerSession,
     ) EndpointServerError!?EndpointServerEvent {
+        if (connection_lifecycle.terminating(&h3.established.connection)) {
+            _ = self.request_rejection_pending.remove(handle);
+            return null;
+        }
         if (self.pending.contains(handle)) return null;
-        if (self.request_rejection_pending.get(handle)) |stream_id| {
-            h3.tryCancelRequest(
-                stream_id,
-                http3.ApplicationErrorCode.request_rejected,
-            ) catch |err| switch (err) {
+        if (self.request_rejection_pending.get(handle)) |rejection| {
+            rejection.submit(h3) catch |err| switch (err) {
                 error.PacingLimited,
                 error.CongestionLimited,
                 error.FlowControlBlocked,
                 => return null,
-                else => {
-                    _ = self.request_rejection_pending.remove(handle);
-                    return err;
-                },
+                else => return err,
             };
             _ = self.request_rejection_pending.remove(handle);
+            if (rejection.failure) |failure| return failure.cause();
         }
+        try self.request_rejection_pending.ensureUnusedCapacity(self.allocator, 1);
         const request = (try pollEndpointConnectHead(h3)) orelse
             return null;
         var owned_request = request.request;
-        errdefer owned_request.deinit(self.allocator);
+        var transferred = false;
+        defer if (!transferred) owned_request.deinit(self.allocator);
+        connect_negotiation.validateRequest(h3, owned_request.request) catch |err| {
+            const failure = connect_rejection.Failure.fromError(err) orelse return err;
+            const rejection = connect_rejection.Pending{ .stream_id = request.session_id.value, .failure = failure };
+            self.request_rejection_pending.putAssumeCapacity(handle, rejection);
+            rejection.submit(h3) catch |submission_error| switch (submission_error) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
+                else => return submission_error,
+            };
+            _ = self.request_rejection_pending.remove(handle);
+            return failure.cause();
+        };
         if (self.sessionCountForConnection(handle) >=
             self.limits.max_sessions_per_connection)
         {
@@ -3602,7 +3616,7 @@ pub const EndpointServer = struct {
             );
             self.request_rejection_pending.putAssumeCapacity(
                 handle,
-                request.session_id.value,
+                .{ .stream_id = request.session_id.value, .application_error_code = http3.ApplicationErrorCode.request_rejected },
             );
             h3.tryCancelRequest(
                 request.session_id.value,
@@ -3612,13 +3626,9 @@ pub const EndpointServer = struct {
                 error.CongestionLimited,
                 error.FlowControlBlocked,
                 => return null,
-                else => {
-                    _ = self.request_rejection_pending.remove(handle);
-                    return err;
-                },
+                else => return err,
             };
             _ = self.request_rejection_pending.remove(handle);
-            owned_request.deinit(self.allocator);
             return null;
         }
         const pending = try self.allocator.create(EndpointPendingSession);
@@ -3632,6 +3642,7 @@ pub const EndpointServer = struct {
             .session_id = request.session_id,
             .limits = self.limits,
         };
+        transferred = true;
         owned_request = undefined;
         slot.value_ptr.* = pending;
         _ = self.idle_connections.remove(handle);
@@ -3966,6 +3977,7 @@ const EndpointConnectHead = struct {
 fn pollEndpointConnectHead(
     h3: *http3.runtime.HandshakeServerSession,
 ) Error!?EndpointConnectHead {
+    if (!h3.control.settings.received) return null;
     while (try h3.pollRequestEventOnce()) |event_value| {
         var event = event_value;
         defer event.deinit(h3.established.connection.endpoint.allocator);
@@ -3974,11 +3986,6 @@ fn pollEndpointConnectHead(
             .message => |*message| switch (message.value) {
                 .head => |*head| {
                     if (head.* != .request) return error.InvalidConnect;
-                    try validateConnectRequest(head.request);
-                    try webtransport.ensureDatagramsNegotiated(
-                        h3.options.local_settings,
-                        h3.control.settings.peer,
-                    );
                     const session_id = webtransport.SessionId.init(
                         message.stream_id,
                     );
@@ -5066,6 +5073,7 @@ pub const PendingHandshakeSession = struct {
     session_id: webtransport.SessionId,
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp = null,
+    rejection_pending: ?connect_rejection.Pending = null,
 
     pub fn deinit(self: *PendingHandshakeSession) void {
         if (self.restore_to != null) {
@@ -5126,6 +5134,24 @@ pub const PendingHandshakeSession = struct {
         self: *PendingHandshakeSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedHandshakeSession {
+        if (self.deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
+        if (self.rejection_pending) |pending| {
+            try pending.submit(&self.h3);
+            self.rejection_pending = null;
+            return pending.failure.?.cause();
+        }
+        if (self.h3.dispatcherBound()) {
+            connect_negotiation.validateRequest(&self.h3, self.request.request) catch |err| {
+                const failure = connect_rejection.Failure.fromError(err) orelse return err;
+                const pending = connect_rejection.Pending{ .stream_id = self.session_id.value, .failure = failure };
+                self.rejection_pending = pending;
+                try pending.submit(&self.h3);
+                self.rejection_pending = null;
+                return failure.cause();
+            };
+        } else {
+            try connect_rejection.validate(&self.h3, self.session_id.value, self.request.request, self.deadline);
+        }
         try validateConnectOrigin(
             self.request.request,
             self.limits.origin_policy,
@@ -5469,7 +5495,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receive(&self.control, &self.h3, &self.streams, self.session_id.value),
             self.session_id,
@@ -5483,10 +5509,7 @@ pub const AcceptedHandshakeSession = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receiveWithTimeout(
                 &self.control,
@@ -5506,10 +5529,7 @@ pub const AcceptedHandshakeSession = struct {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receiveWithDeadline(
                 &self.control,
@@ -5531,10 +5551,7 @@ pub const AcceptedHandshakeSession = struct {
     ) Error![]u8 {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveInto(
             &self.control,
             &self.h3,
@@ -5552,10 +5569,7 @@ pub const AcceptedHandshakeSession = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveIntoWithTimeout(
             &self.control,
             &self.h3,
@@ -5574,10 +5588,7 @@ pub const AcceptedHandshakeSession = struct {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveIntoWithDeadline(
             &self.control,
             &self.h3,
@@ -5598,10 +5609,7 @@ pub const AcceptedHandshakeSession = struct {
         received_count.* = 0;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyInto(
             &self.control,
             &self.h3,
@@ -5622,10 +5630,7 @@ pub const AcceptedHandshakeSession = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyIntoWithTimeout(
             &self.control,
             &self.h3,
@@ -5647,10 +5652,7 @@ pub const AcceptedHandshakeSession = struct {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyIntoWithDeadline(
             &self.control,
             &self.h3,
@@ -5665,7 +5667,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagrams(
             &self.control,
             &self.h3,
@@ -5703,10 +5705,7 @@ pub const AcceptedHandshakeSession = struct {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagramsUntil(
             &self.control,
             &self.h3,
@@ -5720,7 +5719,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
     }
 
@@ -5745,10 +5744,7 @@ pub const AcceptedHandshakeSession = struct {
     ) ReceiveTimeoutError!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         try self.h3.sendConnectDatagramWithDeadline(
             self.session_id.value,
             payload,
@@ -5764,10 +5760,7 @@ pub const AcceptedHandshakeSession = struct {
         committed_count.* = 0;
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagrams(
             self.session_id.value,
             payloads,
@@ -5785,10 +5778,7 @@ pub const AcceptedHandshakeSession = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithTimeout(
             self.session_id.value,
             payloads,
@@ -5810,10 +5800,7 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithDeadline(
             self.session_id.value,
             payloads,
@@ -5939,7 +5926,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn datagramsNegotiated(self: AcceptedHandshakeSession) bool {
-        webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
+        connect_negotiation.ensure(&self.h3) catch return false;
         return self.h3.connectDatagramsNegotiated();
     }
 
@@ -6056,10 +6043,7 @@ pub const AcceptedHandshakeSession = struct {
         }
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_open.open(&self.control, &self.h3, &self.streams, direction, deadline, false);
     }
 
@@ -6702,10 +6686,7 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!?OwnedHandshakeDatagram {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const datagram = try self.h3.pollConnectDatagram(
             self.session_id.value,
         );
@@ -8563,18 +8544,15 @@ pub const HandshakeClientSession = struct {
             webTransportHandshakeClientOptions(options.h3),
         );
         errdefer h3_client.deinit();
-        const session_id = try startStatefulConnect(
+        return beginPendingConnect(
             &h3_client,
             options.authority,
             options.path,
             options.origin,
             options.headers,
+            options.limits,
+            null,
         );
-        return .{
-            .h3 = h3_client,
-            .session_id = session_id,
-            .limits = options.limits,
-        };
     }
 
     /// Bounded form of `beginConnectFrom` for shared-endpoint clients. The
@@ -8604,18 +8582,15 @@ pub const HandshakeClientSession = struct {
         );
         errdefer h3_client.deinit();
         _ = try deadline_policy.usableAwake(endpoint.io, absolute);
-        const session_id = try startStatefulConnect(
+        return beginPendingConnect(
             &h3_client,
             options.authority,
             options.path,
             options.origin,
             options.headers,
+            options.limits,
+            absolute,
         );
-        return .{
-            .h3 = h3_client,
-            .session_id = session_id,
-            .limits = options.limits,
-        };
     }
 
     pub fn beginConnectFromWithTimeout(
@@ -8988,18 +8963,15 @@ pub const HandshakeClientSession = struct {
             webTransportHandshakeSessionOptions(options.h3),
         );
         errdefer h3_client.deinit();
-        const session_id = try startStatefulConnect(
+        return beginPendingConnect(
             &h3_client,
             options.authority,
             options.path,
             options.origin,
             options.headers,
+            options.limits,
+            null,
         );
-        return .{
-            .h3 = h3_client,
-            .session_id = session_id,
-            .limits = options.limits,
-        };
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
@@ -9122,7 +9094,7 @@ pub const HandshakeClientSession = struct {
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagram(self.session_id.value, payload)
         else
@@ -9152,10 +9124,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!void {
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagramWithDeadline(
                 self.session_id.value,
@@ -9182,10 +9151,7 @@ pub const HandshakeClientSession = struct {
         committed_count.* = 0;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagrams(
                 self.session_id.value,
@@ -9213,10 +9179,7 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithTimeout(
             self.session_id.value,
             payloads,
@@ -9239,10 +9202,7 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithDeadline(
             self.session_id.value,
             payloads,
@@ -9378,7 +9338,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receive(&self.control, &self.h3, &self.streams, self.session_id.value),
             self.session_id,
@@ -9393,10 +9353,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receiveWithTimeout(
                 &self.control,
@@ -9417,10 +9374,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receiveWithDeadline(
                 &self.control,
@@ -9443,10 +9397,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveInto(
             &self.control,
             &self.h3,
@@ -9465,10 +9416,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveIntoWithTimeout(
             &self.control,
             &self.h3,
@@ -9488,10 +9436,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveIntoWithDeadline(
             &self.control,
             &self.h3,
@@ -9513,10 +9458,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyInto(
             &self.control,
             &self.h3,
@@ -9538,10 +9480,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyIntoWithTimeout(
             &self.control,
             &self.h3,
@@ -9564,10 +9503,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyIntoWithDeadline(
             &self.control,
             &self.h3,
@@ -9585,10 +9521,7 @@ pub const HandshakeClientSession = struct {
     ) Error!?OwnedHandshakeDatagram {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         if (!try self.prepareDispatcherPoll()) return null;
         const result = self.h3.pollConnectDatagram(
             self.session_id.value,
@@ -9605,7 +9538,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
+        try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagrams(
             &self.control,
             &self.h3,
@@ -9645,10 +9578,7 @@ pub const HandshakeClientSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagramsUntil(
             &self.control,
             &self.h3,
@@ -9671,7 +9601,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn datagramsNegotiated(self: HandshakeClientSession) bool {
-        webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
+        connect_negotiation.ensure(&self.h3) catch return false;
         return self.h3.connectDatagramsNegotiated();
     }
 
@@ -9808,10 +9738,7 @@ pub const HandshakeClientSession = struct {
         }
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         // Registry capacity and the cumulative WT cap are fallible, so reserve
         // them before consuming either the H3 or transport stream-ID cursor.
         return flow_open.open(&self.control, &self.h3, &self.streams, direction, deadline, false);
@@ -9823,10 +9750,7 @@ pub const HandshakeClientSession = struct {
     ) Error!u62 {
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try webtransport.ensureNegotiated(
-            self.h3.options.local_settings,
-            self.h3.control.settings.peer,
-        );
+        try connect_negotiation.ensure(&self.h3);
         return flow_open.open(&self.control, &self.h3, &self.streams, direction, null, true) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => return @errorCast(err),
@@ -11447,6 +11371,19 @@ pub const HandshakeClientSession = struct {
     }
 };
 
+fn beginPendingConnect(h3: *http3.runtime.HandshakeClient, authority: []const u8, path: []const u8, origin: []const u8, additional: []const http3.Qpack.HeaderField, limits: Limits, deadline: ?std.Io.Clock.Timestamp) Error!PendingHandshakeConnect {
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
+    var queued = try pending_connect_request.Request.init(h3.allocator, authority, path, origin, additional);
+    errdefer queued.deinit(h3.allocator);
+    var preface: pending_connect_preface.State = .{};
+    errdefer preface.deinit(h3.allocator);
+    _ = preface.poll(h3) catch |err| switch (err) {
+        error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked, error.StreamLimitExceeded => false,
+        else => return err,
+    };
+    return .{ .h3 = h3.*, .session_id = .init(h3.next_stream_id), .limits = limits, .queued_connect = queued, .connect_deadline = deadline, .preface = preface };
+}
+
 /// A dispatcher-driven WebTransport CONNECT whose final response has not yet
 /// arrived. Promotion APIs can update a dispatcher atomically so its route
 /// never points at moved-from QUIC connection storage.
@@ -11454,12 +11391,17 @@ pub const PendingHandshakeConnect = struct {
     h3: ?http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
     limits: Limits,
+    queued_connect: ?pending_connect_request.Request = null,
+    preface: pending_connect_preface.State = .{},
+    connect_deadline: ?std.Io.Clock.Timestamp = null,
     pending_datagram_registered: bool = false,
     rejection: ?HandshakeConnectResponse = null,
     rejection_body: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *PendingHandshakeConnect) void {
         if (self.h3) |*h3| {
+            if (self.queued_connect) |*queued| queued.deinit(h3.allocator);
+            self.preface.deinit(h3.allocator);
             if (self.rejection) |*rejection| {
                 rejection.deinit(h3.allocator);
             }
@@ -11488,6 +11430,7 @@ pub const PendingHandshakeConnect = struct {
         self: *PendingHandshakeConnect,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (self.queued_connect != null) return self.h3.?.processResponsePacket(packet);
         if (self.rejection != null) {
             return self.h3.?.processResponsePacket(packet);
         }
@@ -11589,6 +11532,23 @@ pub const PendingHandshakeConnect = struct {
         single_attempt: bool,
     ) Error!?HandshakeConnectResponse {
         const h3 = &self.h3.?;
+        if (self.queued_connect) |*queued| {
+            if (self.connect_deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
+            const preface_ready = self.preface.poll(h3) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked, error.StreamLimitExceeded => return null,
+                else => return err,
+            };
+            if (!preface_ready or !h3.control.settings.received) return null;
+            const version = try connect_negotiation.clientVersion(h3);
+            const complete = queued.submit(h3, version, self.session_id.value) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked, error.StreamLimitExceeded => return null,
+                else => return err,
+            };
+            if (!complete) return null;
+            queued.deinit(h3.allocator);
+            self.preface.deinit(h3.allocator);
+            self.queued_connect = null;
+        }
         if (self.rejection == null) {
             if (!h3.control.settings.received) return null;
             var head = (if (single_attempt)
@@ -11758,10 +11718,7 @@ pub const HandshakeConnectAttempt = struct {
         std.debug.assert(self.response_trailers.len == 0);
         std.debug.assert(!self.stream_complete);
         var h3 = &self.h3.?;
-        try webtransport.ensureDatagramsNegotiated(
-            h3.options.local_settings,
-            h3.control.settings.peer,
-        );
+        _ = try connect_negotiation.clientVersion(h3);
         var streams = try initHandshakeStreamRegistry(
             h3.allocator,
             self.session_id,
@@ -11983,7 +11940,7 @@ pub const ProtectedClientSession = struct {
             &header_stack,
         );
         defer prepared_headers.deinit(allocator);
-        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportProtectedConfig(options.config));
         errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
@@ -14390,9 +14347,11 @@ pub const StatefulProtectedConnectAttempt = struct {
     }
 };
 
-fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) http3.runtime.ProtectedConfig {
+fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) Error!http3.runtime.ProtectedConfig {
     var out = config;
     out.local_settings = webtransport.defaultSettings(out.local_settings);
+    if (!out.local_settings.webTransportVersions().legacy) return error.WebTransportNotNegotiated;
+    out.local_settings.webtransport_versions = .{ .legacy = true };
     return out;
 }
 
@@ -14438,17 +14397,11 @@ fn connectStatefulAttempt(
         path,
         origin,
         additional_headers,
+        deadline,
     );
     errdefer if (restore_to != null) {
         h3_client.abandonExtendedConnect(session_id.value);
     };
-    // A response stream can race ahead of the server control stream. Retain
-    // it in HTTP/3 state while completing SETTINGS, instead of exposing a
-    // successful CONNECT that cannot yet be validated as WebTransport.
-    _ = if (deadline) |absolute|
-        try h3_client.receivePeerSettingsWithDeadline(absolute)
-    else
-        try h3_client.receivePeerSettings();
     const allocator = h3_client.allocator;
     var response = if (deadline) |absolute|
         try receiveHandshakeConnectAttemptResponseBefore(
@@ -14497,24 +14450,29 @@ fn startStatefulConnect(
     path: []const u8,
     origin: []const u8,
     additional_headers: []const http3.Qpack.HeaderField,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!webtransport.SessionId {
+    try connect_headers.validate(additional_headers, .request);
+    const version = try connect_negotiation.prepareClient(h3_client, deadline);
     const allocator = h3_client.allocator;
     var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
         undefined;
-    var prepared_headers = try connect_headers.prepareRequest(
+    var prepared_headers = try connect_headers.prepareRequestForVersion(
         allocator,
         origin,
         additional_headers,
         &header_stack,
+        version,
     );
     defer prepared_headers.deinit(allocator);
-    const stream_id = try h3_client.startRequest(.{
+    const request = http3.Request{
         .method = "CONNECT",
         .path = path,
         .scheme = "https",
         .authority = authority,
         .headers = prepared_headers.fields,
-    }, null);
+    };
+    const stream_id = if (deadline) |absolute| try h3_client.startRequestWithDeadline(request, null, absolute) else try h3_client.startRequest(request, null);
     return webtransport.SessionId.init(stream_id);
 }
 
@@ -14557,11 +14515,7 @@ fn receiveStatefulSessionRequestBefore(
     errdefer request.head.deinit(
         session.established.connection.endpoint.allocator,
     );
-    try validateConnectRequest(request.head);
-    try webtransport.ensureDatagramsNegotiated(
-        session.options.local_settings,
-        session.control.settings.peer,
-    );
+    try connect_rejection.validate(session, request.stream_id, request.head, deadline);
     const session_id = webtransport.SessionId.init(request.stream_id);
     if (!session_id.isClientInitiatedBidirectional()) {
         return error.InvalidConnect;
@@ -14598,6 +14552,7 @@ fn receiveHandshakeConnectRequestBefore(
     session: *http3.runtime.HandshakeServerSession,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!HandshakeConnectRequest {
+    try connect_negotiation.waitServerSettings(session, deadline);
     while (true) {
         var event = if (deadline) |absolute|
             try session.receiveRequestEventWithDeadline(absolute)
@@ -19251,4 +19206,9 @@ test {
     _ = @import("runtime/flow/datagram.zig");
     _ = @import("runtime/stream/reset.zig");
     _ = @import("runtime/connection_close_tests.zig");
+}
+
+test {
+    _ = @import("runtime/connect/negotiation.zig");
+    _ = @import("runtime/connect/pending_request.zig");
 }

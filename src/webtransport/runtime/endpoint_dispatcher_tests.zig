@@ -9,6 +9,24 @@ const ObservedBatchSend =
     @import("../../quic/one_rtt/tests/observed_batch_send.zig")
         .ObservedBatchSend;
 
+// Establish the request before injecting a mock response. Modern CONNECT
+// cannot be sent until the server SETTINGS have been processed.
+fn startPendingMockRequest(server: *quic.one_rtt.Connection, pending: *runtime.PendingHandshakeConnect, settings_bytes: []const u8) !void {
+    const connection = pending.connection();
+    const pacing_enabled = connection.config.enable_pacing;
+    connection.config.enable_pacing = false;
+    defer connection.config.enable_pacing = pacing_enabled;
+    try server.send(&.{.{ .stream = .{ .stream_id = 3, .data = settings_bytes } }});
+    var packet = try connection.receivePacketServicingTimersDeadline(.fromNow(connection.endpoint.io, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+    defer packet.deinit(std.testing.allocator);
+    try pending.processPacket(&packet);
+    for (0..8) |_| {
+        if (pending.queued_connect == null) return;
+        try std.testing.expect((try pending.pollConnect()) == null);
+    }
+    return error.TestUnexpectedResult;
+}
+
 const FixedClockIo = struct {
     delegate: std.Io,
     now_ns: i96,
@@ -3086,6 +3104,7 @@ test "WebTransport client polls a dispatcher-injected packet" {
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 1200,
         .peer_max_datagram_frame_size = 1200,
+        .reliable_reset = .{ .local = true, .peer = true },
         .enable_pacing = false,
     });
     defer server.deinit();
@@ -3104,11 +3123,8 @@ test "WebTransport client polls a dispatcher-injected packet" {
         allocator,
         settings,
     );
+    try startPendingMockRequest(&server, &pending, settings_bytes.items);
     const response_frames = [_]quic.Frame{
-        .{ .stream = .{
-            .stream_id = 3,
-            .data = settings_bytes.items,
-        } },
         .{ .stream = .{
             .stream_id = pending.sessionId().value,
             .data = response_bytes.items,
@@ -3344,6 +3360,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 1200,
         .peer_max_datagram_frame_size = 1200,
+        .reliable_reset = .{ .local = true, .peer = true },
         .enable_pacing = false,
     });
     defer server.deinit();
@@ -3373,8 +3390,8 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
         allocator,
         settings,
     );
+    try startPendingMockRequest(&server, &pending, settings_bytes.items);
     try server.send(&.{
-        .{ .stream = .{ .stream_id = 3, .data = settings_bytes.items } },
         .{ .stream = .{
             .stream_id = pending.sessionId().value,
             .data = response_bytes.items,
@@ -4014,6 +4031,7 @@ test "WebTransport client polls complete rejected CONNECT entity" {
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 1200,
         .peer_max_datagram_frame_size = 1200,
+        .reliable_reset = .{ .local = true, .peer = true },
         .enable_pacing = false,
     });
     defer server.deinit();
@@ -4035,8 +4053,8 @@ test "WebTransport client polls complete rejected CONNECT entity" {
         allocator,
         settings,
     );
+    try startPendingMockRequest(&server, &pending, settings_bytes.items);
     const response_frames = [_]quic.Frame{
-        .{ .stream = .{ .stream_id = 3, .data = settings_bytes.items } },
         .{ .stream = .{
             .stream_id = pending.sessionId().value,
             .data = response_bytes.items,
@@ -4167,6 +4185,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 1200,
         .peer_max_datagram_frame_size = 1200,
+        .reliable_reset = .{ .local = true, .peer = true },
         .enable_pacing = false,
     });
     defer server.deinit();
@@ -4190,8 +4209,8 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         allocator,
         settings,
     );
+    try startPendingMockRequest(&server, &pending, settings_bytes.items);
     try server.send(&.{
-        .{ .stream = .{ .stream_id = 3, .data = settings_bytes.items } },
         .{ .stream = .{
             .stream_id = pending.sessionId().value,
             .data = response_bytes.items,
@@ -4350,7 +4369,7 @@ test "WebTransport handshake admission polls routed CONNECT state" {
         .authority = "localhost",
         .path = "/routed",
         .headers = &.{
-            .{ .name = ":protocol", .value = "webtransport" },
+            .{ .name = ":protocol", .value = "webtransport-h3" },
             http3.capsule.protocol_header,
         },
     }).write(&encoded, allocator);

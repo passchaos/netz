@@ -4,6 +4,13 @@
 pub const Version = enum {
     legacy,
     draft16,
+
+    pub fn protocol(self: Version) []const u8 {
+        return switch (self) {
+            .legacy => "webtransport",
+            .draft16 => "webtransport-h3",
+        };
+    }
 };
 
 pub const Versions = packed struct(u8) {

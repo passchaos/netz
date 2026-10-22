@@ -170,6 +170,17 @@ both rejected the denied Origin and completed their supported accepted-Session
 matrix. These identify the tested artifacts rather than imposing fixed browser
 versions on future gate runs.
 
+The 2026-10-23 verification used Chromium 149.0.7827.196 (CDP product
+`Chrome/149.0.7827.196`, process-image SHA-256
+`3a7459ac6edc2ed80101d3b5a0492cae71a0097012a4f236b308d0a9b848290f`)
+and Firefox 158.0.1 (process-image SHA-256
+`e0dd6e00fd23cfc0fafa658526409d675ca20b5663ac19f589a2861dda21a0e8`).
+Both rejected the denied Origin and completed their supported accepted-Session
+matrix. Chromium completed the full reset/STOP_SENDING matrix. The explicit
+full Firefox STOP_SENDING gate was also retried on 158.0.1; its `cancel-done`
+DATAGRAM still timed out, so that version's verified default remains the
+reset-only matrix.
+
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:
 
@@ -298,9 +309,32 @@ family before committing the new peer SETTINGS.
 
 Resumable deadline-bound explicit grant APIs still need runtime integration.
 These tests therefore do not establish full draft-16 session-flow-control
-compliance. Modern `webtransport-h3` CONNECT token selection and mandatory QUIC
-DATAGRAM/RESET_STREAM_AT capability validation still require complete runtime
-integration across modern and compatibility advertisements.
+compliance. Authenticated owning connections and shared endpoints now choose
+`webtransport-h3` for draft-16 and `webtransport` for the legacy family before
+submitting CONNECT. They wait for peer SETTINGS, validate the directional server
+Extended CONNECT setting and both H3 DATAGRAM settings. Both families require
+non-zero QUIC DATAGRAM limits in both directions; draft-16 additionally requires
+RESET_STREAM_AT in both directions. Missing
+modern capabilities reject the session without falling back to an older mutually
+advertised family. The legacy family retains its negotiated transport behavior.
+The lightweight protected-key test runtime advertises only its implemented legacy
+family and rejects a modern-only configuration.
+
+Dispatcher-driven pending CONNECT owns the authority, path, Origin and additional
+headers until SETTINGS is ready. It advances the critical-stream preface and
+literal/static QPACK HEADERS one packet per poll, preserving partial offsets after
+pacing, congestion, flow-control or small frame-budget backpressure. Owning sends
+retain the same absolute deadline through SETTINGS and request submission. Server
+admission retains request bytes until the client's SETTINGS arrive and validates
+the token against the selected family before handing the request to the caller.
+Accepted modern client sessions also permit omission of the client's
+SETTINGS_ENABLE_CONNECT_PROTOCOL, including bidirectional stream operations.
+Malformed CONNECT tokens or capability combinations cancel that CONNECT with
+H3_MESSAGE_ERROR. The shared endpoint retains cancellation state across socket
+submission failures and transport backpressure, returns the original validation
+error after submission, and leaves sibling Sessions usable. Closing connections
+do not retry pending request cancellation. The owning cancellation path checks
+the same absolute deadline before submission and every retry.
 
 ## Feature comparison
 

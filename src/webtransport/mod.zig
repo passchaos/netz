@@ -19,6 +19,7 @@ pub const Error = wire.Error || error{
     StreamLimitExceeded,
     WebTransportNotNegotiated,
     DatagramsNotNegotiated,
+    ReliableResetNotNegotiated,
     IntegerOverflow,
     FlowControlBlocked,
     FlowControlViolation,
@@ -279,9 +280,13 @@ pub fn maxDatagramPayloadSize(quic_payload_size: ?usize, session_id: SessionId) 
 }
 
 pub fn connectHeaders(authority: []const u8, path: []const u8, origin: []const u8) [6]http3.Qpack.HeaderField {
+    return connectHeadersForVersion(authority, path, origin, .legacy);
+}
+
+pub fn connectHeadersForVersion(authority: []const u8, path: []const u8, origin: []const u8, version: Version) [6]http3.Qpack.HeaderField {
     return .{
         .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":protocol", .value = "webtransport" },
+        .{ .name = ":protocol", .value = version.protocol() },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":authority", .value = authority },
         .{ .name = ":path", .value = if (path.len == 0) origin else path },

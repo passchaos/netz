@@ -11,6 +11,7 @@ const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
+const connect_negotiation = @import("connect/negotiation.zig");
 const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
 const incremental_stream = @import("stream_incremental.zig");
@@ -760,16 +761,8 @@ pub const Client = struct {
         try validateSessionOptions(options);
         try self.ensureConnectionOpen();
         defer _ = self.observeConnection();
-        const peer = if (self.h3.control.settings.received)
-            self.h3.control.settings.peer
-        else if (deadline) |absolute|
-            try self.h3.receivePeerSettingsWithDeadline(absolute)
-        else
-            try self.h3.receivePeerSettings();
-        try webtransport.ensureDatagramsNegotiated(
-            self.h3.options.local_settings,
-            peer,
-        );
+        const version = try connect_negotiation.prepareClient(&self.h3, deadline);
+        const peer = self.h3.control.settings.peer;
         if (self.sessions.count() >= sessionCapacity(
             self.max_sessions,
             peer.webtransport_max_sessions,
@@ -779,11 +772,12 @@ pub const Client = struct {
 
         var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
             undefined;
-        var headers = try connect_headers.prepareRequest(
+        var headers = try connect_headers.prepareRequestForVersion(
             self.allocator,
             options.origin,
             options.headers,
             &header_stack,
+            version,
         );
         defer headers.deinit(self.allocator);
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);

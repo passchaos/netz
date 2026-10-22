@@ -1,5 +1,10 @@
 const std = @import("std");
 const http3 = @import("../../../http3/mod.zig");
+const Version = http3.WebTransportVersion;
+
+pub fn protocol(version: Version) []const u8 {
+    return version.protocol();
+}
 
 pub const stack_capacity: usize = 16;
 
@@ -58,6 +63,16 @@ pub fn prepareRequest(
     additional: []const http3.Qpack.HeaderField,
     stack: []http3.Qpack.HeaderField,
 ) (error{ InvalidHeader, IntegerOverflow } || std.mem.Allocator.Error)!Prepared {
+    return prepareRequestForVersion(allocator, origin, additional, stack, .legacy);
+}
+
+pub fn prepareRequestForVersion(
+    allocator: std.mem.Allocator,
+    origin: []const u8,
+    additional: []const http3.Qpack.HeaderField,
+    stack: []http3.Qpack.HeaderField,
+    version: Version,
+) (error{ InvalidHeader, IntegerOverflow } || std.mem.Allocator.Error)!Prepared {
     try validate(additional, .request);
     const include_origin = origin.len != 0 and !std.mem.eql(u8, origin, "/");
     const prefix_count: usize = 2 +
@@ -66,7 +81,7 @@ pub fn prepareRequest(
         return error.IntegerOverflow;
     const fields = try acquire(allocator, stack, count);
     var index: usize = 0;
-    fields[index] = .{ .name = ":protocol", .value = "webtransport" };
+    fields[index] = .{ .name = ":protocol", .value = protocol(version) };
     index += 1;
     fields[index] = http3.capsule.protocol_header;
     index += 1;
@@ -99,6 +114,10 @@ pub fn prepareResponse(
 }
 
 pub fn validateRequest(request: anytype) error{InvalidConnect}!void {
+    return validateRequestForVersion(request, .legacy);
+}
+
+pub fn validateRequestForVersion(request: anytype, version: Version) error{InvalidConnect}!void {
     if (!std.mem.eql(u8, request.method, "CONNECT") or
         !std.mem.eql(u8, request.scheme, "https") or
         request.authority == null or request.authority.?.len == 0 or
@@ -106,7 +125,7 @@ pub fn validateRequest(request: anytype) error{InvalidConnect}!void {
         !std.mem.eql(
             u8,
             find(request.headers, ":protocol") orelse "",
-            "webtransport",
+            protocol(version),
         ))
     {
         return error.InvalidConnect;
@@ -455,4 +474,24 @@ test "WebTransport Origin policy handles exact allowlists and ambiguity" {
         }} },
         .allow_any,
     ));
+}
+
+test "WebTransport CONNECT token is bound to the negotiated wire family" {
+    const allocator = std.testing.allocator;
+    inline for (.{ Version.legacy, Version.draft16 }) |version| {
+        var stack: [stack_capacity]http3.Qpack.HeaderField = undefined;
+        var prepared = try prepareRequestForVersion(allocator, "https://example.test", &.{}, &stack, version);
+        defer prepared.deinit(allocator);
+        const request = struct {
+            method: []const u8 = "CONNECT",
+            scheme: []const u8 = "https",
+            authority: ?[]const u8 = "example.test",
+            path: []const u8 = "/wt",
+            headers: []const http3.Qpack.HeaderField,
+        }{ .headers = prepared.fields };
+        try validateRequestForVersion(request, version);
+        try std.testing.expectEqualStrings(protocol(version), find(prepared.fields, ":protocol").?);
+        const other: Version = if (version == .legacy) .draft16 else .legacy;
+        try std.testing.expectError(error.InvalidConnect, validateRequestForVersion(request, other));
+    }
 }
