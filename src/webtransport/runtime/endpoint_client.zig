@@ -12,6 +12,8 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
 const connect_negotiation = @import("connect/negotiation.zig");
+const application_protocol = webtransport.application_protocol;
+const protocol_negotiation = @import("connect/application_protocol.zig");
 const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
 const incremental_stream = @import("stream_incremental.zig");
@@ -50,6 +52,7 @@ pub const SessionOptions = struct {
     headers: []const http3.Qpack.HeaderField = &.{},
     max_streams: usize = 128,
     max_rejection_body_bytes: usize = 1024 * 1024,
+    application_protocols: application_protocol.Policy = .{},
 };
 
 pub const Rejection = struct {
@@ -116,6 +119,10 @@ pub const Session = struct {
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
     close_response_pending: bool = false,
+
+    pub fn applicationProtocol(self: Session) ?application_protocol.String {
+        return application_protocol.selected(self.response.headers);
+    }
 
     pub fn id(self: Session) webtransport.SessionId {
         return self.session_id;
@@ -759,6 +766,8 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) TimeoutError!OpenResult {
         try validateSessionOptions(options);
+        var offer = try application_protocol.Request.init(self.allocator, options.application_protocols, options.headers);
+        defer offer.deinit(self.allocator);
         try self.ensureConnectionOpen();
         defer _ = self.observeConnection();
         const version = try connect_negotiation.prepareClient(&self.h3, deadline);
@@ -772,12 +781,13 @@ pub const Client = struct {
 
         var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
             undefined;
-        var headers = try connect_headers.prepareRequestForVersion(
+        var headers = try connect_headers.prepareRequestWithOffer(
             self.allocator,
             options.origin,
             options.headers,
             &header_stack,
             version,
+            &offer,
         );
         defer headers.deinit(self.allocator);
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
@@ -792,10 +802,8 @@ pub const Client = struct {
             try self.h3.startRequestWithDeadline(request, null, absolute)
         else
             try self.h3.startRequest(request, null);
-        errdefer self.h3.cancelRequest(
-            stream_id,
-            http3.ApplicationErrorCode.request_cancelled,
-        ) catch {};
+        var protocol_failure = false;
+        errdefer if (protocol_failure) self.h3.tryCancelRequest(stream_id, webtransport.ApplicationErrorCode.alpn_error) catch {} else self.h3.cancelRequest(stream_id, http3.ApplicationErrorCode.request_cancelled) catch {};
         const session_id = webtransport.SessionId.init(stream_id);
         var streams = try handshake_stream.initRegistry(
             self.allocator,
@@ -831,6 +839,10 @@ pub const Client = struct {
         }
         errdefer response.deinit(self.allocator);
         try validateSuccessfulResponse(response);
+        protocol_negotiation.validateResponse(&self.h3, stream_id, &offer, response, deadline) catch |err| {
+            protocol_failure = true;
+            return err;
+        };
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(
                 self.h3.established.connection.endpoint.io,
@@ -1221,6 +1233,7 @@ fn validateSessionOptions(options: SessionOptions) Error!void {
         return error.InvalidConnect;
     }
     try connect_headers.validate(options.headers, .request);
+    try application_protocol.validateRequestPolicy(options.application_protocols, options.headers);
 }
 
 fn resolvedH3Options(

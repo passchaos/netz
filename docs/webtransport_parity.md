@@ -336,6 +336,48 @@ error after submission, and leaves sibling Sessions usable. Closing connections
 do not retry pending request cancellation. The owning cancellation path checks
 the same absolute deadline before submission and every retry.
 
+## Application protocol negotiation
+
+The native runtimes implement draft-16's WT-Available-Protocols List and
+WT-Protocol String Item using RFC 9651 syntax. Client offers retain their
+preference order and escaped string values; repeated List field lines combine
+in wire order. A malformed member or non-String value causes the entire field
+to be ignored. Parameters have no negotiation semantics, including valid
+RFC 9651 Date and Display String parameters. Duplicate selection fields are
+invalid Items and are ignored by optional negotiation.
+
+Owning connect options use `limits.application_protocols`; `EndpointClient`
+per-Session options expose `application_protocols` directly. Both accept a
+`webtransport.application_protocol.Policy` with `values` and `required`:
+
+```zig
+.application_protocols = .{
+    .values = &.{ "chat.v2", "chat.v1" },
+    .required = true,
+}
+```
+
+Server `Limits.application_protocols.values` is its supported set. Acceptance
+chooses the client's first supported value, or validates an explicitly supplied
+WT-Protocol field against the offer and local policy. A required policy with no
+common value returns `NoCommonApplicationProtocol` before status 200 is sent;
+the pending request remains available for application rejection or a different
+admission decision. `offeredApplicationProtocols()` exposes a validated request
+view. Accepted server and client sessions expose the selected value through
+`applicationProtocol()`, whose borrowed String supports decoded comparisons and
+caller-buffer decoding. It remains valid until the owning session is released.
+
+Clients retain an owned offer through the response, including dispatcher-driven
+CONNECT whose caller option strings have already been released. A successful
+response with an unoffered selection, or without a valid selection when required,
+resets only that CONNECT with WT_ALPN_ERROR (`0x0817b3dd`). Buffered associated
+data streams terminate with WT_SESSION_GONE. Failed socket submission retains
+the shared rejection state for retry and never publishes an accepted Session.
+Optional missing/malformed selections are accepted without a selected protocol.
+Tests cover escaped identifiers over real QUIC/TLS, per-Session selection on a
+shared connection, rejection while a sibling remains usable, and cancellation
+retry without taking a second UDP receive owner.
+
 ## Feature comparison
 
 | Area | netz | `~/Work/quicz` | `~/Work/wtransport` |

@@ -6,6 +6,7 @@ const http3 = @import("../http3/mod.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const Version = http3.WebTransportVersion;
+pub const application_protocol = @import("application_protocol.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -23,7 +24,7 @@ pub const Error = wire.Error || error{
     IntegerOverflow,
     FlowControlBlocked,
     FlowControlViolation,
-} || std.mem.Allocator.Error;
+} || application_protocol.Error || std.mem.Allocator.Error;
 
 pub const CapsuleType = @import("capsule.zig").CapsuleType;
 /// Maximum UTF-8 reason length in CLOSE_WEBTRANSPORT_SESSION.
@@ -698,6 +699,7 @@ test "WebTransport settings negotiation and datagram budget" {
 test {
     _ = runtime;
     _ = flow_control;
+    _ = application_protocol;
     _ = @import("runtime/negotiation_tests.zig");
 }
 

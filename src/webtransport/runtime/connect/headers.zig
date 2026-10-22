@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../../../http3/mod.zig");
 const Version = http3.WebTransportVersion;
+const application_protocol = @import("../../application_protocol.zig");
 
 pub fn protocol(version: Version) []const u8 {
     return version.protocol();
@@ -27,9 +28,12 @@ pub const OriginPolicy = union(enum) {
 pub const Prepared = struct {
     fields: []const http3.Qpack.HeaderField,
     allocated: ?[]http3.Qpack.HeaderField = null,
+    encoded_protocol: ?[]u8 = null,
+    selected_application_protocol: ?application_protocol.String = null,
 
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         if (self.allocated) |fields| allocator.free(fields);
+        if (self.encoded_protocol) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -49,6 +53,8 @@ pub fn validate(
                 http3.capsule.header_name,
             ) or
             std.ascii.eqlIgnoreCase(header.name, "content-length") or
+            (context == .request and std.ascii.eqlIgnoreCase(header.name, application_protocol.selected_header)) or
+            (context == .response and std.ascii.eqlIgnoreCase(header.name, application_protocol.available_header)) or
             (context == .request and
                 std.ascii.eqlIgnoreCase(header.name, "origin")))
         {
@@ -73,11 +79,27 @@ pub fn prepareRequestForVersion(
     stack: []http3.Qpack.HeaderField,
     version: Version,
 ) (error{ InvalidHeader, IntegerOverflow } || std.mem.Allocator.Error)!Prepared {
+    return prepareRequestWithOffer(allocator, origin, additional, stack, version, null);
+}
+
+pub fn prepareRequestWithOffer(
+    allocator: std.mem.Allocator,
+    origin: []const u8,
+    additional: []const http3.Qpack.HeaderField,
+    stack: []http3.Qpack.HeaderField,
+    version: Version,
+    offer: ?*const application_protocol.Request,
+) (error{ InvalidHeader, IntegerOverflow } || std.mem.Allocator.Error)!Prepared {
     try validate(additional, .request);
     const include_origin = origin.len != 0 and !std.mem.eql(u8, origin, "/");
+    const include_offer = if (offer) |value| value.present else false;
+    var extra_count = additional.len;
+    if (offer != null) for (additional) |field| {
+        if (std.ascii.eqlIgnoreCase(field.name, application_protocol.available_header)) extra_count -= 1;
+    };
     const prefix_count: usize = 2 +
-        @as(usize, @intFromBool(include_origin));
-    const count = std.math.add(usize, prefix_count, additional.len) catch
+        @as(usize, @intFromBool(include_origin)) + @as(usize, @intFromBool(include_offer));
+    const count = std.math.add(usize, prefix_count, extra_count) catch
         return error.IntegerOverflow;
     const fields = try acquire(allocator, stack, count);
     var index: usize = 0;
@@ -89,7 +111,15 @@ pub fn prepareRequestForVersion(
         fields[index] = .{ .name = "origin", .value = origin };
         index += 1;
     }
-    @memcpy(fields[index..], additional);
+    if (include_offer) {
+        fields[index] = offer.?.header[0];
+        index += 1;
+    }
+    for (additional) |field| {
+        if (offer != null and std.ascii.eqlIgnoreCase(field.name, application_protocol.available_header)) continue;
+        fields[index] = field;
+        index += 1;
+    }
     return .{
         .fields = fields,
         .allocated = if (fields.ptr == stack.ptr) null else fields,
@@ -111,6 +141,24 @@ pub fn prepareResponse(
         .fields = fields,
         .allocated = if (fields.ptr == stack.ptr) null else fields,
     };
+}
+
+pub fn prepareResponseWithProtocols(allocator: std.mem.Allocator, request: []const http3.Qpack.HeaderField, additional: []const http3.Qpack.HeaderField, policy: application_protocol.Policy, stack: []http3.Qpack.HeaderField) (error{InvalidHeader} || application_protocol.Error)!Prepared {
+    try validate(additional, .response);
+    const selected = try application_protocol.serverSelection(request, additional, policy);
+    const encoded = if (selected) |value| try application_protocol.writeItem(allocator, value) else null;
+    errdefer if (encoded) |value| allocator.free(value);
+    const count = std.math.add(usize, additional.len, if (encoded != null) 2 else 1) catch return error.IntegerOverflow;
+    const fields = try acquire(allocator, stack, count);
+    fields[0] = http3.capsule.protocol_header;
+    var offset: usize = 1;
+    if (encoded) |value| {
+        fields[offset] = .{ .name = application_protocol.selected_header, .value = value };
+        offset += 1;
+    }
+    @memcpy(fields[offset..], additional);
+    const selected_view = if (application_protocol.selected(fields)) |selection| application_protocol.offered(request).?.find(selection) else null;
+    return .{ .fields = fields, .allocated = if (fields.ptr == stack.ptr) null else fields, .encoded_protocol = encoded, .selected_application_protocol = selected_view };
 }
 
 pub fn validateRequest(request: anytype) error{InvalidConnect}!void {

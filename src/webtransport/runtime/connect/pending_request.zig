@@ -5,6 +5,7 @@ const std = @import("std");
 const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const headers = @import("headers.zig");
+const application_protocol = @import("../../application_protocol.zig");
 
 pub const Request = struct {
     storage: []u8,
@@ -18,26 +19,43 @@ pub const Request = struct {
     reserved: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, authority: []const u8, path: []const u8, origin: []const u8, additional: []const http3.Qpack.HeaderField) (http3.Error || std.mem.Allocator.Error)!Request {
+        return initWithOffer(allocator, authority, path, origin, additional, null);
+    }
+
+    pub fn initWithOffer(allocator: std.mem.Allocator, authority: []const u8, path: []const u8, origin: []const u8, additional: []const http3.Qpack.HeaderField, offer: ?*const application_protocol.Request) (http3.Error || std.mem.Allocator.Error)!Request {
         try headers.validate(additional, .request);
         var total = try add(authority.len, path.len);
         total = try add(total, origin.len);
+        var count: usize = 0;
         for (additional) |field| {
+            if (offer != null and std.ascii.eqlIgnoreCase(field.name, application_protocol.available_header)) continue;
             total = try add(total, field.name.len);
             total = try add(total, field.value.len);
+            count += 1;
+        }
+        const offer_field = if (offer) |value| if (value.present) @as(?http3.Qpack.HeaderField, value.header[0]) else null else null;
+        if (offer_field) |field| {
+            total = try add(total, field.name.len);
+            total = try add(total, field.value.len);
+            count += 1;
         }
         const storage = try allocator.alloc(u8, total);
         errdefer allocator.free(storage);
-        const fields = try allocator.alloc(http3.Qpack.HeaderField, additional.len);
+        const fields = try allocator.alloc(http3.Qpack.HeaderField, count);
         errdefer allocator.free(fields);
         var offset: usize = 0;
         const owned_authority = copy(storage, &offset, authority);
         const owned_path = copy(storage, &offset, path);
         const owned_origin = copy(storage, &offset, origin);
-        for (fields, additional) |*destination, source| {
-            destination.* = .{
-                .name = copy(storage, &offset, source.name),
-                .value = copy(storage, &offset, source.value),
-            };
+        var index: usize = 0;
+        if (offer_field) |field| {
+            fields[index] = .{ .name = copy(storage, &offset, field.name), .value = copy(storage, &offset, field.value) };
+            index += 1;
+        }
+        for (additional) |field| {
+            if (offer != null and std.ascii.eqlIgnoreCase(field.name, application_protocol.available_header)) continue;
+            fields[index] = .{ .name = copy(storage, &offset, field.name), .value = copy(storage, &offset, field.value) };
+            index += 1;
         }
         return .{ .storage = storage, .fields = fields, .authority = owned_authority, .path = owned_path, .origin = owned_origin };
     }

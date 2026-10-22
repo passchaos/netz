@@ -133,6 +133,7 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
         } },
         .max_session_streams = 8,
         .max_sessions_per_connection = 2,
+        .application_protocols = .{ .values = &.{ "p1", "p2" } },
     };
     var server = try runtime.HandshakeServer.bindForEndpoint(
         allocator,
@@ -233,13 +234,17 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
             const first = try client.openSession(.{
                 .authority = "localhost",
                 .path = "/client-first",
+                .application_protocols = .{ .values = &.{"p2"}, .required = true },
                 .max_streams = 8,
             });
             const second = try client.openSession(.{
                 .authority = "localhost",
                 .path = "/client-second",
+                .application_protocols = .{ .values = &.{"p1"}, .required = true },
                 .max_streams = 8,
             });
+            try std.testing.expect(first.applicationProtocol().?.eql("p2"));
+            try std.testing.expect(second.applicationProtocol().?.eql("p1"));
             const stable_id = client.stableId();
             try std.testing.expect(stable_id != 0);
             try std.testing.expectEqual(
@@ -402,7 +407,9 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                     std.mem.eql(u8, pending.path(), "/client-first") or
                         std.mem.eql(u8, pending.path(), "/client-second"),
                 );
-                _ = try endpoint.accept(handle);
+                const expected_protocol = if (std.mem.eql(u8, pending.path(), "/client-first")) "p2" else "p1";
+                const accepted_session = try endpoint.accept(handle);
+                try std.testing.expect(accepted_session.applicationProtocol().?.eql(expected_protocol));
                 accepted += 1;
             },
             .session_event => |*value| {

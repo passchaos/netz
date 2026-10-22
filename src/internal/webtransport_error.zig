@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const ApplicationErrorCode = struct {
+    pub const alpn_error: u32 = 0x0817b3dd;
     pub const session_gone: u64 = 0x170d7b68;
     pub const buffered_stream_rejected: u64 = 0x3994bd84;
     pub const flow_control_error: u64 = 0x045d4487;
@@ -29,7 +30,8 @@ pub fn http3ToApplication(http3_code: u64) ?u32 {
 }
 
 pub fn isStreamError(http3_code: u64) bool {
-    return http3_code == ApplicationErrorCode.session_gone or
+    return http3_code == ApplicationErrorCode.alpn_error or
+        http3_code == ApplicationErrorCode.session_gone or
         http3_code == ApplicationErrorCode.buffered_stream_rejected or
         http3_code == ApplicationErrorCode.flow_control_error or
         http3ToApplication(http3_code) != null;

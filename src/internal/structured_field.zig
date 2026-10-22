@@ -8,6 +8,68 @@ const std = @import("std");
 
 pub const Error = error{InvalidStructuredField};
 
+/// Borrowed, validated RFC 9651 String content. Escapes stay in the source;
+/// comparisons and caller-buffer decoding use its actual string value.
+pub const String = struct {
+    raw: []const u8,
+
+    pub fn decodedLen(self: String) usize {
+        var count: usize = 0;
+        var cursor: usize = 0;
+        while (cursor < self.raw.len) : (count += 1) {
+            if (self.raw[cursor] == '\\') cursor += 1;
+            cursor += 1;
+        }
+        return count;
+    }
+
+    pub fn eql(self: String, value: []const u8) bool {
+        var cursor: usize = 0;
+        var index: usize = 0;
+        while (cursor < self.raw.len) {
+            if (self.raw[cursor] == '\\') cursor += 1;
+            if (index == value.len or self.raw[cursor] != value[index]) return false;
+            cursor += 1;
+            index += 1;
+        }
+        return index == value.len;
+    }
+
+    pub fn eqlString(self: String, other: String) bool {
+        var left: usize = 0;
+        var right: usize = 0;
+        while (left < self.raw.len and right < other.raw.len) {
+            if (self.raw[left] == '\\') left += 1;
+            if (other.raw[right] == '\\') right += 1;
+            if (self.raw[left] != other.raw[right]) return false;
+            left += 1;
+            right += 1;
+        }
+        return left == self.raw.len and right == other.raw.len;
+    }
+
+    pub fn decodeInto(self: String, output: []u8) error{BufferTooSmall}![]u8 {
+        const length = self.decodedLen();
+        if (output.len < length) return error.BufferTooSmall;
+        var cursor: usize = 0;
+        var index: usize = 0;
+        while (cursor < self.raw.len) {
+            if (self.raw[cursor] == '\\') cursor += 1;
+            output[index] = self.raw[cursor];
+            cursor += 1;
+            index += 1;
+        }
+        return output[0..length];
+    }
+};
+
+pub fn parseString(value: []const u8, cursor: *usize) Error!String {
+    if (cursor.* >= value.len or value[cursor.*] != '"') return error.InvalidStructuredField;
+    const first = cursor.* + 1;
+    try consumeString(value, cursor);
+    return .{ .raw = value[first .. cursor.* - 1] };
+}
+
 pub fn parseBooleanItem(value: []const u8) Error!bool {
     var cursor: usize = 0;
     skipOptionalWhitespace(value, &cursor);
@@ -26,7 +88,7 @@ pub fn parseBooleanItem(value: []const u8) Error!bool {
     return result;
 }
 
-fn skipOptionalWhitespace(value: []const u8, cursor: *usize) void {
+pub fn skipOptionalWhitespace(value: []const u8, cursor: *usize) void {
     while (cursor.* < value.len and
         (value[cursor.*] == ' ' or value[cursor.*] == '\t'))
     {
@@ -34,7 +96,7 @@ fn skipOptionalWhitespace(value: []const u8, cursor: *usize) void {
     }
 }
 
-fn consumeParameters(value: []const u8, cursor: *usize) Error!void {
+pub fn consumeParameters(value: []const u8, cursor: *usize) Error!void {
     while (cursor.* < value.len and value[cursor.*] == ';') {
         cursor.* += 1;
         while (cursor.* < value.len and value[cursor.*] == ' ') {
@@ -77,6 +139,8 @@ fn consumeBareItem(value: []const u8, cursor: *usize) Error!void {
         ':' => consumeByteSequence(value, cursor),
         '?' => consumeBoolean(value, cursor),
         '-', '0'...'9' => consumeNumber(value, cursor),
+        '@' => consumeDate(value, cursor),
+        '%' => consumeDisplayString(value, cursor),
         'A'...'Z', 'a'...'z', '*' => consumeToken(value, cursor),
         else => error.InvalidStructuredField,
     };
@@ -147,6 +211,7 @@ fn consumeNumber(value: []const u8, cursor: *usize) Error!void {
     if (integer_len == 0 or integer_len > 15) return error.InvalidStructuredField;
 
     if (cursor.* < value.len and value[cursor.*] == '.') {
+        if (integer_len > 12) return error.InvalidStructuredField;
         cursor.* += 1;
         const fraction_start = cursor.*;
         while (cursor.* < value.len and
@@ -157,6 +222,46 @@ fn consumeNumber(value: []const u8, cursor: *usize) Error!void {
             return error.InvalidStructuredField;
         }
     }
+}
+
+fn consumeDate(value: []const u8, cursor: *usize) Error!void {
+    cursor.* += 1;
+    const first = cursor.*;
+    try consumeNumber(value, cursor);
+    if (std.mem.indexOfScalar(u8, value[first..cursor.*], '.') != null) return error.InvalidStructuredField;
+}
+
+fn consumeDisplayString(value: []const u8, cursor: *usize) Error!void {
+    if (cursor.* + 1 >= value.len or value[cursor.* + 1] != '"') return error.InvalidStructuredField;
+    cursor.* += 2;
+    var sequence: [4]u8 = undefined;
+    var present: usize = 0;
+    var expected: usize = 0;
+    while (cursor.* < value.len) {
+        var byte = value[cursor.*];
+        cursor.* += 1;
+        if (byte == '"') {
+            if (present != 0) return error.InvalidStructuredField;
+            return;
+        }
+        if (byte == '%') {
+            if (cursor.* + 2 > value.len) return error.InvalidStructuredField;
+            for (value[cursor.*..][0..2]) |digit| if (!std.ascii.isHex(digit)) return error.InvalidStructuredField;
+            byte = std.fmt.parseInt(u8, value[cursor.*..][0..2], 16) catch return error.InvalidStructuredField;
+            cursor.* += 2;
+        } else if (byte < 0x20 or byte > 0x7e) return error.InvalidStructuredField;
+        if (present == 0) {
+            expected = std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidStructuredField;
+            if (expected == 1) continue;
+        }
+        sequence[present] = byte;
+        present += 1;
+        if (present == expected) {
+            _ = std.unicode.utf8Decode(sequence[0..expected]) catch return error.InvalidStructuredField;
+            present = 0;
+        }
+    }
+    return error.InvalidStructuredField;
 }
 
 fn consumeToken(value: []const u8, cursor: *usize) Error!void {
@@ -181,10 +286,14 @@ test "structured field parses boolean item values" {
     try std.testing.expect(try parseBooleanItem("?1"));
     try std.testing.expect(!(try parseBooleanItem(" ?0\t")));
     try std.testing.expect(try parseBooleanItem("?1; flag; token=abc; text=\"ok\"; data=:YWJj:"));
+    try std.testing.expect(try parseBooleanItem("?1;date=@-123;label=%\"%e4%bd%a0\""));
 
     try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("true"));
     try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?2"));
     try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1, ?1"));
     try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1 trailing"));
     try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1; Bad=1"));
+    try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1;date=@1.2"));
+    try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1;decimal=1234567890123.1"));
+    try std.testing.expectError(error.InvalidStructuredField, parseBooleanItem("?1;label=%\"%ff\""));
 }
