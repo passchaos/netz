@@ -842,6 +842,10 @@ persistence-plugin integration than Mosquitto, but supports both
 elapsed-time and persistent-change-count live autosave. An
 `autosave_interval` of zero disables either runtime trigger, matching
 Mosquitto, without disabling startup restore or the final shutdown snapshot.
+Mosquitto's `retained_persistence` alias feeds the same owned persistence
+policy and shares duplicate-directive rejection with `persistence`; the
+connection-scoped Maximum Packet Size restore gate exercises that alias across
+four broker generations.
 Linux SIGHUP can atomically switch that policy among elapsed-time,
 persistent-change-count, and disabled modes while retaining the original
 snapshot target. A fixed management tick applies the new interval before its

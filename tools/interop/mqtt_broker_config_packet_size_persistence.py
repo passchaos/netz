@@ -35,7 +35,7 @@ def _write_config(
     connection_count: int,
 ) -> None:
     config.write_text(
-        "persistence true\n"
+        "retained_persistence true\n"
         f"persistence_location {directory}\n"
         f"persistence_file {snapshot.name}\n"
         "autosave_interval 0\n"

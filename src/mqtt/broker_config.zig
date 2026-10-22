@@ -650,7 +650,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "set_tcp_nodelay")) {
                 try markOnce(&global_seen.set_tcp_nodelay);
                 config.set_tcp_nodelay = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "persistence")) {
+            } else if (std.mem.eql(u8, directive, "persistence") or
+                std.mem.eql(u8, directive, "retained_persistence"))
+            {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "persistence_location")) {
@@ -1360,7 +1362,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\set_tcp_nodelay true
         \\password_file users.pw
         \\acl_file access.acl
-        \\persistence true
+        \\retained_persistence true
         \\persistence_location state
         \\persistence_file broker.db
         \\autosave_interval 17
@@ -3568,6 +3570,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\retain_available true
             \\retain_available false
+            \\listener 1883
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\persistence true
+            \\retained_persistence false
             \\listener 1883
         ),
     );

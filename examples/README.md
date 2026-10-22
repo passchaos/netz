@@ -187,6 +187,7 @@ The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
 `retain_expiry_interval`,
 `sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
+`retained_persistence`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `addresses`, `topic`,
 `cleansession`, `local_cleansession`, `local_clientid`,
@@ -599,6 +600,9 @@ policy snapshot before Session admission and use the new values.
 Changing listener topology or any other listener transport/admission field
 fails the complete reload instead of being ignored. The persistence
 enable/location/file remain fixed until restart.
+Mosquitto's `retained_persistence` spelling is an exact alias for `persistence`;
+the two names share duplicate-directive validation and cannot override each
+other in one configuration.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime
