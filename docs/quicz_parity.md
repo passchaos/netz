@@ -2018,6 +2018,16 @@ rule, covering client-sender and independent-server paths. With a 1,024-byte
 stream window, parent `4fe04ace` timed out at client payload offset zero while
 the candidate completed both sender directions in shared and independent
 topologies. Standard 1-MiB-window throughput remained noisy and overlapping.
+The raw connection also exposes `cancelStreamWithTimeout` and
+`cancelStreamWithDeadline`. They preserve the existing atomic RESET_STREAM plus
+STOP_SENDING submission while waiting for ACK/loss/PTO or pacing under one
+absolute awake-clock budget. Expiry, pacing/congestion timeout and socket
+failure leave both halves retryable and retain unread bytes; success preserves
+an already committed FIN and suppresses duplicate cancellation packets. Seven
+real-UDP regressions verify both frames in one protected packet, exact code and
+Final Size, queued ACK progress, timeout rollback, socket failure and the
+STOP_SENDING-only path after local FIN.
+
 The underlying raw connection now exposes deadline-bounded complete STREAM
 writes with exact committed-prefix reporting. Tests cover positive flow-credit
 tails, multi-packet MTU splitting, FIN, timeout continuation, and socket-visible

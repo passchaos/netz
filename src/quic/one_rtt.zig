@@ -12,6 +12,7 @@ const key_phase_order = @import("one_rtt/key_phase_order.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
 const prepared_keys = @import("one_rtt/prepared_keys.zig");
 const connection_scratch = @import("one_rtt/scratch.zig");
+const stream_cancel = @import("one_rtt/stream_cancel.zig");
 const owned_receive_race = @import("owned_receive_race.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
@@ -7706,6 +7707,33 @@ pub const Connection = struct {
             stream_id,
             application_error_code,
             self.monotonicNowNs(),
+        );
+    }
+
+    /// Cancel both stream halves under one absolute awake-clock deadline.
+    /// Congestion waits continue servicing ACK/loss/PTO, and pacing never
+    /// outlives the caller's deadline. Before socket submission, either half
+    /// remains retryable and received bytes stay owned by the connection.
+    pub fn cancelStreamWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        return stream_cancel.withDeadline(self, stream_id, application_error_code, deadline);
+    }
+
+    pub fn cancelStreamWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.endpoint.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

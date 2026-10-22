@@ -10,6 +10,7 @@ test {
     _ = @import("lifecycle.zig");
     _ = @import("recovery_flow.zig");
     _ = @import("reliable_reset.zig");
+    _ = @import("stream_cancel.zig");
     _ = @import("scratch.zig");
     _ = @import("stateless_reset_receive.zig");
 }
