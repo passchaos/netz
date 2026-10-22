@@ -5722,13 +5722,22 @@ pub const Connection = struct {
     /// accept only their selected server tuple plus the retained validated tuple
     /// during preferred-address migration. Servers that advertised
     /// disable_active_migration discard a new client IP while still allowing a
-    /// source-port NAT rebinding. These drops precede packet-number
-    /// reconstruction, reset-token comparison, and frame parsing.
+    /// source-port NAT rebinding within the non-system port class. Every server
+    /// rejects system/non-system port-scope transitions. These drops precede
+    /// packet-number reconstruction, reset-token comparison, and frame parsing.
     fn shouldDiscardPeerAddressBeforeAuthentication(
         self: *const Connection,
         from: net.IpAddress,
     ) bool {
         if (self.config.local_endpoint == .server) {
+            // Match s2n-quic's RFC 6335-aware default migration policy. User
+            // and dynamic ports can be rewritten by NATs and are one
+            // non-system class; crossing into or out of the privileged system
+            // range is not treated as ordinary rebinding.
+            if (peerAddressCrossesSystemPortScope(
+                self.config.peer,
+                from,
+            )) return true;
             // RFC 9000 section 9 allows an endpoint that advertised
             // disable_active_migration to drop traffic from a new peer IP.
             // A source-port change can be NAT rebinding and remains eligible
@@ -16094,6 +16103,21 @@ fn peerAddressSameIp(a: net.IpAddress, b: net.IpAddress) bool {
                 a6.interface.index == b6.interface.index,
         },
     };
+}
+
+fn peerAddressCrossesSystemPortScope(
+    a: net.IpAddress,
+    b: net.IpAddress,
+) bool {
+    return peerAddressUsesSystemPort(a) != peerAddressUsesSystemPort(b);
+}
+
+fn peerAddressUsesSystemPort(address: net.IpAddress) bool {
+    const port = switch (address) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => |ip6| ip6.port,
+    };
+    return port < 1024;
 }
 
 fn nextPathEpoch(current: u32) u32 {

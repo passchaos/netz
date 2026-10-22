@@ -1677,6 +1677,15 @@ instead of returning a recoverable error. Focused tests cover both invalid
 directions, reordered new-phase arrival, legal delayed old packets, duplicate
 gating, and exact close state. The ordering state folds its ACK gate into two
 sentinel `u64`s, preserving the prior `Connection` layouts.
+Server migration filtering now treats RFC 6335 user and dynamic ports as one
+non-system NAT-rebinding class while rejecting transitions into or out of the
+0-1023 system-port range, matching current `/nav_env/Work/s2n-quic`. The check
+runs before header protection, packet-number reconstruction, stateless-reset
+comparison, or frame parsing, so a denied tuple cannot mutate authentication or
+path state. Protected routed-packet coverage migrates 1024 -> 49152 -> 1025
+with `disable_active_migration` enabled, then proves a 1025 -> 443 packet is
+dropped without advancing the peer tuple, expected packet number, or receive
+statistics.
 
 ## Known blockers before declaring the goal complete
 

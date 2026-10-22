@@ -2492,6 +2492,108 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
 }
 
+test "QUIC server port migration allows user dynamic scopes but rejects system scope" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    const local_cid = "scope-server";
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = .{ .ip4 = .loopback(1024) },
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = local_cid,
+        .peer_connection_id = "scope-client",
+        .local_endpoint = .server,
+        .local_disable_active_migration = true,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const payload = [_]u8{@intFromEnum(quic.FrameType.ping)};
+    const packet0 = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = local_cid,
+            .packet_number = 0,
+            .payload = &payload,
+        },
+    );
+    defer allocator.free(packet0);
+    const packet1 = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = local_cid,
+            .packet_number = 1,
+            .payload = &payload,
+        },
+    );
+    defer allocator.free(packet1);
+    const packet2 = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = local_cid,
+            .packet_number = 2,
+            .payload = &payload,
+        },
+    );
+    defer allocator.free(packet2);
+
+    const addresses = [_]std.Io.net.IpAddress{
+        .{ .ip4 = .loopback(49_152) },
+        .{ .ip4 = .loopback(1_025) },
+    };
+    const packets = [_][]const u8{ packet0, packet1 };
+    for (addresses, packets) |from, sealed| {
+        var datagram = try allocator.dupe(u8, sealed);
+        var routed = quic.runtime.RoutedBytes{
+            .datagram = .{ .from = from, .bytes = datagram },
+            .route = .{ .connection_index = 0 },
+            .destination_connection_id = datagram[1..][0..local_cid.len],
+        };
+        defer routed.deinit(allocator);
+        var received = (try connection.receiveRoutedDatagram(routed)) orelse
+            return error.TestUnexpectedResult;
+        defer received.deinit(allocator);
+        try std.testing.expectEqual(from, connection.peerAddress());
+    }
+
+    const system_from: std.Io.net.IpAddress = .{
+        .ip4 = .loopback(443),
+    };
+    var system_datagram = try allocator.dupe(u8, packet2);
+    var system_routed = quic.runtime.RoutedBytes{
+        .datagram = .{ .from = system_from, .bytes = system_datagram },
+        .route = .{ .connection_index = 0 },
+        .destination_connection_id = system_datagram[1..][0..local_cid.len],
+    };
+    defer system_routed.deinit(allocator);
+    var rejected = try connection.receiveRoutedDatagram(system_routed);
+    defer if (rejected) |*packet| packet.deinit(allocator);
+    try std.testing.expect(rejected == null);
+    try std.testing.expectEqual(addresses[1], connection.peerAddress());
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        one_rtt.testing.expectedPacketNumber(&connection),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        connection.stats().packets_received,
+    );
+}
+
 test "QUIC 1-RTT spin bit keeps independent candidate path state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
