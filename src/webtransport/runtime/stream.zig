@@ -23,7 +23,9 @@ pub const OwnedHandshakeStream = struct {
 
 const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
-const flow_receive = @import("flow_receive.zig");
+const flow_send = @import("flow/send.zig");
+const flow_progress = @import("flow/progress.zig");
+const flow_receive = @import("flow/receive.zig");
 pub fn initRegistry(
     allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
@@ -207,7 +209,7 @@ pub fn send(
     fin: bool,
 ) Error!void {
     var committed_out: usize = 0;
-    return sendUntil(
+    return sendWithProgress(
         connection,
         registry,
         session_id,
@@ -215,6 +217,7 @@ pub fn send(
         payload,
         fin,
         &committed_out,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -238,7 +241,7 @@ pub fn sendWithDeadline(
 ) TimeoutError!void {
     committed_out.* = 0;
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return sendUntil(
+    return sendWithProgress(
         connection,
         registry,
         session_id,
@@ -247,6 +250,7 @@ pub fn sendWithDeadline(
         fin,
         committed_out,
         deadline,
+        null,
     );
 }
 
@@ -261,7 +265,7 @@ pub fn sendSlices(
     fin: bool,
 ) Error!void {
     var committed: usize = 0;
-    return sendSlicesUntil(
+    return sendSlicesWithProgress(
         connection,
         registry,
         session_id,
@@ -269,6 +273,7 @@ pub fn sendSlices(
         parts,
         fin,
         &committed,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -291,7 +296,7 @@ pub fn sendSlicesWithDeadline(
 ) TimeoutError!void {
     committed_out.* = 0;
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return sendSlicesUntil(
+    return sendSlicesWithProgress(
         connection,
         registry,
         session_id,
@@ -300,6 +305,7 @@ pub fn sendSlicesWithDeadline(
         fin,
         committed_out,
         deadline,
+        null,
     );
 }
 
@@ -316,6 +322,7 @@ pub fn sendSlicesOnce(
 ) Error!void {
     const stream = try writableStream(registry, stream_id);
     const total_len = try slicesLength(parts);
+    try flow_send.check(registry, total_len);
     if (total_len == 0 and !fin) return;
     var prefix_storage: [16]u8 = undefined;
     const prefix = try pendingPrefix(stream, session_id, &prefix_storage);
@@ -374,6 +381,7 @@ pub fn sendSlicesOnce(
     try connection.trySend(frames[0..frame_count]);
     stream.send_offset = offset;
     stream.bytes_sent = next_bytes_sent;
+    flow_send.commit(registry, total_len);
     stream.prefix_sent = true;
     if (fin) {
         stream.local_fin = true;
@@ -382,7 +390,7 @@ pub fn sendSlicesOnce(
     }
 }
 
-fn sendSlicesUntil(
+pub fn sendSlicesWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
@@ -391,8 +399,10 @@ fn sendSlicesUntil(
     fin: bool,
     committed_out: *usize,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!void {
     committed_out.* = 0;
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     const total_len = try slicesLength(parts);
     var cursor = SliceCursor{ .parts = parts };
     while (!cursor.done()) {
@@ -405,6 +415,7 @@ fn sendSlicesUntil(
             deadline,
         );
         try ensureDeadline(connection, deadline);
+        try flow_send.wait(registry, progress, deadline);
         const packet_payload = @max(
             @as(usize, 1),
             connection.currentSendDatagramSize() -| 128,
@@ -422,6 +433,7 @@ fn sendSlicesUntil(
             connection_available,
             stream_available,
             connection.congestionAvailable(),
+            flow_send.available(registry),
         );
         if (available == 0) {
             try receiveSendProgressUntil(connection, deadline);
@@ -535,6 +547,7 @@ fn sendSlicesUntil(
         ) catch return error.IntegerOverflow;
         stream.send_offset = next_send_offset;
         stream.bytes_sent = next_bytes_sent;
+        flow_send.commit(registry, committed);
         cursor = committed_cursor;
         committed_out.* = cursor.committed;
         if (result.send_error) |err| return err;
@@ -548,7 +561,7 @@ fn sendSlicesUntil(
     );
 }
 
-fn sendUntil(
+pub fn sendWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
@@ -557,8 +570,10 @@ fn sendUntil(
     fin: bool,
     committed_out: *usize,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!void {
     committed_out.* = 0;
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     var offset: usize = 0;
     while (offset < payload.len) {
         const stream = try writableStream(registry, stream_id);
@@ -570,6 +585,7 @@ fn sendUntil(
             deadline,
         );
         try ensureDeadline(connection, deadline);
+        try flow_send.wait(registry, progress, deadline);
         const packet_payload = @max(
             @as(usize, 1),
             connection.currentSendDatagramSize() -| 128,
@@ -591,6 +607,7 @@ fn sendUntil(
             connection_available,
             stream_available,
             connection.congestionAvailable(),
+            flow_send.available(registry),
         );
         if (available == 0) {
             try receiveSendProgressUntil(connection, deadline);
@@ -658,6 +675,7 @@ fn sendUntil(
         // remain and `committed_out` can describe any following socket error.
         stream.send_offset += committed;
         stream.bytes_sent += committed;
+        flow_send.commit(registry, committed);
         offset += committed;
         committed_out.* = offset;
         if (result.send_error) |err| return err;
@@ -683,12 +701,13 @@ pub fn write(
     stream_id: u62,
     payload: []const u8,
 ) Error!usize {
-    return writeUntil(
+    return writeWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         payload,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -708,13 +727,14 @@ pub fn writeWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimeoutError!usize {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return writeUntil(
+    return writeWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         payload,
         deadline,
+        null,
     );
 }
 
@@ -728,12 +748,13 @@ pub fn writeSlices(
     stream_id: u62,
     parts: []const []const u8,
 ) Error!usize {
-    return writeSlicesUntil(
+    return writeSlicesWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         parts,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -750,24 +771,27 @@ pub fn writeSlicesWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimeoutError!usize {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return writeSlicesUntil(
+    return writeSlicesWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         parts,
         deadline,
+        null,
     );
 }
 
-fn writeSlicesUntil(
+pub fn writeSlicesWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     stream_id: u62,
     parts: []const []const u8,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!usize {
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     const stream = try writableStream(registry, stream_id);
     const total_len = try slicesLength(parts);
     if (total_len == 0) return 0;
@@ -782,6 +806,7 @@ fn writeSlicesUntil(
             deadline,
         );
         try ensureDeadline(connection, deadline);
+        try flow_send.wait(registry, progress, deadline);
         const credit = connection.streamSendCredit(stream_id);
         const packet_payload = @max(
             @as(usize, 1),
@@ -789,7 +814,7 @@ fn writeSlicesUntil(
         );
         const available = @min(
             total_len,
-            @min(packet_payload, credit.available()),
+            @min(packet_payload, credit.available(), flow_send.available(registry)),
         );
         if (available == 0) {
             try receiveSendProgressUntil(connection, deadline);
@@ -858,18 +883,21 @@ fn writeSlicesUntil(
         };
         stream.send_offset += staged.committed;
         stream.bytes_sent += staged.committed;
+        flow_send.commit(registry, staged.committed);
         return staged.committed;
     }
 }
 
-fn writeUntil(
+pub fn writeWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     stream_id: u62,
     payload: []const u8,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!usize {
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     const stream = try writableStream(registry, stream_id);
     if (payload.len == 0) return 0;
 
@@ -882,6 +910,7 @@ fn writeUntil(
             deadline,
         );
         try ensureDeadline(connection, deadline);
+        try flow_send.wait(registry, progress, deadline);
         const credit = connection.streamSendCredit(stream_id);
         const max_frame_data = @max(
             @as(usize, 1),
@@ -889,7 +918,7 @@ fn writeUntil(
         );
         const count = @min(
             payload.len,
-            @min(max_frame_data, credit.available()),
+            @min(max_frame_data, credit.available(), flow_send.available(registry)),
         );
         if (count == 0) {
             try receiveSendProgressUntil(connection, deadline);
@@ -924,6 +953,7 @@ fn writeUntil(
         };
         stream.send_offset = next_send_offset;
         stream.bytes_sent = next_bytes_sent;
+        flow_send.commit(registry, count);
         return count;
     }
 }
@@ -948,12 +978,13 @@ pub fn writeOnce(
         @as(usize, 1),
         credit.max_datagram_size -| 128,
     );
-    const available = credit.available() -| prefix.len;
+    const available = @min(credit.available() -| prefix.len, flow_send.available(registry));
     const count = @min(
         payload.len,
         @min(max_frame_data -| prefix.len, available),
     );
     if (count == 0 and prefix.len == 0) {
+        if (flow_send.available(registry) == 0) return error.FlowControlBlocked;
         // Let QUIC emit DATA_BLOCKED/STREAM_DATA_BLOCKED when appropriate, or
         // report congestion/pacing, without entering its receive loop.
         const probe = [_]quic.Frame{.{ .stream = .{
@@ -967,6 +998,7 @@ pub fn writeOnce(
     }
     try submitOnce(
         connection,
+        registry,
         stream,
         stream_id,
         prefix,
@@ -1003,6 +1035,7 @@ pub fn writeSlicesOnce(
     const available = @min(
         packet_payload -| prefix.len,
         credit.available() -| prefix.len,
+        flow_send.available(registry),
     );
     var frames: [max_slice_frames_per_packet]quic.Frame = undefined;
     var frame_count: usize = 0;
@@ -1060,6 +1093,7 @@ pub fn writeSlicesOnce(
         if (count == 0) break;
     }
     if (frame_count == 0) {
+        if (flow_send.available(registry) == 0) return error.FlowControlBlocked;
         const first = cursor.remaining();
         const probe = [_]quic.Frame{.{ .stream = .{
             .stream_id = stream_id,
@@ -1083,6 +1117,7 @@ pub fn writeSlicesOnce(
     try connection.trySend(frames[0..frame_count]);
     stream.send_offset = next_send_offset;
     stream.bytes_sent = next_bytes_sent;
+    flow_send.commit(registry, cursor.committed);
     stream.prefix_sent = true;
     return cursor.committed;
 }
@@ -1101,7 +1136,7 @@ pub fn sendOnce(
     if (payload.len == 0 and !fin) return;
     var prefix_storage: [16]u8 = undefined;
     const prefix = try pendingPrefix(stream, session_id, &prefix_storage);
-    try submitOnce(connection, stream, stream_id, prefix, payload, fin);
+    try submitOnce(connection, registry, stream, stream_id, prefix, payload, fin);
 }
 
 pub fn finish(
@@ -1325,12 +1360,14 @@ fn pendingPrefix(
 
 fn submitOnce(
     connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
     stream: *webtransport.StreamState,
     stream_id: u62,
     prefix: []const u8,
     payload: []const u8,
     fin: bool,
 ) Error!void {
+    try flow_send.check(registry, payload.len);
     const total = std.math.add(usize, prefix.len, payload.len) catch
         return error.IntegerOverflow;
     const next_offset = std.math.add(
@@ -1367,6 +1404,7 @@ fn submitOnce(
     try connection.trySend(frames[0..frame_count]);
     stream.send_offset = next_offset;
     stream.bytes_sent = next_bytes_sent;
+    flow_send.commit(registry, payload.len);
     stream.prefix_sent = true;
     if (fin) {
         stream.local_fin = true;

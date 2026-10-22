@@ -59,3 +59,32 @@ test "WebTransport endpoint client receive flow violation leaves sibling session
     _ = try second.openBidirectionalStream(&fixture.client);
     try std.testing.expect(!fixture.client.h3.established.connection.closing());
 }
+
+test "WebTransport endpoint client send flow grants preserve independent shared budgets" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    fixture.client.h3.control.settings.peer.webtransport_initial_max_data = 0;
+    const first = try fixture.addSession();
+    const second = try fixture.addSession();
+    const first_stream = try first.openBidirectionalStream(&fixture.client);
+    var committed: usize = 99;
+    try std.testing.expectError(error.Timeout, first.sendStreamWithTimeout(&fixture.client, first_stream, "data", true, &committed, .fromMilliseconds(5)));
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    var storage: [16]u8 = undefined;
+    const grant = try (webtransport.Capsule{ .max_data = 4 }).writeInto(&storage);
+    var framed: std.ArrayList(u8) = .empty;
+    defer framed.deinit(std.testing.allocator);
+    try (http3.Frame{ .frame_type = http3.FrameType.data, .payload = grant, .consumed = 0 }).write(&framed, std.testing.allocator);
+    try fixture.appendConnect(second, framed.items, false);
+    try std.testing.expect((try fixture.poll(second)) == null);
+    const second_stream = try second.openBidirectionalStream(&fixture.client);
+    try second.sendStreamWithTimeout(&fixture.client, second_stream, "data", true, &committed, .fromSeconds(1));
+    try std.testing.expectEqual(@as(usize, 4), committed);
+    try std.testing.expectEqual(@as(u64, 0), first.streams.flow.?.sent.data);
+    try std.testing.expectEqual(@as(u64, 0), first.streams.flow.?.send_limit.data);
+    try std.testing.expectEqual(@as(u64, 4), second.streams.flow.?.sent.data);
+    try std.testing.expect(!first.control.state.closed and !second.control.state.closed);
+}

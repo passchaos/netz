@@ -1,8 +1,8 @@
 //! Atomic one-attempt flow-control grants on an established CONNECT stream.
 
 const std = @import("std");
-const webtransport = @import("../mod.zig");
-const control_mod = @import("session_control.zig");
+const webtransport = @import("../../mod.zig");
+const control_mod = @import("../session_control.zig");
 
 pub fn send(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, capsule: webtransport.Capsule) control_mod.Error!void {
     try control.ensureOpen();

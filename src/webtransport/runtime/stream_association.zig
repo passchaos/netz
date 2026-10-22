@@ -4,7 +4,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
-const flow_receive = @import("flow_receive.zig");
+const flow_receive = @import("flow/receive.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 

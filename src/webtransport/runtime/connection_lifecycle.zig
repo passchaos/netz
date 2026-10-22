@@ -1,7 +1,7 @@
 //! WebTransport session state and application queues follow QUIC termination.
 
 const control_mod = @import("session_control.zig");
-const flow_receive = @import("flow_receive.zig");
+const flow_receive = @import("flow/receive.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const max_close_reason: usize = 1024;

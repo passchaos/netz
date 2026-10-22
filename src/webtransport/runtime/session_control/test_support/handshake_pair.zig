@@ -61,6 +61,13 @@ pub const Pair = struct {
             },
         );
         errdefer self.server.h3.deinit();
+        // SETTINGS are marked sent below instead of transmitting critical
+        // stream prefixes. Reserve their real QUIC IDs so ordinary uni opens
+        // agree with H3's control/QPACK and server-push allocation cursors.
+        for (0..3) |_| {
+            _ = try self.client.h3.established.connection.openUnidirectionalStream();
+            _ = try self.server.h3.established.connection.openUnidirectionalStream();
+        }
         self.client.h3.control.settings.markSent(client_settings);
         self.client.h3.control.settings.markReceived(server_settings);
         self.server.h3.control.settings.markSent(server_settings);

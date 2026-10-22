@@ -15,8 +15,9 @@ const endpoint_client = @import("runtime/endpoint_client.zig");
 const session_control = @import("runtime/session_control.zig");
 const capsule_rejection = @import("runtime/session_control/rejection.zig");
 const connection_lifecycle = @import("runtime/connection_lifecycle.zig");
-const flow_grant = @import("runtime/flow_grant.zig");
-const flow_open = @import("runtime/flow_open.zig");
+const flow_grant = @import("runtime/flow/grant.zig");
+const flow_open = @import("runtime/flow/open.zig");
+const flow_write = @import("runtime/flow/write.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream/batch.zig");
@@ -6071,8 +6072,9 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try sendHandshakeSessionStream(
-            &self.h3.established.connection,
+        try flow_write.send(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6118,8 +6120,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.sendWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.sendWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6138,8 +6141,9 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.sendSlices(
-            &self.h3.established.connection,
+        return flow_write.sendSlices(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6185,8 +6189,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.sendSlicesWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.sendSlicesWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6204,8 +6209,9 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!usize {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.write(
-            &self.h3.established.connection,
+        return flow_write.write(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6242,8 +6248,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.writeWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6259,8 +6266,9 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!usize {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.writeSlices(
-            &self.h3.established.connection,
+        return flow_write.writeSlices(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6297,8 +6305,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.writeSlicesWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeSlicesWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6333,8 +6342,9 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!StreamWriteResult {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return stream_batch.write(
-            &self.h3.established.connection,
+        return flow_write.writeStreams(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             writes,
@@ -6375,8 +6385,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return stream_batch.writeWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeStreamsWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             writes,
@@ -9844,8 +9855,9 @@ pub const HandshakeClientSession = struct {
             try self.refreshDispatcherTimer();
             try result;
         } else {
-            try sendHandshakeSessionStream(
-                &self.h3.established.connection,
+            try flow_write.send(
+                &self.control,
+                &self.h3,
                 &self.streams,
                 self.session_id,
                 stream_id,
@@ -9893,8 +9905,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return handshake_stream.sendWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.sendWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -9925,8 +9938,9 @@ pub const HandshakeClientSession = struct {
             try self.refreshDispatcherTimer();
             return result;
         }
-        return handshake_stream.sendSlices(
-            &self.h3.established.connection,
+        return flow_write.sendSlices(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -9973,8 +9987,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return handshake_stream.sendSlicesWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.sendSlicesWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10003,8 +10018,9 @@ pub const HandshakeClientSession = struct {
             try self.refreshDispatcherTimer();
             return try result;
         }
-        return handshake_stream.write(
-            &self.h3.established.connection,
+        return flow_write.write(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10042,8 +10058,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return handshake_stream.writeWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10070,8 +10087,9 @@ pub const HandshakeClientSession = struct {
             try self.refreshDispatcherTimer();
             return result;
         }
-        return handshake_stream.writeSlices(
-            &self.h3.established.connection,
+        return flow_write.writeSlices(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10109,8 +10127,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return handshake_stream.writeSlicesWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeSlicesWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10156,8 +10175,9 @@ pub const HandshakeClientSession = struct {
             try self.refreshDispatcherTimer();
             return try result;
         }
-        return stream_batch.write(
-            &self.h3.established.connection,
+        return flow_write.writeStreams(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             writes,
@@ -10199,8 +10219,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return stream_batch.writeWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.writeStreamsWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             writes,
@@ -19213,6 +19234,8 @@ test {
     _ = @import("runtime/session_control/handshake_rejection_tests.zig");
     _ = @import("runtime/session_control/connection_lifecycle_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
-    _ = @import("runtime/flow_receive.zig");
+    _ = @import("runtime/flow/receive.zig");
+    _ = @import("runtime/flow/write.zig");
+    _ = @import("runtime/flow/send.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

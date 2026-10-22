@@ -1,10 +1,10 @@
 const std = @import("std");
-const webtransport = @import("../../mod.zig");
-const quic = @import("../../../quic/mod.zig");
-const receive = @import("../flow_receive.zig");
-const Pair = @import("../session_control/test_support/handshake_pair.zig").Pair;
-const ObservedBatchSend = @import("../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
-const runtime = @import("../../runtime.zig");
+const webtransport = @import("../../../mod.zig");
+const quic = @import("../../../../quic/mod.zig");
+const receive = @import("../receive.zig");
+const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;
+const ObservedBatchSend = @import("../../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
+const runtime = @import("../../../runtime.zig");
 
 fn registryWithCredit(credit: u64) !webtransport.StreamRegistry {
     var registry = try webtransport.StreamRegistry.init(std.testing.allocator, .init(0), .server, .{});
@@ -158,7 +158,9 @@ test "WebTransport receive flow reverse direction carries no second header" {
     try pair.client.sendStream(id, "x", false);
     var output: [16]u8 = undefined;
     _ = try pair.server.readStreamWithTimeout(&output, .fromSeconds(1));
-    try pair.server.sendStream(id, "12345", false);
+    // Inject a noncompliant peer directly: the runtime sender now enforces
+    // the same session credit and cannot legitimately produce this excess.
+    try pair.connection(.server).send(&.{.{ .stream = .{ .stream_id = id, .data = "12345" } }});
     try std.testing.expectError(error.FlowControlViolation, pair.client.readStreamWithTimeout(&output, .fromSeconds(1)));
     try std.testing.expectEqual(@as(u64, 0), pair.client.streams.get(id).?.receive_header_len);
     try std.testing.expect(pair.client.streams.flow_violation);

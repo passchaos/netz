@@ -6,7 +6,7 @@ const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
-const flow_receive = @import("flow_receive.zig");
+const flow_receive = @import("flow/receive.zig");
 
 pub const Error = association.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;

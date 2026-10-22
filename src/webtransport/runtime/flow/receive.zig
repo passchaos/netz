@@ -1,10 +1,10 @@
 //! Charge session data when QUIC observes highest offsets, before application
 //! consumption or transport retirement can hide gaps and RESET Final Size.
 
-const webtransport = @import("../mod.zig");
-const quic = @import("../../quic/mod.zig");
-const control_mod = @import("session_control.zig");
-const flow_grant = @import("flow_grant.zig");
+const webtransport = @import("../../mod.zig");
+const quic = @import("../../../quic/mod.zig");
+const control_mod = @import("../session_control.zig");
+const flow_grant = @import("grant.zig");
 const std = @import("std");
 
 pub fn account(registry: *webtransport.StreamRegistry, stream: *webtransport.StreamState, stats: quic.one_rtt.RecvStreamStats) webtransport.Error!void {
@@ -56,5 +56,5 @@ pub fn replenish(control: *control_mod.Control, h3: anytype, registry: *webtrans
 }
 
 test {
-    _ = @import("flow_receive/tests.zig");
+    _ = @import("receive/tests.zig");
 }

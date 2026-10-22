@@ -9,6 +9,8 @@ const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const stream_runtime = @import("../stream.zig");
+const flow_send = @import("../flow/send.zig");
+const flow_progress = @import("../flow/progress.zig");
 
 pub const Error = stream_runtime.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -81,12 +83,13 @@ pub fn write(
     writes: []const Write,
     counts: []usize,
 ) Error!Result {
-    return writeUntil(
+    return writeWithProgress(
         connection,
         registry,
         session_id,
         writes,
         counts,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -109,26 +112,33 @@ pub fn writeWithDeadline(
     if (counts.len < writes.len) return error.BufferTooShort;
     @memset(counts[0..writes.len], 0);
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return writeUntil(
+    return writeWithProgress(
         connection,
         registry,
         session_id,
         writes,
         counts,
         deadline,
+        null,
     );
 }
 
-fn writeUntil(
+pub fn writeWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     writes: []const Write,
     counts: []usize,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!Result {
+    if (counts.len < writes.len) return error.BufferTooShort;
+    @memset(counts[0..writes.len], 0);
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
+    _ = try validateBatch(registry, writes);
     while (true) {
         try ensureDeadline(connection, deadline);
+        if (hasApplicationData(writes)) try flow_send.wait(registry, progress, deadline);
         const result = writeOnceUntil(
             connection,
             registry,
@@ -203,7 +213,7 @@ fn writeOnceUntil(
     var committed_bytes: [quic.one_rtt.max_batch_packets]u64 = undefined;
 
     const validation = try validateBatch(registry, writes);
-    const packet_count = if (validation.all_prefixes_sent)
+    const staged_count = if (validation.all_prefixes_sent)
         try stageSteadyBatch(
             connection,
             registry,
@@ -227,6 +237,17 @@ fn writeOnceUntil(
             &byte_counts,
             deadline,
         );
+
+    var packet_count: usize = 0;
+    var session_available = flow_send.available(registry);
+    for (0..staged_count) |index| {
+        const count = @min(byte_counts[index], session_available);
+        if (count == 0) break;
+        frames[index][0].stream.data = frames[index][0].stream.data[0..count];
+        byte_counts[index] = count;
+        session_available -= count;
+        packet_count += 1;
+    }
 
     if (packet_count == 0) {
         if (!hasApplicationData(writes)) return .{ .progressed = 0 };
@@ -278,6 +299,7 @@ fn writeOnceUntil(
         const stream = committed_streams[packet_index];
         stream.send_offset = committed_offsets[packet_index];
         stream.bytes_sent = committed_bytes[packet_index];
+        flow_send.commit(registry, byte_counts[packet_index]);
         counts[input_index] = byte_counts[packet_index];
     }
     if (sent.sent_count == 0 and sent.send_error == null) {

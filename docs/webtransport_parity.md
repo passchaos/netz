@@ -247,8 +247,23 @@ window, and zero initial data credit stays zero until explicitly granted.
 Shared dispatcher adapters refresh their recovery/pacing timer after deferred
 grant or rejection submission, including operations that otherwise send no data.
 
-Send-side stream-data quota enforcement, automatic stream credit replenishment
-and resumable deadline-bound grant APIs still need runtime integration.
+Send-side body quotas now cover contiguous and scatter/gather writes, complete
+multi-packet sends, and cross-stream batches. Fair writes truncate to available
+session credit; one-attempt complete sends reject an excessive body before
+submission. Every packet batch reserves one aggregate session budget in its
+priority order and charges only its socket-submitted prefix. Association bytes,
+FIN, and CONNECT control DATA remain excluded. Retransmission stays owned by
+QUIC and does not charge the session again.
+
+Owning Session operations now bind a temporary CONNECT progress context while
+waiting for data credit, retaining DRAIN/CLOSE/reset events and using the same
+absolute deadline across Capsule fragments, QUIC credit, congestion and pacing.
+Deadline-bound complete sends report the exact committed application prefix on
+failure so callers can resume without duplication. Dispatcher-bound operations
+retain their one-attempt contract and leave socket receives to the shared owner.
+
+Automatic stream credit replenishment and resumable deadline-bound grant APIs
+still need runtime integration.
 Configured stream-retention bounds remain independent of cumulative opening
 credit. These tests therefore do not establish
 full draft-16 session-flow-control compliance; reliable association-prefix reset

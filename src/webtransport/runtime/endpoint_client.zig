@@ -17,8 +17,9 @@ const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
 const terminal = @import("endpoint_client/terminal.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
-const flow_grant = @import("flow_grant.zig");
-const flow_open = @import("flow_open.zig");
+const flow_grant = @import("flow/grant.zig");
+const flow_open = @import("flow/open.zig");
+const flow_write = @import("flow/write.zig");
 
 const net = std.Io.net;
 
@@ -252,8 +253,9 @@ pub const Session = struct {
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
         try self.control.ensureOpen();
-        try handshake_stream.send(
-            &client.h3.established.connection,
+        try flow_write.send(
+            &self.control,
+            &client.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -300,8 +302,9 @@ pub const Session = struct {
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
         try self.control.ensureOpen();
-        try handshake_stream.sendWithDeadline(
-            &client.h3.established.connection,
+        try flow_write.sendWithDeadline(
+            &self.control,
+            &client.h3,
             &self.streams,
             self.session_id,
             stream_id,
