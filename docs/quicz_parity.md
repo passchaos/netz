@@ -1644,6 +1644,14 @@ error, but it no longer makes the stream readable again after FIN was delivered.
 The reset metadata remains available for diagnostics, duplicate consistency,
 and final-size validation, matching the current `/nav_env/Work/quiche`
 first-terminal behavior without discarding transport evidence.
+`NEW_TOKEN` validation now keeps wire decoding separate from endpoint
+semantics, matching current `/nav_env/Work/s2n-quic`. A client receiving an
+empty token emits `FRAME_ENCODING_ERROR`, while a server receiving any
+`NEW_TOKEN` emits `PROTOCOL_VIOLATION`; both closes identify frame type `0x07`.
+The role-neutral decoder therefore retains an empty token long enough to make
+that decision, while frame encoders and every public send path continue to
+reject constructing one. Real protected 1-RTT tests cover valid client receipt
+and empty/non-empty violations in both endpoint roles.
 
 ## Known blockers before declaring the goal complete
 

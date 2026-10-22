@@ -1974,7 +1974,6 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
 
     if (frame_type == @intFromEnum(FrameType.new_token)) {
         const len = try usizeFromVarint(try varint.decode(cursor));
-        if (len == 0) return error.InvalidFrame;
         return .{ .new_token = .{ .token = try cursor.readSlice(len) } };
     }
 
@@ -3925,6 +3924,22 @@ test "QUIC NEW_TOKEN frame writes fixed frame type byte" {
 
     const parsed = try parseFrame(encoded.items);
     try std.testing.expectEqualStrings("token", parsed.frame.new_token.token);
+
+    // Decoding retains this semantically invalid shape so the endpoint role
+    // can choose RFC 9000's FRAME_ENCODING_ERROR or PROTOCOL_VIOLATION.
+    const empty_encoded = [_]u8{
+        @intFromEnum(FrameType.new_token),
+        0,
+    };
+    const parsed_empty = try parseFrame(&empty_encoded);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        parsed_empty.frame.new_token.token.len,
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        (Frame{ .new_token = .{ .token = "" } }).wireLen(),
+    );
 }
 
 test "QUIC NEW_CONNECTION_ID frame writes fixed frame type byte" {

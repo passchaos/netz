@@ -464,6 +464,49 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
     defer done_packet.deinit(allocator);
     try std.testing.expect(client.handshakeConfirmed());
 
+    // RFC 9000 section 19.7 assigns an endpoint-specific error: a client
+    // receiving an empty token closes with FRAME_ENCODING_ERROR, while a
+    // server rejects every NEW_TOKEN below with PROTOCOL_VIOLATION.
+    const empty_token_packet = try quic.protection.sealShortPacket(
+        allocator,
+        server_keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 3,
+            .payload = &.{
+                @intFromEnum(quic.FrameType.new_token),
+                0,
+            },
+        },
+    );
+    defer allocator.free(empty_token_packet);
+    try server_endpoint.sendBytes(
+        client_endpoint.address(),
+        empty_token_packet,
+    );
+    try std.testing.expectError(error.InvalidFrame, client.receivePacket());
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.frame_encoding_error),
+        client.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.new_token)),
+        client.close_info.?.frame_type,
+    );
+    try std.testing.expectEqualStrings(
+        "empty new token",
+        client.close_info.?.reason_phrase,
+    );
+    try std.testing.expectEqualStrings(
+        issued,
+        client.latestNewToken().?,
+    );
+    // Keep the server connection below available for its independent role
+    // violation checks; consume the client's emitted close at the socket.
+    var client_close_datagram = try server_endpoint.receiveBytes();
+    defer client_close_datagram.deinit(allocator);
+
     try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
         .destination_connection_id = &server_cid,
         .packet_number = 0,
@@ -502,6 +545,55 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server2.close_info.?.error_code);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.new_token)), server2.close_info.?.frame_type);
     try std.testing.expectEqualStrings("new token", server2.close_info.?.reason_phrase);
+
+    var server3_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server3_endpoint.deinit();
+    const server3_cid = [_]u8{ 0x75, 0x76, 0x87, 0x99 };
+    var server3 = try one_rtt.Connection.init(&server3_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server3_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server3.deinit();
+    const server_empty_token_packet = try quic.protection.sealShortPacket(
+        allocator,
+        client_keys,
+        .{
+            .destination_connection_id = &server3_cid,
+            .packet_number = 0,
+            .payload = &.{
+                @intFromEnum(quic.FrameType.new_token),
+                0,
+            },
+        },
+    );
+    defer allocator.free(server_empty_token_packet);
+    try client_endpoint.sendBytes(
+        server3_endpoint.address(),
+        server_empty_token_packet,
+    );
+    try std.testing.expectError(error.InvalidFrame, server3.receivePacket());
+    try std.testing.expect(server3.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.protocol_violation),
+        server3.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.new_token)),
+        server3.close_info.?.frame_type,
+    );
+    try std.testing.expectEqualStrings(
+        "new token",
+        server3.close_info.?.reason_phrase,
+    );
 }
 
 test "QUIC 1-RTT generic send validates role and extension-gated frames" {

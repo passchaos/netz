@@ -13908,7 +13908,10 @@ pub const Connection = struct {
         const frame = triggering_frame orelse return null;
         return switch (err) {
             error.InvalidFrame => blk: {
-                if (self.config.local_endpoint == .server and frame == .new_token) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
+                if (frame == .new_token) {
+                    if (self.config.local_endpoint == .server) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
+                    if (frame.new_token.token.len == 0) break :blk semanticClose(.frame_encoding_error, @intFromEnum(quic.FrameType.new_token), "empty new token");
+                }
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
                 if (frame == .ack_frequency) break :blk ackFrequencyFrameClose(frame);
                 if (frame == .datagram) {
