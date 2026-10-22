@@ -864,6 +864,12 @@ that stream:
 - session termination sends RESET_STREAM/STOP_SENDING with WT_SESSION_GONE for
   every non-terminal associated stream direction.
 - malformed close length/UTF-8 resets the CONNECT stream with H3_MESSAGE_ERROR.
+- DATA after a received WT_CLOSE_SESSION is rejected with an atomic
+  RESET_STREAM plus STOP_SENDING carrying H3_MESSAGE_ERROR, including when the
+  violating suffix shares the same QUIC STREAM frame as the valid CLOSE. The
+  close code/reason remains application-visible, buffered suffix bytes are
+  discarded only after the rejection reaches the socket, and endpoint-driven
+  sessions keep enforcing this rule after their terminal event was delivered.
 
 The 1024-byte reason limit now belongs to the core WebTransport capsule codec
 and is reused by the incremental runtime, so standalone writers and parsers

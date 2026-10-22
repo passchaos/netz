@@ -81,6 +81,11 @@ pub const Control = struct {
     /// associated stream cleanup may still be retried.
     local_close_failed: bool = false,
     terminal_reported: bool = false,
+    /// A peer sent bytes beyond WT_CLOSE_SESSION. The valid close event remains
+    /// application-visible, while the CONNECT stream must be canceled with
+    /// H3_MESSAGE_ERROR before normal FIN/cleanup can continue.
+    post_terminal_data_pending: bool = false,
+    post_terminal_data_rejected: bool = false,
 
     h3_stage: H3Stage = .frame_type,
     h3_varint: VarIntDecoder = .{},
@@ -264,6 +269,17 @@ pub const Control = struct {
         const available = connection.availableReceivedStream(
             self.session_id.value,
         ) orelse &.{};
+        if (self.terminal_reported) {
+            if (available.len == 0 or self.post_terminal_data_rejected) {
+                return null;
+            }
+            self.post_terminal_data_pending = true;
+            _ = if (single_attempt)
+                try self.tryRejectPostTerminalData(connection)
+            else
+                try self.rejectPostTerminalData(connection);
+            return error.InvalidCapsule;
+        }
         if (available.len != 0) {
             const snapshot = self.*;
             const result = self.consume(available) catch |err| {
@@ -284,6 +300,11 @@ pub const Control = struct {
                 self.restoreSnapshot(snapshot);
                 return err;
             };
+            if (result.event != null and self.terminal_reported and
+                available.len > result.consumed)
+            {
+                self.post_terminal_data_pending = true;
+            }
             if (result.event) |event| return event;
         }
 
@@ -314,6 +335,67 @@ pub const Control = struct {
             } };
         }
         return null;
+    }
+
+    /// Cancel a CONNECT stream whose peer sent bytes after WT_CLOSE_SESSION.
+    /// RESET_STREAM and STOP_SENDING are submitted together when both halves
+    /// remain open; QUIC discards every already-buffered offending byte only
+    /// after the terminal packet reaches the socket.
+    pub fn rejectPostTerminalData(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+    ) Error!bool {
+        if (!self.notePostTerminalData(connection)) return false;
+        try connection.cancelStream(
+            self.session_id.value,
+            http3.ApplicationErrorCode.message_error,
+        );
+        self.commitPostTerminalDataRejection();
+        return true;
+    }
+
+    /// One-attempt event-loop counterpart to `rejectPostTerminalData`.
+    pub fn tryRejectPostTerminalData(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+    ) Error!bool {
+        if (!self.notePostTerminalData(connection)) return false;
+        try connection.tryCancelStream(
+            self.session_id.value,
+            http3.ApplicationErrorCode.message_error,
+        );
+        self.commitPostTerminalDataRejection();
+        return true;
+    }
+
+    pub fn handledPostTerminalData(self: Control) bool {
+        return self.post_terminal_data_rejected;
+    }
+
+    fn notePostTerminalData(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+    ) bool {
+        if (!self.terminal_reported or self.post_terminal_data_rejected) {
+            return false;
+        }
+        if (!self.post_terminal_data_pending) {
+            const available = connection.availableReceivedStream(
+                self.session_id.value,
+            ) orelse &.{};
+            if (available.len == 0) return false;
+            self.post_terminal_data_pending = true;
+        }
+        return true;
+    }
+
+    fn commitPostTerminalDataRejection(self: *Control) void {
+        self.post_terminal_data_pending = false;
+        self.post_terminal_data_rejected = true;
+        // The CONNECT stream entered protocol-violation cleanup; suppress
+        // every later CLOSE/FIN retry whether cancellation reset the send side
+        // or a previously committed FIN left only STOP_SENDING to emit.
+        self.local_close_failed = true;
     }
 
     fn consume(

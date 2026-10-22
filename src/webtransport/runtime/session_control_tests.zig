@@ -1930,6 +1930,137 @@ test "WebTransport CONNECT control rejects forbidden HTTP/3 frame types" {
     }
 }
 
+test "WebTransport session control rejects CONNECT data after peer close" {
+    const allocator = std.testing.allocator;
+    const control_module = @import("session_control.zig");
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x91} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-post-close-server",
+        .peer_connection_id = "wt-post-close-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var peer_connection = try quic.one_rtt.Connection.init(&peer, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-post-close-client",
+        .peer_connection_id = "wt-post-close-server",
+        .enable_pacing = false,
+    });
+    defer peer_connection.deinit();
+
+    var close_storage: [64]u8 = undefined;
+    const close = try control_module.writeCloseInto(
+        &close_storage,
+        77,
+        "done",
+    );
+    var h3_data: [96]u8 = undefined;
+    var h3_len: usize = 0;
+    const frame_type = try quic.varint.encodeInto(
+        h3_data[h3_len..],
+        http3.FrameType.data,
+    );
+    h3_len += frame_type.len;
+    const frame_length = try quic.varint.encodeInto(
+        h3_data[h3_len..],
+        close.len + 1,
+    );
+    h3_len += frame_length.len;
+    @memcpy(h3_data[h3_len..][0..close.len], close);
+    h3_len += close.len;
+    h3_data[h3_len] = 0xff;
+    h3_len += 1;
+
+    try peer_connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = h3_data[0..h3_len],
+    } }});
+    var request_packet = try connection.receivePacket();
+    defer request_packet.deinit(allocator);
+    var control = try control_module.Control.init(allocator, .init(0));
+    defer control.deinit();
+    const event = (try control.pollOnce(&connection)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(event == .closed);
+    try std.testing.expectEqual(@as(u32, 77), event.closed.code);
+    try std.testing.expectEqualStrings("done", event.closed.reason);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.availableReceivedStream(0).?.len,
+    );
+
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        control.pollOnce(&connection),
+    );
+    try std.testing.expect(control.handledPostTerminalData());
+    try std.testing.expect(control.local_close_failed);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.availableReceivedStream(0).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.message_error),
+        connection.sendStreamStats(0).?.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.message_error),
+        connection.recvStreamStats(0).?.stop_sending_sent.?
+            .application_error_code,
+    );
+
+    var rejection = try peer_connection.receivePacket();
+    defer rejection.deinit(allocator);
+    var saw_reset = false;
+    var saw_stop = false;
+    for (rejection.frames) |frame| switch (frame) {
+        .reset_stream => |reset| {
+            try std.testing.expectEqual(
+                @as(u64, http3.ApplicationErrorCode.message_error),
+                reset.application_error_code,
+            );
+            saw_reset = true;
+        },
+        .stop_sending => |stop| {
+            try std.testing.expectEqual(
+                @as(u64, http3.ApplicationErrorCode.message_error),
+                stop.application_error_code,
+            );
+            saw_stop = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_reset);
+    try std.testing.expect(saw_stop);
+}
+
 test "Protected session control retains close after drain event" {
     const protected =
         @import("protected_session_control.zig");

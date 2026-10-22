@@ -3761,30 +3761,38 @@ pub const EndpointServer = struct {
         sessions: ?stream_association.SessionLookup,
     ) Error!?EndpointSessionEvent {
         // Accepted sessions remain in the endpoint map until the application
-        // removes their connection. Once the peer terminal event has been
-        // delivered, do not poll stream/DATAGRAM APIs whose association is no
-        // longer application-visible. The retained HTTP/3 association still
-        // lets the dispatcher process late ACKs and reject late datagrams.
-        if (!target.control.terminal_reported) {
-            const control_event = target.control.pollOnce(
-                &target.h3.established.connection,
-            ) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                else => {
+        // removes their connection. Keep polling the CONNECT stream after the
+        // terminal event solely to enforce WT_CLOSE_SESSION's no-more-data
+        // rule; associated stream/DATAGRAM APIs remain hidden below.
+        const control_event = target.control.pollOnce(
+            &target.h3.established.connection,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            error.InvalidCapsule => {
+                if (!target.control.handledPostTerminalData()) {
                     try http3.runtime.closeConnectionForProtocolError(
                         &target.h3.established.connection,
                         err,
                     );
-                    return err;
-                },
-            };
-            if (control_event) |event| {
-                try finishEndpointSessionEvent(target, event);
-                return .{ .session = event };
-            }
+                } else {
+                    target.close_response_pending = false;
+                }
+                return err;
+            },
+            else => {
+                try http3.runtime.closeConnectionForProtocolError(
+                    &target.h3.established.connection,
+                    err,
+                );
+                return err;
+            },
+        };
+        if (control_event) |event| {
+            try finishEndpointSessionEvent(target, event);
+            return .{ .session = event };
         }
         const close_progress = advanceEndpointCloseOnce(target) catch |err|
             switch (err) {
@@ -3976,6 +3984,12 @@ fn finishEndpointSessionEvent(
 fn advanceEndpointCloseOnce(
     target: *EndpointAcceptedSession,
 ) Error!session_control.TerminateProgress {
+    if (try target.control.tryRejectPostTerminalData(
+        &target.h3.established.connection,
+    )) {
+        target.close_response_pending = false;
+        return .submitted;
+    }
     if (target.close_response_pending) {
         target.h3.trySendResponseBody(
             target.session_id.value,
@@ -6556,10 +6570,12 @@ pub const AcceptedHandshakeSession = struct {
                 &self.h3.established.connection,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    try self.h3.established.connection.resetStream(
-                        self.session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                    );
+                    if (!self.control.handledPostTerminalData()) {
+                        try self.h3.established.connection.resetStream(
+                            self.session_id.value,
+                            http3.ApplicationErrorCode.message_error,
+                        );
+                    }
                     return err;
                 },
                 else => {
@@ -6987,12 +7003,14 @@ pub const AcceptedHandshakeSession = struct {
                 &self.h3.established.connection,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    try self.h3.established.connection
-                        .resetStreamWithDeadline(
-                        self.session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                        deadline,
-                    );
+                    if (!self.control.handledPostTerminalData()) {
+                        try self.h3.established.connection
+                            .resetStreamWithDeadline(
+                            self.session_id.value,
+                            http3.ApplicationErrorCode.message_error,
+                            deadline,
+                        );
+                    }
                     return err;
                 },
                 else => {
@@ -7015,6 +7033,9 @@ pub const AcceptedHandshakeSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
+            _ = try self.control.rejectPostTerminalData(
+                &self.h3.established.connection,
+            );
             if (event == .closed and
                 !self.control.local_close_sent and
                 !self.control.local_close_failed)
@@ -7060,6 +7081,9 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         if (event != .closed and event != .reset) return;
+        _ = try self.control.tryRejectPostTerminalData(
+            &self.h3.established.connection,
+        );
         if (event == .closed and !self.control.local_close_sent and
             !self.control.local_close_failed and
             self.pending_close == null)
@@ -10787,10 +10811,12 @@ pub const HandshakeClientSession = struct {
                     &self.h3.established.connection,
                 ) catch |err| switch (err) {
                     error.InvalidCapsule => {
-                        try self.h3.established.connection.resetStream(
-                            self.session_id.value,
-                            http3.ApplicationErrorCode.message_error,
-                        );
+                        if (!self.control.handledPostTerminalData()) {
+                            try self.h3.established.connection.resetStream(
+                                self.session_id.value,
+                                http3.ApplicationErrorCode.message_error,
+                            );
+                        }
                         return err;
                     },
                     else => {
@@ -10853,12 +10879,14 @@ pub const HandshakeClientSession = struct {
                 &self.h3.established.connection,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    try self.h3.established.connection
-                        .resetStreamWithDeadline(
-                        self.session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                        deadline,
-                    );
+                    if (!self.control.handledPostTerminalData()) {
+                        try self.h3.established.connection
+                            .resetStreamWithDeadline(
+                            self.session_id.value,
+                            http3.ApplicationErrorCode.message_error,
+                            deadline,
+                        );
+                    }
                     return err;
                 },
                 else => {
@@ -10881,6 +10909,9 @@ pub const HandshakeClientSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
+            _ = try self.control.rejectPostTerminalData(
+                &self.h3.established.connection,
+            );
             if (event == .closed and
                 !self.control.local_close_sent and
                 !self.control.local_close_failed)
@@ -10924,6 +10955,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         if (event != .closed and event != .reset) return;
+        _ = try self.control.tryRejectPostTerminalData(
+            &self.h3.established.connection,
+        );
         if (event == .closed and !self.control.local_close_sent and
             !self.control.local_close_failed and
             self.pending_close == null)
@@ -10955,15 +10989,15 @@ pub const HandshakeClientSession = struct {
     fn pollSessionEventOnce(
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
-        if (!self.control.terminal_reported) {
-            const event = self.control.pollOnce(
-                &self.h3.established.connection,
-            ) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                error.InvalidCapsule => {
+        const event = self.control.pollOnce(
+            &self.h3.established.connection,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            error.InvalidCapsule => {
+                if (!self.control.handledPostTerminalData()) {
                     self.h3.established.connection.tryResetStream(
                         self.session_id.value,
                         http3.ApplicationErrorCode.message_error,
@@ -10974,22 +11008,24 @@ pub const HandshakeClientSession = struct {
                         => return null,
                         else => return reset_err,
                     };
-                    return err;
-                },
-                else => {
-                    try http3.runtime.closeConnectionForProtocolError(
-                        &self.h3.established.connection,
-                        err,
-                    );
-                    return err;
-                },
-            };
-            if (event) |value| {
-                if (value == .closed and !self.control.local_close_sent) {
-                    self.close_response_pending = true;
+                } else {
+                    self.close_response_pending = false;
                 }
-                return value;
+                return err;
+            },
+            else => {
+                try http3.runtime.closeConnectionForProtocolError(
+                    &self.h3.established.connection,
+                    err,
+                );
+                return err;
+            },
+        };
+        if (event) |value| {
+            if (value == .closed and !self.control.local_close_sent) {
+                self.close_response_pending = true;
             }
+            return value;
         }
 
         _ = self.advanceTerminalCleanupOnce() catch |err| switch (err) {
@@ -11005,6 +11041,12 @@ pub const HandshakeClientSession = struct {
     fn advanceTerminalCleanupOnce(
         self: *HandshakeClientSession,
     ) Error!session_control.TerminateProgress {
+        if (try self.control.tryRejectPostTerminalData(
+            &self.h3.established.connection,
+        )) {
+            self.close_response_pending = false;
+            return .submitted;
+        }
         if (self.close_response_pending) {
             self.h3.trySendRequestBody(
                 self.session_id.value,
