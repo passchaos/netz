@@ -753,6 +753,82 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     }
 }
 
+test "QUIC 1-RTT close bypasses a saturated congestion window" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+
+    const sender_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const receiver_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &sender_cid,
+        .peer_connection_id = &receiver_cid,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &receiver_cid,
+        .peer_connection_id = &sender_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "unacknowledged",
+    } }});
+    var data_packet = try receiver.receivePacket();
+    defer data_packet.deinit(allocator);
+    const saturated_flight = sender.bytesInFlight();
+    try std.testing.expect(saturated_flight != 0);
+    one_rtt.testing.clampCongestionWindowToBytesInFlight(&sender);
+    try std.testing.expectEqual(@as(usize, 0), sender.congestionAvailable());
+    try std.testing.expectError(
+        error.CongestionLimited,
+        sender.send(&.{.{ .ping = {} }}),
+    );
+
+    // CONNECTION_CLOSE is neither ack-eliciting nor in-flight under RFC 9000,
+    // so a full congestion window must not strand the peer until idle timeout.
+    try sender.closeApplication(77, "cancel saturated sender");
+    try std.testing.expectEqual(saturated_flight, sender.bytesInFlight());
+    var close_packet = try receiver.receivePacket();
+    defer close_packet.deinit(allocator);
+    const close = receiver.peerCloseInfo().?.application;
+    try std.testing.expectEqual(@as(u64, 77), close.error_code);
+    try std.testing.expectEqualStrings(
+        "cancel saturated sender",
+        close.reason_phrase,
+    );
+    try std.testing.expect(receiver.draining());
+}
+
 test "QUIC 1-RTT application close truncates reason within path MTU" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
