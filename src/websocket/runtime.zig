@@ -11590,8 +11590,38 @@ pub const H2Server = struct {
             request.deinit(allocator);
             connection.abandonExtendedConnect(stream_id);
         };
-        const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
-        if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
+        const version = try requiredH2SingletonHeader(
+            request.headers,
+            "sec-websocket-version",
+        );
+        websocket.validateClientVersion(version) catch |err| switch (err) {
+            error.UnsupportedVersion => {
+                try validateH2VersionNegotiationRequest(
+                    allocator,
+                    request.headers,
+                    options.allowed_origins,
+                );
+                try validateH2ServerExtraHeaders(options.extra_headers);
+                if (deadline) |absolute| {
+                    _ = try deadline_policy.usableAwake(
+                        connection.io,
+                        absolute,
+                    );
+                }
+                try connection.rejectExtendedConnect(
+                    request.stream_id,
+                    426,
+                    &.{.{
+                        .name = "sec-websocket-version",
+                        .value = "13",
+                    }},
+                );
+                request.deinit(allocator);
+                request_owned = false;
+                return err;
+            },
+            else => return err,
+        };
         try rejectH2ExtendedConnectLegacyHeaders(request.headers);
         try origin_policy.validateH2(request.headers, options.allowed_origins);
 
@@ -11634,6 +11664,21 @@ pub const H2Server = struct {
         };
     }
 };
+
+fn validateH2VersionNegotiationRequest(
+    allocator: std.mem.Allocator,
+    headers: []const http2.Hpack.HeaderField,
+    allowed_origins: []const []const u8,
+) Error!void {
+    try rejectH2ExtendedConnectLegacyHeaders(headers);
+    try origin_policy.validateH2(headers, allowed_origins);
+    if (try selectH2Subprotocol(allocator, headers, &.{})) |protocol| {
+        allocator.free(protocol);
+    }
+    if (try acceptH2Extensions(allocator, headers, .{})) |extension| {
+        allocator.free(extension);
+    }
+}
 
 /// A validated RFC 8441 request awaiting application admission. No response
 /// HEADERS have been sent. The request headers and negotiated values remain

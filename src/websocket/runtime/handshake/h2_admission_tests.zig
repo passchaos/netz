@@ -682,6 +682,97 @@ test "WebSocket RFC 8441 pending deinit resets only its stream" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket RFC 8441 advertises version 13 and reuses H2 connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            try std.testing.expectError(
+                error.UnsupportedVersion,
+                runtime.H2Server.receiveUpgradeRequest(
+                    self.server.allocator,
+                    &h2,
+                    .{},
+                ),
+            );
+
+            var sibling = try h2.readRequest();
+            defer sibling.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/after-version-rejection",
+                sibling.path,
+            );
+            try h2.writeResponse(sibling.stream_id, .{ .status = 204 });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var rejected = try client.openExtendedConnectAttempt(.{
+        .method = "CONNECT",
+        .path = "/unsupported-version",
+        .authority = "localhost",
+        .protocol = "websocket",
+        .headers = &.{.{
+            .name = "sec-websocket-version",
+            .value = "12",
+        }},
+    });
+    defer rejected.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 426), rejected.status);
+    try std.testing.expect(!rejected.accepted());
+    try std.testing.expectEqualStrings(
+        "13",
+        rejected.responseHeader("sec-websocket-version") orelse
+            return error.TestUnexpectedResult,
+    );
+
+    var sibling = try client.request(.{
+        .method = "GET",
+        .path = "/after-version-rejection",
+        .authority = "localhost",
+    });
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.status);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket RFC 8441 client rejects unoffered compression window" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

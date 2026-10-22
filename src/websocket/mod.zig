@@ -1364,8 +1364,7 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
         req.headers,
         "sec-websocket-version",
     );
-    try validateClientVersionValue(version);
-    if (!std.mem.eql(u8, version, "13")) return error.UnsupportedVersion;
+    try validateClientVersion(version);
     try validateClientHandshakeSuffix(req);
 }
 
@@ -1376,14 +1375,19 @@ pub fn validateClientHandshakeForVersionNegotiation(
     req: http1.Request,
 ) Error!void {
     try validateClientHandshakePrefix(req);
-    try validateClientVersionValue(try requiredSingletonHeader(
+    try validateClientVersionSyntax(try requiredSingletonHeader(
         req.headers,
         "sec-websocket-version",
     ));
     try validateClientHandshakeSuffix(req);
 }
 
-fn validateClientVersionValue(value: []const u8) Error!void {
+pub fn validateClientVersion(value: []const u8) Error!void {
+    try validateClientVersionSyntax(value);
+    if (!std.mem.eql(u8, value, "13")) return error.UnsupportedVersion;
+}
+
+pub fn validateClientVersionSyntax(value: []const u8) Error!void {
     const valid = switch (value.len) {
         1 => std.ascii.isDigit(value[0]),
         2 => value[0] >= '1' and value[0] <= '9' and

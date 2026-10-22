@@ -177,6 +177,13 @@ metadata, custom acceptance fields, Content-Length and END_STREAM-delimited
 rejection bodies, trailers, body-limit cancellation, 401 rejection followed by
 a successful sibling request, and delayed-decision timeout. Existing
 `H2Server.accept*` calls remain immediate compatibility wrappers.
+RFC 8441 applies the same version advertisement without resetting or closing
+the parent connection. An otherwise valid Extended CONNECT with version 12
+receives a header-only 426 containing `sec-websocket-version: 13`; the server
+returns typed `UnsupportedVersion`, then a normal sibling request completes on
+the same HTTP/2 connection. Malformed version syntax, legacy connection fields,
+bad Origin/subprotocol/extension grammar, and invalid server response options
+remain ordinary validation errors and cannot trigger the advertisement.
 `H2Client.openAttempt*` completes the other side of that policy: final non-2xx
 status, response fields, bounded body, and trailers remain owned and
 inspectable, while `requireAccepted` and the legacy `open*` wrappers retain
