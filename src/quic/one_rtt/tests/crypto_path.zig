@@ -900,6 +900,146 @@ test "QUIC 1-RTT connection sends and validates PMTU probes" {
     try std.testing.expectEqual(@as(usize, 1300), client.currentSendDatagramSize());
 }
 
+test "QUIC 1-RTT timer automatically sends an initially ready PMTU probe" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6a} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-auto-local",
+        .peer_connection_id = "pmtu-auto-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const timer = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pmtu_probe,
+        timer.kind,
+    );
+    const initial_window = connection.congestion.congestion_window;
+    connection.congestion.congestion_window = 0;
+    _ = (try connection.serviceNextTimerAt(timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 0), connection.bytesInFlight());
+    const retry = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pmtu_probe,
+        retry.kind,
+    );
+    try std.testing.expect(retry.deadline_ns > timer.deadline_ns);
+
+    connection.congestion.congestion_window = initial_window;
+    _ = (try connection.serviceNextTimerAt(retry.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 1300), connection.bytesInFlight());
+
+    var probe = try receiver.receiveBytes();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1300), probe.bytes.len);
+}
+
+test "QUIC dispatcher raise timer automatically resumes PMTU probing" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-raise-local",
+        .peer_connection_id = "pmtu-raise-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    connection.pmtud.current_size = 1250;
+    connection.pmtud.should_probe = false;
+    connection.pmtud.failed_size = 1300;
+    connection.pmtud.raise_probe_after_ns = 100;
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &sender,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 96;
+    try dispatcher.registerConnection(handle, &connection);
+
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, timer.connection_id);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pmtu_raise,
+        timer.timer.kind,
+    );
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 1300), connection.bytesInFlight());
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.loss_time,
+        connection.nextTimerDeadline().?.kind,
+    );
+
+    var probe = try receiver.receiveBytes();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1300), probe.bytes.len);
+}
+
 test "QUIC 1-RTT PTO does not retransmit a PMTU probe as ordinary data" {
     const allocator = std.testing.allocator;
 

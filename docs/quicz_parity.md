@@ -356,6 +356,15 @@ re-arms the same size under an allocator that rejects all new allocations; the
 second exact-size probe succeeds with stable packet-scratch pointers.
 The full 2,958-test Netz suite and both quic-go and s2n-quic transport matrices
 remain green after the change.
+Ready PMTU probes now also participate in the connection and endpoint timer
+schedule instead of depending on unrelated application traffic to call the
+low-level probe API. This starts the initial search automatically, continues
+multi-step searches after ACK or loss feedback, and transmits a new probe when
+the 600-second raise timer reopens a completed search. Congestion, pacing, and
+anti-amplification limits retain probe readiness behind bounded retry deadlines
+so a blocked path neither loses the search nor creates a zero-deadline event
+loop. Focused real-UDP regressions cover the initial interest, blocked retry,
+and dispatcher-owned raise-timer path.
 QUIC PMTU handling now also detects path MTU black holes from ordinary
 non-probe loss bursts instead of only explicit probe loss. The implementation
 records the protected datagram size for each sent packet, clears black-hole

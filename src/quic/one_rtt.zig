@@ -914,6 +914,7 @@ pub const TimerDeadlineKind = enum {
     receive_credit,
     loss_time,
     pto,
+    pmtu_probe,
     pmtu_raise,
     path_validation,
     keep_alive,
@@ -1230,6 +1231,12 @@ pub const Connection = struct {
     /// old-path mark from masking bleaching on the new path.
     ecn_path_baseline_pending: bool = false,
     pmtud: quic.pmtu.State = .{},
+    /// A ready DPLPMTUD probe is transport-owned transmission work. Temporary
+    /// congestion, pacing, or anti-amplification limits defer it without
+    /// dropping the readiness signal or keeping the endpoint in a zero-time
+    /// timer loop.
+    pmtu_probe_retry_deadline_ns: ?u64 = null,
+    pmtu_probe_retry_attempts: u8 = 0,
     pmtu_probe_epoch: u32 = 1,
     pmtu_path_epoch: u32 = 1,
     packets_sent_count: u64 = 0,
@@ -4562,6 +4569,12 @@ pub const Connection = struct {
                 .deadline_ns = deadline.deadline_ns,
             });
         }
+        if (self.pmtuProbeTransmissionDeadline()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .pmtu_probe,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.pmtuProbeDeadline()) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .pmtu_raise,
@@ -4648,8 +4661,13 @@ pub const Connection = struct {
             .loss_time, .pto => {
                 _ = try self.serviceLossDetectionTimer(now_ns);
             },
+            .pmtu_probe => {
+                try self.transmitReadyPmtuProbeAt(now_ns);
+            },
             .pmtu_raise => {
-                _ = self.servicePmtuTimerAt(now_ns);
+                if (self.servicePmtuTimerAt(now_ns)) {
+                    try self.transmitReadyPmtuProbeAt(now_ns);
+                }
             },
             .path_validation => {
                 const retry_due = if (self.path_validation_retry_deadline_ns) |retry|
@@ -5504,6 +5522,7 @@ pub const Connection = struct {
             self.rtt_stats = .init(peer_max_ack_delay_ns);
         }
         self.pmtud.resetForPath();
+        self.clearPmtuProbeRetry();
         self.pmtuProbeEpochBump();
         self.pmtuPathEpochBump();
         self.loss_time_deadline_ns = null;
@@ -5585,6 +5604,71 @@ pub const Connection = struct {
         return self.pmtud.probeDeadlineNs();
     }
 
+    fn pmtuProbeTransmissionDeadline(self: *const Connection) ?u64 {
+        if (!self.pmtud.shouldProbe()) return null;
+        return self.pmtu_probe_retry_deadline_ns orelse 0;
+    }
+
+    fn clearPmtuProbeRetry(self: *Connection) void {
+        self.pmtu_probe_retry_deadline_ns = null;
+        self.pmtu_probe_retry_attempts = 0;
+    }
+
+    fn schedulePmtuProbeRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if (!self.pmtud.shouldProbe() or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearPmtuProbeRetry();
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.pmtu_probe_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.pmtu_probe_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
+        );
+        self.pmtu_probe_retry_attempts +|= 1;
+        self.pmtu_probe_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
+    }
+
+    fn transmitReadyPmtuProbeAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        self.pmtu_probe_retry_deadline_ns = null;
+        _ = self.sendPmtuProbeAt(
+            // Handshake-created connections cap this value to the peer's
+            // max_udp_payload_size, so timer-driven probes cannot exceed the
+            // authenticated transport-parameter limit.
+            self.config.max_datagram_size,
+            now_ns,
+        ) catch |err| switch (err) {
+            error.AntiAmplificationLimited,
+            error.CongestionLimited,
+            error.PacingLimited,
+            => {
+                self.schedulePmtuProbeRetry(err, now_ns);
+                return;
+            },
+            else => |other| return other,
+        };
+        self.clearPmtuProbeRetry();
+    }
+
     pub fn servicePmtuTimerAt(self: *Connection, now_ns: u64) bool {
         if (!self.pmtud.serviceRaiseTimer(now_ns, self.config.max_datagram_size)) return false;
         self.applyCurrentPmtuToPath();
@@ -5593,7 +5677,10 @@ pub const Connection = struct {
 
     pub fn sendPmtuProbeAt(self: *Connection, peer_max_udp_payload: usize, sent_time_ns: ?u64) Error!?usize {
         try self.validateNextPacketNumber();
-        const probe_size = self.pmtud.probeSize(peer_max_udp_payload) orelse return null;
+        const probe_size = self.pmtud.probeSize(peer_max_udp_payload) orelse {
+            self.clearPmtuProbeRetry();
+            return null;
+        };
         if (probe_size > self.config.max_datagram_size) return error.DatagramTooLarge;
 
         const packet_number = self.next_packet_number;
@@ -5648,6 +5735,7 @@ pub const Connection = struct {
             self.pmtu_probe_epoch,
             probe_size,
         );
+        self.clearPmtuProbeRetry();
         self.refreshLossTimeDeadline();
         self.applyCurrentPmtuToPath();
         return probe_size;
