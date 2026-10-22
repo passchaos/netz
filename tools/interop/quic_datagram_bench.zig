@@ -84,6 +84,7 @@ pub const Config = struct {
         return .{
             .max_datagram_size = mtu,
             .max_datagram_queue_items = self.window,
+            .max_datagram_queue_bytes = @as(usize, self.window) * @as(usize, self.payload_bytes),
             .max_frames_per_packet = @max(16, self.window),
         };
     }

@@ -2533,7 +2533,7 @@ test "QUIC 1-RTT partial reset delivery excludes reordered late data" {
     );
 }
 
-test "QUIC 1-RTT stats include datagram queue drops" {
+test "QUIC 1-RTT stats include byte-bounded datagram queue drops" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -2567,7 +2567,8 @@ test "QUIC 1-RTT stats include datagram queue drops" {
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 64,
-        .max_datagram_queue_items = 1,
+        .max_datagram_queue_items = 2,
+        .max_datagram_queue_bytes = 5,
         .enable_pacing = false,
     });
     defer server.deinit();
@@ -2587,11 +2588,16 @@ test "QUIC 1-RTT stats include datagram queue drops" {
     try std.testing.expectEqual(@as(u64, 2), server_stats.datagrams_received);
     try std.testing.expectEqual(@as(u64, 1), server_stats.datagrams_dropped_incoming);
     try std.testing.expectEqual(@as(usize, 1), server_stats.datagram_receive_queue_len);
+    try std.testing.expectEqual(@as(usize, 3), server_stats.datagram_receive_queue_bytes);
 
     var out: [8]u8 = undefined;
     const popped = (try server.popDatagram(&out)).?;
     try std.testing.expectEqualStrings("two", popped);
     try std.testing.expectEqual(@as(usize, 0), server.stats().datagram_receive_queue_len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.stats().datagram_receive_queue_bytes,
+    );
 }
 
 test "QUIC 1-RTT padding-only packets are in flight but non-eliciting" {

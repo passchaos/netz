@@ -8048,6 +8048,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_stream_receive_window"));
     try std.testing.expect(@hasField(
         netz.quic.handshake.OneRttConfig,
+        "max_datagram_queue_bytes",
+    ));
+    try std.testing.expect(@hasField(
+        netz.quic.handshake.OneRttConfig,
         "enable_reset_partial_delivery",
     ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
@@ -8085,6 +8089,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_datagram_frame_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_datagram_frame_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_datagram_queue_items"));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionConfig,
+        "max_datagram_queue_bytes",
+    ));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionStats,
+        "datagram_receive_queue_bytes",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "datagramReceiveQueueBytes",
+    ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_ack_frequency"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "congestion_algorithm"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_hystart"));

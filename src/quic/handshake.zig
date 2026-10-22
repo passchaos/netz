@@ -223,6 +223,10 @@ pub const OneRttConfig = struct {
     /// Maximum application DATAGRAM payloads retained while no direct
     /// receiver is active. Zero keeps only caller-buffer direct delivery.
     max_datagram_queue_items: usize = 16,
+    /// Maximum cumulative payload bytes retained by that queue. Direct
+    /// caller-buffer delivery remains available when this is zero.
+    max_datagram_queue_bytes: usize =
+        quic.one_rtt.default_max_datagram_queue_bytes,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     /// Select the 1-RTT key-update derivation for this connection. The default
     /// is RFC 9001/RFC 9369; the compatibility value exists only for pinned
@@ -296,6 +300,7 @@ pub const OneRttConfig = struct {
             .max_frames_per_packet = self.max_frames_per_packet,
             .max_pending_path_responses = self.max_pending_path_responses,
             .max_datagram_queue_items = self.max_datagram_queue_items,
+            .max_datagram_queue_bytes = self.max_datagram_queue_bytes,
             .initial_send_max_data = @min(self.initial_send_max_data, peer_transport_parameters.initial_max_data),
             .initial_receive_max_data = @min(self.initial_receive_max_data, local_transport_parameters.initial_max_data),
             .receive_window = self.receive_window,
@@ -5298,7 +5303,7 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
     );
 }
 
-test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
+test "QUIC handshake one-RTT config propagates DATAGRAM queue limits" {
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0xa2} ** quic.protection.secret_len,
     );
@@ -5314,8 +5319,13 @@ test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
         .{},
     );
     try std.testing.expectEqual(@as(usize, 16), defaults.max_datagram_queue_items);
+    try std.testing.expectEqual(
+        quic.one_rtt.default_max_datagram_queue_bytes,
+        defaults.max_datagram_queue_bytes,
+    );
     const direct_only = (OneRttConfig{
         .max_datagram_queue_items = 0,
+        .max_datagram_queue_bytes = 0,
     }).apply(
         .version_1,
         .{ .ip4 = .loopback(443) },
@@ -5328,8 +5338,10 @@ test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
         .{},
     );
     try std.testing.expectEqual(@as(usize, 0), direct_only.max_datagram_queue_items);
+    try std.testing.expectEqual(@as(usize, 0), direct_only.max_datagram_queue_bytes);
     const burst = (OneRttConfig{
         .max_datagram_queue_items = 64,
+        .max_datagram_queue_bytes = 256 * 1024,
     }).apply(
         .version_1,
         .{ .ip4 = .loopback(443) },
@@ -5342,6 +5354,10 @@ test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
         .{},
     );
     try std.testing.expectEqual(@as(usize, 64), burst.max_datagram_queue_items);
+    try std.testing.expectEqual(
+        @as(usize, 256 * 1024),
+        burst.max_datagram_queue_bytes,
+    );
 }
 
 test "QUIC handshake one-RTT config propagates pacing policy" {

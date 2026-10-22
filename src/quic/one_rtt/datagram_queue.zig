@@ -9,7 +9,13 @@ pub const Queue = struct {
     slots: std.ArrayList(?Entry) = .empty,
     head: usize = 0,
     len: usize = 0,
+    payload_bytes: usize = 0,
     recycled_payloads: std.ArrayList([]u8) = .empty,
+
+    pub const PushResult = struct {
+        accepted: bool,
+        dropped: usize,
+    };
 
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         for (self.slots.items) |maybe_entry| {
@@ -23,6 +29,10 @@ pub const Queue = struct {
 
     pub fn count(self: Queue) usize {
         return self.len;
+    }
+
+    pub fn payloadByteCount(self: Queue) usize {
+        return self.payload_bytes;
     }
 
     /// Insert an already-owned payload. On allocation failure the queue is
@@ -75,6 +85,7 @@ pub const Queue = struct {
                 });
             }
             self.len += 1;
+            self.payload_bytes += payload.len;
             return null;
         }
 
@@ -84,6 +95,8 @@ pub const Queue = struct {
             .packet_number = packet_number,
         };
         self.head = (self.head + 1) % self.slots.items.len;
+        self.payload_bytes -= dropped.len;
+        self.payload_bytes += payload.len;
         return dropped;
     }
 
@@ -145,17 +158,112 @@ pub const Queue = struct {
         return did_drop;
     }
 
+    /// Copy one borrowed payload while bounding both logical entries and their
+    /// queued payload bytes. Oldest entries are discarded until both limits
+    /// admit the new payload. A payload larger than the byte budget is dropped
+    /// without disturbing already queued data.
+    ///
+    /// All fallible metadata/storage acquisition completes before FIFO state
+    /// changes. When an evicted exact-size allocation exists, replacement is
+    /// allocation-free just like the fixed-count full-queue fast path.
+    pub fn pushCopyWithinLimits(
+        self: *Queue,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+        packet_number: u64,
+        max_items: usize,
+        max_bytes: usize,
+    ) std.mem.Allocator.Error!PushResult {
+        if (max_items == 0 or max_bytes == 0 or payload.len > max_bytes) {
+            return .{ .accepted = false, .dropped = 1 };
+        }
+
+        var remaining_items = self.len;
+        var remaining_bytes = self.payload_bytes;
+        var drop_count: usize = 0;
+        while (remaining_items >= max_items or
+            remaining_bytes > max_bytes - payload.len)
+        {
+            const index = (self.head + drop_count) % self.slots.items.len;
+            const entry = self.slots.items[index].?;
+            remaining_items -= 1;
+            remaining_bytes -= entry.payload.len;
+            drop_count += 1;
+        }
+
+        if (self.slots.capacity < max_items) {
+            try self.slots.ensureTotalCapacityPrecise(allocator, max_items);
+        }
+        if (self.recycled_payloads.capacity < max_items) {
+            try self.recycled_payloads.ensureTotalCapacityPrecise(
+                allocator,
+                max_items,
+            );
+        }
+
+        var reused_queue_payload: ?[]u8 = null;
+        for (0..drop_count) |logical| {
+            const index = (self.head + logical) % self.slots.items.len;
+            const candidate = self.slots.items[index].?.payload;
+            if (candidate.len == payload.len) {
+                reused_queue_payload = candidate;
+                break;
+            }
+        }
+        const owned: []u8 = if (reused_queue_payload) |candidate|
+            candidate
+        else recycle: {
+            for (self.recycled_payloads.items, 0..) |candidate, index| {
+                if (candidate.len != payload.len) continue;
+                break :recycle self.recycled_payloads.swapRemove(index);
+            }
+            const fresh = try allocator.dupe(u8, payload);
+            if (self.recycled_payloads.pop()) |stale| allocator.free(stale);
+            break :recycle fresh;
+        };
+        var owns_payload = reused_queue_payload == null;
+        errdefer if (owns_payload) allocator.free(owned);
+        @memcpy(owned, payload);
+
+        for (0..drop_count) |_| {
+            const dropped = self.popEntry().?;
+            if (reused_queue_payload != null and
+                dropped.payload.ptr == reused_queue_payload.?.ptr)
+            {
+                reused_queue_payload = null;
+                owns_payload = true;
+            } else {
+                self.recycleOrFree(allocator, dropped.payload);
+            }
+        }
+        const unexpected_drop = self.pushDroppingOldest(
+            allocator,
+            owned,
+            packet_number,
+            max_items,
+        ) catch unreachable;
+        std.debug.assert(unexpected_drop == null);
+        owns_payload = false;
+        std.debug.assert(self.payload_bytes <= max_bytes);
+        return .{ .accepted = true, .dropped = drop_count };
+    }
+
     pub fn pop(self: *Queue) ?[]u8 {
+        return if (self.popEntry()) |entry| entry.payload else null;
+    }
+
+    fn popEntry(self: *Queue) ?Entry {
         if (self.len == 0) return null;
-        const payload = self.slots.items[self.head].?.payload;
+        const entry = self.slots.items[self.head].?;
         self.slots.items[self.head] = null;
         self.len -= 1;
+        self.payload_bytes -= entry.payload.len;
         if (self.len == 0) {
             self.head = 0;
         } else {
             self.head = (self.head + 1) % self.slots.items.len;
         }
-        return payload;
+        return entry;
     }
 
     /// Copy the oldest payload into caller storage and retain its allocation
@@ -200,6 +308,7 @@ pub const Queue = struct {
             const source = (self.head + logical) % self.slots.items.len;
             const entry = self.slots.items[source].?;
             if (entry.packet_number == packet_number) {
+                self.payload_bytes -= entry.payload.len;
                 allocator.free(entry.payload);
                 self.slots.items[source] = null;
                 discarded += 1;

@@ -154,6 +154,16 @@ place rather than temporarily retaining a `capacity + 1` payload block through
 the recycle pool. A fail-first allocator test verifies the no-allocation
 overwrite and FIFO order. Nine CPU-0 fixed-binary service-path pairs reduced
 the 1,149-byte DATAGRAM median from 2,811 to 2,774 ns/packet (1.32%, 9/9 wins).
+The queue now also enforces an independent cumulative payload-byte budget,
+matching current Quinn's defense against many nonempty DATAGRAMs while retaining
+the existing item cap for zero-length and metadata pressure. The default is 64
+KiB; oldest entries are evicted until both limits admit a payload, while a
+single payload larger than the budget is dropped without disturbing older
+entries. Allocation failure before replacement leaves the FIFO unchanged, an
+equal-sized eviction remains allocation-free, and direct caller-buffer or
+borrowed-visitor delivery bypasses the queue. Public configuration and stats
+expose the byte cap and current queued payload bytes alongside item counts and
+drop accounting.
 
 A synchronous borrowed DATAGRAM batch visitor now applies and cumulatively
 acknowledges caller-buffer packets while delivering payload views without a

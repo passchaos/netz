@@ -381,6 +381,7 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive bypasses disabled queue" {
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 1200,
         .max_datagram_queue_items = 0,
+        .max_datagram_queue_bytes = 0,
         .enable_pacing = false,
     });
     defer receiver.deinit();

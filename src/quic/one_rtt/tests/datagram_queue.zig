@@ -30,6 +30,79 @@ test "QUIC DATAGRAM receive queue drops oldest without shifting" {
     try std.testing.expectEqualStrings("four", third);
 }
 
+test "QUIC DATAGRAM receive queue bounds payload bytes and reuses eviction" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+
+    var result = try queue.pushCopyWithinLimits(
+        allocator,
+        "aa",
+        1,
+        4,
+        5,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 0), result.dropped);
+    result = try queue.pushCopyWithinLimits(
+        allocator,
+        "bb",
+        2,
+        4,
+        5,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 4), queue.payloadByteCount());
+
+    // Four new bytes require both two-byte entries to leave the five-byte
+    // budget. Count capacity alone would have retained all three payloads.
+    result = try queue.pushCopyWithinLimits(
+        allocator,
+        "cccc",
+        3,
+        4,
+        5,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 2), result.dropped);
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqual(@as(usize, 4), queue.payloadByteCount());
+
+    // A payload that cannot fit by itself is dropped without evicting the
+    // already-admitted FIFO contents.
+    result = try queue.pushCopyWithinLimits(
+        allocator,
+        "123456",
+        4,
+        4,
+        5,
+    );
+    try std.testing.expect(!result.accepted);
+    try std.testing.expectEqual(@as(usize, 1), result.dropped);
+    try std.testing.expectEqual(@as(usize, 4), queue.payloadByteCount());
+
+    // The next equal-sized replacement reuses the evicted allocation after
+    // every fallible metadata reservation has already completed.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    result = try queue.pushCopyWithinLimits(
+        failing.allocator(),
+        "dddd",
+        5,
+        4,
+        5,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 1), result.dropped);
+    try std.testing.expect(!failing.has_induced_failure);
+    const kept = queue.pop().?;
+    defer allocator.free(kept);
+    try std.testing.expectEqualStrings("dddd", kept);
+    try std.testing.expectEqual(@as(usize, 0), queue.payloadByteCount());
+}
+
 test "QUIC DATAGRAM receive queue discards wrapped packet entries stably" {
     const allocator = std.testing.allocator;
     var queue: Queue = .{};
@@ -46,6 +119,7 @@ test "QUIC DATAGRAM receive queue discards wrapped packet entries stably" {
     try std.testing.expectEqual(@as(usize, 2), queue.countPacket(1));
     try std.testing.expectEqual(@as(usize, 2), queue.discardPacket(allocator, 1));
     try std.testing.expectEqual(@as(usize, 2), queue.count());
+    try std.testing.expectEqual(@as(usize, 2), queue.payloadByteCount());
     const b = queue.pop().?;
     defer allocator.free(b);
     const d = queue.pop().?;
@@ -69,6 +143,40 @@ test "QUIC DATAGRAM receive queue OOM keeps caller ownership" {
         queue.pushDroppingOldest(fail.allocator(), payload, 1, 1),
     );
     try std.testing.expectEqual(@as(usize, 0), queue.count());
+}
+
+test "QUIC DATAGRAM byte-budget replacement is transactional on OOM" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+    const admitted = try queue.pushCopyWithinLimits(
+        allocator,
+        "old",
+        1,
+        2,
+        4,
+    );
+    try std.testing.expect(admitted.accepted);
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        queue.pushCopyWithinLimits(
+            failing.allocator(),
+            "new!",
+            2,
+            2,
+            4,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqual(@as(usize, 3), queue.payloadByteCount());
+    const retained = queue.pop().?;
+    defer allocator.free(retained);
+    try std.testing.expectEqualStrings("old", retained);
 }
 
 test "QUIC DATAGRAM receive queue OOM while reserving recycle metadata is safe" {

@@ -301,6 +301,8 @@ pub const ReliableResetSupport = packed struct(u8) {
     reserved: u6 = 0,
 };
 
+pub const default_max_datagram_queue_bytes: usize = 64 * 1024;
+
 pub const ConnectionConfig = struct {
     pub const EndpointRole = enum { client, server };
 
@@ -412,7 +414,13 @@ pub const ConnectionConfig = struct {
     peer_max_datagram_frame_size: ?usize = null,
     /// Directional draft-ietf-quic-reliable-stream-reset negotiation state.
     reliable_reset: ReliableResetSupport = .{},
+    /// Maximum application DATAGRAM payloads retained while no direct
+    /// receiver is active. Zero keeps only caller-buffer direct delivery.
     max_datagram_queue_items: usize = 16,
+    /// Maximum cumulative payload bytes retained by the receive queue.
+    /// Metadata and recyclable allocations remain independently bounded by
+    /// `max_datagram_queue_items`.
+    max_datagram_queue_bytes: usize = default_max_datagram_queue_bytes,
     enable_ack_frequency: bool = false,
     /// `min_ack_delay` advertised locally; gates peer ACK_FREQUENCY and
     /// validates its Requested Max Ack Delay (microseconds).
@@ -632,6 +640,7 @@ pub const ConnectionStats = struct {
     datagrams_received: u64,
     datagrams_dropped_incoming: u64,
     datagram_receive_queue_len: usize,
+    datagram_receive_queue_bytes: usize,
     smoothed_rtt_ns: ?u64,
     rtt_variance_ns: ?u64,
     min_rtt_ns: ?u64,
@@ -3990,6 +3999,10 @@ pub const Connection = struct {
         return self.datagram_recv_queue.count();
     }
 
+    pub fn datagramReceiveQueueBytes(self: Connection) usize {
+        return self.datagram_recv_queue.payloadByteCount();
+    }
+
     /// Remove queued transport copies belonging to one authenticated packet
     /// after an application protocol has routed that packet's frame payloads
     /// directly. Packet identity remains stable across GRO batch visitation.
@@ -4057,6 +4070,7 @@ pub const Connection = struct {
             .datagrams_received = self.datagrams_received_count,
             .datagrams_dropped_incoming = self.datagrams_dropped_incoming_count,
             .datagram_receive_queue_len = self.datagram_recv_queue.count(),
+            .datagram_receive_queue_bytes = self.datagram_recv_queue.payloadByteCount(),
             .smoothed_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.smoothed_rtt else null,
             .rtt_variance_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.rtt_var else null,
             .min_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.min_rtt else null,
@@ -14524,20 +14538,16 @@ pub const Connection = struct {
                 return;
             }
         }
-        if (self.config.max_datagram_queue_items == 0) {
-            self.datagrams_dropped_incoming_count +|= 1;
-            self.datagrams_received_count +|= 1;
-            return;
-        }
-        const dropped = try self.datagram_recv_queue.pushCopyDroppingOldest(
+        const result = try self.datagram_recv_queue.pushCopyWithinLimits(
             self.endpoint.allocator,
             datagram.data,
             packet_number,
             self.config.max_datagram_queue_items,
+            self.config.max_datagram_queue_bytes,
         );
-        if (dropped) {
-            self.datagrams_dropped_incoming_count +|= 1;
-        }
+        const dropped = std.math.cast(u64, result.dropped) orelse
+            std.math.maxInt(u64);
+        self.datagrams_dropped_incoming_count +|= dropped;
         self.datagrams_received_count +|= 1;
     }
 

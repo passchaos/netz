@@ -467,6 +467,7 @@ fn measureDatagramDelivery(
         .local_endpoint = .server,
         .local_max_datagram_frame_size = 65_535,
         .max_datagram_queue_items = batch_size,
+        .max_datagram_queue_bytes = batch_size * payload_size,
     });
     defer server.deinit();
 
