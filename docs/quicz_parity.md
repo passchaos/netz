@@ -307,6 +307,12 @@ the others fail as invalid packets before TLS processing or a server flight.
 The filter remains caller-sized when explicitly supplied and supports snapshot
 export/restore, but it does not claim distributed coordination, external durable
 storage, or external-peer replay/expiry coverage.
+Endpoint UDP receive paths now also treat operation-level `MessageOversize`
+as an unauthenticated asynchronous ICMP Packet-Too-Big/Fragmentation-Needed
+hint and retry the socket, matching Quinn's DPLPMTUD policy. Owned,
+caller-buffer, GRO-batch, and receive-many paths share that rule; timed retries
+retain one absolute deadline, while an actually truncated data/control message
+still fails with `DatagramTooLarge` through `MSG_TRUNC`/`MSG_CTRUNC`.
 The server's first 1-RTT application send also appends HANDSHAKE_DONE through a
 16-frame stack-first view instead of allocating a temporary `Frame` array. The
 caller frames remain first, preserving HTTP/3 application ordering; oversized

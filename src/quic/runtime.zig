@@ -1572,28 +1572,39 @@ pub const Endpoint = struct {
         var controls: [max_receive_batch_messages][
             receive_control_buffer_len
         ]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        for (messages[0..out.len], controls[0..out.len]) |*message, *control| {
-            message.* = .init;
-            // recvmsg writes the ancillary prefix and returns its exact length.
-            // The unused suffix and unused batch slots are never inspected.
-            message.control = control;
-        }
 
         self.socket_receive_mutex.lockUncancelable(self.io);
         defer self.socket_receive_mutex.unlock(self.io);
-        const receive_error, const count = self.socket.receiveManyTimeout(
-            self.io,
-            messages[0..out.len],
-            buffer,
-            .{},
-            timeout,
-        );
-        return self.finishManyKernelBytesInto(
-            messages[0..out.len],
-            out,
-            receive_error,
-            count,
-        );
+        const deadline = timeout.toDeadline(self.io);
+        while (true) {
+            for (
+                messages[0..out.len],
+                controls[0..out.len],
+            ) |*message, *control| {
+                message.* = .init;
+                // recvmsg writes the ancillary prefix and returns its exact
+                // length. Unused suffixes and batch slots are never inspected.
+                message.control = control;
+            }
+            const receive_error, const count = self.socket.receiveManyTimeout(
+                self.io,
+                messages[0..out.len],
+                buffer,
+                .{},
+                deadline,
+            );
+            if (count == 0) {
+                if (receive_error) |err| {
+                    if (err == error.MessageOversize) continue;
+                }
+            }
+            return self.finishManyKernelBytesInto(
+                messages[0..out.len],
+                out,
+                receive_error,
+                count,
+            );
+        }
     }
 
     fn finishManyKernelBytesInto(
@@ -1855,19 +1866,83 @@ pub const Endpoint = struct {
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operate(.{ .net_receive = .{
-            .socket_handle = self.socket.handle,
-            .message_buffer = (&incoming)[0..1],
-            .data_buffer = buffer,
-            .flags = .{},
-        } })).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelInto(
+            &incoming,
+            &control_buffer,
+            buffer,
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatch(buffer, incoming);
+    }
+
+    /// Receive one kernel UDP message while ignoring asynchronous ICMP
+    /// Packet-Too-Big/Fragmentation-Needed reports. std.Io exposes those
+    /// unauthenticated path hints as MessageOversize from the recv operation;
+    /// actual oversized datagrams remain distinguishable through MSG_TRUNC or
+    /// MSG_CTRUNC and are rejected by the finish helpers below.
+    fn receiveOneKernelInto(
+        self: *Endpoint,
+        incoming: *net.IncomingMessage,
+        control_buffer: []u8,
+        data_buffer: []u8,
+    ) Error!void {
+        while (true) {
+            prepareKernelReceive(incoming, control_buffer);
+            const maybe_err, const count = (try self.io.operate(.{
+                .net_receive = .{
+                    .socket_handle = self.socket.handle,
+                    .message_buffer = incoming[0..1],
+                    .data_buffer = data_buffer,
+                    .flags = .{},
+                },
+            })).net_receive;
+            if (maybe_err) |err| {
+                if (err == error.MessageOversize) continue;
+                return err;
+            }
+            std.debug.assert(count == 1);
+            return;
+        }
+    }
+
+    fn receiveOneKernelIntoTimeout(
+        self: *Endpoint,
+        incoming: *net.IncomingMessage,
+        control_buffer: []u8,
+        data_buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!void {
+        // Converting a relative timeout once prevents ignored ICMP errors from
+        // renewing the caller's receive budget.
+        const deadline = timeout.toDeadline(self.io);
+        while (true) {
+            prepareKernelReceive(incoming, control_buffer);
+            const maybe_err, const count = (try self.io.operateTimeout(
+                .{ .net_receive = .{
+                    .socket_handle = self.socket.handle,
+                    .message_buffer = incoming[0..1],
+                    .data_buffer = data_buffer,
+                    .flags = .{},
+                } },
+                deadline,
+            )).net_receive;
+            if (maybe_err) |err| {
+                if (err == error.MessageOversize) continue;
+                return err;
+            }
+            std.debug.assert(count == 1);
+            return;
+        }
+    }
+
+    fn prepareKernelReceive(
+        incoming: *net.IncomingMessage,
+        control_buffer: []u8,
+    ) void {
+        @memset(control_buffer, 0);
+        incoming.* = .init;
+        incoming.control = control_buffer;
     }
 
     fn receiveKernelBytesBatchInto(
@@ -1875,19 +1950,12 @@ pub const Endpoint = struct {
         buffer: []u8,
     ) Error!ReceivedBytesBatchView {
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operate(.{
-            .net_receive = .{
-                .socket_handle = self.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            },
-        })).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelInto(
+            &incoming,
+            &control_buffer,
+            buffer,
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatchView(incoming);
     }
@@ -1898,20 +1966,13 @@ pub const Endpoint = struct {
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!ReceivedBytesBatchView {
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operateTimeout(
-            .{ .net_receive = .{
-                .socket_handle = self.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            } },
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelIntoTimeout(
+            &incoming,
+            &control_buffer,
+            buffer,
             timeout,
-        )).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatchView(incoming);
     }
@@ -1921,17 +1982,12 @@ pub const Endpoint = struct {
         buffer: []u8,
     ) Error!ReceivedBytesView {
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operate(.{ .net_receive = .{
-            .socket_handle = self.socket.handle,
-            .message_buffer = (&incoming)[0..1],
-            .data_buffer = buffer,
-            .flags = .{},
-        } })).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelInto(
+            &incoming,
+            &control_buffer,
+            buffer,
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesInto(incoming);
     }
@@ -1942,20 +1998,13 @@ pub const Endpoint = struct {
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!ReceivedBytesView {
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operateTimeout(
-            .{ .net_receive = .{
-                .socket_handle = self.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            } },
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelIntoTimeout(
+            &incoming,
+            &control_buffer,
+            buffer,
             timeout,
-        )).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesInto(incoming);
     }
@@ -1993,20 +2042,13 @@ pub const Endpoint = struct {
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operateTimeout(
-            .{ .net_receive = .{
-                .socket_handle = self.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            } },
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelIntoTimeout(
+            &incoming,
+            &control_buffer,
+            buffer,
             timeout,
-        )).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        );
         self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatch(buffer, incoming);
     }
@@ -2186,20 +2228,13 @@ pub const Endpoint = struct {
         const buffer = try self.allocator.alloc(u8, receive_capacity);
         errdefer self.allocator.free(buffer);
         var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        @memset(&control_buffer, 0);
-        var incoming: net.IncomingMessage = .init;
-        incoming.control = &control_buffer;
-        const maybe_err, const count = (try self.io.operateTimeout(
-            .{ .net_receive = .{
-                .socket_handle = self.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            } },
+        var incoming: net.IncomingMessage = undefined;
+        try self.receiveOneKernelIntoTimeout(
+            &incoming,
+            &control_buffer,
+            buffer,
             timeout,
-        )).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
+        );
         self.recordSocketReceived(incoming);
         if (incoming.data.len == 0) return error.EmptyDatagram;
         if (incoming.flags.trunc or incoming.flags.ctrunc) {
@@ -4938,6 +4973,89 @@ const AcceptFirstBatchDatagram = struct {
         return .{ error.NetworkDown, 1 };
     }
 };
+
+const RejectMessageOversizeReceives = struct {
+    delegate: std.Io,
+    remaining_failures: usize = 0,
+    receive_calls: usize = 0,
+
+    fn arm(self: *@This(), failures: usize) void {
+        self.remaining_failures = failures;
+        self.receive_calls = 0;
+    }
+
+    fn operate(
+        userdata: ?*anyopaque,
+        operation: std.Io.Operation,
+    ) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        if (std.meta.activeTag(operation) == .net_receive) {
+            self.receive_calls += 1;
+            if (self.remaining_failures != 0) {
+                self.remaining_failures -= 1;
+                return .{ .net_receive = .{ error.MessageOversize, 0 } };
+            }
+        }
+        return self.delegate.vtable.operate(
+            self.delegate.userdata,
+            operation,
+        );
+    }
+};
+
+test "QUIC UDP receive ignores asynchronous message oversize" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+
+    var rejecting = RejectMessageOversizeReceives{ .delegate = io };
+    var vtable = io.vtable.*;
+    vtable.operate = RejectMessageOversizeReceives.operate;
+    receiver.io = .{ .userdata = &rejecting, .vtable = &vtable };
+    defer receiver.io = io;
+
+    try sender.sendBytes(receiver.address(), "owned");
+    rejecting.arm(1);
+    var owned = try receiver.receiveKernelBytesBatchWithEcn();
+    defer owned.deinit(allocator);
+    try std.testing.expectEqualStrings("owned", owned.datagramAt(0).?);
+    try std.testing.expectEqual(@as(usize, 2), rejecting.receive_calls);
+
+    try sender.sendBytes(receiver.address(), "caller");
+    rejecting.arm(1);
+    var storage: [128]u8 = undefined;
+    const caller = try receiver.receiveKernelBytesInto(&storage);
+    try std.testing.expectEqualStrings("caller", caller.bytes);
+    try std.testing.expectEqual(@as(usize, 2), rejecting.receive_calls);
+
+    var truncated_flags = emptyIncomingFlags();
+    truncated_flags.trunc = true;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        receiver.finishKernelBytesInto(.{
+            .from = sender.address(),
+            .data = @constCast("truncated"),
+            .control = &.{},
+            .flags = truncated_flags,
+        }),
+    );
+}
 
 test "QUIC endpoint pending receive queue reuses consumed slots" {
     const allocator = std.testing.allocator;
