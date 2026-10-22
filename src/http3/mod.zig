@@ -65,6 +65,7 @@ pub const default_max_priority_updates: usize = 256;
 pub const max_priority_update_payload_size: usize = 256;
 /// Bound partial control-frame retention, including fragmented ORIGIN frames.
 pub const max_control_stream_buffer_size: usize = 64 * 1024;
+const max_control_frame_header_size: usize = 16;
 
 pub const ApplicationErrorCode = struct {
     /// RFC 9297 malformed HTTP Datagram association/context identifier.
@@ -1078,6 +1079,9 @@ pub const ControlState = struct {
     peer_control_stream_consumed_offset: usize = 0,
     /// Incomplete control-frame bytes retained across QUIC STREAM boundaries.
     peer_control_stream_buffer: std.ArrayList(u8) = .empty,
+    /// Remaining payload bytes of an ignorable extension frame. Unknown frame
+    /// bodies are discarded directly instead of entering the retained buffer.
+    peer_control_stream_skip_remaining: usize = 0,
     latest_priority_update: ?PriorityUpdatePayload = null,
     latest_priority_update_type: ?u64 = null,
     priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
@@ -1333,16 +1337,7 @@ pub const ControlState = struct {
         payload: []const u8,
         validator: ?FrameValidator,
     ) Error!void {
-        if (payload.len > max_control_stream_buffer_size -|
-            self.peer_control_stream_buffer.items.len)
-        {
-            return error.ExcessiveLoad;
-        }
-        const previous_buffer_len = self.peer_control_stream_buffer.items.len;
-        try self.peer_control_stream_buffer.appendSlice(allocator, payload);
-        // Delay the deep snapshot until a complete frame can actually mutate
-        // state. Incomplete input and ignorable extension frames only touch
-        // the bounded byte buffer.
+        const parser_snapshot = ControlParserSnapshot.capture(self.*);
         var previous: ?ControlState = null;
         defer if (previous) |*value| value.deinit(allocator);
         errdefer {
@@ -1351,60 +1346,235 @@ pub const ControlState = struct {
                 self.* = value;
                 previous = null;
             } else {
-                self.peer_control_stream_buffer.items.len =
-                    previous_buffer_len;
+                parser_snapshot.restore(self);
             }
         }
-        var consumed: usize = 0;
-        while (consumed < self.peer_control_stream_buffer.items.len) {
-            const remaining = self.peer_control_stream_buffer.items[consumed..];
-            const header = Frame.parseHeader(remaining) catch |err| switch (err) {
-                error.BufferTooShort => break,
-                else => return err,
-            };
-            if (header.payload_length > max_control_stream_buffer_size) {
+
+        var input_offset: usize = 0;
+        while (input_offset < payload.len) {
+            if (self.peer_control_stream_skip_remaining != 0) {
+                const skipped = @min(
+                    self.peer_control_stream_skip_remaining,
+                    payload.len - input_offset,
+                );
+                self.peer_control_stream_skip_remaining -= skipped;
+                input_offset += skipped;
+                if (input_offset == payload.len) return;
+                if (self.peer_control_stream_skip_remaining != 0) unreachable;
+            }
+
+            if (self.peer_control_stream_buffer.items.len == 0) {
+                const remaining = payload[input_offset..];
+                const header = Frame.parseHeader(remaining) catch |err| switch (err) {
+                    error.BufferTooShort => {
+                        try self.peer_control_stream_buffer.appendSlice(
+                            allocator,
+                            remaining,
+                        );
+                        return;
+                    },
+                    else => return err,
+                };
+                const known = controlFrameMayMutateOrError(header.frame_type);
+                if (header.payload_length > max_control_stream_buffer_size and
+                    (!self.settings.received or known))
+                {
+                    return error.ExcessiveLoad;
+                }
+                try self.validateControlFrameHeader(header);
+                if (!known) {
+                    input_offset += header.header_length;
+                    const skipped = @min(
+                        header.payload_length,
+                        payload.len - input_offset,
+                    );
+                    input_offset += skipped;
+                    self.peer_control_stream_skip_remaining =
+                        header.payload_length - skipped;
+                    continue;
+                }
+
+                const total = try header.totalLength();
+                if (remaining.len < total) {
+                    try self.peer_control_stream_buffer.appendSlice(
+                        allocator,
+                        remaining,
+                    );
+                    return;
+                }
+                const frame = Frame{
+                    .frame_type = header.frame_type,
+                    .payload = remaining[header.header_length..total],
+                    .consumed = total,
+                };
+                if (validator) |value| {
+                    if (try value.validateFrame(self.*, frame) == .ignore) {
+                        input_offset += total;
+                        continue;
+                    }
+                }
+                if (previous == null) {
+                    previous = try parser_snapshot.cloneOriginal(
+                        self.*,
+                        allocator,
+                    );
+                }
+                try self.applyFrame(allocator, frame);
+                input_offset += total;
+                continue;
+            }
+
+            var header: Frame.Header = undefined;
+            while (true) {
+                header = Frame.parseHeader(
+                    self.peer_control_stream_buffer.items,
+                ) catch |err| switch (err) {
+                    error.BufferTooShort => {
+                        if (input_offset == payload.len) return;
+                        if (self.peer_control_stream_buffer.items.len >=
+                            max_control_frame_header_size)
+                        {
+                            return error.InvalidFrame;
+                        }
+                        try self.peer_control_stream_buffer.append(
+                            allocator,
+                            payload[input_offset],
+                        );
+                        input_offset += 1;
+                        continue;
+                    },
+                    else => return err,
+                };
+                break;
+            }
+            const known = controlFrameMayMutateOrError(header.frame_type);
+            if (header.payload_length > max_control_stream_buffer_size and
+                (!self.settings.received or known))
+            {
                 return error.ExcessiveLoad;
             }
             try self.validateControlFrameHeader(header);
+            if (!known) {
+                std.debug.assert(
+                    self.peer_control_stream_buffer.items.len ==
+                        header.header_length,
+                );
+                self.peer_control_stream_buffer.clearRetainingCapacity();
+                const skipped = @min(
+                    header.payload_length,
+                    payload.len - input_offset,
+                );
+                input_offset += skipped;
+                self.peer_control_stream_skip_remaining =
+                    header.payload_length - skipped;
+                continue;
+            }
+
             const total = try header.totalLength();
-            if (remaining.len < total) break;
+            if (self.peer_control_stream_buffer.items.len < total) {
+                const needed = total - self.peer_control_stream_buffer.items.len;
+                const appended = @min(needed, payload.len - input_offset);
+                try self.peer_control_stream_buffer.appendSlice(
+                    allocator,
+                    payload[input_offset..][0..appended],
+                );
+                input_offset += appended;
+                if (self.peer_control_stream_buffer.items.len < total) return;
+            }
             const frame = Frame{
                 .frame_type = header.frame_type,
-                .payload = remaining[header.header_length..total],
+                .payload = self.peer_control_stream_buffer.items[header.header_length..total],
                 .consumed = total,
             };
-            if (validator) |value| {
-                if (try value.validateFrame(self.*, frame) == .ignore) {
-                    consumed += total;
-                    continue;
+            const disposition = if (validator) |value|
+                try value.validateFrame(self.*, frame)
+            else
+                FrameDisposition.apply;
+            if (disposition == .ignore) {
+                if (input_offset < payload.len and previous == null and
+                    parser_snapshot.buffer_len >
+                        max_control_frame_header_size)
+                {
+                    previous = try parser_snapshot.cloneOriginal(
+                        self.*,
+                        allocator,
+                    );
                 }
-            }
-            if (self.settings.received and
-                !controlFrameMayMutateOrError(frame.frame_type))
-            {
-                consumed += total;
+                self.peer_control_stream_buffer.clearRetainingCapacity();
                 continue;
             }
             if (previous == null) {
-                previous = try self.cloneWithControlBufferLen(
+                previous = try parser_snapshot.cloneOriginal(
+                    self.*,
                     allocator,
-                    previous_buffer_len,
                 );
             }
             try self.applyFrame(allocator, frame);
-            consumed += total;
+            self.peer_control_stream_buffer.clearRetainingCapacity();
         }
-        if (consumed == 0) return;
-        const retained = self.peer_control_stream_buffer.items.len - consumed;
-        if (retained != 0) {
-            std.mem.copyForwards(
-                u8,
-                self.peer_control_stream_buffer.items[0..retained],
-                self.peer_control_stream_buffer.items[consumed..],
-            );
-        }
-        self.peer_control_stream_buffer.items.len = retained;
     }
+
+    const ControlParserSnapshot = struct {
+        buffer_len: usize,
+        inline_buffer: [max_control_frame_header_size]u8 = undefined,
+        inline_buffer_valid: bool,
+        skip_remaining: usize,
+
+        fn capture(control: ControlState) ControlParserSnapshot {
+            const buffer_len = control.peer_control_stream_buffer.items.len;
+            var snapshot = ControlParserSnapshot{
+                .buffer_len = buffer_len,
+                .inline_buffer_valid = buffer_len <= max_control_frame_header_size,
+                .skip_remaining = control.peer_control_stream_skip_remaining,
+            };
+            if (snapshot.inline_buffer_valid) {
+                @memcpy(
+                    snapshot.inline_buffer[0..buffer_len],
+                    control.peer_control_stream_buffer.items,
+                );
+            }
+            return snapshot;
+        }
+
+        fn originalBytes(
+            snapshot: *const ControlParserSnapshot,
+            control: ControlState,
+        ) []const u8 {
+            if (snapshot.inline_buffer_valid) {
+                return snapshot.inline_buffer[0..snapshot.buffer_len];
+            }
+            return control.peer_control_stream_buffer.items[0..snapshot.buffer_len];
+        }
+
+        fn restore(
+            snapshot: *const ControlParserSnapshot,
+            control: *ControlState,
+        ) void {
+            control.peer_control_stream_skip_remaining = snapshot.skip_remaining;
+            control.peer_control_stream_buffer.items.len = snapshot.buffer_len;
+            if (snapshot.inline_buffer_valid) {
+                @memcpy(
+                    control.peer_control_stream_buffer.items,
+                    snapshot.inline_buffer[0..snapshot.buffer_len],
+                );
+            }
+        }
+
+        fn cloneOriginal(
+            snapshot: *const ControlParserSnapshot,
+            control: ControlState,
+            allocator: std.mem.Allocator,
+        ) std.mem.Allocator.Error!ControlState {
+            var copy = try control.cloneWithControlBufferLen(allocator, 0);
+            errdefer copy.deinit(allocator);
+            try copy.peer_control_stream_buffer.appendSlice(
+                allocator,
+                snapshot.originalBytes(control),
+            );
+            copy.peer_control_stream_skip_remaining = snapshot.skip_remaining;
+            return copy;
+        }
+    };
 
     /// Reject known-invalid control frames as soon as their type and declared
     /// length are available. Waiting for the payload would let a peer retain a
@@ -5968,10 +6138,13 @@ test "HTTP/3 incomplete control frame avoids state snapshot allocation" {
     );
     try control.appendControlPayload(no_alloc.allocator(), &partial);
     try std.testing.expect(!no_alloc.has_induced_failure);
-    try std.testing.expectEqualSlices(
-        u8,
-        &partial,
-        control.peer_control_stream_buffer.items,
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        control.peer_control_stream_skip_remaining,
     );
     try std.testing.expectEqual(
         @as(u3, 2),
@@ -5982,6 +6155,10 @@ test "HTTP/3 incomplete control frame avoids state snapshot allocation" {
     try std.testing.expectEqual(
         @as(usize, 0),
         control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_skip_remaining,
     );
     try std.testing.expectEqual(
         @as(u3, 2),

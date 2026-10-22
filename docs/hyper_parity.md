@@ -2137,6 +2137,17 @@ extensions remain incrementally consumable. This exact ownership bound is
 kept separate from the decoded `name + value + 32` SETTINGS limit instead of
 using a heuristic encoded/decoded ratio that could reject legal inefficient
 QPACK Huffman input.
+Unknown control-stream extension frames now retain at most their two QUIC
+varints (16 bytes) and discard the declared payload incrementally, including
+payloads larger than the ordinary 64-KiB control buffer. A skip counter is part
+of cloned control state, while a lightweight parser snapshot restores partial
+headers and skip progress if a later frame in the same STREAM fragment fails.
+Fragmented-header, allocation-disabled large-frame, batched semantic rollback,
+and exhaustive allocation-failure tests preserve SETTINGS-first and known-frame
+error behavior while satisfying HTTP/3's unknown-frame ignore requirement.
+The explicit counter adds eight bytes to the three WebTransport session layouts
+that embed this HTTP/3 control state; Debug and ReleaseFast size baselines lock
+that cost, while the development client layout remains unchanged.
 The runtime owning decode path first replaced per-field Huffman/dynamic output
 allocations with a stack-staged byte sequence, a descriptor array and one
 shared contiguous string block. Offset-based plans keep slices valid while
