@@ -2128,6 +2128,15 @@ PRIORITY_UPDATE frames never wait for or retain their declared payload. Each
 RFC 9218 update is capped at 256 encoded payload bytes, matching the audited
 quiche boundary, so the 256-entry state cap cannot multiply the independent
 64-KiB fragmented-control buffer into multi-megabyte retained values.
+Request, response, push, and development-runtime message assemblers also
+preflight HEADERS and PUSH_PROMISE once their frame header is contiguous. A
+field-section frame whose declared wire length cannot fit the configured
+`max_stream_buffer` fails immediately and its aggregate entry is discarded
+without accumulating the remaining declared payload; DATA and unknown
+extensions remain incrementally consumable. This exact ownership bound is
+kept separate from the decoded `name + value + 32` SETTINGS limit instead of
+using a heuristic encoded/decoded ratio that could reject legal inefficient
+QPACK Huffman input.
 The runtime owning decode path first replaced per-field Huffman/dynamic output
 allocations with a stack-staged byte sequence, a descriptor array and one
 shared contiguous string block. Offset-based plans keep slices valid while

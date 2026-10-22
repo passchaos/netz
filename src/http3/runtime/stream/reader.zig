@@ -2,6 +2,7 @@ const std = @import("std");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const Error = @import("../error.zig").Error;
+const frame_limits = @import("frame_limits.zig");
 
 pub const Head = union(enum) {
     request: http3.DecodedRequestHead,
@@ -205,6 +206,17 @@ pub const Reader = struct {
                     },
                     else => return err,
                 };
+                const field_section_allowed = switch (header.frame_type) {
+                    http3.FrameType.headers => self.phase == .initial_headers or self.phase == .body,
+                    http3.FrameType.push_promise => self.kind == .response and self.push_promises_allowed,
+                    else => false,
+                };
+                if (field_section_allowed) {
+                    try frame_limits.validateFieldSectionHeader(
+                        header,
+                        self.receive.max_buffered,
+                    );
+                }
                 self.current_frame = header;
                 self.current_header_consumed = false;
                 self.current_payload_read = 0;

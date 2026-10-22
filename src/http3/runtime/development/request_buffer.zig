@@ -1,6 +1,7 @@
 const std = @import("std");
 const quic = @import("../../../quic/mod.zig");
 const Error = @import("../error.zig").Error;
+const frame_limits = @import("../stream/frame_limits.zig");
 
 const net = std.Io.net;
 
@@ -198,6 +199,14 @@ pub const Set = struct {
                 self.discard(datagram.from, stream_id);
                 return err;
             };
+            frame_limits.validateAvailableFieldSection(
+                entry.receive.available(),
+                self.max_stream_buffer,
+                .request,
+            ) catch |err| {
+                self.discard(datagram.from, stream_id);
+                return err;
+            };
         }
         const entry = self.find(datagram.from, stream_id).?;
         entry.datagrams.append(self.allocator, datagram.*) catch |err| {
@@ -378,6 +387,31 @@ test "HTTP/3 development request buffer rejects mixed streams transactionally" {
 
     try std.testing.expectError(
         error.UnexpectedStream,
+        set.insertDatagram(&datagram),
+    );
+    try std.testing.expect(set.isEmpty());
+}
+
+test "HTTP/3 development request buffer drops unbufferable field section header" {
+    const allocator = std.testing.allocator;
+    var set = Set.init(allocator, 64, 1);
+    defer set.deinit();
+
+    const bytes = try allocator.dupe(u8, &.{ 0x01, 63 });
+    const frames = try allocator.alloc(quic.Frame, 1);
+    frames[0] = .{ .stream = .{
+        .stream_id = 0,
+        .data = bytes,
+    } };
+    var datagram: quic.runtime.OwnedDatagram = .{
+        .from = .{ .ip4 = .loopback(443) },
+        .bytes = bytes,
+        .frames = frames,
+    };
+    defer datagram.deinit(allocator);
+
+    try std.testing.expectError(
+        error.ExcessiveLoad,
         set.insertDatagram(&datagram),
     );
     try std.testing.expect(set.isEmpty());

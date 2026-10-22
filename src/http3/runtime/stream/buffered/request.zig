@@ -3,6 +3,7 @@ const http3 = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
 const Error = @import("../../error.zig").Error;
 const common = @import("common.zig");
+const frame_limits = @import("../frame_limits.zig");
 
 const net = std.Io.net;
 
@@ -54,6 +55,14 @@ pub const Set = struct {
     ) Error!void {
         const entry = try self.getOrCreate(from, frame.stream_id);
         try entry.receive.insert(frame);
+        frame_limits.validateAvailableFieldSection(
+            entry.receive.available(),
+            self.max_stream_buffer,
+            .request,
+        ) catch |err| {
+            self.remove(frame.stream_id);
+            return err;
+        };
     }
 
     pub fn takeReady(
@@ -434,6 +443,27 @@ test "HTTP/3 buffered request streams index reassembly entries" {
     try std.testing.expectEqualStrings(target_message, ready_request.bytes);
     try std.testing.expect(!requests.contains(12));
     try std.testing.expect(requests.contains(16));
+}
+
+test "HTTP/3 buffered request drops unbufferable field section from header" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    var requests = Set.init(allocator, 64, 1);
+    defer requests.deinit();
+    try requests.insert(from, .{
+        .stream_id = 0,
+        .data = &.{0x01},
+    });
+    try std.testing.expect(requests.contains(0));
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        requests.insert(from, .{
+            .stream_id = 0,
+            .offset = 1,
+            .data = &.{63},
+        }),
+    );
+    try std.testing.expect(requests.isEmpty());
 }
 
 test "HTTP/3 buffered request transfers prepared storage without copying" {

@@ -3,6 +3,20 @@ const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const Reader = @import("reader.zig").Reader;
 
+test "HTTP/3 incremental reader rejects unbufferable field section from header" {
+    const allocator = std.testing.allocator;
+    var reader = Reader.initRequest(allocator, 0, 64, .{});
+    defer reader.deinit();
+    try reader.insert(.{
+        .stream_id = 0,
+        .data = &.{ 0x01, 63 },
+    });
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    try std.testing.expectError(error.ExcessiveLoad, reader.next(table));
+    try std.testing.expectEqual(@as(usize, 2), reader.bufferedBytes());
+}
+
 test "HTTP/3 incremental reader streams DATA through bounded window" {
     const allocator = std.testing.allocator;
     const body_len: usize = 100 * 1024;
