@@ -19319,6 +19319,7 @@ test {
 
 test {
     _ = @import("runtime/association/tests/discovery.zig");
+    _ = @import("runtime/association/tests/invalid_session_id.zig");
 }
 
 test {

@@ -30,6 +30,16 @@ pub const SessionLookup = struct {
     }
 };
 
+/// Draft-16 section 4 makes a malformed peer Session ID a connection
+/// error, even when no accepted Session owns the stream yet. Keep the wire
+/// close code shared by ordinary association and early-stream discovery.
+pub fn rejectInvalidSessionId(connection: *quic.one_rtt.Connection) error{InvalidSessionId} {
+    // The canonical close installs local termination before its best-effort
+    // socket write, preserving the peer error if that write fails.
+    http3.runtime.closeConnectionForProtocolError(connection, error.IdError) catch {};
+    return error.InvalidSessionId;
+}
+
 /// Associate complete prefixes without claiming either application reader or
 /// consuming data. Flow maintenance can then enforce session limits before a
 /// DATAGRAM-only application ever polls a stream.
@@ -312,6 +322,7 @@ fn identifyInternal(
                             // Another HTTP/3 adapter owns ordinary request or
                             // extension streams on the same QUIC connection.
                             error.InvalidStreamType => return .unclaimed,
+                            error.InvalidSessionId => return rejectInvalidSessionId(connection),
                             else => return err,
                         };
                 if (parsed.session_id.value != session_id.value) {
@@ -335,6 +346,7 @@ fn identifyInternal(
                     webtransport.UnidirectionalStreamHeader.parse(available) catch |err|
                         switch (err) {
                             error.BufferTooShort => return .unclaimed,
+                            error.InvalidSessionId => return rejectInvalidSessionId(connection),
                             else => return err,
                         };
                 if (parsed.stream_type !=

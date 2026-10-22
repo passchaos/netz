@@ -104,7 +104,7 @@ pub const State = struct {
                 continue;
             }
             if (peek(connection, entry.stream_id)) |header| entry.header = header;
-            if (entry.header.invalid) return invalidSession(connection);
+            if (entry.header.invalid) return association.rejectInvalidSessionId(connection);
             if (entry.header.session_id) |session_id| {
                 if (active.contains(session_id)) {
                     _ = self.entries.orderedRemove(index);
@@ -137,7 +137,7 @@ pub const State = struct {
                 }
                 if (self.find(id) != null) continue;
                 const header = peek(connection, id) orelse continue;
-                if (header.invalid) return invalidSession(connection);
+                if (header.invalid) return association.rejectInvalidSessionId(connection);
                 if (header.session_id) |session_id| {
                     if (active.contains(session_id)) continue;
                 }
@@ -202,9 +202,4 @@ fn peek(connection: *quic.one_rtt.Connection, stream_id: u62) ?Header {
     const id = std.math.cast(u62, session_id.value) orelse return .{ .direction = direction, .session_id = null, .invalid = true };
     if (!webtransport.SessionId.init(id).isClientInitiatedBidirectional()) return .{ .direction = direction, .session_id = null, .invalid = true };
     return .{ .direction = direction, .session_id = id };
-}
-
-fn invalidSession(connection: *quic.one_rtt.Connection) Error!bool {
-    try http3.runtime.closeConnectionForProtocolError(connection, error.IdError);
-    return error.InvalidSessionId;
 }

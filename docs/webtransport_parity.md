@@ -1637,7 +1637,7 @@ without later traffic, while preserving the application's absolute deadline.
 Each maintenance step submits at most one cancellation packet and refreshes its
 dispatcher timer. Registered application streams keep their owning Session's
 lifecycle. Invalid Session IDs close the connection with H3_ID_ERROR, as required
-by draft-16 section 3.1; a closed valid Session ID still uses scoped cleanup.
+by draft-16 section 4; a closed valid Session ID still uses scoped cleanup.
 Focused tests cover both stream directions, count/byte limits, fragmented
 association headers, cancellation/allocator failure, already-owned data and
 invalid IDs. Real QUIC/TLS cases verify a stream arriving before CONNECT on an
@@ -1645,3 +1645,14 @@ active sibling connection, idle expiry wakeup, delayed acceptance, and exact
 WT_SESSION_GONE after a 403 rejection with continued sibling DATAGRAM delivery.
 The dedicated early-stream policy currently applies to the shared server;
 standalone owning and client admission paths retain their QUIC receive bounds.
+
+Ordinary stream association now uses the same connection-error boundary as
+early-stream discovery. An invalid Session ID on a peer bidi or uni stream
+returns `InvalidSessionId` and installs `H3_ID_ERROR` (0x108) before any registry
+insertion or application-byte consumption. Owning whole-stream and incremental
+readers, nonblocking stream polls and DATAGRAM-only maintenance all enforce this
+rule in both endpoint roles, including when a valid DATAGRAM is already ready.
+A fragmented Session ID remains buffered until its varint completes; a failed
+close socket write retains the protocol error and local closing state. Focused
+preconfigured-key QUIC/UDP regressions exercise these boundaries. Existing
+pending/unknown/closed valid Session IDs continue through their scoped handling.
