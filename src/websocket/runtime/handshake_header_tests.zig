@@ -100,6 +100,86 @@ fn writeServerUpgradeResponse(
     try writeAll(io, stream, response.items);
 }
 
+test "WebSocket server advertises version 13 with HTTP 426" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .http1_handshake_timeout = .fromMilliseconds(250),
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.acceptWithTimeout(
+                .{},
+                .fromMilliseconds(250),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(
+        io,
+        stream,
+        "GET /version HTTP/1.1\r\n" ++
+            "Host: 127.0.0.1\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 12\r\n\r\n",
+    );
+    var response =
+        try http1_runtime.readResponseFromStreamForRequestWithTimeout(
+            allocator,
+            io,
+            stream,
+            .{ .max_head_bytes = 4096, .max_body_bytes = 0 },
+            .{ .max_headers = 16 },
+            .GET,
+            .fromMilliseconds(250),
+        );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 426), response.response.status);
+    try std.testing.expectEqualStrings(
+        "13",
+        response.response.header("sec-websocket-version").?,
+    );
+    try std.testing.expectEqualStrings(
+        "close",
+        response.response.header("connection").?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), response.response.body.len);
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(error.UnsupportedVersion, shared.err.?);
+}
+
 test "WebSocket client sends custom HTTP upgrade headers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

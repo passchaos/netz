@@ -155,6 +155,14 @@ that no response is sent before admission, custom acceptance fields survive the
 wire, a 401 response carries its body and closes, and delayed admission expires
 the original deadline. This closes the reference server's pre-upgrade handler
 gap without introducing a callback or worker-pool policy into the transport.
+HTTP/1 TCP, Unix, and native TLS admission additionally implement RFC 6455
+version negotiation: an otherwise valid request offering a version other than
+13 receives a bounded final `426 Upgrade Required` with
+`Sec-WebSocket-Version: 13` and `Connection: close` before the transport is
+retired. Missing/duplicate version fields, malformed keys, disallowed Origins,
+or bytes coalesced after the request head remain ordinary handshake failures
+and cannot trigger the capability response. Codec, cleartext real-socket, and
+authenticated WSS tests cover the same shared path.
 RFC 8441 now exposes the same decision boundary through
 `H2Server.receiveUpgradeRequest*` and `PendingH2Upgrade`. Applications can
 inspect the CONNECT stream ID, path, scheme, authority, and request fields

@@ -21,6 +21,7 @@ const message_buffer = @import("runtime/message/buffer.zig");
 pub const ReceiveBuffer = message_buffer;
 const message_state = @import("runtime/message/state.zig");
 const handshake_headers = @import("runtime/handshake/headers.zig");
+const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
@@ -1401,11 +1402,31 @@ fn receiveUpgradeRequestFromTransport(
         http1HandshakeRequestParseOptions(limits),
     );
     errdefer request.deinit(allocator);
-    try websocket.validateClientHandshake(request);
-    try origin_policy.validateHttp1(request.headers, options.allowed_origins);
     // Bytes sent before the 101 response are ambiguous HTTP smuggling/junk,
     // regardless of whether the carrier is TCP or TLS.
     if (head.extra.len != 0) return error.InvalidHandshake;
+    websocket.validateClientHandshake(request) catch |err| switch (err) {
+        error.UnsupportedVersion => {
+            try websocket.validateClientHandshakeForVersionNegotiation(request);
+            try origin_policy.validateHttp1(
+                request.headers,
+                options.allowed_origins,
+            );
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(io, absolute);
+            }
+            try handshake_rejection.writeUnsupportedVersion(
+                allocator,
+                request.method,
+                limits.max_head_bytes,
+                transport,
+                writeUnsupportedVersionParts,
+            );
+            return err;
+        },
+        else => return err,
+    };
+    try origin_policy.validateHttp1(request.headers, options.allowed_origins);
 
     const key = request.header("sec-websocket-key") orelse
         return error.MissingHeader;
@@ -1454,6 +1475,14 @@ fn receiveUpgradeRequestFromTransport(
         .selected_extension = selected_extension,
         .negotiated_extension = negotiated_extension,
     };
+}
+
+fn writeUnsupportedVersionParts(
+    transport: RuntimeTransport,
+    header: []const u8,
+    body: []const u8,
+) Error!void {
+    try transport.writeAllParts(header, body);
 }
 
 pub const AsyncServeError = Error || std.Io.Cancelable;

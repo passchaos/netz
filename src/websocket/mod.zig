@@ -24,6 +24,7 @@ pub const Error = error{
     InvalidUtf8,
     MissingHeader,
     InvalidHandshake,
+    UnsupportedVersion,
     InvalidExtension,
     PayloadTooLarge,
     UnmaskedClientFrame,
@@ -1358,6 +1359,43 @@ pub fn acceptKey(client_key: []const u8) [28]u8 {
 }
 
 pub fn validateClientHandshake(req: http1.Request) Error!void {
+    try validateClientHandshakePrefix(req);
+    const version = try requiredSingletonHeader(
+        req.headers,
+        "sec-websocket-version",
+    );
+    try validateClientVersionValue(version);
+    if (!std.mem.eql(u8, version, "13")) return error.UnsupportedVersion;
+    try validateClientHandshakeSuffix(req);
+}
+
+/// Validate every HTTP/1 WebSocket handshake requirement except the concrete
+/// version value. Servers use this only after `validateClientHandshake`
+/// reports `UnsupportedVersion`, before advertising the supported version.
+pub fn validateClientHandshakeForVersionNegotiation(
+    req: http1.Request,
+) Error!void {
+    try validateClientHandshakePrefix(req);
+    try validateClientVersionValue(try requiredSingletonHeader(
+        req.headers,
+        "sec-websocket-version",
+    ));
+    try validateClientHandshakeSuffix(req);
+}
+
+fn validateClientVersionValue(value: []const u8) Error!void {
+    const valid = switch (value.len) {
+        1 => std.ascii.isDigit(value[0]),
+        2 => value[0] >= '1' and value[0] <= '9' and
+            std.ascii.isDigit(value[1]),
+        3 => (value[0] == '1' or value[0] == '2') and
+            std.ascii.isDigit(value[1]) and std.ascii.isDigit(value[2]),
+        else => false,
+    };
+    if (!valid) return error.InvalidHandshake;
+}
+
+fn validateClientHandshakePrefix(req: http1.Request) Error!void {
     if (req.method != .GET) return error.InvalidHandshake;
     if (req.version != .http_1_1) return error.InvalidHandshake;
     switch (req.body_framing) {
@@ -1370,8 +1408,9 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (wire.trimOws(host).len == 0) return error.InvalidHandshake;
     http1.validateHostValue(host) catch return error.InvalidHandshake;
     try validateHttp1UpgradeHeaders(req.headers);
-    const version = try requiredSingletonHeader(req.headers, "sec-websocket-version");
-    if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
+}
+
+fn validateClientHandshakeSuffix(req: http1.Request) Error!void {
     const key = try requiredSingletonHeader(req.headers, "sec-websocket-key");
     try validateClientKey(key);
     try validateClientSubprotocolHeaders(req.headers);
@@ -2647,6 +2686,71 @@ test "WebSocket handshake validation" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try validateClientHandshake(req);
+
+    const unsupported_version =
+        "GET /chat HTTP/1.1\r\nHost: example.com\r\n" ++
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+        "Sec-WebSocket-Version: 12\r\n\r\n";
+    var unsupported_req = try http1.parseRequest(
+        allocator,
+        unsupported_version,
+        .{},
+    );
+    defer unsupported_req.deinit(allocator);
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        validateClientHandshake(unsupported_req),
+    );
+    try validateClientHandshakeForVersionNegotiation(unsupported_req);
+
+    const unsupported_with_bad_key =
+        "GET /chat HTTP/1.1\r\nHost: example.com\r\n" ++
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: not-base64\r\n" ++
+        "Sec-WebSocket-Version: 12\r\n\r\n";
+    var bad_key_req = try http1.parseRequest(
+        allocator,
+        unsupported_with_bad_key,
+        .{},
+    );
+    defer bad_key_req.deinit(allocator);
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        validateClientHandshake(bad_key_req),
+    );
+    try std.testing.expectError(
+        error.InvalidHandshake,
+        validateClientHandshakeForVersionNegotiation(bad_key_req),
+    );
+
+    const malformed_headers = try allocator.dupe(
+        http1.Header,
+        unsupported_req.headers,
+    );
+    defer allocator.free(malformed_headers);
+    var malformed_req = unsupported_req;
+    malformed_req.headers = malformed_headers;
+    var version_header: ?*http1.Header = null;
+    for (malformed_headers) |*header| {
+        if (header.eqlName("sec-websocket-version")) {
+            version_header = header;
+            break;
+        }
+    }
+    const version = version_header orelse return error.TestUnexpectedResult;
+    for ([_][]const u8{ "", "012", "12, 13", "300" }) |malformed| {
+        version.value = malformed;
+        try std.testing.expectError(
+            error.InvalidHandshake,
+            validateClientHandshake(malformed_req),
+        );
+        try std.testing.expectError(
+            error.InvalidHandshake,
+            validateClientHandshakeForVersionNegotiation(malformed_req),
+        );
+    }
+
     var constructed_missing_host = req;
     constructed_missing_host.headers = req.headers[1..];
     try std.testing.expectError(

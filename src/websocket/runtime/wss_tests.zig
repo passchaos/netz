@@ -1,8 +1,113 @@
 const std = @import("std");
 const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const http1 = @import("../../http1/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_testing = @import("../../tls/testing.zig");
+
+test "WSS server advertises version 13 with HTTP 426" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_head_bytes = 4096,
+                .max_frame_bytes = 4096,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const client = try tls_stream.ClientConnection.init(
+        allocator,
+        io,
+        stream,
+        .{
+            .server_name = "localhost",
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+            },
+        },
+    );
+    stream_owned = false;
+    defer client.deinit();
+    try client.writeAll(
+        "GET /version HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 12\r\n\r\n",
+    );
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    while (std.mem.indexOf(u8, response_bytes.items, "\r\n\r\n") == null) {
+        var scratch: [512]u8 = undefined;
+        const count = try client.read(&scratch);
+        if (count == 0) return error.ConnectionClosed;
+        try response_bytes.appendSlice(allocator, scratch[0..count]);
+        if (response_bytes.items.len > 4096) return error.HeadersTooLarge;
+    }
+    var response = try http1.parseResponse(
+        allocator,
+        response_bytes.items,
+        .{},
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 426), response.status);
+    try std.testing.expectEqualStrings(
+        "13",
+        response.header("sec-websocket-version").?,
+    );
+    try std.testing.expectEqualStrings(
+        "close",
+        response.header("connection").?,
+    );
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(error.UnsupportedVersion, shared.err.?);
+}
 
 test "WSS server completes verified WebSocket echo" {
     const allocator = std.testing.allocator;
