@@ -116,6 +116,14 @@ pub const StreamState = struct {
     prefix_sent: bool = false,
     prefix_received: bool = false,
     receive_prefix_len: usize = 0,
+    /// Association bytes excluded from session flow control. Retained after
+    /// incremental readers consume the prefix and after QUIC retires storage.
+    receive_header_len: u64 = 0,
+    /// Highest QUIC receive offset already charged to the session. This is
+    /// independent of application consumption and includes RESET Final Size.
+    receive_accounted_offset: u64 = 0,
+    /// Body bytes already released for automatic session-credit return.
+    receive_credited_data: u64 = 0,
     /// Whole-FIN and incremental readers consume transport storage
     /// differently and therefore must not be mixed on one receive direction.
     receive_mode: ReceiveMode = .unset,
@@ -526,6 +534,10 @@ pub const StreamRegistry = struct {
         std.debug.assert(position + 1 == self.streams.items.len);
         const stream_state = self.streams.items[position];
         std.debug.assert(!stream_state.locally_initiated);
+        if (self.flow) |flow| {
+            flow.received.data -= stream_state.receive_accounted_offset -| stream_state.receive_header_len;
+            flow.consumed_data -= stream_state.receive_credited_data;
+        }
         _ = self.index.remove(stream_id);
         _ = self.streams.pop();
         switch (stream_state.direction) {

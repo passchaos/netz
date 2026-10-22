@@ -84,6 +84,33 @@ test "WebTransport flow grants remain transactional before capsule submission" {
     try std.testing.expectError(error.FlowControlViolation, state.commitGrant(grant));
 }
 
+test "WebTransport flow automatic data grants preserve the receive policy window" {
+    var state = try flow.State.init(settings(8, 1, 1), settings(8, 1, 1));
+    state.consumed_data = 3;
+    try std.testing.expect(state.automaticDataGrant() == null);
+    state.consumed_data = 4;
+    try std.testing.expectEqual(@as(?u64, 12), state.automaticDataGrant());
+    try state.commitGrant(try state.prepareGrantData(12));
+    try std.testing.expectEqual(@as(u64, 8), state.receive_window);
+    try std.testing.expect(state.automaticDataGrant() == null);
+    // Explicit grants can enlarge the live window without resetting usage.
+    try state.commitGrant(try state.prepareGrantData(20));
+    try std.testing.expectEqual(@as(u64, 16), state.receive_window);
+    state.consumed_data = 12;
+    try std.testing.expectEqual(@as(?u64, 28), state.automaticDataGrant());
+
+    var zero = try flow.State.init(settings(0, 1, 1), settings(8, 1, 1));
+    try std.testing.expect(zero.automaticDataGrant() == null);
+    try zero.commitGrant(try zero.prepareGrantData(4));
+    zero.consumed_data = 2;
+    try std.testing.expectEqual(@as(?u64, 6), zero.automaticDataGrant());
+
+    state.receive_limit.data = quic.varint.max_value;
+    state.receive_window = quic.varint.max_value;
+    state.consumed_data = quic.varint.max_value;
+    try std.testing.expect(state.automaticDataGrant() == null);
+}
+
 test "WebTransport flow keeps independent session budgets and advisory blocked values" {
     var first = try flow.State.init(settings(16, 1, 1), settings(16, 1, 1));
     var second = try flow.State.init(settings(16, 1, 1), settings(16, 1, 1));

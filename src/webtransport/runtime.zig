@@ -2395,7 +2395,7 @@ pub const EndpointAcceptedSession = struct {
         payload: []const u8,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -2430,7 +2430,7 @@ pub const EndpointAcceptedSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -2453,7 +2453,7 @@ pub const EndpointAcceptedSession = struct {
     ) EndpointServerError!void {
         committed_count.* = 0;
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -2476,7 +2476,7 @@ pub const EndpointAcceptedSession = struct {
         fin: bool,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = self.h3.trySendResponseBody(
             self.session_id.value,
             data,
@@ -2494,7 +2494,7 @@ pub const EndpointAcceptedSession = struct {
         fin: bool,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = self.h3.trySendResponseBodyParts(
             self.session_id.value,
             parts,
@@ -2510,7 +2510,7 @@ pub const EndpointAcceptedSession = struct {
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -2536,7 +2536,7 @@ pub const EndpointAcceptedSession = struct {
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -2590,7 +2590,7 @@ pub const EndpointAcceptedSession = struct {
         if (reason.len > max_connection_close_reason) {
             return error.InvalidSessionState;
         }
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = self.h3.established.connection.closeApplication(
             error_code,
             reason,
@@ -2608,7 +2608,7 @@ pub const EndpointAcceptedSession = struct {
         payload: []const u8,
     ) EndpointServerError!usize {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = handshake_stream.writeOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2628,7 +2628,7 @@ pub const EndpointAcceptedSession = struct {
         parts: []const []const u8,
     ) EndpointServerError!usize {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = handshake_stream.writeSlicesOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2651,7 +2651,7 @@ pub const EndpointAcceptedSession = struct {
         fin: bool,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = handshake_stream.sendOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2673,7 +2673,7 @@ pub const EndpointAcceptedSession = struct {
         fin: bool,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = handshake_stream.sendSlicesOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2692,7 +2692,7 @@ pub const EndpointAcceptedSession = struct {
         priority: i32,
     ) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         try self.streams.setPriority(stream_id, priority);
     }
 
@@ -2711,7 +2711,7 @@ pub const EndpointAcceptedSession = struct {
         counts: []usize,
     ) EndpointServerError!StreamWriteResult {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = stream_batch.writeOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2729,7 +2729,7 @@ pub const EndpointAcceptedSession = struct {
         stream_id: u62,
     ) EndpointServerError!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const result = handshake_stream.finishOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2812,7 +2812,7 @@ pub const EndpointAcceptedSession = struct {
     pub fn drain(self: *EndpointAcceptedSession) EndpointServerError!void {
         if (self.control.local_drain_sent) return;
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         var encoded: [16]u8 = undefined;
         const capsule = try session_control.writeDrainInto(&encoded);
         const result = self.h3.trySendResponseBody(
@@ -2843,7 +2843,7 @@ pub const EndpointAcceptedSession = struct {
             return;
         }
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         var encoded: [4 + session_control.max_close_reason + 16]u8 =
             undefined;
         const capsule = try session_control.writeCloseInto(
@@ -2884,13 +2884,13 @@ pub const EndpointAcceptedSession = struct {
     /// unchanged so an endpoint loop can retry this same operation.
     pub fn grantData(self: *EndpointAcceptedSession, maximum: u64) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         return flow_grant.send(&self.control, self.h3, &self.streams, .{ .max_data = maximum });
     }
 
     pub fn grantStreams(self: *EndpointAcceptedSession, direction: webtransport.StreamDirection, maximum: u64) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
         const capsule: webtransport.Capsule = switch (direction) {
             .bidirectional => .{ .max_streams_bidi = maximum },
             .unidirectional => .{ .max_streams_uni = maximum },
@@ -8298,7 +8298,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
     }
 
     /// Open WebTransport on an existing authenticated HTTP/3 connection. The
@@ -9041,7 +9041,7 @@ pub const HandshakeClientSession = struct {
         if (reason.len > max_connection_close_reason) {
             return error.InvalidSessionState;
         }
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = self.h3.established.connection.closeApplication(
             error_code,
             reason,
@@ -9105,7 +9105,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagram(self.session_id.value, payload)
@@ -9135,7 +9135,7 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9165,7 +9165,7 @@ pub const HandshakeClientSession = struct {
     ) Error!void {
         committed_count.* = 0;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9196,7 +9196,7 @@ pub const HandshakeClientSession = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9222,7 +9222,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9242,7 +9242,7 @@ pub const HandshakeClientSession = struct {
         fin: bool,
     ) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = if (self.dispatcher != null)
             self.h3.trySendRequestBody(
                 self.session_id.value,
@@ -9295,7 +9295,7 @@ pub const HandshakeClientSession = struct {
         fin: bool,
     ) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = if (self.dispatcher != null)
             self.h3.trySendRequestBodyParts(
                 self.session_id.value,
@@ -9325,7 +9325,7 @@ pub const HandshakeClientSession = struct {
         progress.* = .{};
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return self.h3.sendRequestBodyPartsPacedWithTimeout(
             self.session_id.value,
             parts,
@@ -9348,7 +9348,7 @@ pub const HandshakeClientSession = struct {
             deadline,
         );
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return self.h3.sendRequestBodyPartsPacedWithDeadline(
             self.session_id.value,
             parts,
@@ -9360,7 +9360,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return ownedHandshakeDatagram(
@@ -9375,7 +9375,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9396,7 +9396,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9419,7 +9419,7 @@ pub const HandshakeClientSession = struct {
         output: []u8,
     ) Error![]u8 {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9438,7 +9438,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError![]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9458,7 +9458,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError![]u8 {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9480,7 +9480,7 @@ pub const HandshakeClientSession = struct {
     ) Error!void {
         received_count.* = 0;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9502,7 +9502,7 @@ pub const HandshakeClientSession = struct {
         received_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9525,7 +9525,7 @@ pub const HandshakeClientSession = struct {
         received_count.* = 0;
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9544,7 +9544,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?OwnedHandshakeDatagram {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9563,7 +9563,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(
@@ -9583,7 +9583,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveManyDatagramsWithDeadline(
             count,
@@ -9601,7 +9601,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9647,7 +9647,7 @@ pub const HandshakeClientSession = struct {
     pub fn receivePeerConnectionClose(
         self: *HandshakeClientSession,
     ) Error!quic.one_rtt.PeerCloseInfo {
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakePeerConnectionClose(
             &self.h3.established.connection,
@@ -9664,7 +9664,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakePeerConnectionCloseUntil(
             &self.h3.established.connection,
@@ -9763,7 +9763,7 @@ pub const HandshakeClientSession = struct {
             );
         }
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9795,7 +9795,7 @@ pub const HandshakeClientSession = struct {
         direction: webtransport.StreamDirection,
     ) Error!u62 {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9831,7 +9831,7 @@ pub const HandshakeClientSession = struct {
         fin: bool,
     ) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = handshake_stream.sendOnce(
                 &self.h3.established.connection,
@@ -9892,7 +9892,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return handshake_stream.sendWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -9912,7 +9912,7 @@ pub const HandshakeClientSession = struct {
         fin: bool,
     ) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = handshake_stream.sendSlicesOnce(
                 &self.h3.established.connection,
@@ -9972,7 +9972,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return handshake_stream.sendSlicesWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -9991,7 +9991,7 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
     ) Error!usize {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = handshake_stream.writeOnce(
                 &self.h3.established.connection,
@@ -10041,7 +10041,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return handshake_stream.writeWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10058,7 +10058,7 @@ pub const HandshakeClientSession = struct {
         parts: []const []const u8,
     ) Error!usize {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = handshake_stream.writeSlicesOnce(
                 &self.h3.established.connection,
@@ -10108,7 +10108,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return handshake_stream.writeSlicesWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10125,7 +10125,7 @@ pub const HandshakeClientSession = struct {
         priority: i32,
     ) Error!void {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try self.streams.setPriority(stream_id, priority);
     }
 
@@ -10144,7 +10144,7 @@ pub const HandshakeClientSession = struct {
         counts: []usize,
     ) Error!StreamWriteResult {
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = stream_batch.writeOnce(
                 &self.h3.established.connection,
@@ -10198,7 +10198,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return stream_batch.writeWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10215,7 +10215,7 @@ pub const HandshakeClientSession = struct {
     ) Error!void {
         // Completion means the FIN packet was submitted, not yet acknowledged.
         try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) {
             const result = handshake_stream.finishOnce(
                 &self.h3.established.connection,
@@ -10261,7 +10261,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return handshake_stream.finishWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10296,7 +10296,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!OwnedHandshakeStream {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStream(
             &self.h3.established.connection,
@@ -10312,7 +10312,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
@@ -10326,7 +10326,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStreamWithDeadline(
             &self.h3.established.connection,
@@ -10341,7 +10341,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?OwnedHandshakeStream {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (!try self.prepareDispatcherPoll()) return null;
         const result = if (self.dispatcher != null)
             handshake_stream.pollOnce(
@@ -10369,7 +10369,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = self.h3.processDetachedResponsePacket(
             self.session_id.value,
             packet,
@@ -10399,7 +10399,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!?StreamRead {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (out.len == 0) return error.BufferTooShort;
         if (!try self.prepareDispatcherPoll()) return null;
         const result = if (self.dispatcher != null)
@@ -10426,7 +10426,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!StreamRead {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return readHandshakeSessionStream(
             &self.h3.established.connection,
@@ -10443,7 +10443,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
@@ -10464,7 +10464,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
@@ -10482,7 +10482,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!StreamRead {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readId(
             &self.h3.established.connection,
@@ -10501,7 +10501,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return self.readStreamIdWithDeadline(
             stream_id,
             out,
@@ -10520,7 +10520,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readIdWithDeadline(
             &self.h3.established.connection,
@@ -10607,7 +10607,7 @@ pub const HandshakeClientSession = struct {
         application_error_code: u32,
     ) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = if (self.dispatcher != null)
             incremental_stream.resetOnce(
                 &self.h3.established.connection,
@@ -10655,7 +10655,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return incremental_stream.resetWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10675,7 +10675,7 @@ pub const HandshakeClientSession = struct {
         reliable_size: u64,
     ) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = if (self.dispatcher != null)
             incremental_stream.resetReliablyOnce(
                 &self.h3.established.connection,
@@ -10728,7 +10728,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return incremental_stream.resetReliablyWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10745,7 +10745,7 @@ pub const HandshakeClientSession = struct {
         application_error_code: u32,
     ) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const result = if (self.dispatcher != null)
             incremental_stream.stopOnce(
                 &self.h3.established.connection,
@@ -10793,7 +10793,7 @@ pub const HandshakeClientSession = struct {
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return incremental_stream.stopWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -10807,7 +10807,7 @@ pub const HandshakeClientSession = struct {
         if (self.control.local_drain_sent) return;
         if (self.dispatcher != null) {
             try self.ensureApplicationSendOpen();
-            defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+            defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
             var encoded: [16]u8 = undefined;
             const capsule = try session_control.writeDrainInto(&encoded);
             const result = self.h3.trySendRequestBody(
@@ -11061,7 +11061,7 @@ pub const HandshakeClientSession = struct {
     pub fn receiveSessionEvent(
         self: *HandshakeClientSession,
     ) Error!SessionEvent {
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEvent()) |ready| break ready;
@@ -11076,7 +11076,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         self.control.bindFlow(self.streams.flow);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher == null) {
             if (capsule_rejection.pending(&self.control)) {
                 try capsule_rejection.finish(&self.control, &self.h3.established.connection, &self.streams);
@@ -11132,7 +11132,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEventWithCleanupDeadline(deadline)) |ready| {
@@ -11273,7 +11273,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         self.control.bindFlow(self.streams.flow);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (capsule_rejection.pending(&self.control)) {
             const ready = capsule_rejection.finishOnce(&self.control, &self.h3.established.connection, &self.streams) catch |err| switch (err) {
                 error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
@@ -11403,13 +11403,13 @@ pub const HandshakeClientSession = struct {
     /// unchanged so an endpoint loop can retry this same operation.
     pub fn grantData(self: *HandshakeClientSession, maximum: u64) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return flow_grant.send(&self.control, &self.h3, &self.streams, .{ .max_data = maximum });
     }
 
     pub fn grantStreams(self: *HandshakeClientSession, direction: webtransport.StreamDirection, maximum: u64) Error!void {
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         const capsule: webtransport.Capsule = switch (direction) {
             .bidirectional => .{ .max_streams_bidi = maximum },
             .unidirectional => .{ .max_streams_uni = maximum },
@@ -19213,5 +19213,6 @@ test {
     _ = @import("runtime/session_control/handshake_rejection_tests.zig");
     _ = @import("runtime/session_control/connection_lifecycle_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
+    _ = @import("runtime/flow_receive.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

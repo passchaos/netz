@@ -46,6 +46,11 @@ pub const State = struct {
     receive_limit: Limits,
     sent: Limits = .{},
     received: Limits = .{},
+    /// Receiver policy window and cumulative body bytes released by the
+    /// application, including abandoned/reset bytes. Runtime grants preserve
+    /// this window as consumption advances.
+    receive_window: u64 = 0,
+    consumed_data: u64 = 0,
     peer_data_blocked: ?u64 = null,
     peer_bidi_blocked: ?u64 = null,
     peer_uni_blocked: ?u64 = null,
@@ -55,7 +60,7 @@ pub const State = struct {
         const send_limit = Limits.fromSettings(peer);
         try receive_limit.validate();
         try send_limit.validate();
-        return .{ .enabled = negotiated(local, peer), .send_limit = send_limit, .receive_limit = receive_limit };
+        return .{ .enabled = negotiated(local, peer), .send_limit = send_limit, .receive_limit = receive_limit, .receive_window = receive_limit.data };
     }
 
     pub fn sendDataAvailable(self: State) u64 {
@@ -153,11 +158,23 @@ pub const State = struct {
     /// Commit the grant only after its serialized Capsule reaches the wire.
     pub fn commitGrant(self: *State, capsule: webtransport.Capsule) Error!void {
         switch (capsule) {
-            .max_data => |value| try increase(&self.receive_limit.data, value, quic.varint.max_value),
+            .max_data => |value| {
+                try increase(&self.receive_limit.data, value, quic.varint.max_value);
+                self.receive_window = @max(self.receive_window, value -| self.consumed_data);
+            },
             .max_streams_bidi => |value| try increase(&self.receive_limit.bidi, value, max_streams),
             .max_streams_uni => |value| try increase(&self.receive_limit.uni, value, max_streams),
             else => return error.FlowControlViolation,
         }
+    }
+
+    /// Replenish after half the policy window is consumed. Explicit grants
+    /// can enlarge that window; zero credit remains zero until granted.
+    pub fn automaticDataGrant(self: *const State) ?u64 {
+        if (!self.enabled or self.receive_window == 0) return null;
+        if (self.receive_limit.data -| self.consumed_data > self.receive_window / 2) return null;
+        const maximum = @min(self.receive_window +| self.consumed_data, quic.varint.max_value);
+        return if (maximum > self.receive_limit.data) maximum else null;
     }
 };
 

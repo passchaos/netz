@@ -206,9 +206,10 @@ violations leave prior state intact. Receiver grants are prepared without
 mutation and committed separately after successful Capsule submission. BLOCKED
 values remain advisory, and HTTP/2-only stream-data Capsules are rejected.
 
-The established Session runtimes now share a stable registry-owned State with
-their incremental CONNECT control reader. All six flow Capsules are processed
-when flow control is negotiated, including fragmented values; they are ignored
+The authenticated handshake-backed and shared endpoint Session runtimes now
+share a stable registry-owned State with their incremental CONNECT control
+reader. All six flow Capsules are processed when flow control is negotiated,
+including fragmented values; they are ignored
 when negotiation is disabled. Peer MAX_* updates dynamically unlock stream
 opens, and incoming stream counts are checked against the advertised cumulative
 limits. Opening without available credit allocates no QUIC stream ID. Owning
@@ -226,10 +227,30 @@ without terminating sibling sessions. Runtime tests cover both roles, zero
 initial credit, failed submissions, fragmented grants, deadline waits and
 shared-session isolation.
 
-Actual stream-data send/receive byte accounting, RESET Final Size observation,
-automatic data/stream credit replenishment and resumable deadline-bound grant
-APIs still need runtime integration. Configured stream-retention bounds remain
-independent of cumulative opening credit. These tests therefore do not establish
+Receive-side stream data is now charged by each stream's highest QUIC offset,
+including out-of-order gaps, before copying application bytes or retiring
+transport state. Association headers are excluded even with zero data credit;
+locally initiated bidirectional reverse directions carry no second header.
+RESET Final Size reconciles lost bytes exactly once, including resets first
+observed while parsing the association. Failed association-prefix credit return
+rolls back both registration and its session data charge. Excess data rejects
+the affected CONNECT before application delivery, and shared-client tests verify
+that sibling sessions remain usable.
+
+Successful incremental or whole-stream consumption now replenishes WT_MAX_DATA
+after half the receive window is consumed. RESET/STOP abandonment releases the
+remaining accounted body credit once. Replenishment uses the same transactional
+one-attempt sender as explicit grants: backpressure or socket failure leaves
+the target pending for the next Session operation or dispatcher poll. It does
+not wait for a peer BLOCKED capsule. Explicit data grants can enlarge the policy
+window, and zero initial data credit stays zero until explicitly granted.
+Shared dispatcher adapters refresh their recovery/pacing timer after deferred
+grant or rejection submission, including operations that otherwise send no data.
+
+Send-side stream-data quota enforcement, automatic stream credit replenishment
+and resumable deadline-bound grant APIs still need runtime integration.
+Configured stream-retention bounds remain independent of cumulative opening
+credit. These tests therefore do not establish
 full draft-16 session-flow-control compliance; reliable association-prefix reset
 support must also be used by the WebTransport runtimes.
 

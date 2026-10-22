@@ -1,6 +1,7 @@
 //! WebTransport session state and application queues follow QUIC termination.
 
 const control_mod = @import("session_control.zig");
+const flow_receive = @import("flow_receive.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const max_close_reason: usize = 1024;
@@ -16,6 +17,21 @@ pub fn activate(control: *control_mod.Control, h3: anytype, registry: anytype) v
 }
 
 pub fn observe(control: *control_mod.Control, h3: anytype, registry: anytype) bool {
+    return observeInternal(control, h3, registry, true);
+}
+
+/// Deferred observation can submit a flow grant or scoped rejection after a
+/// method's ordinary timer refresh. Mirror the resulting recovery/pacing work
+/// before the shared socket owner next waits for an event.
+pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: anytype, dispatcher: ?*quic.endpoint_dispatcher.Dispatcher, handle: ?quic.endpoint_dispatcher.ConnectionHandle) void {
+    _ = observe(control, h3, registry);
+    const owner = dispatcher orelse return;
+    owner.refreshConnectionTimer(handle orelse return) catch {};
+}
+
+fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
+    flow_receive.observeAll(&h3.established.connection, registry) catch {};
+    if (replenish) flow_receive.replenish(control, h3, registry);
     if (registry.flow_violation) {
         control.flow_violation = true;
         control.capsule_error_pending = !control.capsule_error_reported;
@@ -29,7 +45,7 @@ pub fn observe(control: *control_mod.Control, h3: anytype, registry: anytype) bo
 
 pub fn ensureOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {
     control.bindFlow(registry.flow);
-    if (observe(control, h3, registry)) return error.ConnectionClosed;
+    if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
     try control.ensureOpen();
 }
 
@@ -38,6 +54,6 @@ pub fn ensureDatagramReceiveOpen(control: *control_mod.Control, h3: anytype, reg
     // This also supports callers that assemble a preconfigured session value
     // directly rather than promoting it through a CONNECT constructor.
     h3.connect_datagrams.discardOnConnectionClose(control.session_id.value);
-    if (observe(control, h3, registry)) return error.ConnectionClosed;
+    if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
     try control.ensureDatagramReceiveOpen();
 }

@@ -4,6 +4,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const flow_receive = @import("flow_receive.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 
@@ -65,6 +66,7 @@ pub fn drainAbandonedReceives(
     registry: *webtransport.StreamRegistry,
     single_attempt: bool,
 ) Error!bool {
+    try flow_receive.observeAll(connection, registry);
     var progressed = false;
     for (registry.registered()) |*stream| {
         if (stream.peer_fin) continue;
@@ -94,10 +96,12 @@ pub fn drainAbandonedReceives(
                 fresh_reset = true;
             }
             _ = try connection.discardResetReceived(stream.stream_id);
+            flow_receive.consumeAbandoned(registry, stream);
             try requestAfterSendTerminal(connection, stream);
         } else {
             if (stream.stop_sent == null) continue;
             _ = try connection.discardStoppedReceived(stream.stream_id);
+            flow_receive.consumeAbandoned(registry, stream);
         }
         progressed = progressed or before.available_bytes != 0 or fresh_reset;
         const after = connection.recvStreamStats(stream.stream_id) orelse {
@@ -387,6 +391,8 @@ fn identifyInternal(
             },
         };
         stream = try registry.registerPeer(stream_id, direction);
+        stream.?.receive_header_len = prefix_len;
+        try flow_receive.observe(connection, registry, stream.?);
         stream.?.receive_mode = receive_mode;
         if (receive_mode == .incremental) {
             // Association bytes count toward QUIC credit but are never exposed
@@ -399,6 +405,7 @@ fn identifyInternal(
                     );
                     stream.?.receive_reset_final_size = reset.final_size;
                     _ = try connection.discardResetReceived(stream_id);
+                    flow_receive.consumeAbandoned(registry, stream.?);
                     reset_consumed_prefix = true;
                 }
             }
@@ -455,5 +462,6 @@ fn identifyInternal(
     } else if (stream.?.receive_mode != receive_mode) {
         return error.InvalidStreamState;
     }
+    try flow_receive.observe(connection, registry, stream.?);
     return .{ .associated = stream.? };
 }

@@ -23,6 +23,7 @@ pub const OwnedHandshakeStream = struct {
 
 const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
+const flow_receive = @import("flow_receive.zig");
 pub fn initRegistry(
     allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
@@ -1656,6 +1657,7 @@ fn takeHandshakeSessionStream(
             stream.receive_reset_final_size = reset.final_size;
         }
         _ = try connection.discardResetReceived(stream_id);
+        flow_receive.consumeAbandoned(registry, stream);
         _ = try association.requestTransportRetirement(connection, stream);
         stream.reset_reported = true;
         return error.InvalidStreamState;
@@ -1705,6 +1707,7 @@ fn takeHandshakeSessionStream(
     };
     _ = try association.requestTransportRetirement(connection, stream);
     try registry.recordReceived(stream_id, lengths.payload, true);
+    flow_receive.consume(registry, stream, lengths.payload);
     payload_owned = false;
     return .{
         .allocator = connection.endpoint.allocator,

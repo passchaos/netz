@@ -6,6 +6,7 @@ const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
+const flow_receive = @import("flow_receive.zig");
 
 pub const Error = association.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -919,6 +920,7 @@ fn pollStream(
                 // RESET_STREAM_AT reaches this branch only after its reliable
                 // prefix has passed through the application read path.
                 _ = try connection.discardResetReceived(stream_id);
+                flow_receive.consumeAbandoned(registry, stream);
                 _ = try association.requestTransportRetirement(connection, stream);
                 stream.reset_reported = true;
                 return resetEvent(stream, stream_id, reset_info.final_size);
@@ -957,6 +959,7 @@ fn pollStream(
                 return err;
             },
         };
+        flow_receive.consume(registry, stream, count);
         if (fin) {
             _ = association.requestTransportRetirement(
                 connection,

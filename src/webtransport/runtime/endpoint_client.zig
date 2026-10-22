@@ -989,6 +989,7 @@ pub const Client = struct {
     ) Error!?Event {
         try self.ensureConnectionOpen();
         session_value.control.bindFlow(session_value.streams.flow);
+        defer _ = connection_lifecycle.observe(&session_value.control, &self.h3, &session_value.streams);
         const session_id = session_value.session_id;
         // Retain the detached CONNECT association until removal: late bytes
         // after CLOSE still require H3_MESSAGE_ERROR on this stream.
