@@ -77,6 +77,12 @@ test "fuzz bounded cross-protocol parsers" {
         &webtransport_datagram_seed,
         &webtransport_bidi_seed,
         &webtransport_uni_seed,
+        &webtransport_max_data_seed,
+        &webtransport_max_bidi_seed,
+        &webtransport_max_uni_seed,
+        &webtransport_data_blocked_seed,
+        &webtransport_bidi_blocked_seed,
+        &webtransport_uni_blocked_seed,
         &mqtt_connect_seed,
         &mqtt_publish_seed,
         &mqtt_subscribe_seed,
@@ -106,6 +112,12 @@ test "bounded deterministic parser mutation smoke" {
         webtransport_datagram_seed[4..],
         webtransport_bidi_seed[4..],
         webtransport_uni_seed[4..],
+        webtransport_max_data_seed[4..],
+        webtransport_max_bidi_seed[4..],
+        webtransport_max_uni_seed[4..],
+        webtransport_data_blocked_seed[4..],
+        webtransport_bidi_blocked_seed[4..],
+        webtransport_uni_blocked_seed[4..],
         mqtt_connect_seed[4..],
         mqtt_publish_seed[4..],
         mqtt_subscribe_seed[4..],
@@ -396,6 +408,12 @@ const webtransport_close_seed = smithSliceSeed(&.{
 const webtransport_datagram_seed = smithSliceSeed(&.{ 0x00, 'd', 'a', 't', 'a' });
 const webtransport_bidi_seed = smithSliceSeed(&.{ 0x40, 0x41, 0x00 });
 const webtransport_uni_seed = smithSliceSeed(&.{ 0x54, 0x00 });
+const webtransport_max_data_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x3d, 1, 42 });
+const webtransport_max_bidi_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x3f, 1, 42 });
+const webtransport_max_uni_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x40, 1, 42 });
+const webtransport_data_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x41, 1, 0 });
+const webtransport_bidi_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x43, 1, 0 });
+const webtransport_uni_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x44, 1, 0 });
 
 fn exerciseWebTransport(bytes: []const u8) !void {
     if (netz.webtransport.Capsule.parse(bytes)) |parsed| {
@@ -405,6 +423,21 @@ fn exerciseWebTransport(bytes: []const u8) !void {
                 std.unicode.utf8ValidateSlice(close.reason),
             ),
             else => {},
+        }
+        if (parsed.capsule.flowType() != null) {
+            var encoded: [32]u8 = undefined;
+            const roundtrip = try parsed.capsule.writeInto(&encoded);
+            try std.testing.expectEqualDeep(parsed.capsule, (try netz.webtransport.Capsule.parse(roundtrip)).capsule);
+            const settings = netz.http3.Settings{
+                .webtransport_initial_max_data = 8,
+                .webtransport_initial_max_streams_bidi = 1,
+                .webtransport_initial_max_streams_uni = 1,
+            };
+            var state = try netz.webtransport.flow_control.State.init(settings, settings);
+            const snapshot = state;
+            if (state.receiveCapsule(parsed.capsule)) |_| {} else |_| {
+                try std.testing.expectEqualDeep(snapshot, state);
+            }
         }
     } else |_| {}
     if (netz.webtransport.Datagram.parse(bytes)) |datagram| {

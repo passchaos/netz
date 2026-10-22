@@ -187,6 +187,32 @@ HTTP/3 SETTINGS and extended CONNECT negotiation, then:
 The existing handshake runtime test combines those stream paths with a
 WebTransport DATAGRAM round trip and transport statistics.
 
+## Draft-16 flow-control protocol model
+
+`webtransport.Capsule` now parses and serializes WT_MAX_DATA, the uni/bidi
+WT_MAX_STREAMS variants, WT_DATA_BLOCKED, and the uni/bidi WT_STREAMS_BLOCKED
+variants from `draft-ietf-webtrans-http3-16`. Their payload contains exactly one
+QUIC varint; allocating and caller-buffer writers validate complete output
+before appending any byte. Fixed wire vectors cover all six assigned types,
+and bounded parser fuzzing includes each type alongside hostile mutations.
+
+The public `webtransport.flow_control.State` provides session-level limits and
+accounting. Both endpoint SETTINGS must indicate flow-control intent; a zero
+initial stream limit requires an explicit grant. Peer MAX_* capsules must
+strictly increase the previous limit, stream counts cannot exceed 2^60, and
+data accounting uses new highest-offset growth with association headers
+excluded. RESET Final Size charges body bytes lost in flight, and receive
+violations leave prior state intact. Receiver grants are prepared without
+mutation and committed separately after successful Capsule submission. BLOCKED
+values remain advisory, and HTTP/2-only stream-data Capsules are rejected.
+
+These are reusable codec and state utilities. The socket-owning Session
+runtimes still need to bind this state to stream opens, writes, final-size
+observation and automatic credit updates. Their current incremental control
+reader still skips flow-control Capsules. The existing multiplexed endpoint
+tests therefore do not establish full draft-16 session-flow-control compliance;
+reliable association-prefix reset support must also be used by those runtimes.
+
 ## Feature comparison
 
 | Area | netz | `~/Work/quicz` | `~/Work/wtransport` |

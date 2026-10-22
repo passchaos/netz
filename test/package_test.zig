@@ -1,6 +1,22 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public WebTransport flow-control model consumes encoded peer grants" {
+    const initial = netz.http3.Settings{
+        .webtransport_initial_max_data = 8,
+        .webtransport_initial_max_streams_uni = 1,
+    };
+    var state = try netz.webtransport.flow_control.State.init(initial, initial);
+    try state.openLocal(.unidirectional);
+    try std.testing.expectError(error.FlowControlBlocked, state.openLocal(.unidirectional));
+    var output: [32]u8 = undefined;
+    const encoded = try (netz.webtransport.Capsule{ .max_data = 16 }).writeInto(&output);
+    const decoded = try netz.webtransport.Capsule.parse(encoded);
+    try std.testing.expect(try state.receiveCapsule(decoded.capsule));
+    try state.accountSent(0, 12, 3);
+    try std.testing.expectEqual(@as(u64, 7), state.sendDataAvailable());
+}
+
 test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.quic.tls.trust,
