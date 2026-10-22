@@ -1637,6 +1637,13 @@ client/server role coverage sends `STREAM`, `RESET_STREAM`, `MAX_STREAM_DATA`,
 and `STOP_SENDING` on those lower IDs, verifies lazy half-stream creation and
 the automatic RESET response, and proves the next unopened IDs still fail
 transactionally with `STREAM_STATE_ERROR`.
+Receive-stream terminal delivery also distinguishes an unread FIN from an EOF
+already returned to the application. A later same-final-size `RESET_STREAM`
+still replaces unread or partially consumed data and reports its application
+error, but it no longer makes the stream readable again after FIN was delivered.
+The reset metadata remains available for diagnostics, duplicate consistency,
+and final-size validation, matching the current `/nav_env/Work/quiche`
+first-terminal behavior without discarding transport evidence.
 
 ## Known blockers before declaring the goal complete
 

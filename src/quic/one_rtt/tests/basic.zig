@@ -2178,6 +2178,86 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     );
 }
 
+test "QUIC 1-RTT reset after FIN preserves the first delivered terminal event" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9d} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "fin-reset-local",
+        .peer_connection_id = "fin-reset-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 0, &.{.{
+        .stream = .{
+            .stream_id = 0,
+            .data = "done",
+            .fin = true,
+        },
+    }}, null, .not_ect);
+    var out: [8]u8 = undefined;
+    const finished = (try connection.pollStreamId(0, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(finished == .data);
+    try std.testing.expect(finished.data.fin);
+    try std.testing.expectEqualStrings(
+        "done",
+        out[0..finished.data.bytes],
+    );
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 1, &.{.{
+        .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 77,
+            .final_size = 4,
+        },
+    }}, null, .not_ect);
+    try std.testing.expect((try connection.pollStreamId(0, &out)) == null);
+    try std.testing.expectEqual(
+        @as(u64, 77),
+        connection.streamResetReceived(0).?.application_error_code,
+    );
+
+    // A reset still supersedes an unread FIN and must remain observable.
+    try one_rtt.testing.applyReceivedFrames(&connection, 2, &.{.{
+        .stream = .{
+            .stream_id = 4,
+            .data = "unread",
+            .fin = true,
+        },
+    }}, null, .not_ect);
+    try one_rtt.testing.applyReceivedFrames(&connection, 3, &.{.{
+        .reset_stream = .{
+            .stream_id = 4,
+            .application_error_code = 78,
+            .final_size = 6,
+        },
+    }}, null, .not_ect);
+    const reset = (try connection.pollStreamId(4, &out)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(
+        @as(u64, 78),
+        reset.reset.application_error_code,
+    );
+    try std.testing.expect((try connection.pollStreamId(4, &out)) == null);
+}
+
 test "QUIC 1-RTT optionally drains buffered stream data before reset" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

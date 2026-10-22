@@ -14547,6 +14547,12 @@ pub const Connection = struct {
         } else if (reliable_size > recv_stream.reset.?.reliable_size) {
             return;
         }
+        if (first_reset and recv_stream.fin_reported) {
+            // EOF is already an application-visible terminal event. Retain
+            // the peer's later reset for final-size validation and diagnostics
+            // without making this stream readable again after FIN.
+            recv_stream.reset_reported = true;
+        }
         recv_stream.reset = .{
             .application_error_code = application_error_code,
             .final_size = final_size,
