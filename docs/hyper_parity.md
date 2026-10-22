@@ -822,6 +822,18 @@ Reusable implementation changes behind these H2 results:
   `GOAWAY(ENHANCE_YOUR_CALM, "too_many_internal_resets")`. `null` disables
   the guard; application cancellation, timeout cleanup, and capacity-driven
   REFUSED_STREAM do not consume it;
+- `Limits.data_frame_budget` mirrors current h2's connection-wide defense
+  against DATA fragmentation that flow control alone cannot bound. The
+  automatic default follows half the receive connection window with a
+  25,600-byte minimum, including adaptive-window growth; callers can select a
+  fixed budget instead. Non-final payloads below 256 bytes consume their
+  framing deficit until library buffering releases them, large payloads repay
+  outstanding deficit, and final DATA is exempt because each stream has only
+  one. Empty non-final DATA has an independent 100-frame lifetime ceiling, so
+  large frames cannot erase an empty-frame attack. Exhaustion sends
+  `GOAWAY(ENHANCE_YOUR_CALM, "too_many_data_frames")`; padded-empty wire tests
+  prove accounting uses the decoded application payload while flow control
+  still charges Pad Length and padding octets;
 - `Connection.peerMaxConcurrentStreams`,
   `availableLocalStreamCapacity`, `activeLocalStreamCount`,
   `activePeerStreamCount`, and `peerExtendedConnectEnabled` expose the live

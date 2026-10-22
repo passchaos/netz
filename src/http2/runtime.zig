@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http2 = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
 const http1 = @import("../http1/mod.zig");
@@ -15,6 +16,7 @@ const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
 const bdp = @import("runtime/bdp.zig");
+const data_frame_budget = @import("runtime/data_frame_budget.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
@@ -83,6 +85,9 @@ const appendFrameBytes = frame_wire.appendFrame;
 const appendHeaderBlockBytes = frame_wire.appendHeaderBlock;
 const writeFrameTransport = frame_io.writeTransport;
 const writeFrameTransportWithDeadline = frame_io.writeTransportWithDeadline;
+
+/// Select automatic small-DATA-frame budgeting in `Limits.data_frame_budget`.
+pub const automatic_data_frame_budget: u32 = data_frame_budget.automatic;
 
 pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     uri_redirect.Error || error{
@@ -456,6 +461,10 @@ pub const Limits = struct {
     /// SETTINGS_INITIAL_WINDOW_SIZE, which applies per stream.
     initial_connection_window_size: u32 =
         @intCast(default_flow_window),
+    /// Connection-wide budget for DATA framing overhead. The default sentinel
+    /// tracks half the receive connection window with a 25,600-byte minimum.
+    /// Any other value stays fixed when adaptive receive windows grow.
+    data_frame_budget: u32 = automatic_data_frame_budget,
     /// Adapt receive windows from measured DATA throughput and a dedicated
     /// PING RTT sample. Disabled by default so configured fixed-window wire
     /// behavior remains unchanged.
@@ -3603,6 +3612,12 @@ const OwnedFrameSlot = struct {
     }
 };
 
+const ReceivedDataPayload = struct {
+    data: []const u8,
+    padding_len: u8,
+    budget_charge: u8,
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -3615,6 +3630,7 @@ pub const Connection = struct {
     recv_connection_window: FlowWindow = .{},
     recv_connection_window_target: u32 = @intCast(default_flow_window),
     recv_stream_window_target: u32 = @intCast(default_flow_window),
+    data_frame_budget: data_frame_budget.State = .{},
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     send_stream_window_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
@@ -7031,6 +7047,7 @@ pub const Connection = struct {
                     state.stream_id,
                     frame,
                 );
+                defer self.releaseDataFrameBudget(data);
                 if (state.forbids_body and data.data.len != 0) {
                     self.releaseConnectionCapacity(frame.payload.len) catch {};
                     return error.InvalidContentLength;
@@ -8096,6 +8113,7 @@ pub const Connection = struct {
                         state.stream_id,
                         frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     if (state.forbids_body and data.data.len != 0) {
                         self.releaseConnectionCapacity(
                             frame.payload.len,
@@ -8382,6 +8400,7 @@ pub const Connection = struct {
                         state.stream_id,
                         frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     if (state.forbids_body and data.data.len != 0) {
                         self.releaseConnectionCapacity(
                             frame.payload.len,
@@ -9721,6 +9740,7 @@ pub const Connection = struct {
                                                     stream_id,
                                                     owned.frame,
                                                 );
+                                            defer self.releaseDataFrameBudget(data);
                                             const body_len = std.math.add(
                                                 usize,
                                                 body.items.len,
@@ -10270,6 +10290,7 @@ pub const Connection = struct {
                         .data => {
                             const data =
                                 try self.receiveDataPayload(stream_id, frame);
+                            defer self.releaseDataFrameBudget(data);
                             body_bytes = std.math.add(
                                 usize,
                                 body_bytes,
@@ -10640,6 +10661,7 @@ pub const Connection = struct {
                         frame.header.stream_id,
                         frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     requests[index].body_bytes = std.math.add(
                         usize,
                         requests[index].body_bytes,
@@ -11521,7 +11543,8 @@ pub const Connection = struct {
             .header = header,
             .payload = body.items[old_len..new_len],
         };
-        _ = try self.receiveDataPayload(stream_id, frame);
+        const data = try self.receiveDataPayload(stream_id, frame);
+        defer self.releaseDataFrameBudget(data);
         try self.maybeReleaseReceivedCapacity(
             stream_id,
             (header.flags & flag_end_stream) != 0,
@@ -14566,7 +14589,7 @@ pub const Connection = struct {
         return .{};
     }
 
-    fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!http2.DataPayload {
+    fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!ReceivedDataPayload {
         const data = try http2.DataPayload.parse(frame);
         // HTTP/2 flow control charges the whole DATA frame payload, not just
         // the bytes exposed to the application.  PADDED DATA therefore consumes
@@ -14602,7 +14625,39 @@ pub const Connection = struct {
         {
             try self.sendQueuedAdaptiveWindowUpdate();
         }
-        return data;
+        const budget_charge = self.data_frame_budget.record(
+            data.data.len,
+            (frame.header.flags & flag_end_stream) != 0,
+            self.dataFrameBudgetMaximum(),
+        ) catch {
+            self.aggregate_timeout_unusable = true;
+            self.sendGoAwayUntil(
+                self.lastPeerProcessedStreamId(),
+                .enhance_your_calm,
+                "too_many_data_frames",
+                null,
+            ) catch {};
+            return error.ConnectionGoAway;
+        };
+        return .{
+            .data = data.data,
+            .padding_len = data.padding_len,
+            .budget_charge = budget_charge,
+        };
+    }
+
+    fn releaseDataFrameBudget(
+        self: *Connection,
+        data: ReceivedDataPayload,
+    ) void {
+        self.data_frame_budget.release(data.budget_charge);
+    }
+
+    fn dataFrameBudgetMaximum(self: Connection) u32 {
+        return data_frame_budget.maximum(
+            self.limits.data_frame_budget,
+            self.recv_connection_window_target,
+        );
     }
 
     fn maybeReleaseReceivedCapacity(
@@ -14873,6 +14928,7 @@ pub const Connection = struct {
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
                     const data = try self.receiveDataPayload(stream_id, frame);
+                    defer self.releaseDataFrameBudget(data);
                     if (body.items.len + data.data.len > self.limits.max_body_bytes) {
                         // The DATA payload already consumed connection credit.
                         // A stream-local size rejection must restore that shared
@@ -15223,6 +15279,7 @@ pub const Connection = struct {
                         stream_id,
                         frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     body_bytes = std.math.add(
                         usize,
                         body_bytes,
@@ -15370,6 +15427,7 @@ pub const Connection = struct {
                         stream_id,
                         frame.frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     if (body.items.len + data.data.len >
                         self.limits.max_body_bytes)
                     {
@@ -15569,10 +15627,11 @@ pub const Connection = struct {
                         parsed_data.data.len,
                     ) catch return error.MessageTooLarge;
                     if (next_len > self.limits.max_body_bytes) {
-                        _ = try self.receiveDataPayload(
+                        const oversized_data = try self.receiveDataPayload(
                             stream_id,
                             frame.frame,
                         );
+                        defer self.releaseDataFrameBudget(oversized_data);
                         try self.releaseConnectionCapacity(
                             frame.frame.payload.len,
                         );
@@ -15582,6 +15641,7 @@ pub const Connection = struct {
                         stream_id,
                         frame.frame,
                     );
+                    defer self.releaseDataFrameBudget(data);
                     var data_credit_held = true;
                     errdefer if (data_credit_held) {
                         self.releaseConnectionCapacity(
@@ -15746,6 +15806,7 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .data => {
                     const data = try self.receiveDataPayload(stream_id, frame.frame);
+                    defer self.releaseDataFrameBudget(data);
                     if (data.data.len != 0) {
                         self.releaseConnectionCapacity(
                             frame.frame.payload.len,
@@ -17286,6 +17347,7 @@ pub const Connection = struct {
         self.recv_connection_window_target =
             self.limits.initial_connection_window_size;
         self.recv_stream_window_target = self.limits.initial_window_size;
+        self.data_frame_budget = .{};
         self.adaptive_window = if (self.limits.adaptive_window)
             bdp.Estimator.init(
                 // Match Hyper's policy: samples grow the stream window. The
@@ -19196,6 +19258,7 @@ pub const ClientDuplexStream = struct {
                         self.stream_id,
                         frame.frame,
                     );
+                    defer self.connection.releaseDataFrameBudget(payload);
                     if (self.response_body_forbidden and
                         payload.data.len != 0)
                     {
@@ -19942,6 +20005,7 @@ pub const ServerDuplexStream = struct {
                         self.stream_id,
                         frame.frame,
                     );
+                    defer self.connection.releaseDataFrameBudget(payload);
                     self.request_body_bytes = std.math.add(
                         usize,
                         self.request_body_bytes,
@@ -20684,11 +20748,17 @@ pub const Tunnel = struct {
             switch (frame.frame.header.frame_type) {
                 .data => {
                     const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
+                    defer self.connection.releaseDataFrameBudget(payload);
                     const end_stream = (frame.frame.header.flags & flag_end_stream) != 0;
                     try self.connection.maybeReleaseReceivedCapacity(
                         self.stream_id,
                         end_stream,
                     );
+                    if (payload.data.len == 0 and !end_stream) {
+                        frame.deinit(self.connection.allocator);
+                        frame_owned = false;
+                        continue;
+                    }
                     if (end_stream) self.finishReceive();
                     frame_owned = false;
                     return .{
@@ -21697,7 +21767,11 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 1_840), @sizeOf(Connection));
+        const connection_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 1_840,
+            .ReleaseFast, .ReleaseSmall => 1_760,
+        };
+        try std.testing.expectEqual(connection_size, @sizeOf(Connection));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
         try std.testing.expectEqual(
             @as(usize, 40),
@@ -32139,6 +32213,7 @@ test "HTTP/2 padded DATA charges full frame payload to receive windows" {
 
     try (try connection.recvStreamWindow(1)).update(1);
     const data = try connection.receiveDataPayload(1, padded_frame);
+    defer connection.releaseDataFrameBudget(data);
     try std.testing.expectEqualStrings("ok", data.data);
     try std.testing.expectEqual(@as(i64, 0), connection.recv_connection_window.value);
     try std.testing.expectEqual(@as(i64, 0), (try connection.recvStreamWindow(1)).value);
@@ -32173,6 +32248,7 @@ test "HTTP/2 empty DATA is legal while stream window is negative" {
         },
         .payload = &.{},
     });
+    defer connection.releaseDataFrameBudget(data);
     try std.testing.expectEqual(@as(usize, 0), data.data.len);
     try std.testing.expectEqual(@as(i64, -7), connection.recv_connection_window.value);
     try std.testing.expectEqual(@as(i64, -11), stream_window.value);
@@ -35096,6 +35172,10 @@ test "HTTP/2 adaptive window queues behind initial SETTINGS ACK" {
                 adaptive_target,
                 connection.recv_stream_window_target,
             );
+            try std.testing.expectEqual(
+                @as(u32, adaptive_target / 2),
+                connection.dataFrameBudgetMaximum(),
+            );
             try std.testing.expect(
                 (try connection.recvStreamWindow(1)).value >
                     default_flow_window,
@@ -36220,6 +36300,101 @@ test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
     try std.testing.expectEqual(
         writer.bytes.items.len,
         reset_frame.consumed() + goaway_frame.consumed(),
+    );
+}
+
+test "HTTP/2 excessive padded empty DATA emits terminal GOAWAY" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            splat: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var total = header.len;
+            self.bytes.appendSlice(allocator, header) catch
+                return error.SystemResources;
+            for (data[0 .. data.len - 1]) |part| {
+                total += part.len;
+                self.bytes.appendSlice(allocator, part) catch
+                    return error.SystemResources;
+            }
+            for (0..splat) |_| {
+                const part = data[data.len - 1];
+                total += part.len;
+                self.bytes.appendSlice(allocator, part) catch
+                    return error.SystemResources;
+            }
+            return total;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    defer writer.bytes.deinit(allocator);
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .last_peer_processed_stream_id = 1,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+    connection.applyLocalLimits();
+
+    // PADDED with Pad Length 1 and one padding octet has no application
+    // payload. Flow control still charges both bytes, while the independent
+    // lifetime frame-count guard rejects the 101st non-final empty DATA.
+    const padded_empty = [_]u8{ 1, 0 };
+    const frame = http2.Frame{
+        .header = .{
+            .length = padded_empty.len,
+            .frame_type = .data,
+            .flags = 0x08,
+            .stream_id = 1,
+        },
+        .payload = &padded_empty,
+    };
+    for (0..data_frame_budget.max_empty_frames) |_| {
+        const data = try connection.receiveDataPayload(1, frame);
+        defer connection.releaseDataFrameBudget(data);
+        try std.testing.expectEqual(@as(usize, 0), data.data.len);
+    }
+    try std.testing.expectError(
+        error.ConnectionGoAway,
+        connection.receiveDataPayload(1, frame),
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+
+    const goaway_frame = try http2.Frame.parse(writer.bytes.items);
+    try std.testing.expectEqual(
+        http2.FrameType.goaway,
+        goaway_frame.header.frame_type,
+    );
+    const goaway = try http2.GoAwayPayload.parse(goaway_frame);
+    try std.testing.expectEqual(@as(u31, 1), goaway.last_stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.enhance_your_calm,
+        goaway.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "too_many_data_frames",
+        goaway.debug_data,
     );
 }
 
