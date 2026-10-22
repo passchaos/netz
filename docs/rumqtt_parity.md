@@ -854,6 +854,12 @@ last snapshot, while periodic/manual writes acknowledge the same generation so
 switching modes cannot duplicate an already persisted checkpoint. Changing
 `persistence`, `persistence_location`, or `persistence_file` remains a
 restart-only operation and fails the complete reload transaction.
+Broker-initiated shutdown also detaches every still-connected durable Session
+before the final snapshot, arming its expiry deadline from shutdown time rather
+than restoring it indefinitely connected. A Mosquitto-issue-derived regression
+keeps a subscribed MQTT 5 Session live, shuts down the broker without a client
+DISCONNECT, snapshots the resulting offline state, restores it, and proves a
+future lookup beyond the 60-second interval removes the Session.
 On Linux the production config runner also maps `SIGUSR1` to an on-demand live
 checkpoint. Its signal handler performs only a lock-free atomic flag store; a
 bounded `std.Io` supervisor poll consumes the request and runs normal locked,

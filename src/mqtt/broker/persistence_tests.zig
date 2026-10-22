@@ -791,6 +791,112 @@ test "MQTT persistent change autosave tracks durable subscription lifecycle" {
     if (serve.err) |err| return err;
 }
 
+test "MQTT broker shutdown persists an armed Session expiry deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+        } },
+    );
+    var source_owned = true;
+    defer if (source_owned) source.deinit();
+    var serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    }{ .broker = &source };
+    const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
+    var joined = false;
+    defer if (!joined) {
+        source.shutdownActiveConnections();
+        thread.join();
+    };
+
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    var client = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        source.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "shutdown-expiry-session",
+            .clean_start = false,
+            .properties = &expiry,
+        },
+    );
+    var suback = try client.subscribe(
+        &.{.{
+            .topic_filter = "shutdown/expiry",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    suback.deinit(allocator);
+
+    source.shutdownActiveConnections();
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+    client.close();
+
+    const now = std.Io.Clock.awake.now(io);
+    const source_handle = source.sessions.find(
+        "shutdown-expiry-session",
+        now,
+    ) orelse return error.TestUnexpectedResult;
+    const source_stats = try source.sessions.stats(source_handle);
+    try std.testing.expect(!source_stats.connected);
+    try std.testing.expectEqual(@as(u32, 60), source_stats.expiry_interval);
+    try std.testing.expectEqual(@as(usize, 1), source_stats.subscription_count);
+    try source.saveSnapshot(tmp.dir, "shutdown-expiry.db");
+    source.deinit();
+    source_owned = false;
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreSnapshot(tmp.dir, "shutdown-expiry.db");
+    const restored_now = std.Io.Clock.awake.now(io);
+    const restored_handle = restored.sessions.find(
+        "shutdown-expiry-session",
+        restored_now,
+    ) orelse return error.TestUnexpectedResult;
+    const restored_stats = try restored.sessions.stats(restored_handle);
+    try std.testing.expect(!restored_stats.connected);
+    try std.testing.expectEqual(@as(u32, 60), restored_stats.expiry_interval);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        restored_stats.subscription_count,
+    );
+
+    const after_expiry = std.Io.Timestamp.fromNanoseconds(
+        restored_now.nanoseconds + 61 * std.time.ns_per_s,
+    );
+    try std.testing.expect(restored.sessions.find(
+        "shutdown-expiry-session",
+        after_expiry,
+    ) == null);
+}
+
 test "MQTT broker snapshot restores retained and durable Session state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
