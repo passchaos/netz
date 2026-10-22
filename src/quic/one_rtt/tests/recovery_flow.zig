@@ -6880,6 +6880,79 @@ test "QUIC application retirement consumes a fully received peer stream" {
     try std.testing.expectEqual(@as(u64, 16), connection.recv_flow.limit);
 }
 
+test "QUIC empty FIN retains independent recovery until acknowledged" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbd} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "empty-fin-local",
+        .peer_connection_id = "empty-fin-peer",
+        .initial_send_max_streams_bidi = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "body",
+    } }});
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    try std.testing.expect(connection.markPacketAcknowledged(0));
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = "body".len,
+        .data = &.{},
+        .fin = true,
+    } }});
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    const fin_candidate = connection.recovery.packetNumberCandidate(1) orelse
+        return error.TestUnexpectedResult;
+    const fin = try quic.parseFrame(fin_candidate.payload);
+    try std.testing.expect(fin.frame == .stream);
+    try std.testing.expectEqual(@as(u64, 0), fin.frame.stream.stream_id);
+    try std.testing.expectEqual(@as(usize, 0), fin.frame.stream.data.len);
+    try std.testing.expect(fin.frame.stream.fin);
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = &.{},
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(!try connection
+        .requestCompletedLocalStreamRelease(0));
+    try std.testing.expect(!connection.localStreamClosed(0));
+
+    // Repeating the earlier data ACK cannot stand in for FIN delivery.
+    _ = connection.markPacketAcknowledged(0);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    try std.testing.expect(!connection.localStreamClosed(0));
+
+    try std.testing.expect(connection.markPacketAcknowledged(1));
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expect(connection.localStreamClosed(0));
+}
+
 test "QUIC local stream retirement waits for FIN ACK and ignores late frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

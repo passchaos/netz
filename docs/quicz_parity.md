@@ -1696,6 +1696,14 @@ without consuming a stream slot, flow credit, packet number, or recovery state.
 A real UDP regression restores the window and sends that exact retained byte;
 batch sends already performed their full-packet congestion preflight before
 stream materialization.
+Zero-length FIN acknowledgement is independently owned as well. Netz recovery
+retains complete encoded STREAM frames, so ACKing an earlier data-only packet
+cannot satisfy a later empty FIN, matching the lifecycle correction audited in
+current `/nav_env/Work/quiche`. A focused regression ACKs the data packet,
+sends FIN in its own packet, requests local stream retirement after the peer
+receive half closes, and proves duplicate data ACKs leave the FIN recovery
+payload and stream state intact; only ACKing the FIN packet releases recovery
+and completes the retained retirement request.
 
 ## Known blockers before declaring the goal complete
 
