@@ -16,6 +16,10 @@ pub fn finish(
     connection: *quic.one_rtt.Connection,
     streams: *webtransport.StreamRegistry,
 ) control_mod.Error!void {
+    if (control.observeConnection(connection)) {
+        report(control);
+        return;
+    }
     control.capsule_error_pending = true;
     _ = try control.rejectInvalidCapsule(connection);
     try control_mod.terminateStreams(connection, streams);
@@ -29,6 +33,10 @@ pub fn finishWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) (control_mod.Error || quic.runtime.ReceiveTimeoutError)!void {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    if (control.observeConnection(connection)) {
+        report(control);
+        return;
+    }
     control.capsule_error_pending = true;
     _ = try control.rejectInvalidCapsuleWithDeadline(connection, deadline);
     try control_mod.terminateStreamsWithDeadline(connection, streams, deadline);
@@ -42,6 +50,10 @@ pub fn finishOnce(
     connection: *quic.one_rtt.Connection,
     streams: *webtransport.StreamRegistry,
 ) control_mod.Error!bool {
+    if (control.observeConnection(connection)) {
+        report(control);
+        return true;
+    }
     control.capsule_error_pending = true;
     if (try control.tryRejectInvalidCapsule(connection)) return false;
     if (try control_mod.terminateStreamsOnce(connection, streams) == .submitted) {

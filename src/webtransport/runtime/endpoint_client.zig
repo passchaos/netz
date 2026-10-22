@@ -16,6 +16,7 @@ const handshake_stream = @import("stream.zig");
 const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
 const terminal = @import("endpoint_client/terminal.zig");
+const connection_lifecycle = @import("connection_lifecycle.zig");
 
 const net = std.Io.net;
 
@@ -150,6 +151,8 @@ pub const Session = struct {
         payload: []const u8,
     ) Error!void {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try self.control.ensureOpen();
         try client.h3.sendConnectDatagram(self.session_id.value, payload);
     }
@@ -178,6 +181,8 @@ pub const Session = struct {
         deadline: std.Io.Clock.Timestamp,
     ) TimeoutError!void {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try self.control.ensureOpen();
         try client.h3.sendConnectDatagramWithDeadline(
             self.session_id.value,
@@ -216,6 +221,8 @@ pub const Session = struct {
         direction: webtransport.StreamDirection,
     ) Error!u62 {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try self.control.ensureOpen();
         const connection = &client.h3.established.connection;
         const stream_id: u62 = @intCast(switch (direction) {
@@ -240,6 +247,8 @@ pub const Session = struct {
         fin: bool,
     ) Error!void {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try self.control.ensureOpen();
         try handshake_stream.send(
             &client.h3.established.connection,
@@ -286,6 +295,8 @@ pub const Session = struct {
     ) TimeoutError!void {
         committed.* = 0;
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try self.control.ensureOpen();
         try handshake_stream.sendWithDeadline(
             &client.h3.established.connection,
@@ -306,6 +317,8 @@ pub const Session = struct {
         code: u32,
     ) Error!void {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try incremental_stream.reset(
             &client.h3.established.connection,
             &self.streams,
@@ -321,6 +334,8 @@ pub const Session = struct {
         code: u32,
     ) Error!void {
         try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
         try incremental_stream.stop(
             &client.h3.established.connection,
             &self.streams,
@@ -336,6 +351,8 @@ pub const Session = struct {
         reason: []const u8,
     ) Error!void {
         try self.validateOwner(client);
+        _ = client.observeConnection();
+        defer _ = client.observeConnection();
         if (self.control.local_close_sent or
             self.control.local_close_failed) return;
         var storage: [4 + session_control.max_close_reason + 16]u8 = undefined;
@@ -363,6 +380,20 @@ pub const Client = struct {
     max_sessions: usize,
     sessions: std.AutoHashMapUnmanaged(u62, *Session) = .empty,
     last_ready_session_id: ?u62 = null,
+
+    fn observeConnection(self: *Client) bool {
+        if (!connection_lifecycle.terminating(&self.h3.established.connection)) return false;
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |session_ptr| {
+            _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3);
+            session_ptr.*.close_response_pending = false;
+        }
+        return true;
+    }
+
+    fn ensureConnectionOpen(self: *Client) Error!void {
+        if (self.observeConnection()) return error.ConnectionClosed;
+    }
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -622,7 +653,9 @@ pub const Client = struct {
         application_error_code: u62,
         reason: []const u8,
     ) Error!void {
-        try self.h3.closeConnection(application_error_code, reason);
+        if (reason.len > connection_lifecycle.max_close_reason) return error.InvalidSessionState;
+        defer _ = self.observeConnection();
+        try self.h3.established.connection.closeApplication(application_error_code, reason);
     }
 
     pub fn openSession(
@@ -713,6 +746,8 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) TimeoutError!OpenResult {
         try validateSessionOptions(options);
+        try self.ensureConnectionOpen();
+        defer _ = self.observeConnection();
         const peer = if (self.h3.control.settings.received)
             self.h3.control.settings.peer
         else if (deadline) |absolute|
@@ -803,6 +838,7 @@ pub const Client = struct {
             .streams = streams,
             .control = control,
         };
+        connection_lifecycle.activate(&session_value.control, &self.h3);
         self.sessions.putAssumeCapacityNoClobber(stream_id, session_value);
         return .{ .accepted = session_value };
     }
@@ -921,6 +957,7 @@ pub const Client = struct {
         session_id: webtransport.SessionId,
         stream_buffer: []u8,
     ) Error!?Event {
+        try self.ensureConnectionOpen();
         if (stream_buffer.len == 0) return error.BufferTooShort;
         const session_value = self.session(session_id) orelse
             return error.InvalidSessionState;
@@ -932,6 +969,7 @@ pub const Client = struct {
         session_value: *Session,
         stream_buffer: []u8,
     ) Error!?Event {
+        try self.ensureConnectionOpen();
         const session_id = session_value.session_id;
         // Retain the detached CONNECT association until removal: late bytes
         // after CLOSE still require H3_MESSAGE_ERROR on this stream.
@@ -1009,6 +1047,7 @@ pub const Client = struct {
         self: *Client,
         stream_buffer: []u8,
     ) Error!?AnyEvent {
+        try self.ensureConnectionOpen();
         if (stream_buffer.len == 0) return error.BufferTooShort;
         return round_robin.poll(
             u62,
@@ -1042,6 +1081,7 @@ pub const Client = struct {
         stream_buffer: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) TimeoutError!Event {
+        defer _ = self.observeConnection();
         _ = try deadline_policy.usableAwake(
             self.h3.established.connection.endpoint.io,
             deadline,
@@ -1077,6 +1117,7 @@ pub const Client = struct {
         stream_buffer: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) TimeoutError!AnyEvent {
+        defer _ = self.observeConnection();
         _ = try deadline_policy.usableAwake(
             self.h3.established.connection.endpoint.io,
             deadline,
@@ -1274,4 +1315,5 @@ fn findHeader(
 
 test {
     _ = @import("endpoint_client/terminal_tests.zig");
+    _ = @import("endpoint_client/connection_close_tests.zig");
 }

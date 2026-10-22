@@ -7,6 +7,7 @@ const webtransport = @import("../../mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const association = @import("../stream_association.zig");
+const connection_lifecycle = @import("../connection_lifecycle.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error;
 
@@ -14,6 +15,7 @@ pub fn terminateStreams(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
 ) Error!void {
+    if (connection_lifecycle.terminating(connection)) return;
     for (registry.registered()) |*stream| {
         const has_send_side = stream.direction == .bidirectional or
             stream.locally_initiated;
@@ -61,6 +63,7 @@ pub fn terminateStreamsWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!void {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    if (connection_lifecycle.terminating(connection)) return;
     for (registry.registered()) |*stream| {
         const has_send_side = stream.direction == .bidirectional or
             stream.locally_initiated;
@@ -112,6 +115,7 @@ pub fn terminateStreamsOnce(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
 ) Error!TerminateProgress {
+    if (connection_lifecycle.terminating(connection)) return .complete;
     for (registry.registered()) |*stream| {
         const has_send_side = stream.direction == .bidirectional or
             stream.locally_initiated;

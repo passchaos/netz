@@ -22,6 +22,7 @@ pub const OwnedHandshakeStream = struct {
 };
 
 const association = @import("stream_association.zig");
+const connection_lifecycle = @import("connection_lifecycle.zig");
 pub fn initRegistry(
     allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
@@ -1527,6 +1528,7 @@ fn pollInternal(
     max_stream_bytes: usize,
     single_attempt: bool,
 ) Error!?OwnedHandshakeStream {
+    if (connection_lifecycle.terminating(connection)) return error.ConnectionClosed;
     const drained = try association.drainAbandonedReceives(
         connection,
         registry,

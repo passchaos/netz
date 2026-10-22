@@ -207,3 +207,30 @@ test "WebTransport endpoint server retries malformed Capsule cancellation after 
     try std.testing.expectEqual(@as(usize, 2), observed.calls);
     try fixture.expectCancellation();
 }
+
+test "WebTransport endpoint server suppresses all session events after QUIC termination" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    for (&fixture.sessions) |*session| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(std.testing.allocator);
+        try (http3.Datagram{
+            .quarter_stream_id = session.session_id.quarterStreamId(),
+            .payload = "queued",
+        }).write(&encoded, std.testing.allocator);
+        try fixture.h3.connect_datagrams.route(encoded.items);
+        session.close_response_pending = true;
+    }
+    fixture.h3.established.connection.failClosedApplication(99, "closed");
+    const packet_number = fixture.h3.established.connection.next_packet_number;
+    for (&fixture.sessions, 0..) |*session, index| {
+        try std.testing.expect((try fixture.poll(index)) == null);
+        try std.testing.expect(session.control.connection_terminated and session.control.state.closed);
+        try std.testing.expect(!session.close_response_pending);
+        try std.testing.expectEqual(@as(usize, 0), try fixture.h3.connect_datagrams.queuedCount(session.session_id.value));
+    }
+    try std.testing.expectEqual(packet_number, fixture.h3.established.connection.next_packet_number);
+}

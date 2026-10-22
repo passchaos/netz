@@ -6,6 +6,7 @@
 const http3 = @import("../../../http3/mod.zig");
 const webtransport = @import("../../mod.zig");
 const session_control = @import("../session_control.zig");
+const connection_lifecycle = @import("../connection_lifecycle.zig");
 
 pub fn advanceOnce(
     h3: *http3.runtime.HandshakeClient,
@@ -13,6 +14,10 @@ pub fn advanceOnce(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
 ) session_control.Error!session_control.TerminateProgress {
+    if (connection_lifecycle.observe(control, h3)) {
+        close_response_pending.* = false;
+        return .complete;
+    }
     if (try control.tryRejectPostTerminalData(&h3.established.connection)) {
         close_response_pending.* = false;
         return .submitted;
@@ -46,6 +51,10 @@ pub fn finish(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
 ) session_control.Error!void {
+    if (connection_lifecycle.observe(control, h3)) {
+        close_response_pending.* = false;
+        return;
+    }
     if (control.capsule_error_pending) {
         _ = try control.rejectInvalidCapsule(&h3.established.connection);
         close_response_pending.* = false;

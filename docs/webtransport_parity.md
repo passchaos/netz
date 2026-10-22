@@ -915,6 +915,22 @@ Five real-UDP regressions exercise both roles, cancellation timeout, cleanup
 timeout, preserved CLOSE metadata, and bounded dispatcher progress through a
 production Extended CONNECT exchange with preconfigured packet-protection keys.
 
+Handshake-backed sessions now observe QUIC closing, draining and closed state
+at packet, control and application receive boundaries. Connection termination
+closes their logical Session state and makes unfulfilled reads fail with
+ConnectionClosed; it does not manufacture a normal WebTransport CLOSE event.
+Accepted WebTransport DATAGRAM associations opt into connection-close queue
+discard. A direct DATAGRAM receive already fulfilled before the close frame in
+an ordered packet retains its completed result, then exposes terminal state to
+every following operation. Incremental and complete stream readers stop before
+copying data from a terminal connection. Previously decoded CLOSE metadata and
+pending malformed-Capsule notifications remain observable even when transport
+termination makes further FIN/RESET cleanup impossible. Shared clients update
+all accepted Sessions and permit explicit removal after close; shared servers
+suppress stale application events while continuing their typed connection-close
+event path. Regressions cover both endpoint roles, buffered payloads, both
+DATAGRAM/close frame orders, whole/incremental stream reads and shared Sessions.
+
 The 1024-byte reason limit now belongs to the core WebTransport capsule codec
 and is reused by the incremental runtime, so standalone writers and parsers
 cannot create or accept a CLOSE capsule that the session state machine would

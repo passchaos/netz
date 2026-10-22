@@ -8,6 +8,7 @@ const http3 = @import("../../../../http3/mod.zig");
 const quic = @import("../../../../quic/mod.zig");
 const control_mod = @import("../../session_control.zig");
 const handshake_stream = @import("../../stream.zig");
+const connection_lifecycle = @import("../../connection_lifecycle.zig");
 
 pub const Role = enum { client, server };
 
@@ -22,6 +23,8 @@ pub const Pair = struct {
         errdefer self.endpoint.deinit();
         const keys = quic.protection.deriveAes128Keys([_]u8{0xb1} ** quic.protection.secret_len);
         const settings = webtransport.defaultSettings(.{});
+        var parameters = quic.practical_transport_parameters;
+        parameters.max_datagram_frame_size = 1200;
         self.client.h3 = try http3.runtime.HandshakeClient.initPreconfigured(
             allocator,
             io,
@@ -34,6 +37,8 @@ pub const Pair = struct {
                 .send_keys = keys,
                 .local_connection_id = "wt-owned-client",
                 .peer_connection_id = "wt-owned-server",
+                .local_transport_parameters = parameters,
+                .peer_transport_parameters = parameters,
                 .one_rtt = .{ .enable_pacing = false },
             },
         );
@@ -47,6 +52,8 @@ pub const Pair = struct {
                 .send_keys = keys,
                 .local_connection_id = "wt-owned-server",
                 .peer_connection_id = "wt-owned-client",
+                .local_transport_parameters = parameters,
+                .peer_transport_parameters = parameters,
                 .one_rtt = .{ .enable_pacing = false },
             },
         );
@@ -116,6 +123,8 @@ pub const Pair = struct {
             .streams = server_streams,
             .control = try control_mod.Control.init(allocator, session_id),
         };
+        connection_lifecycle.activate(&self.client.control, &self.client.h3);
+        connection_lifecycle.activate(&self.server.control, &self.server.h3);
     }
 
     pub fn deinit(self: *Pair) void {
@@ -162,7 +171,8 @@ pub const Pair = struct {
         // Stream association is lazy until the first application write.
         try self.client.sendStream(id, "prefix", false);
         const deadline = std.Io.Clock.Timestamp.fromNow(self.endpoint.io, .{ .clock = .awake, .raw = .fromSeconds(1) });
-        while ((self.server.h3.established.connection.availableReceivedStream(id) orelse @as([]const u8, &.{})).len == 0) {
+        const expected_offset = self.client.h3.established.connection.sendStreamStats(id).?.highest_sent_offset;
+        while ((if (self.server.h3.established.connection.recvStreamStats(id)) |stats| stats.highest_received_offset else 0) < expected_offset) {
             try self.receiveProgress(.server, deadline);
         }
         return id;

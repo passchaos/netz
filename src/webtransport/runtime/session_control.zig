@@ -97,6 +97,7 @@ pub const Control = struct {
     capsule_error_pending: bool = false,
     capsule_error_rejected: bool = false,
     capsule_error_reported: bool = false,
+    connection_terminated: bool = false,
 
     h3_stage: H3Stage = .frame_type,
     h3_varint: VarIntDecoder = .{},
@@ -187,6 +188,7 @@ pub const Control = struct {
     }
 
     pub fn ensureOpen(self: Control) Error!void {
+        if (self.connection_terminated) return error.ConnectionClosed;
         if (!self.state.established or self.state.closed or
             self.local_drain_started or self.local_close_started or
             self.capsule_error_pending)
@@ -196,8 +198,18 @@ pub const Control = struct {
     }
 
     pub fn ensureDatagramReceiveOpen(self: *const Control) Error!void {
+        if (self.connection_terminated) return error.ConnectionClosed;
         if (self.state.closed) return error.ConnectDatagramAssociationClosed;
         try self.ensureOpen();
+    }
+
+    pub fn observeConnection(self: *Control, connection: *const quic.one_rtt.Connection) bool {
+        if (self.connection_terminated) return true;
+        if (!connection.closing() and !connection.draining() and !connection.closed()) return false;
+        self.connection_terminated = true;
+        self.recordLocalCloseFailure(0);
+        self.terminal_reported = true;
+        return true;
     }
 
     pub fn beginLocalClose(self: *Control) Error!void {
@@ -304,6 +316,7 @@ pub const Control = struct {
         connection: *quic.one_rtt.Connection,
         single_attempt: bool,
     ) Error!?Event {
+        if (self.observeConnection(connection)) return error.ConnectionClosed;
         const available = connection.availableReceivedStream(
             self.session_id.value,
         ) orelse &.{};

@@ -5,6 +5,7 @@ const webtransport = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const association = @import("stream_association.zig");
+const connection_lifecycle = @import("connection_lifecycle.zig");
 
 pub const Error = association.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -734,6 +735,7 @@ fn pollInternal(
     single_attempt: bool,
     sessions: ?association.SessionLookup,
 ) Error!?Read {
+    if (connection_lifecycle.terminating(connection)) return error.ConnectionClosed;
     const drained = try association.drainAbandonedReceives(
         connection,
         registry,
@@ -832,6 +834,7 @@ fn pollStream(
     transport_progressed: *bool,
     sessions: ?association.SessionLookup,
 ) Error!?Read {
+    if (connection_lifecycle.terminating(connection)) return error.ConnectionClosed;
     // A session can mix whole-stream and incremental consumption as long as a
     // single receive direction never changes mode. Skip streams claimed by
     // the whole-stream reader so an already-consumed stream cannot prevent
