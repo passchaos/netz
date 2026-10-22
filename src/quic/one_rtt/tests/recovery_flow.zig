@@ -6008,7 +6008,7 @@ test "QUIC committed receive credit batches streams fairly" {
     );
 }
 
-test "QUIC discarded stopped receive bytes restore only connection credit" {
+test "QUIC STOP_SENDING automatically restores only connection credit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -6039,9 +6039,9 @@ test "QUIC discarded stopped receive bytes restore only connection credit" {
         .initial_receive_max_data = 8,
         .receive_window = 8,
         .max_receive_window = 8,
-        .initial_receive_max_stream_data = 8,
-        .stream_receive_window = 8,
-        .max_stream_receive_window = 8,
+        .initial_receive_max_stream_data = 12,
+        .stream_receive_window = 12,
+        .max_stream_receive_window = 12,
         .initial_receive_max_streams_bidi = 1,
         .local_endpoint = .server,
         .enable_pacing = false,
@@ -6056,6 +6056,10 @@ test "QUIC discarded stopped receive bytes restore only connection credit" {
         .not_ect,
     );
     try connection.sendStopSending(0, 41);
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.recvStreamStats(0).?.bytes_read,
+    );
     var stop_datagram = try sender.receiveBytes();
     defer stop_datagram.deinit(allocator);
     var stop_packet = try one_rtt.openReceivedBytes(
@@ -6069,7 +6073,7 @@ test "QUIC discarded stopped receive bytes restore only connection credit" {
     );
     defer stop_packet.deinit(allocator);
     try std.testing.expectEqual(
-        @as(usize, 6),
+        @as(usize, 0),
         try connection.discardStoppedReceived(0),
     );
     try std.testing.expectEqual(
@@ -6077,7 +6081,7 @@ test "QUIC discarded stopped receive bytes restore only connection credit" {
         connection.recvStreamStats(0).?.bytes_read,
     );
     try std.testing.expectEqual(
-        @as(u64, 8),
+        @as(u64, 12),
         connection.recvStreamStats(0).?.receive_limit,
     );
     var credit_datagram = try sender.receiveBytes();
@@ -6097,6 +6101,44 @@ test "QUIC discarded stopped receive bytes restore only connection credit" {
     try std.testing.expectEqual(
         @as(u64, 14),
         credit.frames[0].max_data.maximum_data,
+    );
+
+    // Data sent before the peer processes STOP_SENDING can still arrive.
+    // It is flow-controlled, discarded immediately, and returned only to the
+    // connection window so a sibling stream can use the credit.
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 6,
+            .data = "789012",
+        } }},
+        null,
+        .not_ect,
+    );
+    const late_stats = connection.recvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 12), late_stats.bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), late_stats.available_bytes);
+    try std.testing.expectEqual(@as(u64, 12), late_stats.receive_limit);
+
+    var late_credit_datagram = try sender.receiveBytes();
+    defer late_credit_datagram.deinit(allocator);
+    var late_credit = try one_rtt.openReceivedBytes(
+        &sender,
+        late_credit_datagram.from,
+        late_credit_datagram.bytes,
+        keys,
+        "discard-client".len,
+        credit.packet.packet_number + 1,
+        8,
+    );
+    defer late_credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), late_credit.frames.len);
+    try std.testing.expect(late_credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 20),
+        late_credit.frames[0].max_data.maximum_data,
     );
 }
 
@@ -6173,7 +6215,7 @@ test "QUIC stopped reset settles final-size connection credit across gaps" {
         .not_ect,
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 0),
         try connection.discardStoppedReceived(0),
     );
     const stats = connection.recvStreamStats(0).?;
@@ -6290,7 +6332,7 @@ test "QUIC discarded reset restores only connection credit" {
     );
 }
 
-test "QUIC stopped empty receive clears pending stream credit" {
+test "QUIC automatic stopped connection credit retries from timer" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -6324,7 +6366,7 @@ test "QUIC stopped empty receive clears pending stream credit" {
         .initial_receive_max_stream_data = 8,
         .stream_receive_window = 8,
         .max_stream_receive_window = 8,
-        .initial_receive_max_streams_bidi = 1,
+        .initial_receive_max_streams_bidi = 2,
         .local_endpoint = .server,
         .enable_pacing = false,
     });
@@ -6337,7 +6379,30 @@ test "QUIC stopped empty receive clears pending stream credit" {
         null,
         .not_ect,
     );
+    var failed = ObservedBatchSend{
+        .delegate = connection.endpoint.io,
+        // STOP_SENDING reaches the socket; the immediately following
+        // connection-credit update fails and must be retried by the timer.
+        .fail_on_call = 2,
+    };
+    var failed_vtable = connection.endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    connection.endpoint.io = .{
+        .userdata = &failed,
+        .vtable = &failed_vtable,
+    };
+    defer connection.endpoint.io = failed.delegate;
     try connection.sendStopSending(0, 44);
+    try std.testing.expectEqual(@as(usize, 2), failed.calls);
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.recvStreamStats(0).?.bytes_read,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try connection.discardStoppedReceived(0),
+    );
+
     var stop_datagram = try sender.receiveBytes();
     defer stop_datagram.deinit(allocator);
     var stop_packet = try one_rtt.openReceivedBytes(
@@ -6350,23 +6415,6 @@ test "QUIC stopped empty receive clears pending stream credit" {
         8,
     );
     defer stop_packet.deinit(allocator);
-
-    var failed = ObservedBatchSend{
-        .delegate = connection.endpoint.io,
-        .fail_after_prefix = 0,
-    };
-    var failed_vtable = connection.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{
-        .userdata = &failed,
-        .vtable = &failed_vtable,
-    };
-    defer connection.endpoint.io = failed.delegate;
-    try connection.commitReceivedThrough(0, 6);
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        try connection.discardStoppedReceived(0),
-    );
 
     connection.endpoint.io = failed.delegate;
     const retry = connection.nextTimerDeadline() orelse
@@ -6395,8 +6443,73 @@ test "QUIC stopped empty receive clears pending stream credit" {
         credit.frames[0].max_data.maximum_data,
     );
     try std.testing.expectEqual(
-        @as(u64, 14),
+        @as(u64, 8),
         connection.recvStreamStats(0).?.receive_limit,
+    );
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{ .stream_id = 4, .data = "abcdef" } }},
+        null,
+        .not_ect,
+    );
+    var observed = ObservedBatchSend{
+        .delegate = connection.endpoint.io,
+    };
+    var observed_vtable = connection.endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    connection.endpoint.io = .{
+        .userdata = &observed,
+        .vtable = &observed_vtable,
+    };
+    try connection.trySendStopSending(4, 45);
+    try std.testing.expectEqual(@as(usize, 1), observed.calls);
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.recvStreamStats(4).?.bytes_read,
+    );
+    connection.endpoint.io = observed.delegate;
+
+    var second_stop_datagram = try sender.receiveBytes();
+    defer second_stop_datagram.deinit(allocator);
+    var second_stop = try one_rtt.openReceivedBytes(
+        &sender,
+        second_stop_datagram.from,
+        second_stop_datagram.bytes,
+        keys,
+        "stale-credit-client".len,
+        credit.packet.packet_number + 1,
+        8,
+    );
+    defer second_stop.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), second_stop.frames.len);
+    try std.testing.expect(second_stop.frames[0] == .stop_sending);
+
+    const second_retry = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.receive_credit,
+        second_retry.kind,
+    );
+    _ = try connection.serviceNextTimerAt(second_retry.deadline_ns);
+    var second_credit_datagram = try sender.receiveBytes();
+    defer second_credit_datagram.deinit(allocator);
+    var second_credit = try one_rtt.openReceivedBytes(
+        &sender,
+        second_credit_datagram.from,
+        second_credit_datagram.bytes,
+        keys,
+        "stale-credit-client".len,
+        second_stop.packet.packet_number + 1,
+        8,
+    );
+    defer second_credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), second_credit.frames.len);
+    try std.testing.expect(second_credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 20),
+        second_credit.frames[0].max_data.maximum_data,
     );
 }
 

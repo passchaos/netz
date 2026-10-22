@@ -501,6 +501,11 @@ const StreamRecvFlowEntry = struct {
     }
 };
 
+const AbandonedReceiveResult = struct {
+    discarded: usize,
+    released_connection_credit: u64,
+};
+
 const RecvStreamPreflightEntry = struct {
     stream_id: u64,
     flow_limit: u64,
@@ -7462,6 +7467,9 @@ pub const Connection = struct {
         );
     }
 
+    /// Send STOP_SENDING and immediately return every already-received byte to
+    /// connection flow control. Later STREAM/RESET data is likewise consumed
+    /// without extending this abandoned stream's receive window.
     pub fn sendStopSending(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
         try self.sendStopSendingAt(stream_id, application_error_code, null);
     }
@@ -7619,7 +7627,16 @@ pub const Connection = struct {
             } };
             count += 1;
         }
-        if (count == 0) return;
+        if (count == 0) {
+            if (recv_stream.stop_sending_sent != null) {
+                _ = self.discardAbandonedReceivedAt(
+                    recv_stream,
+                    sent_time_ns orelse self.monotonicNowNs(),
+                    sent_time_ns == null,
+                );
+            }
+            return;
+        }
         if (sent_time_ns) |now_ns|
             try self.sendTrackedFramesEcnAt(
                 frames[0..count],
@@ -7642,6 +7659,13 @@ pub const Connection = struct {
                 .application_error_code = application_error_code,
             };
         }
+        if (recv_stream.stop_sending_sent != null) {
+            _ = self.discardAbandonedReceivedAt(
+                recv_stream,
+                sent_time_ns orelse self.monotonicNowNs(),
+                sent_time_ns == null,
+            );
+        }
     }
 
     fn sendStopSendingAt(
@@ -7654,7 +7678,14 @@ pub const Connection = struct {
         var recv_stream = try self.recvStreamFlow(stream_id);
         const info: StopSendingInfo = .{ .application_error_code = application_error_code };
         if (recv_stream.stop_sending_sent) |existing| {
-            if (existing.application_error_code == application_error_code) return;
+            if (existing.application_error_code == application_error_code) {
+                _ = self.discardAbandonedReceivedAt(
+                    recv_stream,
+                    sent_time_ns orelse self.monotonicNowNs(),
+                    sent_time_ns == null,
+                );
+                return;
+            }
         }
 
         const frames = [_]quic.Frame{.{ .stop_sending = .{
@@ -7666,6 +7697,11 @@ pub const Connection = struct {
         else
             try self.sendTrackedFrames(&frames);
         recv_stream.stop_sending_sent = info;
+        _ = self.discardAbandonedReceivedAt(
+            recv_stream,
+            sent_time_ns orelse self.monotonicNowNs(),
+            sent_time_ns == null,
+        );
     }
 
     pub fn streamResetReceived(self: Connection, stream_id: u64) ?StreamResetInfo {
@@ -13648,6 +13684,9 @@ pub const Connection = struct {
                         self.recv_data_total = next_total;
                     }
                     recv_stream.highest_received_end = @max(recv_stream.highest_received_end, stream_end);
+                    if (recv_stream.stop_sending_sent != null) {
+                        _ = self.consumeAbandonedReceived(recv_stream);
+                    }
                 },
                 else => {},
             }
@@ -14561,6 +14600,9 @@ pub const Connection = struct {
             .final_size = final_size,
             .reliable_size = reliable_size,
         };
+        if (recv_stream.stop_sending_sent != null) {
+            _ = self.consumeAbandonedReceived(recv_stream);
+        }
     }
 
     fn validateResetIdentity(
@@ -15319,14 +15361,14 @@ pub const Connection = struct {
         };
     }
 
-    /// Discard a contiguous receive prefix after the application has sent
-    /// STOP_SENDING. Only connection-level credit is replenished: extending
-    /// this stream's MAX_STREAM_DATA would invite additional bytes that the
-    /// application has explicitly abandoned. A received RESET_STREAM charges
-    /// its complete final size to connection flow control even when gaps remain;
-    /// settle that stream-level charge here while retaining its reset metadata
-    /// for the protocol adapter to report. The return value is the number of
-    /// contiguous buffered bytes removed.
+    /// Idempotently settle receive state after STOP_SENDING. The transport does
+    /// this automatically when STOP_SENDING reaches the socket and whenever
+    /// later STREAM/RESET data arrives; this compatibility hook lets protocol
+    /// adapters explicitly confirm the boundary. Only connection-level credit
+    /// is replenished: extending this abandoned stream's MAX_STREAM_DATA would
+    /// invite more bytes. RESET_STREAM's final size is still charged and then
+    /// released while its metadata remains available to the adapter. The return
+    /// value is any contiguous buffered prefix removed by this call.
     pub fn discardStoppedReceived(
         self: *Connection,
         stream_id: u64,
@@ -15356,6 +15398,44 @@ pub const Connection = struct {
         self: *Connection,
         recv_stream: *StreamRecvFlowEntry,
     ) Error!usize {
+        return self.discardAbandonedReceivedAt(
+            recv_stream,
+            self.monotonicNowNs(),
+            true,
+        );
+    }
+
+    fn discardAbandonedReceivedAt(
+        self: *Connection,
+        recv_stream: *StreamRecvFlowEntry,
+        now_ns: u64,
+        flush_now: bool,
+    ) usize {
+        const result = self.consumeAbandonedReceived(recv_stream);
+        if (result.discarded == 0 and
+            result.released_connection_credit == 0)
+        {
+            if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
+            return 0;
+        }
+        if (flush_now) {
+            self.flushPendingReceiveCreditAt(now_ns) catch |err| {
+                self.scheduleReceiveCreditRetry(err, now_ns);
+            };
+        } else {
+            self.scheduleReceiveCreditRetry(
+                error.CongestionLimited,
+                now_ns,
+            );
+        }
+        if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
+        return result.discarded;
+    }
+
+    fn consumeAbandonedReceived(
+        self: *Connection,
+        recv_stream: *StreamRecvFlowEntry,
+    ) AbandonedReceiveResult {
         const discarded = recv_stream.recv_state.available().len;
         const outstanding_credit = recv_stream.flow.highest_received -|
             recv_stream.flow.consumed;
@@ -15364,10 +15444,11 @@ pub const Connection = struct {
             std.debug.assert(self.pending_receive_stream_credits != 0);
             self.pending_receive_stream_credits -= 1;
         }
-        if (discarded == 0 and outstanding_credit == 0) {
-            if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
-            return 0;
-        }
+        const result: AbandonedReceiveResult = .{
+            .discarded = discarded,
+            .released_connection_credit = outstanding_credit,
+        };
+        if (discarded == 0 and outstanding_credit == 0) return result;
         if (self.recv_flow.consume(outstanding_credit) != null) {
             self.pending_max_data = true;
         }
@@ -15376,13 +15457,8 @@ pub const Connection = struct {
         // Keep the actual reassembly cursor contiguous for overlap and
         // final-size validation of reordered packets.
         recv_stream.flow.consumed = recv_stream.flow.highest_received;
-        try recv_stream.recv_state.consume(discarded);
-        const now_ns = self.monotonicNowNs();
-        self.flushPendingReceiveCreditAt(now_ns) catch |err| {
-            self.scheduleReceiveCreditRetry(err, now_ns);
-        };
-        if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
-        return discarded;
+        recv_stream.recv_state.consume(discarded) catch unreachable;
+        return result;
     }
 
     fn releaseReceivedCapacityAt(

@@ -2303,6 +2303,24 @@ test "WebTransport whole-stream stopped reset remains observable" {
     stream.stop_sent = .fromHttp3(stop_code);
     var stop_datagram = try sender.receiveBytes();
     defer stop_datagram.deinit(allocator);
+    var stop_credit_datagram = try sender.receiveBytes();
+    defer stop_credit_datagram.deinit(allocator);
+    var stop_credit = try quic.one_rtt.openReceivedBytes(
+        &sender,
+        stop_credit_datagram.from,
+        stop_credit_datagram.bytes,
+        keys,
+        "wt-reset-client".len,
+        1,
+        8,
+    );
+    defer stop_credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), stop_credit.frames.len);
+    try std.testing.expect(stop_credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 12),
+        stop_credit.frames[0].max_data.maximum_data,
+    );
 
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
@@ -2332,7 +2350,7 @@ test "WebTransport whole-stream stopped reset remains observable" {
         credit_datagram.bytes,
         keys,
         "wt-reset-client".len,
-        1,
+        stop_credit.packet.packet_number + 1,
         8,
     );
     defer credit.deinit(allocator);

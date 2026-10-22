@@ -411,23 +411,18 @@ test "WebTransport incremental poll rejects wrong-session bidi before sibling" {
     };
     try std.testing.expect(saw_reset);
     try std.testing.expect(saw_stop);
-    try std.testing.expectEqual(@as(u64, 0), quic.one_rtt.testing.receiveDataConsumed(&connection));
-    try std.testing.expect(registry.get(4) == null);
-
-    // The next bounded turn drains retained bytes and restores connection
-    // credit without also publishing an application event.
-    try std.testing.expect((try pollOnce(
-        &connection,
-        &registry,
-        session_id,
-        &out,
-    )) == null);
-    try std.testing.expectEqual(@as(u64, wrong_bytes.len), quic.one_rtt.testing.receiveDataConsumed(&connection));
+    try std.testing.expectEqual(
+        @as(u64, wrong_bytes.len),
+        quic.one_rtt.testing.receiveDataConsumed(&connection),
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         quic.one_rtt.testing.receiveStreamAvailableLen(&connection, 4).?,
     );
+    try std.testing.expect(registry.get(4) == null);
 
+    // The cancelled stream is already drained, so the next bounded turn can
+    // deliver the sibling instead of spending another turn on cleanup.
     const event = (try pollOnce(
         &connection,
         &registry,

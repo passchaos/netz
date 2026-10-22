@@ -1644,11 +1644,25 @@ test "WebTransport terminal sweep discovers buffered associated streams" {
     try std.testing.expect(connection.recvStreamStats(6).?.stop_sending_sent == null);
     try std.testing.expect(connection.recvStreamStats(8).?.stop_sending_sent == null);
     try std.testing.expect(connection.recvStreamStats(10).?.stop_sending_sent == null);
-    try std.testing.expectEqual(bidi.len, connection.availableReceivedStream(4).?.len);
-    try std.testing.expectEqual(uni.items.len, connection.availableReceivedStream(2).?.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.availableReceivedStream(4).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intCast(bidi.len)),
+        connection.recvStreamStats(4).?.bytes_read,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.availableReceivedStream(2).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intCast(uni.items.len)),
+        connection.recvStreamStats(2).?.bytes_read,
+    );
 
     // The blocking cleanup path uses the same discovery without relying on
-    // registry capacity or consuming the association prefix.
+    // registry capacity; STOP_SENDING then consumes the association prefix.
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
         1,
@@ -1670,8 +1684,12 @@ test "WebTransport terminal sweep discovers buffered associated streams" {
             .application_error_code,
     );
     try std.testing.expectEqual(
-        bidi.len,
+        @as(usize, 0),
         connection.availableReceivedStream(12).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intCast(bidi.len)),
+        connection.recvStreamStats(12).?.bytes_read,
     );
 }
 

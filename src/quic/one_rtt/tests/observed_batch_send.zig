@@ -6,6 +6,7 @@ const net = std.Io.net;
 pub const ObservedBatchSend = struct {
     delegate: std.Io,
     fail_after_prefix: ?usize = null,
+    fail_on_call: ?usize = null,
     calls: usize = 0,
     last_message_count: usize = 0,
     last_control_len: usize = 0,
@@ -23,6 +24,9 @@ pub const ObservedBatchSend = struct {
             0
         else
             messages[0].control.len;
+        if (self.fail_on_call == self.calls) {
+            return .{ error.NetworkDown, 0 };
+        }
         const configured_prefix = self.fail_after_prefix orelse {
             return self.delegate.vtable.netSend(
                 self.delegate.userdata,

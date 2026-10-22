@@ -1652,6 +1652,17 @@ The role-neutral decoder therefore retains an empty token long enough to make
 that decision, while frame encoders and every public send path continue to
 reject constructing one. Real protected 1-RTT tests cover valid client receipt
 and empty/non-empty violations in both endpoint roles.
+Locally sending `STOP_SENDING` now transfers every outstanding receive byte
+back to connection flow control immediately, matching current
+`/nav_env/Work/s2n-quic`; the abandoned stream never receives new
+`MAX_STREAM_DATA` credit. STREAM bytes that were already in flight and a later
+RESET final size are still charged under RFC 9000 section 4.5, then consumed
+without becoming application-readable so sibling streams cannot be starved.
+Blocking cancellation sends an eligible `MAX_DATA` update immediately, while
+one-attempt APIs retain their single-submission boundary and schedule that
+credit through the connection timer. Tests cover buffered and late data, reset
+gaps, idempotent compatibility discard, and a failed credit send followed by
+timer-driven retry.
 
 ## Known blockers before declaring the goal complete
 
