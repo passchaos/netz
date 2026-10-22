@@ -321,8 +321,15 @@ both the CONNECT advertisement and the local ceiling applied to the remote
 CONNACK value. The outgoing complete-packet limit treats zero as unlimited and
 uses the smaller non-zero configured or negotiated value; an oversized
 forwarded PUBLISH is retired for that destination without terminating the
-bridge. Disabling outgoing RETAIN strips it from forwarded publications and
-remote state notifications in both MQTT 3.1.1 and MQTT 5. The default-on
+bridge. This also covers Session Present=true replay after the remote limit
+shrinks: the reconnect Session removes only the oversized QoS 1/2 PUBLISH,
+keeps the connection usable, and reports local Quota Exceeded `0x97` through
+the delivery observer. The outbound bridge propagates that legal reason to its
+source; its durable QoS 2 coordinator commits a target rejection before
+clearing the source transaction. A pending PUBREL is never discarded because
+the peer has already accepted that QoS 2 PUBLISH. Disabling outgoing RETAIN
+strips it from forwarded publications and remote state notifications in both
+MQTT 3.1.1 and MQTT 5. The default-on
 `bridge_attempt_unsubscribe` sends mapped remote filters after every outbound
 connection and waits for a successful UNSUBACK before forwarding, except for
 filters still used by the same bidirectional bridge. This prevents a persistent

@@ -149,14 +149,24 @@ pub fn Operations(comptime Self: type) type {
                         .connected => |connected| {
                             try self.noteTargetConnected(connected);
                             if (!connected.session_present) {
-                                target_result = try publishTarget(
+                                target_result = publishTarget(
                                     self,
                                     target_topic,
                                     source_publish,
                                     &properties,
                                     expiry_interval,
                                     received_at_ns,
-                                );
+                                ) catch |err| {
+                                    if (err == error.OutgoingPacketTooLarge) {
+                                        self.completeSource(
+                                            source_publish,
+                                            source_epoch,
+                                            0x97,
+                                        );
+                                        return;
+                                    }
+                                    return err;
+                                };
                                 switch (target_result) {
                                     .expired, .completed => {
                                         self.completeSource(
@@ -175,10 +185,24 @@ pub fn Operations(comptime Self: type) type {
                                 if (stats.queued_count == 0 and
                                     stats.inflight_count == 0)
                                 {
+                                    const reason_code = blk: {
+                                        if (!self.target_delivery.completed) {
+                                            break :blk @as(u8, 0);
+                                        }
+                                        if (self.target_delivery.packet_id !=
+                                            target_packet_id)
+                                        {
+                                            return error.TargetAcknowledgementMismatch;
+                                        }
+                                        const reason =
+                                            self.target_delivery.reason_code;
+                                        self.target_delivery.reset();
+                                        break :blk reason;
+                                    };
                                     self.completeSource(
                                         source_publish,
                                         source_epoch,
-                                        0,
+                                        reason_code,
                                     );
                                     return;
                                 }

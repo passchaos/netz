@@ -61,14 +61,27 @@ fn expectForwardProperties(
     );
 }
 
-fn runQoS1ReconnectCase(
+const QoS1ReconnectCase = struct {
     source_protocol: mqtt.ProtocolVersion,
     target_protocol: mqtt.ProtocolVersion,
     target_session_present: bool,
-    expire_before_reconnect: bool,
-    source_reconnects_while_pending: bool,
-    downgrade_after_reconnect: bool,
-) !void {
+    expire_before_reconnect: bool = false,
+    source_reconnects_while_pending: bool = false,
+    downgrade_after_reconnect: bool = false,
+    shrink_packet_after_reconnect: bool = false,
+};
+
+fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
+    const source_protocol = case_options.source_protocol;
+    const target_protocol = case_options.target_protocol;
+    const target_session_present = case_options.target_session_present;
+    const expire_before_reconnect = case_options.expire_before_reconnect;
+    const source_reconnects_while_pending =
+        case_options.source_reconnects_while_pending;
+    const downgrade_after_reconnect =
+        case_options.downgrade_after_reconnect;
+    const shrink_packet_after_reconnect =
+        case_options.shrink_packet_after_reconnect;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -95,6 +108,7 @@ fn runQoS1ReconnectCase(
         protocol: mqtt.ProtocolVersion,
         expire_before_reconnect: bool,
         reconnect_while_pending: bool,
+        expected_reason_code: u8,
         acked: *std.Io.Event,
         reconnected: *std.Io.Event,
         ping_count: usize = 0,
@@ -198,6 +212,13 @@ fn runQoS1ReconnectCase(
                             packet_id,
                             puback.ack.packet_id,
                         );
+                        try std.testing.expectEqual(
+                            if (self.protocol == .v5)
+                                self.expected_reason_code
+                            else
+                                0,
+                            puback.ack.reason_code,
+                        );
                         break;
                     },
                     else => return error.UnexpectedPacket,
@@ -216,6 +237,7 @@ fn runQoS1ReconnectCase(
         session_present: bool,
         expire_before_reconnect: bool,
         downgrade_after_reconnect: bool,
+        shrink_packet_after_reconnect: bool,
         first_received: *std.Io.Event,
         allow_reconnect: *std.Io.Event,
         first_packet_id: u16 = 0,
@@ -258,6 +280,23 @@ fn runQoS1ReconnectCase(
                 self.first_received.set(self.server.io);
                 self.allow_reconnect.waitUncancelable(self.server.io);
                 first.connection.shutdown() catch {};
+            }
+            if (self.shrink_packet_after_reconnect) {
+                var pending = try self.server.acceptPending(.{
+                    .protocol = self.protocol,
+                });
+                defer pending.deinit(self.server.allocator);
+                const connack_properties = [_]mqtt.Property{.{ .four_byte = .{
+                    .id = .maximum_packet_size,
+                    .value = 32,
+                } }};
+                try pending.connection.writeConnAck(.{
+                    .session_present = self.session_present,
+                    .properties = &connack_properties,
+                });
+                var disconnect = try pending.connection.readDisconnect();
+                defer disconnect.deinit(self.server.allocator);
+                return;
             }
             var second = try self.server.accept(.{
                 .protocol = self.protocol,
@@ -323,6 +362,10 @@ fn runQoS1ReconnectCase(
         .protocol = source_protocol,
         .expire_before_reconnect = expire_before_reconnect,
         .reconnect_while_pending = source_reconnects_while_pending,
+        .expected_reason_code = if (shrink_packet_after_reconnect)
+            0x97
+        else
+            0,
         .acked = &source_acked,
         .reconnected = &source_reconnected,
     };
@@ -333,6 +376,7 @@ fn runQoS1ReconnectCase(
         .session_present = target_session_present,
         .expire_before_reconnect = expire_before_reconnect,
         .downgrade_after_reconnect = downgrade_after_reconnect,
+        .shrink_packet_after_reconnect = shrink_packet_after_reconnect,
         .first_received = &target_first_received,
         .allow_reconnect = &allow_target_reconnect,
     };
@@ -464,32 +508,96 @@ fn runQoS1ReconnectCase(
 }
 
 test "outbound bridge resumes target QoS1 before acknowledging source" {
-    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, true, false, false, false);
-    try runQoS1ReconnectCase(.v5, .v5, true, false, false, false);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v3_1_1,
+        .target_protocol = .v3_1_1,
+        .target_session_present = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+    });
 }
 
 test "outbound bridge republishes QoS1 when target Session is lost" {
-    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, false, false, false, false);
-    try runQoS1ReconnectCase(.v5, .v5, false, false, false, false);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v3_1_1,
+        .target_protocol = .v3_1_1,
+        .target_session_present = false,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = false,
+    });
 }
 
 test "outbound bridge does not extend expiry across target reconnect" {
-    try runQoS1ReconnectCase(.v5, .v5, true, true, false, false);
-    try runQoS1ReconnectCase(.v5, .v5, false, true, false, false);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+        .expire_before_reconnect = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = false,
+        .expire_before_reconnect = true,
+    });
 }
 
 test "outbound bridge crosses MQTT protocol versions" {
-    try runQoS1ReconnectCase(.v3_1_1, .v5, true, false, false, false);
-    try runQoS1ReconnectCase(.v5, .v3_1_1, true, false, false, false);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v3_1_1,
+        .target_protocol = .v5,
+        .target_session_present = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v3_1_1,
+        .target_session_present = true,
+    });
 }
 
 test "outbound bridge reconnects source while target QoS1 is pending" {
-    try runQoS1ReconnectCase(.v5, .v5, true, false, true, false);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+        .source_reconnects_while_pending = true,
+    });
 }
 
 test "outbound bridge applies target capabilities after Session loss" {
-    try runQoS1ReconnectCase(.v5, .v5, false, false, false, true);
-    try runQoS1ReconnectCase(.v5, .v5, true, false, false, true);
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = false,
+        .downgrade_after_reconnect = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+        .downgrade_after_reconnect = true,
+    });
+}
+
+test "outbound bridge drops oversized publish after target reconnect" {
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = false,
+        .shrink_packet_after_reconnect = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+        .shrink_packet_after_reconnect = true,
+    });
 }
 
 test "outbound bridge routes between two brokers" {
@@ -1992,6 +2100,176 @@ test "outbound bridge reports target QoS2 capability rejection" {
                 .bridge_id = [_]u8{0x98} ** 16,
                 .dir = tmp.dir,
                 .sub_path = "qos2-capability.log",
+                .mode = .create,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!bridge.hasPendingDurableQoS2());
+    try bridge.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge rejects oversized QoS2 replay after reconnect" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x02},
+                &.{},
+            );
+            const packet_id = (try accepted.connection.writePublish(
+                "local/oversized/qos2",
+                &([_]u8{'x'} ** 64),
+                .{ .qos = .exactly_once },
+            )).?;
+            var pubrec = try accepted.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            try std.testing.expectEqual(@as(u8, 0x97), pubrec.ack.reason_code);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var publish = try first.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    mqtt.QoS.exactly_once,
+                    publish.publish.qos,
+                );
+                try first.connection.shutdown();
+            }
+            var resumed = try self.server.acceptPending(.{
+                .protocol = .v5,
+            });
+            defer resumed.deinit(self.server.allocator);
+            const connack_properties = [_]mqtt.Property{.{ .four_byte = .{
+                .id = .maximum_packet_size,
+                .value = 32,
+            } }};
+            try resumed.connection.writeConnAck(.{
+                .session_present = true,
+                .properties = &connack_properties,
+            });
+            // The coordinator must consume a local terminal rejection; the
+            // resumed target must not receive another oversized PUBLISH.
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{ .server = &source };
+    var target_peer = TargetPeer{ .server = &target };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer if (!source_joined) source_thread.join();
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer if (!target_joined) target_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "oversized-qos2-source",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "oversized-qos2-target",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .target_reconnect_policy = .{
+                .initial_delay = .fromMilliseconds(1),
+                .max_delay = .fromMilliseconds(8),
+            },
+            .rule = .{
+                .filter = "oversized/#",
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
+            },
+            .coordinator = .{
+                .bridge_id = [_]u8{0x99} ** 16,
+                .dir = tmp.dir,
+                .sub_path = "oversized-qos2.log",
                 .mode = .create,
             },
         },

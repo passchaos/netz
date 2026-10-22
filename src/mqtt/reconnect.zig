@@ -1145,6 +1145,8 @@ pub const SubscriptionOptions = ClientOptions;
 pub const PublishDelivery = struct {
     packet_id: ?u16,
     qos: mqtt.QoS,
+    /// Peer acknowledgement reason, or local Quota Exceeded (0x97) when a
+    /// resumed PUBLISH cannot fit the newly negotiated Maximum Packet Size.
     reason_code: u8,
     /// Borrowed from the incoming acknowledgement for this callback only.
     properties: []const mqtt.Property,
@@ -3269,6 +3271,32 @@ pub const Client = struct {
                 active.writeClientSessionTransmission(
                     wire_transmission,
                 ) catch |err| {
+                    if (err == error.OutgoingPacketTooLarge and
+                        transmission == .publish)
+                    {
+                        const publish_value = transmission.publish;
+                        const dropped = try self.outgoing.dropOversizedPublish(
+                            self.outgoing_handle,
+                            publish_value.packet_id,
+                        );
+                        if (dropped != .dropped) {
+                            return error.InvalidAcknowledgement;
+                        }
+                        // Maximum Packet Size may shrink across connections.
+                        // Match broker/Mosquitto delivery semantics: retire
+                        // only this destination, keep the transport usable,
+                        // and surface an ACK-compatible terminal reason.
+                        self.finishPublishDelivery(.{
+                            .packet_id = if (publish_value.packet_id == 0)
+                                null
+                            else
+                                publish_value.packet_id,
+                            .qos = publish_value.qos,
+                            .reason_code = 0x97,
+                            .properties = &.{},
+                        });
+                        continue;
+                    }
                     if (!retryableConnectError(err) and
                         transmission == .publish)
                     {
