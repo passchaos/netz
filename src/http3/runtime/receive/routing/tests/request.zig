@@ -501,7 +501,7 @@ test "HTTP/3 aggregate request returns copied receive credit before FIN" {
     try std.testing.expectEqual(@as(?u64, 12), buffered.contiguousEnd(0));
 }
 
-test "HTTP/3 request router retires drained unknown uni stream" {
+test "HTTP/3 request router retires empty and unknown uni streams" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -549,22 +549,22 @@ test "HTTP/3 request router retires drained unknown uni stream" {
     var lifecycle = ServerRequestLifecycle.init(allocator);
     defer lifecycle.deinit();
 
-    const unknown = quic.Frame{ .stream = .{
+    const empty = quic.Frame{ .stream = .{
         .stream_id = 2,
-        .data = &.{ 0x21, 0xaa },
+        .data = &.{},
         .fin = true,
     } };
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
         0,
-        &.{unknown},
+        &.{empty},
         null,
         .not_ect,
     );
     try std.testing.expect((try request_routing
         .applyServerRequestPacketFrames(
         endpoint.address(),
-        &.{unknown},
+        &.{empty},
         allocator,
         &control,
         &qpack_decode,
@@ -579,23 +579,26 @@ test "HTTP/3 request router retires drained unknown uni stream" {
         null,
     )) == null);
     try std.testing.expect(connection.peerStreamClosed(2));
+    try std.testing.expect(
+        qpack_decode.classifiedPeerUniStreamType(2) == null,
+    );
 
-    const reset = quic.Frame{ .reset_stream = .{
+    const unknown = quic.Frame{ .stream = .{
         .stream_id = 6,
-        .application_error_code = 0,
-        .final_size = 0,
+        .data = &.{ 0x21, 0xaa },
+        .fin = true,
     } };
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
         1,
-        &.{reset},
+        &.{unknown},
         null,
         .not_ect,
     );
     try std.testing.expect((try request_routing
         .applyServerRequestPacketFrames(
         endpoint.address(),
-        &.{reset},
+        &.{unknown},
         allocator,
         &control,
         &qpack_decode,
@@ -611,11 +614,42 @@ test "HTTP/3 request router retires drained unknown uni stream" {
     )) == null);
     try std.testing.expect(connection.peerStreamClosed(6));
 
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 10,
+        .application_error_code = 0,
+        .final_size = 0,
+    } };
     try quic.one_rtt.testing.applyReceivedFrames(
         &connection,
         2,
+        &.{reset},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{reset},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        null,
+    )) == null);
+    try std.testing.expect(connection.peerStreamClosed(10));
+
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        3,
         &.{.{ .stream = .{
-            .stream_id = 10,
+            .stream_id = 14,
             .data = &.{0x21},
             .fin = true,
         } }},

@@ -107,18 +107,27 @@ pub const QpackDecodeState = struct {
         };
         try entry.receive.insert(frame);
         if (entry.stream_type == null) {
-            const available = entry.receive.available();
-            const prefix = quic.varint.decodeSlice(available) catch |err|
-                switch (err) {
+            entry.stream_type = classify: {
+                const prefix = quic.varint.decodeSlice(
+                    entry.receive.available(),
+                ) catch |err| switch (err) {
                     error.BufferTooShort => {
-                        if (entry.receive.final_size != null) {
+                        // FIN can arrive before offset zero. Wait until the
+                        // complete stream is contiguous before deciding that
+                        // its type prefix was truncated. A zero-byte stream has
+                        // no declared critical type, so treat it like an
+                        // unknown extension stream and let the router retire
+                        // its QUIC stream credit normally.
+                        if (!entry.receive.receivedComplete()) return null;
+                        if (entry.receive.final_size.? != 0) {
                             return error.InvalidStreamType;
                         }
-                        return null;
+                        break :classify .unknown;
                     },
                     else => return err,
                 };
-            entry.stream_type = peerUniStreamType(prefix.value);
+                break :classify peerUniStreamType(prefix.value);
+            };
         }
         const available = entry.receive.available();
         const at_final = entry.receive.final_size != null and

@@ -7,6 +7,50 @@ const QpackEncodeState = qpack_state.QpackEncodeState;
 const client_qpack_encoder_stream_id: u62 = 6;
 const client_qpack_decoder_stream_id: u62 = 10;
 
+test "HTTP/3 peer uni classification waits for reordered FIN and retires empty streams" {
+    const allocator = std.testing.allocator;
+    var state = QpackDecodeState.init(allocator, 0, 64);
+    defer state.deinit();
+
+    try std.testing.expect((try state.classifyPeerUniFrame(.{
+        .stream_id = 2,
+        .offset = 1,
+        .data = "x",
+        .fin = true,
+    })) == null);
+    const reordered = (try state.classifyPeerUniFrame(.{
+        .stream_id = 2,
+        .data = &.{0x21},
+    })).?;
+    try std.testing.expectEqual(qpack_state.PeerUniStreamType.unknown, reordered.stream_type);
+    try std.testing.expectEqualStrings("\x21x", reordered.frame.data);
+    try std.testing.expect(reordered.frame.fin);
+    state.commitPeerUniFrame(reordered.frame);
+    try std.testing.expect(state.classifiedPeerUniStreamType(2) == null);
+
+    const empty = (try state.classifyPeerUniFrame(.{
+        .stream_id = 6,
+        .data = &.{},
+        .fin = true,
+    })).?;
+    try std.testing.expectEqual(qpack_state.PeerUniStreamType.unknown, empty.stream_type);
+    try std.testing.expectEqual(@as(usize, 0), empty.frame.data.len);
+    try std.testing.expect(empty.frame.fin);
+    state.commitPeerUniFrame(empty.frame);
+    try std.testing.expect(state.classifiedPeerUniStreamType(6) == null);
+
+    try std.testing.expectError(
+        error.InvalidStreamType,
+        state.classifyPeerUniFrame(.{
+            .stream_id = 10,
+            // A two-byte varint prefix that ends after its first byte remains
+            // a malformed declared type, unlike a stream with no type bytes.
+            .data = &.{0x40},
+            .fin = true,
+        }),
+    );
+}
+
 test "HTTP/3 QPACK decoder state reassembles split and reordered encoder instructions" {
     const allocator = std.testing.allocator;
     var state = QpackDecodeState.init(allocator, 256, 4096);

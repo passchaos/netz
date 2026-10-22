@@ -2458,6 +2458,15 @@ connection error because the next frame boundary cannot be recovered. Rejected
 DATA restores its already-consumed connection receive credit before stream
 cleanup. Real h2c tests cover aggregate, streaming, and batch response paths,
 sibling reuse, and connection-error precedence.
+Peer HTTP/3 unidirectional-stream classification also waits when a reordered
+FIN arrives before offset zero instead of treating the temporarily unavailable
+type as malformed. A complete zero-byte stream declares no critical type and
+is retired as an unknown extension stream, while a complete truncated varint
+still fails with `InvalidStreamType`. Symmetric client/server routing
+regressions run with one peer unidirectional stream of credit and then process
+an empty stream, an ordinary unknown stream, a reset stream, and a fourth
+stream in sequence, proving each terminal case removes its QPACK classifier
+state and returns transport `MAX_STREAMS` credit.
 
 1. Add a cancellation-race benchmark that combines reset timing with the
    priority-aware flow scheduler. **Completed:** `bench-http2-flow --priority
