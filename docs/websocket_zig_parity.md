@@ -187,11 +187,14 @@ remain ordinary validation errors and cannot trigger the advertisement.
 `H2Client.openAttempt*` completes the other side of that policy: final non-2xx
 status, response fields, bounded body, and trailers remain owned and
 inspectable, while `requireAccepted` and the legacy `open*` wrappers retain
-strict WebSocket negotiation and `InvalidStatus` behavior after draining the
-complete rejection. The body bound is the caller-owned HTTP/2 connection's
-`Limits.max_body_bytes`; an overflow cancels only that stream. The underlying
-HTTP/2 attempt API retires rejected streams immediately, so the connection can
-issue a sibling request after authentication failure.
+strict WebSocket negotiation after draining the complete rejection. A valid
+426 whose repeated or comma-separated `sec-websocket-version` list excludes 13
+maps to typed `UnsupportedVersion`; missing/malformed lists and contradictory
+lists that still advertise 13 retain `InvalidStatus`. The body bound is the
+caller-owned HTTP/2 connection's `Limits.max_body_bytes`; an overflow cancels
+only that stream. The underlying HTTP/2 attempt API retires rejected streams
+immediately, so the connection can issue a sibling request after authentication
+failure.
 RFC 9220 exposes the corresponding `Server.receiveUpgradeRequest*` and
 `receiveSessionUpgradeRequest*` entry points. Its `PendingUpgrade` owns the
 HTTP/3 session while the decision is pending, exposes CONNECT
@@ -225,10 +228,12 @@ trailers under `Limits.max_rejection_body_bytes`, rejects an oversized declared
 Content-Length before allocating or reading DATA, and skips bounded 1xx heads
 before the final response. Declared-length bodies use one exact retained
 allocation even when DATA arrives fragmented; unknown-length rejections keep
-the bounded incremental path. Compatibility `connect*` calls still return
-`InvalidResponse`, but only after draining the rejection. Caller-owned HTTP/3
-sessions are restored after a complete rejection without an unnecessary
-stream cancellation; limit failures abandon only the affected CONNECT stream.
+the bounded incremental path. Compatibility `connect*` calls return typed
+`UnsupportedVersion` for a valid 426 advertisement that excludes 13; missing,
+malformed, or contradictory advertisements and all other non-2xx responses
+retain `InvalidResponse`. Caller-owned HTTP/3 sessions are restored after a
+complete rejection without an unnecessary stream cancellation; limit failures
+abandon only the affected CONNECT stream.
 Authenticated transport tests cover 103 followed by body/trailers, automatic
 Content-Length, split DATA without Content-Length, legacy draining, body-limit
 cancellation, explicit server rejection and dropped pending requests, and a
@@ -1637,11 +1642,14 @@ HTTP/1 clients now expose `ConnectAttempt` through direct-address and WS/WSS URI
 helpers, with relative/absolute deadline variants. A non-101 final
 response retains owned status, headers, decoded chunked trailers, and a body
 bounded by `Limits.max_rejection_body_bytes`; the transport is closed before a
-direct address attempt returns. `requireAccepted` keeps the established API's
-`InvalidResponse` mapping, while successful attempts preserve bytes coalesced
-after the 101 head and transfer them without another copy into the WebSocket
-receive buffer. Bodyless interim 1xx responses are skipped under the same
-absolute deadline and `Limits.max_informational_responses` bound.
+direct address attempt returns. `requireAccepted` maps a valid 426 with a
+repeated or comma-separated version advertisement excluding 13 to typed
+`UnsupportedVersion`; missing, malformed, or contradictory advertisements and
+other non-101 responses keep the established `InvalidResponse` mapping.
+Successful attempts preserve bytes coalesced after the 101 head and transfer
+them without another copy into the WebSocket receive buffer. Bodyless interim
+1xx responses are skipped under the same absolute deadline and
+`Limits.max_informational_responses` bound.
 Successful 101 responses reject `Content-Length`, `Transfer-Encoding`, and
 `Trailer` on both the server writer and client validator; caller-supplied
 server fields are checked before the transactional writer changes its output.

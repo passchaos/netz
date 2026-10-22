@@ -773,6 +773,86 @@ test "WebSocket RFC 8441 advertises version 13 and reuses H2 connection" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket RFC 8441 client maps advertised unsupported version" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var request = try h2.readExtendedConnectRequest("websocket");
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("CONNECT", request.method);
+            try std.testing.expectEqualStrings("websocket", request.protocol);
+            try h2.writeResponse(request.stream_id, .{
+                .status = 426,
+                .headers = &.{
+                    .{ .name = "sec-websocket-version", .value = "8, 12" },
+                    .{ .name = "sec-websocket-version", .value = "14" },
+                },
+                .request_method = request.method,
+                .extended_connect = true,
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    var attempt = try runtime.H2Client.openAttemptWithTimeout(
+        allocator,
+        &client,
+        .{
+            .path = "/unsupported-version",
+            .authority = "localhost",
+        },
+        .fromSeconds(3),
+    );
+    defer attempt.deinit();
+    try std.testing.expectEqual(@as(u16, 426), attempt.status());
+    try std.testing.expectEqualStrings("8, 12", attempt.responseHeader(
+        "sec-websocket-version",
+    ).?);
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        attempt.requireAccepted(),
+    );
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket RFC 8441 client rejects unoffered compression window" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -397,7 +397,13 @@ pub const ConnectAttempt = struct {
     }
 
     pub fn requireAccepted(self: *ConnectAttempt) Error!ClientConnection {
-        if (!self.accepted()) return error.InvalidResponse;
+        if (!self.accepted()) {
+            if (handshake_headers.isUnsupportedVersionResponse(
+                self.response.status,
+                self.response.headers,
+            )) return error.UnsupportedVersion;
+            return error.InvalidResponse;
+        }
         std.debug.assert(self.response_body.len == 0);
         std.debug.assert(self.response_trailers.len == 0);
         std.debug.assert(!self.stream_complete);

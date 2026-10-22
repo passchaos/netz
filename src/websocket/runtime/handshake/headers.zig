@@ -183,6 +183,38 @@ pub fn optionalH2(
     return found;
 }
 
+/// Return whether a rejected client handshake is an RFC 6455 version
+/// negotiation response that excludes the version sent by this client.
+///
+/// A server may advertise supported versions across repeated
+/// `Sec-WebSocket-Version` fields or a comma-separated field value. Missing or
+/// malformed advertisements, and a 426 that still advertises version 13, are
+/// contradictory responses and remain ordinary invalid-response failures.
+pub fn isUnsupportedVersionResponse(
+    status: u16,
+    headers: anytype,
+) bool {
+    if (status != 426) return false;
+
+    var saw_version = false;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(
+            header.name,
+            "sec-websocket-version",
+        )) continue;
+
+        var versions = std.mem.splitScalar(u8, header.value, ',');
+        while (versions.next()) |raw| {
+            const version = wire.trimOws(raw);
+            if (version.len == 0) return false;
+            websocket.validateClientVersionSyntax(version) catch return false;
+            saw_version = true;
+            if (std.mem.eql(u8, version, "13")) return false;
+        }
+    }
+    return saw_version;
+}
+
 pub fn validateHttp1ClientExtra(
     headers: []const http1.Header,
 ) !void {
@@ -551,4 +583,100 @@ test "WebSocket subprotocol offer is stack-first and exact on overflow" {
             &.{},
         ),
     );
+}
+
+test "WebSocket client classifies version negotiation responses" {
+    const Case = struct {
+        name: []const u8,
+        status: u16 = 426,
+        headers: []const http1.Header,
+        unsupported: bool,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "other status",
+            .status = 400,
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "12",
+            }},
+            .unsupported = false,
+        },
+        .{
+            .name = "missing advertisement",
+            .headers = &.{},
+            .unsupported = false,
+        },
+        .{
+            .name = "single unsupported version",
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "12",
+            }},
+            .unsupported = true,
+        },
+        .{
+            .name = "comma separated unsupported versions",
+            .headers = &.{.{
+                .name = "sec-websocket-version",
+                .value = " 8, 12,\t14 ",
+            }},
+            .unsupported = true,
+        },
+        .{
+            .name = "repeated unsupported version fields",
+            .headers = &.{
+                .{ .name = "Sec-WebSocket-Version", .value = "8, 12" },
+                .{ .name = "sec-websocket-version", .value = "14" },
+            },
+            .unsupported = true,
+        },
+        .{
+            .name = "advertises current version in list",
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "12, 13",
+            }},
+            .unsupported = false,
+        },
+        .{
+            .name = "advertises current version in repeated field",
+            .headers = &.{
+                .{ .name = "Sec-WebSocket-Version", .value = "12" },
+                .{ .name = "Sec-WebSocket-Version", .value = "13" },
+            },
+            .unsupported = false,
+        },
+        .{
+            .name = "empty list member",
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "12,,14",
+            }},
+            .unsupported = false,
+        },
+        .{
+            .name = "leading zero",
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "012",
+            }},
+            .unsupported = false,
+        },
+        .{
+            .name = "out of range version",
+            .headers = &.{.{
+                .name = "Sec-WebSocket-Version",
+                .value = "300",
+            }},
+            .unsupported = false,
+        },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(
+            case.unsupported,
+            isUnsupportedVersionResponse(case.status, case.headers),
+        );
+    }
 }

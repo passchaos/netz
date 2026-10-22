@@ -2139,7 +2139,13 @@ pub const ConnectAttempt = struct {
     }
 
     pub fn requireAccepted(self: *ConnectAttempt) Error!Connection {
-        if (!self.accepted()) return error.InvalidResponse;
+        if (!self.accepted()) {
+            if (handshake_headers.isUnsupportedVersionResponse(
+                self.response.status,
+                self.response.headers,
+            )) return error.UnsupportedVersion;
+            return error.InvalidResponse;
+        }
         const selected_protocol = try validateServerHandshake(
             self.allocator,
             self.response,
@@ -11411,7 +11417,13 @@ pub const H2ConnectAttempt = struct {
     }
 
     pub fn requireAccepted(self: *H2ConnectAttempt) Error!H2Connection {
-        if (!self.accepted()) return error.InvalidStatus;
+        if (!self.accepted()) {
+            if (handshake_headers.isUnsupportedVersionResponse(
+                self.response.status,
+                self.response.headers,
+            )) return error.UnsupportedVersion;
+            return error.InvalidStatus;
+        }
         const selected_protocol = try validateH2ServerHandshake(
             self.allocator,
             self.response.headers,

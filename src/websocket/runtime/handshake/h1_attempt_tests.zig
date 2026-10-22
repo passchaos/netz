@@ -112,6 +112,74 @@ test "WebSocket HTTP1 connect attempt preserves rejection metadata and body" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket HTTP1 client maps advertised unsupported version" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const response =
+        "HTTP/1.1 426 Upgrade Required\r\n" ++
+        "Sec-WebSocket-Version: 8, 12\r\n" ++
+        "Sec-WebSocket-Version: 14\r\n" ++
+        "Content-Length: 11\r\n" ++
+        "Connection: close\r\n\r\n" ++
+        "unsupported";
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        response: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            serveResponse(
+                self.allocator,
+                self.io,
+                self.listener,
+                self.response,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+        .response = response,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try runtime.Client.connectAttemptWithTimeout(
+        allocator,
+        io,
+        listener.socket.address,
+        .{ .host = "localhost", .limits = .{ .max_head_bytes = 4096 } },
+        .fromSeconds(3),
+    );
+    defer attempt.deinit();
+    try std.testing.expectEqual(@as(u16, 426), attempt.status());
+    try std.testing.expectEqualStrings("8, 12", attempt.responseHeader(
+        "sec-websocket-version",
+    ).?);
+    try std.testing.expectEqualStrings("unsupported", attempt.body());
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        attempt.requireAccepted(),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket HTTP1 connect attempt skips bounded informational responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });

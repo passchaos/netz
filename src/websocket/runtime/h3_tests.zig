@@ -1127,7 +1127,7 @@ test "WebSocket HTTP3 caller session attempt restores after rejection" {
             var oversized_stream_ids: [2]?u62 = .{ null, null };
             var reset_seen = [_]bool{false} ** 2;
             var reset_count: usize = 0;
-            for (0..5) |attempt_index| {
+            for (0..6) |attempt_index| {
                 while (true) {
                     var connect_event = try session
                         .receiveRequestEventWithTimeout(.fromSeconds(3));
@@ -1174,7 +1174,8 @@ test "WebSocket HTTP3 caller session attempt restores after rejection" {
                                         1 => "/legacy",
                                         2 => "/declared-oversized",
                                         3 => "/streamed-oversized",
-                                        else => "/trailers-only",
+                                        4 => "/trailers-only",
+                                        else => "/unsupported-version",
                                     },
                                     head.request.path,
                                 );
@@ -1194,13 +1195,32 @@ test "WebSocket HTTP3 caller session attempt restores after rejection" {
                                                 .value = "0",
                                             },
                                         }
+                                    else if (attempt_index == 5)
+                                        &.{
+                                            .{
+                                                .name = "sec-websocket-version",
+                                                .value = "8, 12",
+                                            },
+                                            .{
+                                                .name = "sec-websocket-version",
+                                                .value = "14",
+                                            },
+                                        }
                                     else
                                         &.{.{
                                             .name = "www-authenticate",
                                             .value = "Bearer realm=session",
                                         }};
+                                const response_trailers: []const http3.Qpack.HeaderField =
+                                    if (attempt_index == 5)
+                                        &.{}
+                                    else
+                                        &.{.{
+                                            .name = "x-rejection-code",
+                                            .value = "expired",
+                                        }};
                                 const response: http3.Response = .{
-                                    .status = 401,
+                                    .status = if (attempt_index == 5) 426 else 401,
                                     .headers = response_headers,
                                     .body = switch (attempt_index) {
                                         0 => "session expired",
@@ -1208,10 +1228,7 @@ test "WebSocket HTTP3 caller session attempt restores after rejection" {
                                         2 => "oversized",
                                         else => "",
                                     },
-                                    .trailers = &.{.{
-                                        .name = "x-rejection-code",
-                                        .value = "expired",
-                                    }},
+                                    .trailers = response_trailers,
                                     .request_method = "CONNECT",
                                     .extended_connect = true,
                                 };
@@ -1429,6 +1446,16 @@ test "WebSocket HTTP3 caller session attempt restores after rejection" {
         trailers_only.trailers()[0].value,
     );
     trailers_only.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        h3.Client.connectSessionWithTimeout(
+            allocator,
+            &client,
+            .{ .authority = "localhost", .path = "/unsupported-version" },
+            .fromSeconds(3),
+        ),
+    );
 
     var sibling = try client.requestWithTimeout(.{
         .method = "GET",
