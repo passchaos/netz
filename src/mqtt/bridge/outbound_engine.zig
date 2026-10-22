@@ -511,6 +511,7 @@ pub fn Engine(comptime Source: type) type {
                         .deferred
                     else
                         .automatic,
+                    .outbound_replay_capability_policy = .adapt_qos1,
                     .publish_delivery = .{
                         .context = target_delivery,
                         .complete = TargetDeliveryState.complete,

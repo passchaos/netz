@@ -335,15 +335,21 @@ After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is
 completed only after that target socket write succeeds, so no nonexistent
-PUBACK is awaited. Durable source QoS 2 is never silently weakened: when the
-peer Maximum QoS is lower than 2, the bridge sends no target PUBLISH, creates
-no coordinator transaction, and terminates an MQTT 5 source transaction with
-the PUBREC-valid Implementation Specific Error `0x83`; legacy sources fail
-closed because their PUBREC cannot carry a negative reason. When target QoS 2
-is available but RETAIN is not, the durable handshake is preserved and only
-the target RETAIN flag is cleared. In-process broker-local and two-wire tests
-cover target non-delivery, exact negative acknowledgement, socket-write
-completion, and removal of Session receipt, inflight, and coordinator state.
+PUBACK is awaited. The bridge opts into the reconnect client's QoS-1-only
+capability policy, so a Session Present=true replay obeys capabilities that
+tightened since the previous connection: lowering to QoS 0 retires the stored
+Packet Identifier only after the replacement socket write, while clearing
+RETAIN without lowering QoS still waits for the original PUBACK. General
+reconnect clients remain strict by default. Durable source QoS 2 is never
+silently weakened: when the peer Maximum QoS is lower than 2, the bridge sends
+no target PUBLISH, creates no coordinator transaction, and terminates an MQTT
+5 source transaction with the PUBREC-valid Implementation Specific Error
+`0x83`; legacy sources fail closed because their PUBREC cannot carry a negative
+reason. When target QoS 2 is available but RETAIN is not, the durable handshake
+is preserved and only the target RETAIN flag is cleared. In-process
+broker-local, reconnect, and two-wire tests cover fresh and resumed Sessions,
+target non-delivery, exact negative acknowledgement, socket-write completion,
+and removal of Session receipt, inflight, and coordinator state.
 
 The reconnect client retains one bounded owned failed CONNACK instead of
 collapsing every protocol refusal into an opaque error. Applications may

@@ -526,6 +526,176 @@ test "MQTT reconnect reports QoS0 and acknowledged publish delivery" {
     if (shared.err) |err| return err;
 }
 
+fn runQoS1ReplayCapabilityCase(maximum_qos: mqtt.QoS) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    var first_received: std.Io.Event = .unset;
+    const Shared = struct {
+        server: *runtime.Server,
+        first_received: *std.Io.Event,
+        maximum_qos: mqtt.QoS,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_received.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var publish = try first.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    mqtt.QoS.at_least_once,
+                    publish.publish.qos,
+                );
+                try std.testing.expect(publish.publish.retain);
+                self.first_received.set(self.server.io);
+                try first.connection.shutdown();
+            }
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+                .maximum_qos = self.maximum_qos,
+                .retain_available = false,
+            });
+            defer resumed.deinit(self.server.allocator);
+            var replay = try resumed.connection.readPublish();
+            defer replay.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                self.maximum_qos,
+                replay.publish.qos,
+            );
+            try std.testing.expectEqual(
+                self.maximum_qos != .at_most_once,
+                replay.publish.dup,
+            );
+            try std.testing.expect(!replay.publish.retain);
+            try std.testing.expectEqual(
+                self.maximum_qos != .at_most_once,
+                replay.publish.packet_id != null,
+            );
+            try std.testing.expectEqualStrings(
+                "replay/capabilities",
+                replay.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "adapted",
+                replay.publish.payload,
+            );
+            if (self.maximum_qos != .at_most_once) {
+                try resumed.connection.writePubAck(
+                    replay.publish.packet_id.?,
+                    0,
+                );
+            }
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const Delivery = struct {
+        calls: usize = 0,
+        packet_id: ?u16 = null,
+        qos: mqtt.QoS = .at_most_once,
+
+        fn complete(
+            context: *anyopaque,
+            delivery: reconnect.PublishDelivery,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.packet_id = delivery.packet_id;
+            self.qos = delivery.qos;
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .first_received = &first_received,
+        .maximum_qos = maximum_qos,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var delivery: Delivery = .{};
+    var shutdown: std.Io.Event = .unset;
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "replay-capabilities",
+            .clean_start = false,
+            .properties = &properties,
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(8),
+        },
+        &shutdown,
+        .{
+            .outbound_replay_capability_policy = .adapt_qos1,
+            .publish_delivery = .{
+                .context = &delivery,
+                .complete = Delivery.complete,
+            },
+        },
+    );
+    defer client.deinit();
+    const connected = try client.connect();
+    try std.testing.expect(!connected.session_present);
+    const packet_id = (try client.publish(
+        "replay/capabilities",
+        "adapted",
+        .{ .qos = .at_least_once, .retain = true },
+    )).?;
+    try first_received.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
+    client.disconnectTransport();
+    const resumed = try client.connect();
+    try std.testing.expect(resumed.session_present);
+    if (maximum_qos != .at_most_once) {
+        try std.testing.expectEqual(packet_id, try client.completeNextPublish());
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try client.outgoingStats()).inflight_count,
+    );
+    try std.testing.expectEqual(@as(usize, 1), delivery.calls);
+    try std.testing.expectEqual(packet_id, delivery.packet_id.?);
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, delivery.qos);
+    try client.disconnect(0);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect can adapt QoS1 replay to changed capabilities" {
+    try runQoS1ReplayCapabilityCase(.at_most_once);
+    try runQoS1ReplayCapabilityCase(.at_least_once);
+}
+
 test "MQTT publish delivery queue owns acknowledgement properties" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

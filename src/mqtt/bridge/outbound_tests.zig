@@ -278,7 +278,7 @@ fn runQoS1ReconnectCase(
             var retry = try second.connection.readPublish();
             defer retry.deinit(self.server.allocator);
             try std.testing.expectEqual(
-                self.session_present,
+                self.session_present and !self.downgrade_after_reconnect,
                 retry.publish.dup,
             );
             try std.testing.expectEqual(
@@ -489,6 +489,7 @@ test "outbound bridge reconnects source while target QoS1 is pending" {
 
 test "outbound bridge applies target capabilities after Session loss" {
     try runQoS1ReconnectCase(.v5, .v5, false, false, false, true);
+    try runQoS1ReconnectCase(.v5, .v5, true, false, false, true);
 }
 
 test "outbound bridge routes between two brokers" {

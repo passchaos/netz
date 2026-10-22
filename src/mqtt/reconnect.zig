@@ -1098,6 +1098,17 @@ pub const OutboundQoS2ReleasePolicy = enum {
     deferred,
 };
 
+pub const OutboundReplayCapabilityPolicy = enum {
+    /// Preserve the accepted Application Message exactly. A peer capability
+    /// that shrinks across reconnect makes replay fail closed.
+    strict,
+    /// Let QoS 1 replay follow the current peer capabilities. Maximum QoS 0
+    /// lowers the wire PUBLISH to QoS 0 and completes the stored transaction
+    /// after the socket write; Retain Available=false clears RETAIN. QoS 2
+    /// remains strict because weakening it would violate its durable boundary.
+    adapt_qos1,
+};
+
 pub const IncomingQoS2ResumeState = enum {
     await_pubrel,
     release_pending,
@@ -1112,6 +1123,8 @@ pub const ClientOptions = struct {
     manual_acknowledgements: bool = false,
     inbound_qos2_release_policy: InboundQoS2ReleasePolicy = .automatic,
     outbound_qos2_release_policy: OutboundQoS2ReleasePolicy = .automatic,
+    outbound_replay_capability_policy: OutboundReplayCapabilityPolicy =
+        .strict,
     /// Deliver a retransmitted inbound QoS 2 PUBLISH to a manual-acknowledging
     /// application instead of consuming it after re-emitting PUBREC. Durable
     /// bridges use this to compare the complete message against their own
@@ -1119,8 +1132,11 @@ pub const ClientOptions = struct {
     surface_incoming_qos2_retransmissions: bool = false,
     /// Optional notification emitted when an outbound PUBLISH reaches its
     /// protocol delivery boundary: socket completion for QoS 0, PUBACK for
-    /// QoS 1, and PUBCOMP (or a negative PUBREC) for QoS 2. This observes all
-    /// sends, including retransmissions restored from durable Session state.
+    /// QoS 1, and PUBCOMP (or a negative PUBREC) for QoS 2. An opt-in QoS 1
+    /// replay lowered to QoS 0 completes at its replacement socket write but
+    /// still reports the caller's original QoS and Packet Identifier. This
+    /// observes all sends, including retransmissions restored from durable
+    /// Session state.
     publish_delivery: ?PublishDeliveryHandler = null,
 };
 
@@ -3231,7 +3247,28 @@ pub const Client = struct {
             );
             if (transmissions.len == 0) return;
             for (transmissions) |transmission| {
-                active.writeClientSessionTransmission(transmission) catch |err| {
+                var wire_transmission = transmission;
+                const qos1_completed_on_write =
+                    self.client_options.outbound_replay_capability_policy ==
+                    .adapt_qos1 and
+                    transmission == .publish and
+                    transmission.publish.qos == .at_least_once and
+                    active.peerMaximumQoS() == .at_most_once;
+                if (self.client_options.outbound_replay_capability_policy ==
+                    .adapt_qos1 and transmission == .publish and
+                    transmission.publish.qos == .at_least_once)
+                {
+                    wire_transmission.publish.qos = @enumFromInt(@min(
+                        @intFromEnum(transmission.publish.qos),
+                        @intFromEnum(active.peerMaximumQoS()),
+                    ));
+                    wire_transmission.publish.retain =
+                        transmission.publish.retain and
+                        active.peerRetainAvailable();
+                }
+                active.writeClientSessionTransmission(
+                    wire_transmission,
+                ) catch |err| {
                     if (!retryableConnectError(err) and
                         transmission == .publish)
                     {
@@ -3243,6 +3280,26 @@ pub const Client = struct {
                     self.disconnectTransport();
                     return err;
                 };
+                if (qos1_completed_on_write) {
+                    // The original Packet Identifier remains the Session key
+                    // until the QoS 0 socket write succeeds. Only then can we
+                    // retire it and report completion of the caller's QoS 1
+                    // contract without risking loss on a failed write.
+                    const packet_id = transmission.publish.packet_id;
+                    const dropped = try self.outgoing.dropOutgoingPublish(
+                        self.outgoing_handle,
+                        packet_id,
+                    );
+                    if (dropped != .dropped) {
+                        return error.InvalidAcknowledgement;
+                    }
+                    self.finishPublishDelivery(.{
+                        .packet_id = packet_id,
+                        .qos = .at_least_once,
+                        .reason_code = 0,
+                        .properties = &.{},
+                    });
+                }
             }
         }
     }
