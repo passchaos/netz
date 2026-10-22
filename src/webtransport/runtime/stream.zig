@@ -36,7 +36,7 @@ pub fn initRegistry(
     try webtransport.ensureNegotiated(local, peer);
     const max_streams = std.math.cast(u64, max_session_streams) orelse
         std.math.maxInt(u64);
-    return webtransport.StreamRegistry.init(
+    var registry = try webtransport.StreamRegistry.init(
         allocator,
         session_id,
         role,
@@ -73,6 +73,17 @@ pub fn initRegistry(
             .first_local_uni = first_local_uni,
         },
     );
+    errdefer registry.deinit();
+    // Once negotiated, these fields bound retained registry entries while
+    // protocol opening credit comes from the dynamic flow-control state.
+    if (webtransport.flow_control.negotiated(local, peer)) {
+        registry.max_local_bidi = max_streams;
+        registry.max_local_uni = max_streams;
+        registry.max_peer_bidi = max_streams;
+        registry.max_peer_uni = max_streams;
+        try registry.configureFlow(local, peer);
+    }
+    return registry;
 }
 
 fn webTransportStreamLimit(advertised: u64, fallback: u64) u64 {

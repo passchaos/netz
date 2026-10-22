@@ -98,6 +98,13 @@ pub const Control = struct {
     capsule_error_rejected: bool = false,
     capsule_error_reported: bool = false,
     connection_terminated: bool = false,
+    flow_state: ?*webtransport.flow_control.State = null,
+    flow_violation: bool = false,
+    flow_value: u64 = 0,
+    flow_value_complete: bool = false,
+    pending_draining: bool = false,
+    pending_closed: bool = false,
+    pending_reset: ?webtransport.StreamError = null,
 
     h3_stage: H3Stage = .frame_type,
     h3_varint: VarIntDecoder = .{},
@@ -173,9 +180,19 @@ pub const Control = struct {
     /// Restore parser state after a surrounding transport transaction fails.
     /// Any close-reason allocation created after the snapshot is released;
     /// bytes appended to an existing allocation are hidden by the old length.
-    pub fn restoreSnapshot(self: *Control, snapshot: Control) void {
+    pub const Snapshot = struct {
+        control: Control,
+        flow: ?webtransport.flow_control.State,
+    };
+
+    pub fn captureSnapshot(self: *const Control) Snapshot {
+        return .{ .control = self.*, .flow = if (self.flow_state) |state| state.* else null };
+    }
+
+    pub fn restoreSnapshot(self: *Control, saved: Snapshot) void {
+        const snapshot_control = saved.control;
         if (self.close_reason_heap) |current| {
-            const same_allocation = if (snapshot.close_reason_heap) |previous|
+            const same_allocation = if (snapshot_control.close_reason_heap) |previous|
                 current.ptr == previous.ptr
             else
                 false;
@@ -184,7 +201,50 @@ pub const Control = struct {
                 self.allocator.free(current);
             }
         }
-        self.* = snapshot;
+        self.* = snapshot_control;
+        if (saved.flow) |flow| self.flow_state.?.* = flow;
+    }
+
+    pub fn bindFlow(self: *Control, state: ?*webtransport.flow_control.State) void {
+        self.flow_state = state;
+    }
+
+    pub fn progressFlow(self: *Control, connection: *quic.one_rtt.Connection) Error!void {
+        if (self.flow_state == null) return;
+        while (true) {
+            const event = self.pollInternal(connection, true) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return,
+                else => return err,
+            };
+            const value = event orelse return;
+            switch (value) {
+                .draining => self.pending_draining = true,
+                .closed => {
+                    self.pending_closed = true;
+                    return;
+                },
+                .reset => |info| {
+                    self.pending_reset = info;
+                    return;
+                },
+            }
+        }
+    }
+
+    fn takePending(self: *Control) ?Event {
+        if (self.pending_draining) {
+            self.pending_draining = false;
+            return .draining;
+        }
+        if (self.pending_closed) {
+            self.pending_closed = false;
+            return .{ .closed = .{ .code = self.state.close_code orelse 0, .reason = self.closeReason() } };
+        }
+        if (self.pending_reset) |info| {
+            self.pending_reset = null;
+            return .{ .reset = info };
+        }
+        return null;
     }
 
     pub fn ensureOpen(self: Control) Error!void {
@@ -277,6 +337,7 @@ pub const Control = struct {
         self: *Control,
         connection: *quic.one_rtt.Connection,
     ) Error!?Event {
+        if (self.takePending()) |event| return event;
         return self.pollInternal(connection, false);
     }
 
@@ -287,6 +348,7 @@ pub const Control = struct {
         self: *Control,
         connection: *quic.one_rtt.Connection,
     ) Error!?Event {
+        if (self.takePending()) |event| return event;
         return self.pollInternal(connection, true);
     }
 
@@ -332,9 +394,10 @@ pub const Control = struct {
             return error.InvalidCapsule;
         }
         if (available.len != 0) {
-            const snapshot = self.*;
+            const snapshot = self.captureSnapshot();
             const result = self.consume(available) catch |err| {
                 self.restoreSnapshot(snapshot);
+                self.noteFlowError(err);
                 return err;
             };
             const release_result = if (single_attempt)
@@ -443,6 +506,17 @@ pub const Control = struct {
         return self.post_terminal_data_rejected or self.capsule_error_rejected;
     }
 
+    fn noteFlowError(self: *Control, err: anyerror) void {
+        if (err == error.FlowControlViolation) {
+            self.flow_violation = true;
+            self.capsule_error_pending = true;
+        }
+    }
+
+    fn rejectionCode(self: *const Control) u64 {
+        return if (self.flow_violation) webtransport.ApplicationErrorCode.flow_control_error else http3.ApplicationErrorCode.message_error;
+    }
+
     /// Apply RFC 9297 malformed-message handling to this CONNECT stream.
     /// The parser caller retains InvalidCapsule as its one terminal result.
     pub fn rejectInvalidCapsule(
@@ -453,7 +527,7 @@ pub const Control = struct {
         self.capsule_error_pending = true;
         try connection.cancelStream(
             self.session_id.value,
-            http3.ApplicationErrorCode.message_error,
+            self.rejectionCode(),
         );
         self.commitCapsuleErrorRejection();
         return true;
@@ -469,7 +543,7 @@ pub const Control = struct {
         self.capsule_error_pending = true;
         try connection.tryCancelStream(
             self.session_id.value,
-            http3.ApplicationErrorCode.message_error,
+            self.rejectionCode(),
         );
         self.commitCapsuleErrorRejection();
         return true;
@@ -485,7 +559,7 @@ pub const Control = struct {
         self.capsule_error_pending = true;
         try connection.cancelStreamWithDeadline(
             self.session_id.value,
-            http3.ApplicationErrorCode.message_error,
+            self.rejectionCode(),
             deadline,
         );
         self.commitCapsuleErrorRejection();
@@ -582,9 +656,10 @@ pub const Control = struct {
         self: *Control,
         bytes: []const u8,
     ) Error!?Event {
-        const snapshot = self.*;
+        const snapshot = self.captureSnapshot();
         const result = self.consume(bytes) catch |err| {
             self.restoreSnapshot(snapshot);
+            self.noteFlowError(err);
             return err;
         };
         return result.event;
@@ -602,12 +677,13 @@ pub const Control = struct {
         consumed: usize,
         event: ?Event,
     } {
-        const snapshot = self.*;
+        const snapshot = self.captureSnapshot();
         var offset: usize = 0;
         while (offset < bytes.len) {
             if (self.terminal_reported) return error.InvalidCapsule;
             const event = self.feedCapsuleByte(bytes[offset]) catch |err| {
                 self.restoreSnapshot(snapshot);
+                self.noteFlowError(err);
                 return err;
             };
             offset += 1;
@@ -651,12 +727,21 @@ pub const Control = struct {
                 const capsule_type = self.capsule_varint.feed(byte) orelse
                     return null;
                 self.capsule_type = capsule_type;
+                if (capsule_type == webtransport.flow_control.prohibited_max_stream_data or
+                    capsule_type == webtransport.flow_control.prohibited_stream_data_blocked)
+                {
+                    return error.FlowControlViolation;
+                }
                 self.capsule_stage = .capsule_length;
             },
             .capsule_length => {
                 const length = self.capsule_varint.feed(byte) orelse
                     return null;
                 self.capsule_value_remaining = length;
+                if (self.flowType() and self.flow_state != null) {
+                    if (length == 0 or length > 8) return error.InvalidCapsule;
+                    self.flow_value_complete = false;
+                }
                 if (self.capsule_type ==
                     webtransport.CapsuleType.drain_webtransport_session)
                 {
@@ -682,6 +767,13 @@ pub const Control = struct {
                 if (length == 0) self.resetCapsule();
             },
             .capsule_value => {
+                if (self.flowType() and self.flow_state != null) {
+                    if (self.flow_value_complete) return error.InvalidCapsule;
+                    if (self.capsule_varint.feed(byte)) |value| {
+                        self.flow_value = value;
+                        self.flow_value_complete = true;
+                    }
+                }
                 if (self.capsule_type ==
                     webtransport.CapsuleType.close_webtransport_session)
                 {
@@ -694,6 +786,10 @@ pub const Control = struct {
                 }
                 self.capsule_value_remaining -= 1;
                 if (self.capsule_value_remaining == 0) {
+                    if (self.flowType() and self.flow_state != null) {
+                        if (!self.flow_value_complete) return error.InvalidCapsule;
+                        _ = try self.flow_state.?.receiveCapsule(self.flowCapsule());
+                    }
                     if (self.capsule_type ==
                         webtransport.CapsuleType.close_webtransport_session)
                     {
@@ -724,6 +820,31 @@ pub const Control = struct {
             },
         }
         return null;
+    }
+
+    fn flowType(self: *const Control) bool {
+        return switch (self.capsule_type) {
+            webtransport.CapsuleType.max_data,
+            webtransport.CapsuleType.max_streams_bidi,
+            webtransport.CapsuleType.max_streams_uni,
+            webtransport.CapsuleType.data_blocked,
+            webtransport.CapsuleType.streams_blocked_bidi,
+            webtransport.CapsuleType.streams_blocked_uni,
+            => true,
+            else => false,
+        };
+    }
+
+    fn flowCapsule(self: *const Control) webtransport.Capsule {
+        return switch (self.capsule_type) {
+            webtransport.CapsuleType.max_data => .{ .max_data = self.flow_value },
+            webtransport.CapsuleType.max_streams_bidi => .{ .max_streams_bidi = self.flow_value },
+            webtransport.CapsuleType.max_streams_uni => .{ .max_streams_uni = self.flow_value },
+            webtransport.CapsuleType.data_blocked => .{ .data_blocked = self.flow_value },
+            webtransport.CapsuleType.streams_blocked_bidi => .{ .streams_blocked_bidi = self.flow_value },
+            webtransport.CapsuleType.streams_blocked_uni => .{ .streams_blocked_uni = self.flow_value },
+            else => unreachable,
+        };
     }
 
     fn resetCapsule(self: *Control) void {

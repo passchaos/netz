@@ -187,7 +187,7 @@ HTTP/3 SETTINGS and extended CONNECT negotiation, then:
 The existing handshake runtime test combines those stream paths with a
 WebTransport DATAGRAM round trip and transport statistics.
 
-## Draft-16 flow-control protocol model
+## Draft-16 flow-control model and runtime
 
 `webtransport.Capsule` now parses and serializes WT_MAX_DATA, the uni/bidi
 WT_MAX_STREAMS variants, WT_DATA_BLOCKED, and the uni/bidi WT_STREAMS_BLOCKED
@@ -206,12 +206,32 @@ violations leave prior state intact. Receiver grants are prepared without
 mutation and committed separately after successful Capsule submission. BLOCKED
 values remain advisory, and HTTP/2-only stream-data Capsules are rejected.
 
-These are reusable codec and state utilities. The socket-owning Session
-runtimes still need to bind this state to stream opens, writes, final-size
-observation and automatic credit updates. Their current incremental control
-reader still skips flow-control Capsules. The existing multiplexed endpoint
-tests therefore do not establish full draft-16 session-flow-control compliance;
-reliable association-prefix reset support must also be used by those runtimes.
+The established Session runtimes now share a stable registry-owned State with
+their incremental CONNECT control reader. All six flow Capsules are processed
+when flow control is negotiated, including fragmented values; they are ignored
+when negotiation is disabled. Peer MAX_* updates dynamically unlock stream
+opens, and incoming stream counts are checked against the advertised cumulative
+limits. Opening without available credit allocates no QUIC stream ID. Owning
+deadline-bound opens can receive additional CONNECT progress under the same
+absolute deadline, retaining DRAIN/CLOSE/reset notifications for the caller;
+shared dispatcher sessions use nonblocking progress through their sole reader.
+
+Session `grantData` and `grantStreams` APIs atomically submit one Capsule and
+commit the advertised receive limit only after successful socket submission.
+They are one-attempt operations that callers retry on backpressure. Parser and
+shared-state snapshots also roll back peer grants when returning QUIC receive
+credit fails. Duplicate, decreasing or excessive peer limits and incoming
+stream-limit violations cancel the affected CONNECT with WT_FLOW_CONTROL_ERROR,
+without terminating sibling sessions. Runtime tests cover both roles, zero
+initial credit, failed submissions, fragmented grants, deadline waits and
+shared-session isolation.
+
+Actual stream-data send/receive byte accounting, RESET Final Size observation,
+automatic data/stream credit replenishment and resumable deadline-bound grant
+APIs still need runtime integration. Configured stream-retention bounds remain
+independent of cumulative opening credit. These tests therefore do not establish
+full draft-16 session-flow-control compliance; reliable association-prefix reset
+support must also be used by the WebTransport runtimes.
 
 ## Feature comparison
 

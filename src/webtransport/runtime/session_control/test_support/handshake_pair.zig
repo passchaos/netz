@@ -18,11 +18,14 @@ pub const Pair = struct {
     client: runtime.HandshakeClientSession,
 
     pub fn init(self: *Pair, io: std.Io) !void {
+        return self.initWithSettings(io, webtransport.defaultSettings(.{}), webtransport.defaultSettings(.{}));
+    }
+
+    pub fn initWithSettings(self: *Pair, io: std.Io, client_settings: http3.Settings, server_settings: http3.Settings) !void {
         const allocator = std.testing.allocator;
         self.endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
         errdefer self.endpoint.deinit();
         const keys = quic.protection.deriveAes128Keys([_]u8{0xb1} ** quic.protection.secret_len);
-        const settings = webtransport.defaultSettings(.{});
         var parameters = quic.practical_transport_parameters;
         parameters.max_datagram_frame_size = 1200;
         self.client.h3 = try http3.runtime.HandshakeClient.initPreconfigured(
@@ -31,7 +34,7 @@ pub const Pair = struct {
             .{ .ip4 = .loopback(0) },
             self.endpoint.address(),
             .{ .quic = .{ .max_datagram_size = 4096 } },
-            .{ .local_settings = settings },
+            .{ .local_settings = client_settings },
             .{
                 .receive_keys = keys,
                 .send_keys = keys,
@@ -46,7 +49,7 @@ pub const Pair = struct {
         self.server.h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
             &self.endpoint,
             self.client.h3.established.connection.endpoint.address(),
-            .{ .local_settings = settings, .auto_date_header = false },
+            .{ .local_settings = server_settings, .auto_date_header = false },
             .{
                 .receive_keys = keys,
                 .send_keys = keys,
@@ -58,10 +61,10 @@ pub const Pair = struct {
             },
         );
         errdefer self.server.h3.deinit();
-        self.client.h3.control.settings.markSent(settings);
-        self.client.h3.control.settings.markReceived(settings);
-        self.server.h3.control.settings.markSent(settings);
-        self.server.h3.control.settings.markReceived(settings);
+        self.client.h3.control.settings.markSent(client_settings);
+        self.client.h3.control.settings.markReceived(server_settings);
+        self.server.h3.control.settings.markSent(server_settings);
+        self.server.h3.control.settings.markReceived(client_settings);
         const id = try self.client.h3.startRequest(.{
             .method = "CONNECT",
             .scheme = "https",
@@ -105,9 +108,9 @@ pub const Pair = struct {
         errdefer owned_response.deinit(allocator);
         try self.client.h3.detachResponseStream(id);
         const session_id = webtransport.SessionId.init(id);
-        var client_streams = try handshake_stream.initRegistry(allocator, session_id, .client, settings, settings, 8, null, null);
+        var client_streams = try handshake_stream.initRegistry(allocator, session_id, .client, client_settings, server_settings, 8, null, null);
         errdefer client_streams.deinit();
-        var server_streams = try handshake_stream.initRegistry(allocator, session_id, .server, settings, settings, 8, null, null);
+        var server_streams = try handshake_stream.initRegistry(allocator, session_id, .server, server_settings, client_settings, 8, null, null);
         errdefer server_streams.deinit();
         self.client = .{
             .h3 = self.client.h3,
@@ -123,8 +126,8 @@ pub const Pair = struct {
             .streams = server_streams,
             .control = try control_mod.Control.init(allocator, session_id),
         };
-        connection_lifecycle.activate(&self.client.control, &self.client.h3);
-        connection_lifecycle.activate(&self.server.control, &self.server.h3);
+        connection_lifecycle.activate(&self.client.control, &self.client.h3, &self.client.streams);
+        connection_lifecycle.activate(&self.server.control, &self.server.h3, &self.server.streams);
     }
 
     pub fn deinit(self: *Pair) void {

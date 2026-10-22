@@ -14,7 +14,7 @@ pub fn advanceOnce(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
 ) session_control.Error!session_control.TerminateProgress {
-    if (connection_lifecycle.observe(control, h3)) {
+    if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
         return .complete;
     }
@@ -51,7 +51,7 @@ pub fn finish(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
 ) session_control.Error!void {
-    if (connection_lifecycle.observe(control, h3)) {
+    if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
         return;
     }

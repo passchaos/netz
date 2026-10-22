@@ -2,6 +2,7 @@ const std = @import("std");
 const webtransport = @import("mod.zig");
 const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
+const http3 = @import("../http3/mod.zig");
 
 pub const FrameType = struct {
     /// The first frame on a WebTransport bidirectional stream. Unlike ordinary
@@ -184,6 +185,10 @@ pub const StreamRegistry = struct {
     /// Last productive stream for the incremental whichever-ready reader.
     /// Stable IDs remain valid when registry storage reallocates.
     incremental_poll_cursor: ?u62 = null,
+    /// Stable shared state owned by this registry and borrowed by CONNECT
+    /// control parsing. Absent when session flow control was not negotiated.
+    flow: ?*webtransport.flow_control.State = null,
+    flow_violation: bool = false,
 
     pub const Config = struct {
         max_local_bidi: u64 = webtransport.default_initial_max_streams_bidi,
@@ -223,9 +228,55 @@ pub const StreamRegistry = struct {
     }
 
     pub fn deinit(self: *StreamRegistry) void {
+        if (self.flow) |state| self.allocator.destroy(state);
         self.streams.deinit(self.allocator);
         self.index.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn configureFlow(self: *StreamRegistry, local: http3.Settings, peer: http3.Settings) webtransport.Error!void {
+        if (!webtransport.flow_control.negotiated(local, peer)) return;
+        if (self.flow != null or self.streams.items.len != 0) return error.InvalidSessionState;
+        const state = try self.allocator.create(webtransport.flow_control.State);
+        errdefer self.allocator.destroy(state);
+        state.* = try webtransport.flow_control.State.init(local, peer);
+        self.flow = state;
+    }
+
+    fn openingLimit(self: *const StreamRegistry, direction: StreamDirection, local: bool) u64 {
+        if (self.flow) |flow| {
+            const limits = if (local) flow.send_limit else flow.receive_limit;
+            return switch (direction) {
+                .bidirectional => limits.bidi,
+                .unidirectional => limits.uni,
+            };
+        }
+        return switch (direction) {
+            .bidirectional => if (local) self.max_local_bidi else self.max_peer_bidi,
+            .unidirectional => if (local) self.max_local_uni else self.max_peer_uni,
+        };
+    }
+
+    fn checkRetention(self: *const StreamRegistry, direction: StreamDirection, local: bool) webtransport.Error!void {
+        if (self.flow == null) return;
+        const maximum = switch (direction) {
+            .bidirectional => if (local) self.max_local_bidi else self.max_peer_bidi,
+            .unidirectional => if (local) self.max_local_uni else self.max_peer_uni,
+        };
+        var retained: u64 = 0;
+        for (self.streams.items) |stream| {
+            if (stream.direction == direction and stream.locally_initiated == local) retained += 1;
+        }
+        if (retained >= maximum) return error.StreamLimitExceeded;
+    }
+
+    fn syncFlowStreams(self: *StreamRegistry) void {
+        if (self.flow) |flow| {
+            flow.sent.bidi = self.opened_local_bidi;
+            flow.sent.uni = self.opened_local_uni;
+            flow.received.bidi = self.opened_peer_bidi;
+            flow.received.uni = self.opened_peer_uni;
+        }
     }
 
     pub fn openLocal(
@@ -246,16 +297,24 @@ pub const StreamRegistry = struct {
         const opened, const limit = switch (direction) {
             .bidirectional => .{
                 &self.opened_peer_bidi,
-                self.max_peer_bidi,
+                self.openingLimit(.bidirectional, false),
             },
             .unidirectional => .{
                 &self.opened_peer_uni,
-                self.max_peer_uni,
+                self.openingLimit(.unidirectional, false),
             },
         };
-        if (opened.* >= limit) return error.StreamLimitExceeded;
+        if (opened.* >= limit) {
+            if (self.flow != null) {
+                self.flow_violation = true;
+                return error.FlowControlViolation;
+            }
+            return error.StreamLimitExceeded;
+        }
+        try self.checkRetention(direction, false);
         const stream_state = try self.insert(stream_id, direction, false);
         opened.* += 1;
+        self.syncFlowStreams();
         return stream_state;
     }
 
@@ -269,16 +328,18 @@ pub const StreamRegistry = struct {
         const opened, const limit = switch (direction) {
             .bidirectional => .{
                 &self.opened_local_bidi,
-                self.max_local_bidi,
+                self.openingLimit(.bidirectional, true),
             },
             .unidirectional => .{
                 &self.opened_local_uni,
-                self.max_local_uni,
+                self.openingLimit(.unidirectional, true),
             },
         };
-        if (opened.* >= limit) return error.StreamLimitExceeded;
+        if (opened.* >= limit) return if (self.flow != null) error.FlowControlBlocked else error.StreamLimitExceeded;
+        try self.checkRetention(direction, true);
         const stream_state = try self.insert(stream_id, direction, true);
         opened.* += 1;
+        self.syncFlowStreams();
         return stream_state;
     }
 
@@ -310,14 +371,15 @@ pub const StreamRegistry = struct {
         const opened, const limit = switch (direction) {
             .bidirectional => .{
                 self.opened_local_bidi,
-                self.max_local_bidi,
+                self.openingLimit(.bidirectional, true),
             },
             .unidirectional => .{
                 self.opened_local_uni,
-                self.max_local_uni,
+                self.openingLimit(.unidirectional, true),
             },
         };
-        if (opened >= limit) return error.StreamLimitExceeded;
+        if (opened >= limit) return if (self.flow != null) error.FlowControlBlocked else error.StreamLimitExceeded;
+        try self.checkRetention(direction, true);
         _ = std.math.add(u62, stream_id, 4) catch
             return error.StreamLimitExceeded;
         try self.index.ensureUnusedCapacity(self.allocator, 1);
@@ -350,6 +412,7 @@ pub const StreamRegistry = struct {
         const stream_state = try self.insert(stream_id, direction, true);
         next.* = advanced;
         opened.* += 1;
+        self.syncFlowStreams();
         return stream_state;
     }
 
@@ -469,6 +532,7 @@ pub const StreamRegistry = struct {
             .bidirectional => self.opened_peer_bidi -= 1,
             .unidirectional => self.opened_peer_uni -= 1,
         }
+        self.syncFlowStreams();
     }
 
     pub fn recordSent(

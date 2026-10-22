@@ -17,6 +17,8 @@ const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
 const terminal = @import("endpoint_client/terminal.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
+const flow_grant = @import("flow_grant.zig");
+const flow_open = @import("flow_open.zig");
 
 const net = std.Io.net;
 
@@ -229,7 +231,7 @@ pub const Session = struct {
             .bidirectional => connection.nextLocalBidirectionalStreamId(),
             .unidirectional => connection.nextLocalUnidirectionalStreamId(),
         });
-        try self.streams.prepareLocalId(stream_id, direction);
+        try flow_open.prepareId(&self.control, &client.h3, &self.streams, stream_id, direction, null);
         const opened: u64 = switch (direction) {
             .bidirectional => try client.h3.openClientBidirectionalStream(),
             .unidirectional => try connection.openUnidirectionalStream(),
@@ -372,6 +374,22 @@ pub const Session = struct {
         };
         try self.control.recordLocalClose(code);
     }
+
+    pub fn grantData(self: *Session, client: *Client, maximum: u64) Error!void {
+        try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        return flow_grant.send(&self.control, &client.h3, &self.streams, .{ .max_data = maximum });
+    }
+
+    pub fn grantStreams(self: *Session, client: *Client, direction: webtransport.StreamDirection, maximum: u64) Error!void {
+        try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        const capsule: webtransport.Capsule = switch (direction) {
+            .bidirectional => .{ .max_streams_bidi = maximum },
+            .unidirectional => .{ .max_streams_uni = maximum },
+        };
+        return flow_grant.send(&self.control, &client.h3, &self.streams, capsule);
+    }
 };
 
 pub const Client = struct {
@@ -385,7 +403,7 @@ pub const Client = struct {
         if (!connection_lifecycle.terminating(&self.h3.established.connection)) return false;
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |session_ptr| {
-            _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3);
+            _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3, &session_ptr.*.streams);
             session_ptr.*.close_response_pending = false;
         }
         return true;
@@ -838,7 +856,7 @@ pub const Client = struct {
             .streams = streams,
             .control = control,
         };
-        connection_lifecycle.activate(&session_value.control, &self.h3);
+        connection_lifecycle.activate(&session_value.control, &self.h3, &session_value.streams);
         self.sessions.putAssumeCapacityNoClobber(stream_id, session_value);
         return .{ .accepted = session_value };
     }
@@ -970,6 +988,7 @@ pub const Client = struct {
         stream_buffer: []u8,
     ) Error!?Event {
         try self.ensureConnectionOpen();
+        session_value.control.bindFlow(session_value.streams.flow);
         const session_id = session_value.session_id;
         // Retain the detached CONNECT association until removal: late bytes
         // after CLOSE still require H3_MESSAGE_ERROR on this stream.
@@ -980,7 +999,7 @@ pub const Client = struct {
             error.CongestionLimited,
             error.FlowControlBlocked,
             => return null,
-            error.InvalidCapsule => {
+            error.InvalidCapsule, error.FlowControlViolation => {
                 _ = session_value.control.tryRejectInvalidCapsule(
                     &self.h3.established.connection,
                 ) catch |rejection_err| switch (rejection_err) {
@@ -1316,4 +1335,5 @@ fn findHeader(
 test {
     _ = @import("endpoint_client/terminal_tests.zig");
     _ = @import("endpoint_client/connection_close_tests.zig");
+    _ = @import("endpoint_client/flow_tests.zig");
 }

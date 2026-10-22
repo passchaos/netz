@@ -11,6 +11,10 @@ pub fn pending(control: *const control_mod.Control) bool {
         (control.capsule_error_rejected and !control.capsule_error_reported);
 }
 
+pub fn errorFor(control: *const control_mod.Control) control_mod.Error {
+    return if (control.flow_violation) error.FlowControlViolation else error.InvalidCapsule;
+}
+
 pub fn finish(
     control: *control_mod.Control,
     connection: *quic.one_rtt.Connection,

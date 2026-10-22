@@ -99,7 +99,7 @@ pub const Reader = struct {
         self: *Reader,
         bytes: []const u8,
     ) Error!?session_control.Event {
-        const control_snapshot = self.control;
+        const control_snapshot = self.control.captureSnapshot();
         const result = try self.control.feedCapsulePayload(bytes);
         if (result.event) |event| {
             const remaining = bytes[result.consumed..];
