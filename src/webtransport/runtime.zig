@@ -2519,19 +2519,12 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const stream_id = try self.streams.prepareLocal(.bidirectional);
-        const transport_id = self.h3.established.connection
-            .tryOpenStream() catch |err| {
-            try self.refreshTimer();
-            return err;
-        };
-        std.debug.assert(transport_id == stream_id);
-        const committed = (try self.streams.commitPreparedLocal(
-            stream_id,
-            .bidirectional,
-        )).stream_id;
+        const result = flow_open.open(&self.control, self.h3, &self.streams, .bidirectional, null, true);
         try self.refreshTimer();
-        return committed;
+        return result catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     /// Attempt to reserve one unidirectional stream without waiting for peer
@@ -2545,18 +2538,12 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const stream_id = try self.streams.prepareLocal(.unidirectional);
-        const transport_id = self.h3.tryOpenServerUnidirectionalStream() catch |err| {
-            try self.refreshTimer();
-            return err;
-        };
-        std.debug.assert(transport_id == stream_id);
-        const registered = try self.streams.commitPreparedLocal(
-            stream_id,
-            .unidirectional,
-        );
+        const result = flow_open.open(&self.control, self.h3, &self.streams, .unidirectional, null, true);
         try self.refreshTimer();
-        return registered.stream_id;
+        return result catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn maxDatagramPayloadSize(
@@ -6073,25 +6060,7 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const stream_id = try flow_open.prepare(&self.control, &self.h3, &self.streams, direction, deadline);
-        const transport_id: u64 = switch (direction) {
-            .bidirectional => if (deadline) |absolute|
-                try self.h3.established.connection
-                    .openStreamWithDeadline(absolute)
-            else
-                try self.h3.established.connection.openStream(),
-            // Server push and WebTransport uni streams share this ID space,
-            // so H3 and QUIC must advance as one indivisible reservation.
-            .unidirectional => if (deadline) |absolute|
-                try self.h3.openServerUnidirectionalStreamWithDeadline(absolute)
-            else
-                try self.h3.openServerUnidirectionalStream(),
-        };
-        std.debug.assert(transport_id == stream_id);
-        return (try self.streams.commitPreparedLocal(
-            stream_id,
-            direction,
-        )).stream_id;
+        return flow_open.open(&self.control, &self.h3, &self.streams, direction, deadline, false);
     }
 
     pub fn sendStream(
@@ -9845,24 +9814,7 @@ pub const HandshakeClientSession = struct {
         );
         // Registry capacity and the cumulative WT cap are fallible, so reserve
         // them before consuming either the H3 or transport stream-ID cursor.
-        const stream_id = try flow_open.prepare(&self.control, &self.h3, &self.streams, direction, deadline);
-        const transport_id: u64 = switch (direction) {
-            .bidirectional => if (deadline) |absolute|
-                try self.h3.openClientBidirectionalStreamWithDeadline(absolute)
-            else
-                try self.h3.openClientBidirectionalStream(),
-            .unidirectional => if (deadline) |absolute|
-                try self.h3.established.connection
-                    .openUnidirectionalStreamWithDeadline(absolute)
-            else
-                try self.h3.established.connection
-                    .openUnidirectionalStream(),
-        };
-        std.debug.assert(transport_id == stream_id);
-        return (try self.streams.commitPreparedLocal(
-            stream_id,
-            direction,
-        )).stream_id;
+        return flow_open.open(&self.control, &self.h3, &self.streams, direction, deadline, false);
     }
 
     fn openLocalStreamOnce(
@@ -9875,28 +9827,10 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const stream_id = flow_open.prepare(&self.control, &self.h3, &self.streams, direction, null) catch |err| switch (err) {
+        return flow_open.open(&self.control, &self.h3, &self.streams, direction, null, true) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => return @errorCast(err),
         };
-        const transport_id: u64 = switch (direction) {
-            .bidirectional => self.h3.established.connection
-                .tryOpenStream() catch |err| {
-                try self.refreshDispatcherTimer();
-                return err;
-            },
-            .unidirectional => self.h3.established.connection
-                .tryOpenUnidirectionalStream() catch |err| {
-                try self.refreshDispatcherTimer();
-                return err;
-            },
-        };
-        try self.refreshDispatcherTimer();
-        std.debug.assert(transport_id == stream_id);
-        return (try self.streams.commitPreparedLocal(
-            stream_id,
-            direction,
-        )).stream_id;
     }
 
     pub fn sendStream(
@@ -19315,5 +19249,6 @@ test {
     _ = @import("runtime/flow/streams.zig");
     _ = @import("runtime/flow/grant.zig");
     _ = @import("runtime/flow/datagram.zig");
+    _ = @import("runtime/stream/reset.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

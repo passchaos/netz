@@ -6410,6 +6410,18 @@ pub const HandshakeServerSession = struct {
         return stream_id;
     }
 
+    /// Reserve the shared push/extension namespace with an atomic QUIC reset
+    /// prefix binding. All fallible prefix allocation precedes ID consumption.
+    pub fn tryOpenServerUnidirectionalStreamWithResetPrefix(self: *HandshakeServerSession, prefix: []const u8) Error!u62 {
+        const expected = self.next_push_stream_id;
+        _ = std.math.add(u62, expected, 4) catch return error.StreamCreationError;
+        if (self.established.connection.nextLocalUnidirectionalStreamId() != expected) return error.StreamCreationError;
+        const actual = try self.established.connection.tryOpenStreamWithResetPrefix(.unidirectional, prefix);
+        const id = try self.reserveServerUnidirectionalStreamId();
+        std.debug.assert(actual == expected and id == expected);
+        return id;
+    }
+
     pub fn openServerUnidirectionalStreamWithTimeout(
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
@@ -11711,6 +11723,17 @@ pub const HandshakeClient = struct {
         self.next_stream_id = next_stream_id;
         self.request_lifecycle.markAllocated(expected);
         std.debug.assert(expected == transport_id);
+        return expected;
+    }
+
+    pub fn tryOpenClientBidirectionalStreamWithResetPrefix(self: *HandshakeClient, prefix: []const u8) Error!u62 {
+        const expected = self.next_stream_id;
+        const advanced = std.math.add(u62, expected, 4) catch return error.StreamCreationError;
+        if (self.established.connection.nextLocalBidirectionalStreamId() != expected) return error.StreamCreationError;
+        const actual = try self.established.connection.tryOpenStreamWithResetPrefix(.bidirectional, prefix);
+        self.next_stream_id = advanced;
+        self.request_lifecycle.markAllocated(expected);
+        std.debug.assert(actual == expected);
         return expected;
     }
 

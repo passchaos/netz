@@ -4,6 +4,7 @@
 
 const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
+const association_prefix = @import("../stream/prefix.zig");
 
 /// Explicit release stays idempotent after automatic record reclamation.
 /// Unknown live IDs still fail ownership validation before touching transport.
@@ -22,6 +23,7 @@ pub fn observeClosed(connection: *const quic.one_rtt.Connection, registry: *webt
     while (position < registry.streams.items.len) {
         const stream = &registry.streams.items[position];
         if (connection.sendStreamStats(stream.stream_id)) |stats| {
+            association_prefix.observeReset(connection, stream);
             if (stats.reset) |reset| stream.send_reset = .fromHttp3(reset.application_error_code);
             if (stats.stopped) |stop| {
                 if (stream.stopped == null) stream.stopped = .fromHttp3(stop.application_error_code);

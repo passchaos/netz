@@ -8,6 +8,7 @@ const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const association = @import("../stream_association.zig");
 const connection_lifecycle = @import("../connection_lifecycle.zig");
+const stream_reset = @import("../stream/reset.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error;
 
@@ -24,7 +25,9 @@ pub fn terminateStreams(
             stream.send_reset == null and
             stream.stopped == null)
         {
-            try connection.resetStream(
+            try stream_reset.resetWithCode(
+                connection,
+                registry,
                 stream.stream_id,
                 webtransport.ApplicationErrorCode.session_gone,
             );
@@ -72,7 +75,9 @@ pub fn terminateStreamsWithDeadline(
             stream.send_reset == null and
             stream.stopped == null)
         {
-            try connection.resetStreamWithDeadline(
+            try stream_reset.resetWithCodeAndDeadline(
+                connection,
+                registry,
                 stream.stream_id,
                 webtransport.ApplicationErrorCode.session_gone,
                 deadline,
@@ -124,7 +129,9 @@ pub fn terminateStreamsOnce(
             stream.send_reset == null and
             stream.stopped == null)
         {
-            try connection.tryResetStream(
+            try stream_reset.resetOnceWithCode(
+                connection,
+                registry,
                 stream.stream_id,
                 webtransport.ApplicationErrorCode.session_gone,
             );
@@ -252,6 +259,7 @@ fn terminateBufferedStreamsInternal(
             if (direction == .bidirectional and
                 bufferedSendNeedsReset(connection, stream_id))
             {
+                if (connection.config.reliable_reset.peer) try connection.setStreamResetPrefix(stream_id, &.{});
                 if (deadline) |absolute| {
                     try connection.resetStreamWithDeadline(
                         stream_id,

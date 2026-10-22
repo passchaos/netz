@@ -287,8 +287,9 @@ session errors, and forbidden CONNECT frames retain connection-level handling.
 
 Resumable deadline-bound explicit grant APIs still need runtime integration.
 These tests therefore do not establish
-full draft-16 session-flow-control compliance; reliable association-prefix reset
-support must also be used by the WebTransport runtimes.
+full draft-16 session-flow-control compliance; highest-common draft selection and
+mandatory capability validation still require a complete version-aware handshake
+audit across modern and compatibility advertisements.
 
 ## Feature comparison
 
@@ -503,7 +504,7 @@ without reading the shared socket, refresh the dispatcher timer after either
 success or backpressure, and leave body length, stream offset, and FIN state
 unchanged when the packet is not accepted.
 Packet-sized writes never hide application progress on timeout, and FIN is
-marked only after its packet reaches the socket. RESET_STREAM also has relative-
+marked only after its packet reaches the socket. Stream reset also has relative-
 timeout and absolute-deadline forms: congestion and pacing are serviced under
 the same budget, and the registry records the reset only after socket
 submission, so a timeout remains safely retryable. STOP_SENDING now has the
@@ -511,10 +512,23 @@ same bounded contract from the QUIC connection through both standalone
 WebTransport endpoint roles and the stateful protected client facade. Invalid
 or expired deadlines consume no packet number and leave both transport and
 WebTransport stop state uncommitted; a later retry sends the exact mapped code.
-Negotiated `RESET_STREAM_AT` adds partial-reliability cancellation across the
-same session facades. Its public `reliable_size` counts application bytes rather
-than the hidden WebTransport association prefix; the adapter translates that
-to the QUIC offset and rejects prefixes that have not reached the socket.
+When the peer advertises QUIC `reset_stream_at`, stream opens now bind their
+association bytes to transport reset state before returning an ID. Prefix/state
+allocation precedes ID consumption across H3 request/push and QUIC namespaces.
+Ordinary application reset, dual-direction cancellation, automatic STOP_SENDING
+response and SESSION_GONE cleanup then use RESET_STREAM_AT with at least that
+prefix. Resetting an unwritten stream can submit its header and reset in one
+packet, even with zero session data credit; header bytes remain excluded from
+application accounting. Legacy peers without the extension retain RESET_STREAM
+compatibility, as covered by the native wtransport gate.
+
+Explicit `resetStreamReliably*` adds a guaranteed application-data prefix. Its
+public `reliable_size` counts application bytes rather than association bytes;
+the adapter translates that to the QUIC offset and rejects unsent application
+prefixes. A zero-sized application guarantee can reset an unwritten stream.
+STOP abandonment keeps a bounded 16-byte protocol prefix view separately from
+application-readable storage, so reliable association headers arriving after an
+early stop remain identifiable without restoring discarded application DATA.
 Receive polling delivers the complete reliable prefix before the one-shot reset
 event, waits across reordered gaps, ignores reordered Reliable Size increases,
 and never lets automatic abandoned-stream cleanup reclaim the prefix early.

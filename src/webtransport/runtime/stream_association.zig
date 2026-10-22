@@ -5,6 +5,7 @@ const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const flow_receive = @import("flow/receive.zig");
+const association_prefix = @import("stream/prefix.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 
@@ -394,11 +395,19 @@ fn identifyInternal(
         stream = try registry.registerPeer(stream_id, direction);
         stream.?.receive_header_len = prefix_len;
         try flow_receive.observe(connection, registry, stream.?);
+        if (direction == .bidirectional) {
+            association_prefix.bind(connection, registry, stream.?) catch |err| {
+                registry.removeLastPeer(stream_id);
+                return err;
+            };
+        }
         stream.?.receive_mode = receive_mode;
+        const receive_stats = connection.recvStreamStats(stream_id).?;
+        if (receive_stats.stop_sending_sent) |stop| stream.?.stop_sent = .fromHttp3(stop.application_error_code);
         if (receive_mode == .incremental) {
             // Association bytes count toward QUIC credit but are never exposed
             // as WebTransport application bytes.
-            var reset_consumed_prefix = false;
+            var reset_consumed_prefix = receive_stats.bytes_read >= prefix_len;
             if (connection.recvStreamStats(stream_id).?.reset) |reset| {
                 if (reset.reliable_size <= prefix_len) {
                     stream.?.receive_reset = .fromHttp3(

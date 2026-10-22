@@ -47,6 +47,7 @@ pub fn Context(comptime H3Pointer: type) type {
         control: *control_mod.Control,
         h3: H3Pointer,
         registry: *webtransport.StreamRegistry,
+        one_attempt: bool = false,
 
         pub fn progress(self: *@This()) Progress {
             return .{ .context = self, .runFn = run, .maintainFn = maintain };
@@ -68,7 +69,7 @@ pub fn Context(comptime H3Pointer: type) type {
                 if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
                 credits.sendPending(self.control, self.h3, self.registry) catch |err| switch (err) {
                     error.PacingLimited => {
-                        if (self.h3.dispatcherBound()) return;
+                        if (self.one_attempt or self.h3.dispatcherBound()) return;
                         if (deadline) |absolute|
                             try self.h3.established.connection.waitForPacingAvailabilityWithDeadline(absolute)
                         else

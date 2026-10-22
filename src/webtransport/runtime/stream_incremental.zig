@@ -418,186 +418,13 @@ test "WebTransport incremental poll rejects wrong-session bidi before sibling" {
     try std.testing.expect(event.data.fin);
 }
 
-/// Abort the local send direction with a mapped WebTransport error code.
-pub fn reset(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-) Error!void {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if (stream.direction == .unidirectional and
-        !stream.locally_initiated)
-    {
-        return error.InvalidStreamState;
-    }
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.resetStream(stream_id, http3_code);
-    stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, stream);
-}
-
-/// Abort the local send direction under one absolute awake-clock deadline.
-/// The registry is committed only after RESET_STREAM reaches the socket.
-pub fn resetWithDeadline(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-    deadline: std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if (stream.direction == .unidirectional and
-        !stream.locally_initiated)
-    {
-        return error.InvalidStreamState;
-    }
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.resetStreamWithDeadline(
-        stream_id,
-        http3_code,
-        deadline,
-    );
-    stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, stream);
-}
-
-/// Abort the local send direction once without sleeping for QUIC pacing.
-/// Registry state changes only after the RESET_STREAM packet is submitted.
-pub fn resetOnce(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-) Error!void {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if (stream.direction == .unidirectional and
-        !stream.locally_initiated)
-    {
-        return error.InvalidStreamState;
-    }
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.tryResetStream(stream_id, http3_code);
-    stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, stream);
-}
-
-/// Abort the local send direction while guaranteeing delivery of an
-/// application-data prefix. `reliable_size` excludes the WebTransport stream
-/// association prefix, which must already have reached the QUIC send path.
-pub fn resetReliably(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-    reliable_size: u64,
-) Error!void {
-    const prepared = try prepareReliableReset(
-        registry,
-        stream_id,
-        reliable_size,
-    );
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.resetStreamReliably(
-        stream_id,
-        http3_code,
-        prepared.wire_reliable_size,
-    );
-    prepared.stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, prepared.stream);
-}
-
-/// Deadline-bounded reliable reset. Registry state changes only after the
-/// RESET_STREAM_AT frame reaches the socket.
-pub fn resetReliablyWithDeadline(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-    reliable_size: u64,
-    deadline: std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    const prepared = try prepareReliableReset(
-        registry,
-        stream_id,
-        reliable_size,
-    );
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.resetStreamReliablyWithDeadline(
-        stream_id,
-        http3_code,
-        prepared.wire_reliable_size,
-        deadline,
-    );
-    prepared.stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, prepared.stream);
-}
-
-/// Single-attempt counterpart for shared-endpoint dispatchers.
-pub fn resetReliablyOnce(
-    connection: *quic.one_rtt.Connection,
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    application_error_code: u32,
-    reliable_size: u64,
-) Error!void {
-    const prepared = try prepareReliableReset(
-        registry,
-        stream_id,
-        reliable_size,
-    );
-    const http3_code =
-        webtransport.applicationErrorCodeToHttp3(application_error_code);
-    try connection.tryResetStreamReliably(
-        stream_id,
-        http3_code,
-        prepared.wire_reliable_size,
-    );
-    prepared.stream.send_reset = .fromHttp3(http3_code);
-    try association.requestAfterSendTerminal(connection, prepared.stream);
-}
-
-const PreparedReliableReset = struct {
-    stream: *webtransport.StreamState,
-    wire_reliable_size: u64,
-};
-
-fn prepareReliableReset(
-    registry: *webtransport.StreamRegistry,
-    stream_id: u62,
-    reliable_size: u64,
-) Error!PreparedReliableReset {
-    const stream = registry.get(stream_id) orelse
-        return error.UnknownStream;
-    if ((stream.direction == .unidirectional and
-        !stream.locally_initiated) or
-        stream.send_reset != null or
-        stream.stopped != null or
-        stream.local_fin)
-    {
-        return error.InvalidStreamState;
-    }
-    if (!stream.prefix_sent or reliable_size > stream.bytes_sent) {
-        return error.InvalidStreamState;
-    }
-    const prefix_size = stream.send_offset - stream.bytes_sent;
-    return .{
-        .stream = stream,
-        .wire_reliable_size = std.math.add(
-            u64,
-            prefix_size,
-            reliable_size,
-        ) catch return error.IntegerOverflow,
-    };
-}
+const stream_reset = @import("stream/reset.zig");
+pub const reset = stream_reset.reset;
+pub const resetWithDeadline = stream_reset.resetWithDeadline;
+pub const resetOnce = stream_reset.resetOnce;
+pub const resetReliably = stream_reset.resetReliably;
+pub const resetReliablyWithDeadline = stream_reset.resetReliablyWithDeadline;
+pub const resetReliablyOnce = stream_reset.resetReliablyOnce;
 
 /// Cancel the peer send direction with a mapped WebTransport error code.
 pub fn stop(
@@ -1688,7 +1515,7 @@ test "WebTransport reliable reset maps application bytes to QUIC offsets" {
 
     try std.testing.expectError(
         error.InvalidStreamState,
-        resetReliably(&connection, &registry, stream.stream_id, 42, 0),
+        resetReliably(&connection, &registry, stream.stream_id, 42, 1),
     );
     var prefix_storage: [16]u8 = undefined;
     const prefix = try webtransport.BidirectionalStreamHeader.writeInto(

@@ -227,19 +227,10 @@ pub const Session = struct {
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
         try self.control.ensureOpen();
-        const connection = &client.h3.established.connection;
-        const stream_id: u62 = @intCast(switch (direction) {
-            .bidirectional => connection.nextLocalBidirectionalStreamId(),
-            .unidirectional => connection.nextLocalUnidirectionalStreamId(),
-        });
-        try flow_open.prepareId(&self.control, &client.h3, &self.streams, stream_id, direction, null);
-        const opened: u64 = switch (direction) {
-            .bidirectional => try client.h3.openClientBidirectionalStream(),
-            .unidirectional => try connection.openUnidirectionalStream(),
+        return flow_open.open(&self.control, &client.h3, &self.streams, direction, null, false) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
         };
-        std.debug.assert(opened == stream_id);
-        _ = try self.streams.registerLocal(stream_id, direction);
-        return stream_id;
     }
 
     pub fn sendStream(

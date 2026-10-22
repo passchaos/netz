@@ -22,6 +22,7 @@ pub const OwnedHandshakeStream = struct {
 };
 
 const association = @import("stream_association.zig");
+const association_prefix = @import("stream/prefix.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_send = @import("flow/send.zig");
 const flow_progress = @import("flow/progress.zig");
@@ -1310,17 +1311,7 @@ fn sendPrefixIfNeededUntil(
 ) TimeoutError!void {
     if (stream.prefix_sent) return;
     var prefix_storage: [16]u8 = undefined;
-    const prefix = switch (stream.direction) {
-        .bidirectional => try webtransport
-            .BidirectionalStreamHeader.writeInto(
-            &prefix_storage,
-            session_id,
-        ),
-        .unidirectional => try writeUnidirectionalHeaderInto(
-            &prefix_storage,
-            session_id,
-        ),
-    };
+    const prefix = try association_prefix.header(session_id, stream.direction, &prefix_storage);
     while (true) {
         try ensureDeadline(connection, deadline);
         sendPrefixOnce(connection, stream, stream_id, prefix) catch |err| switch (err) {
@@ -1356,14 +1347,7 @@ fn pendingPrefix(
     storage: *[16]u8,
 ) Error![]const u8 {
     if (stream.prefix_sent) return storage[0..0];
-    return switch (stream.direction) {
-        .bidirectional => try webtransport
-            .BidirectionalStreamHeader.writeInto(storage, session_id),
-        .unidirectional => try writeUnidirectionalHeaderInto(
-            storage,
-            session_id,
-        ),
-    };
+    return association_prefix.header(session_id, stream.direction, storage);
 }
 
 fn submitOnce(
@@ -1768,21 +1752,6 @@ fn takeHandshakeSessionStream(
         .payload = payload,
         .fin = true,
     };
-}
-
-fn writeUnidirectionalHeaderInto(
-    storage: []u8,
-    session_id: webtransport.SessionId,
-) Error![]const u8 {
-    const stream_type = try quic.varint.encodeInto(
-        storage,
-        @intFromEnum(http3.StreamType.webtransport_unidirectional),
-    );
-    const session = try quic.varint.encodeInto(
-        storage[stream_type.len..],
-        session_id.value,
-    );
-    return storage[0 .. stream_type.len + session.len];
 }
 
 test "WebTransport whole-stream oversize advances sibling and permits incremental drain" {

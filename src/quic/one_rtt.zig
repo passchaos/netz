@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("mod.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const closed_streams = @import("one_rtt/closed_streams.zig");
+const reset_prefix = @import("one_rtt/reset_prefix.zig");
 const close_packet = @import("one_rtt/close_packet.zig");
 const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
@@ -477,6 +478,9 @@ const StreamFlowEntry = struct {
     final_size: ?u64 = null,
     stopped: ?StopSendingInfo = null,
     reset_sent: ?StreamResetInfo = null,
+    /// Protocol-owned association bytes. Every local reset, including the
+    /// automatic response to STOP_SENDING, keeps this prefix reliable.
+    required_reset_prefix: ?reset_prefix.Prefix = null,
     /// The application no longer needs this locally initiated stream. State
     /// is reclaimed once every applicable send/receive half is terminal.
     release_requested: bool = false,
@@ -486,6 +490,7 @@ const StreamRecvFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.RecvFlow,
     recv_state: quic.stream_state.RecvState,
+    stopped_prefix: reset_prefix.Received = .{},
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
     reset: ?StreamResetInfo = null,
@@ -2591,6 +2596,7 @@ pub const Connection = struct {
                     frame,
                     &current_traits,
                 );
+                if (frame == .reset_stream_at) try self.validateResetPrefixQueued(frame.reset_stream_at, packets[0 .. i + 1]);
                 try traits.merge(current_traits);
                 if (frame == .stream) {
                     try self.validateStreamFrameForBatchSendAt(
@@ -4135,6 +4141,39 @@ pub const Connection = struct {
         return self.tryOpenLocalStream(.bidirectional);
     }
 
+    /// Reserve one stream and its protocol reset prefix in one transaction.
+    /// Prefix/state allocation completes before consuming a QUIC stream ID.
+    /// No prefix is sent until first use or cancellation.
+    pub fn tryOpenStreamWithResetPrefix(self: *Connection, direction: StreamDirection, prefix: []const u8) Error!u64 {
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (!self.config.reliable_reset.peer) return error.InvalidFrame;
+        const prepared = try reset_prefix.Prefix.init(prefix);
+        try self.stream_send_index.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        try self.stream_send_flows.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        const id = try self.tryOpenLocalStream(direction);
+        const entry = self.sendStreamEntry(id) catch unreachable;
+        entry.required_reset_prefix = prepared;
+        return id;
+    }
+
+    /// Bind a protocol prefix to an already reserved send direction. Repeated
+    /// identical bindings are harmless; a terminal stream cannot gain a new
+    /// reliable-prefix promise after a reset was submitted.
+    pub fn setStreamResetPrefix(self: *Connection, stream_id: u64, prefix: []const u8) Error!void {
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (!self.config.reliable_reset.peer) return error.InvalidFrame;
+        _ = quic.varint.length(stream_id) catch return error.InvalidFrameLength;
+        if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        const prepared = try reset_prefix.Prefix.init(prefix);
+        const entry = try self.sendStreamEntry(stream_id);
+        if (entry.required_reset_prefix) |*existing| {
+            if (!std.mem.eql(u8, existing.bytes(), prefix)) return error.InvalidFrame;
+            return;
+        }
+        if (entry.reset_sent != null) return error.InvalidFrame;
+        entry.required_reset_prefix = prepared;
+    }
+
     /// Reserve one bidirectional stream when peer credit is already present.
     ///
     /// Unlike `openStreamWithDeadline`, this never reads the endpoint socket
@@ -5436,6 +5475,7 @@ pub const Connection = struct {
         for (frames) |frame| {
             var traits: OutboundFrameTraits = .{};
             try self.validateOutboundFrameAndTraits(frame, &traits);
+            if (frame == .reset_stream_at) try self.validateResetPrefixQueued(frame.reset_stream_at, &[_][]const quic.Frame{frames});
             try combined.merge(traits);
         }
         return combined;
@@ -5462,8 +5502,18 @@ pub const Connection = struct {
                 const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
                 if (frame_size > frame_limit) return error.DatagramTooLarge;
             },
-            .reset_stream_at => if (!self.config.reliable_reset.peer) {
-                return error.InvalidFrame;
+            .reset_stream => |reset| {
+                if (self.findSendStreamEntryConst(reset.stream_id)) |entry| {
+                    if (entry.required_reset_prefix != null) return error.InvalidFrame;
+                }
+            },
+            .reset_stream_at => |reset| {
+                if (!self.config.reliable_reset.peer) return error.InvalidFrame;
+                if (self.findSendStreamEntryConst(reset.stream_id)) |entry| {
+                    if (entry.required_reset_prefix) |*prefix| {
+                        if (reset.reliable_size < prefix.len) return error.InvalidFrame;
+                    }
+                }
             },
             .ack_frequency => |ack_frequency| {
                 if (!self.ackFrequencySendEnabled()) {
@@ -5478,6 +5528,13 @@ pub const Connection = struct {
                 return error.AckFrequencyDisabled;
             },
             else => {},
+        }
+    }
+
+    fn validateResetPrefixQueued(self: Connection, reset: quic.ResetStreamAtFrame, packets: anytype) Error!void {
+        const entry = self.findSendStreamEntryConst(reset.stream_id) orelse return;
+        if (entry.required_reset_prefix) |*prefix| {
+            if (!prefix.queuedIn(reset.stream_id, packets)) return error.InvalidFrame;
         }
     }
 
@@ -7571,12 +7628,15 @@ pub const Connection = struct {
         if (!self.config.reliable_reset.peer) return error.InvalidFrame;
         try self.validateNextPacketNumber();
         const entry = try self.sendStreamEntry(stream_id);
-        if (reliable_size > entry.highest_sent_end) return error.InvalidFrame;
+        const minimum: u64 = if (entry.required_reset_prefix) |prefix| prefix.len else 0;
+        const final_size = @max(entry.highest_sent_end, minimum);
+        const required_size = @max(reliable_size, minimum);
+        if (required_size > final_size) return error.InvalidFrame;
         try self.sendResetStreamReliablyAt(
             stream_id,
             application_error_code,
-            entry.highest_sent_end,
-            reliable_size,
+            final_size,
+            required_size,
             sent_time_ns,
         );
     }
@@ -7746,13 +7806,15 @@ pub const Connection = struct {
         try self.validateNextPacketNumber();
         const send_stream = try self.sendStreamEntry(stream_id);
         const recv_stream = try self.recvStreamFlow(stream_id);
+        const minimum: u64 = if (send_stream.required_reset_prefix) |prefix| prefix.len else 0;
         const reset_info: StreamResetInfo = .{
             .application_error_code = application_error_code,
-            .final_size = send_stream.highest_sent_end,
+            .final_size = @max(send_stream.highest_sent_end, minimum),
+            .reliable_size = minimum,
         };
         const needs_reset = send_stream.final_size == null and
             (send_stream.reset_sent == null or
-                send_stream.reset_sent.?.reliable_size != 0);
+                send_stream.reset_sent.?.reliable_size > minimum);
         const satisfies_pending_stop = send_stream.stopped != null and
             send_stream.reset_sent == null and needs_reset;
         if (send_stream.reset_sent) |existing| {
@@ -7767,14 +7829,29 @@ pub const Connection = struct {
         else
             true;
 
-        var frames: [2]quic.Frame = undefined;
+        var frames: [3]quic.Frame = undefined;
         var count: usize = 0;
+        var prefix_needed = false;
         if (needs_reset) {
-            frames[count] = .{ .reset_stream = .{
-                .stream_id = stream_id,
-                .application_error_code = application_error_code,
-                .final_size = reset_info.final_size,
-            } };
+            if (send_stream.required_reset_prefix) |*prefix| {
+                if (!prefix.submitted and prefix.len != 0) {
+                    frames[count] = .{ .stream = .{ .stream_id = stream_id, .offset = 0, .data = prefix.bytes(), .fin = false } };
+                    count += 1;
+                    prefix_needed = true;
+                }
+                frames[count] = .{ .reset_stream_at = .{
+                    .stream_id = stream_id,
+                    .application_error_code = application_error_code,
+                    .final_size = reset_info.final_size,
+                    .reliable_size = minimum,
+                } };
+            } else {
+                frames[count] = .{ .reset_stream = .{
+                    .stream_id = stream_id,
+                    .application_error_code = application_error_code,
+                    .final_size = reset_info.final_size,
+                } };
+            }
             count += 1;
         }
         if (needs_stop) {
@@ -7794,7 +7871,9 @@ pub const Connection = struct {
             }
             return;
         }
-        if (sent_time_ns) |now_ns|
+        if (prefix_needed)
+            try self.sendWithEcnAtImpl(frames[0..count], .not_ect, sent_time_ns, false)
+        else if (sent_time_ns) |now_ns|
             try self.sendTrackedFramesEcnAt(
                 frames[0..count],
                 .not_ect,
@@ -7803,8 +7882,11 @@ pub const Connection = struct {
         else
             try self.sendTrackedFrames(frames[0..count]);
         if (needs_reset) {
-            _ = self.recovery.abandonStreamData(stream_id);
-            _ = self.recovery.abandonStreamResetsAbove(stream_id, 0);
+            if (minimum == 0)
+                _ = self.recovery.abandonStreamData(stream_id)
+            else
+                _ = self.recovery.abandonStreamDataAfter(stream_id, minimum);
+            _ = self.recovery.abandonStreamResetsAbove(stream_id, minimum);
             send_stream.reset_sent = reset_info;
             if (satisfies_pending_stop) {
                 std.debug.assert(self.pending_stop_sending_resets != 0);
@@ -7893,12 +7975,15 @@ pub const Connection = struct {
     /// Borrow contiguous transport bytes even after RESET_STREAM. Protocol
     /// dispatchers use this narrow view only to identify ownership from a
     /// stream prefix; application data APIs continue to honor reset delivery
-    /// policy through `availableReceivedStream`.
+    /// policy through `availableReceivedStream`. STOP abandonment keeps at
+    /// most 16 leading bytes here so a later reliable reset remains attributable
+    /// even after its ordinary transport storage has been consumed.
     pub fn retainedReceivedStream(
         self: *Connection,
         stream_id: u64,
     ) ?[]const u8 {
         const entry = self.findRecvStreamEntry(stream_id) orelse return null;
+        if (entry.stop_sending_sent != null and entry.stopped_prefix.contiguous != 0) return entry.stopped_prefix.bytes();
         return entry.recv_state.available();
     }
 
@@ -14875,6 +14960,9 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
     ) Error!void {
         const entry = try self.sendStreamEntry(stream_id);
+        if (entry.required_reset_prefix) |prefix| {
+            return self.sendResetStreamReliablyAt(stream_id, application_error_code, @max(final_size, prefix.len), prefix.len, sent_time_ns);
+        }
         const info: StreamResetInfo = .{
             .application_error_code = application_error_code,
             .final_size = final_size,
@@ -14916,6 +15004,9 @@ pub const Connection = struct {
             return error.InvalidFrame;
         }
         const entry = try self.sendStreamEntry(stream_id);
+        if (entry.required_reset_prefix) |prefix| {
+            if (reliable_size < prefix.len) return error.InvalidFrame;
+        }
         const info: StreamResetInfo = .{
             .application_error_code = application_error_code,
             .final_size = final_size,
@@ -14931,16 +15022,29 @@ pub const Connection = struct {
             }
         }
 
-        const frames = [_]quic.Frame{.{ .reset_stream_at = .{
+        var frames: [2]quic.Frame = undefined;
+        var count: usize = 0;
+        if (entry.required_reset_prefix) |*prefix| {
+            if (!prefix.submitted and prefix.len != 0) {
+                frames[count] = .{ .stream = .{ .stream_id = stream_id, .offset = 0, .data = prefix.bytes(), .fin = false } };
+                count += 1;
+            }
+        }
+        frames[count] = .{ .reset_stream_at = .{
             .stream_id = stream_id,
             .application_error_code = application_error_code,
             .final_size = final_size,
             .reliable_size = reliable_size,
-        } }};
-        if (sent_time_ns) |now_ns|
-            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
-        else
-            try self.sendTrackedFrames(&frames);
+        } };
+        count += 1;
+        if (count == 2) {
+            // STREAM prefix bytes need the normal flow-credit transaction.
+            try self.sendWithEcnAtImpl(frames[0..count], .not_ect, sent_time_ns, false);
+        } else if (sent_time_ns) |now_ns| {
+            try self.sendTrackedFramesEcnAt(frames[0..count], .not_ect, now_ns);
+        } else {
+            try self.sendTrackedFrames(frames[0..count]);
+        }
         _ = self.recovery.abandonStreamDataAfter(stream_id, reliable_size);
         _ = self.recovery.abandonStreamResetsAbove(stream_id, reliable_size);
         entry.reset_sent = info;
@@ -14972,6 +15076,7 @@ pub const Connection = struct {
             const data_len = std.math.cast(u64, frame.stream.data.len) orelse continue;
             const stream_end = std.math.add(u64, frame.stream.offset, data_len) catch continue;
             entry.highest_sent_end = @max(entry.highest_sent_end, stream_end);
+            if (entry.required_reset_prefix) |*prefix| prefix.noteSubmitted(frame.stream.offset, frame.stream.data);
             if (frame.stream.fin) entry.final_size = stream_end;
         }
     }
@@ -15648,6 +15753,9 @@ pub const Connection = struct {
         self: *Connection,
         recv_stream: *StreamRecvFlowEntry,
     ) AbandonedReceiveResult {
+        if (recv_stream.stop_sending_sent != null) {
+            recv_stream.stopped_prefix.remember(recv_stream.recv_state.read_offset, recv_stream.recv_state.available());
+        }
         const discarded = recv_stream.recv_state.available().len;
         const outstanding_credit = recv_stream.flow.highest_received -|
             recv_stream.flow.consumed;
@@ -15828,6 +15936,12 @@ pub const Connection = struct {
         stream: quic.StreamFrame,
         sent_time_ns: ?u64,
     ) Error!void {
+        if (self.findSendStreamEntry(stream.stream_id)) |entry| {
+            if (entry.stopped != null or entry.reset_sent != null) {
+                const prefix = if (entry.required_reset_prefix) |*value| value else return error.StreamStopped;
+                if (stream.fin or !prefix.matches(stream.offset, stream.data)) return error.StreamStopped;
+            }
+        }
         return self.validateStreamRangeForSendAt(
             stream.stream_id,
             stream.offset,
@@ -15856,7 +15970,10 @@ pub const Connection = struct {
         if (end > quic.varint.max_value) return error.InvalidFrameLength;
 
         if (self.findSendStreamEntry(stream_id)) |entry| {
-            if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
+            if (entry.stopped != null or entry.reset_sent != null) {
+                const allowed_end: u64 = if (entry.required_reset_prefix) |prefix| prefix.len else 0;
+                if (fin or end > allowed_end or entry.required_reset_prefix == null) return error.StreamStopped;
+            }
             if (fin and end < entry.highest_sent_end) {
                 return error.FinalSizeMismatch;
             }
@@ -16012,6 +16129,13 @@ pub const Connection = struct {
             .bidirectional => self.streams_blocked_bidi_at = self.peer_max_streams_bidi,
             .unidirectional => self.streams_blocked_uni_at = self.peer_max_streams_uni,
         }
+    }
+
+    fn findSendStreamEntryConst(self: Connection, stream_id: u64) ?*const StreamFlowEntry {
+        const index = self.stream_send_index.get(stream_id) orelse return null;
+        if (index >= self.stream_send_flows.items.len) return null;
+        const entry = &self.stream_send_flows.items[index];
+        return if (entry.stream_id == stream_id) entry else null;
     }
 
     fn findSendStreamEntry(self: *Connection, stream_id: u64) ?*StreamFlowEntry {
@@ -17544,5 +17668,6 @@ comptime {
 }
 
 test {
+    _ = @import("one_rtt/tests/reset_prefix.zig");
     _ = @import("one_rtt/tests/mod.zig");
 }
