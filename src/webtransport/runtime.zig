@@ -31,6 +31,7 @@ const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream/batch.zig");
 const stream_association = @import("runtime/stream_association.zig");
+const early_streams = @import("runtime/association/early_streams.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 pub const EndpointClient = endpoint_client.Client;
@@ -170,6 +171,7 @@ pub const EndpointServerError = Error ||
 pub const HandshakeFailure = http3.runtime.HandshakeFailure;
 pub const OriginPolicy = connect_headers.OriginPolicy;
 pub const EarlyDatagramLimits = http3.runtime.EarlyConnectDatagramLimits;
+pub const EarlyStreamLimits = early_streams.Limits;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
@@ -190,6 +192,8 @@ pub const Limits = struct {
     /// Connection-wide DATAGRAM retention before CONNECT acceptance. These
     /// bounds are separate from each accepted association's receive queue.
     early_connect_datagrams: EarlyDatagramLimits = .{ .max_datagrams = 64, .max_bytes = 64 * 1024 },
+    /// `EndpointServer` retention for streams whose Session is not yet accepted.
+    early_connect_streams: EarlyStreamLimits = .{},
 };
 
 pub const max_connection_close_reason: usize = connection_lifecycle.max_close_reason;
@@ -3022,6 +3026,7 @@ pub const EndpointServer = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
     h3: http3.runtime.EndpointServer,
+    early: std.AutoHashMapUnmanaged(quic.endpoint_dispatcher.ConnectionHandle, early_streams.State) = .empty,
     pending: std.AutoHashMapUnmanaged(
         quic.endpoint_dispatcher.ConnectionHandle,
         *EndpointPendingSession,
@@ -3065,6 +3070,9 @@ pub const EndpointServer = struct {
     }
 
     pub fn deinit(self: *EndpointServer) void {
+        var early = self.early.valueIterator();
+        while (early.next()) |state| state.deinit(self.allocator);
+        self.early.deinit(self.allocator);
         var pending = self.pending.valueIterator();
         while (pending.next()) |value| {
             value.*.request.deinit(self.allocator);
@@ -3151,6 +3159,7 @@ pub const EndpointServer = struct {
     ) EndpointServerError!*EndpointAcceptedSession {
         const source = self.pending.get(handle) orelse
             return error.InvalidSessionState;
+        _ = try self.maintainEarlyConnection(handle, source.h3);
         try validateConnectOrigin(
             source.request.request,
             source.limits.origin_policy,
@@ -3245,6 +3254,7 @@ pub const EndpointServer = struct {
             try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
         }
         try source.h3.connect_datagrams.rejectEarlyAssociation(source.session_id.value);
+        try self.noteEarlyRejection(handle, source.h3, source.session_id.value);
         const response_result = source.h3.trySendResponseLiteral(source.session_id.value, .{
             .status = status,
             .headers = response_headers,
@@ -3273,6 +3283,10 @@ pub const EndpointServer = struct {
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) bool {
+        if (self.early.fetchRemove(handle)) |removed| {
+            var state = removed.value;
+            state.deinit(self.allocator);
+        }
         while (self.firstSessionKey(handle)) |key| {
             const removed = self.sessions.fetchRemove(key).?.value;
             removed.deinit(self.allocator);
@@ -3304,6 +3318,7 @@ pub const EndpointServer = struct {
             .session_id = session_id,
         };
         if (!self.sessions.contains(key)) return false;
+        if (self.h3.session(handle)) |h3| try self.noteEarlyRejection(handle, h3, session_id.value);
         const becomes_idle = self.sessionCountForConnection(handle) == 1;
         if (becomes_idle) {
             try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
@@ -3346,6 +3361,9 @@ pub const EndpointServer = struct {
         session_id: u62,
     ) bool {
         const self: *const EndpointServer = @ptrCast(@alignCast(context));
+        // The connection's early-stream owner decides quotas and expiry for
+        // foreign Session IDs. A live Session must leave those streams alone.
+        if (self.early.contains(@intCast(scope))) return true;
         if (self.pending.get(@intCast(scope))) |pending| {
             if (pending.session_id.value == session_id) return true;
         }
@@ -3354,6 +3372,12 @@ pub const EndpointServer = struct {
             .session_id = .init(session_id),
         });
     }
+
+    const Early = @import("runtime/association/endpoint.zig").For(@This());
+    const maintainEarlyConnection = Early.maintain;
+    const maintainEarlyStreams = Early.maintainAll;
+    const noteEarlyRejection = Early.reject;
+    const earlyDeadline = Early.boundedDeadline;
 
     /// Run the endpoint-owned receive loop until `shutdown` is set. The
     /// callback executes synchronously on the sole owner so it may accept or
@@ -3477,13 +3501,22 @@ pub const EndpointServer = struct {
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointServerEvent {
         if (stream_buffer.len == 0) return error.BufferTooShort;
+        try self.maintainEarlyStreams();
         if (try self.pollBufferedSessionRequest()) |event| return event;
         if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
 
+        const poll_deadline = std.Io.Clock.Timestamp.fromNow(self.h3.server.quic_server.endpoint.io, .{ .clock = .awake, .raw = poll_interval.raw });
+        const early_deadline = self.earlyDeadline(poll_deadline);
+        if (early_deadline.raw.nanoseconds < poll_deadline.raw.nanoseconds and
+            early_deadline.raw.nanoseconds <= std.Io.Clock.awake.now(self.h3.server.quic_server.endpoint.io).nanoseconds) return null;
+        const interval = if (early_deadline.raw.nanoseconds < poll_deadline.raw.nanoseconds) early_deadline.durationFromNow(self.h3.server.quic_server.endpoint.io) else poll_interval;
         const event_value = (try self.h3.receiveTransportOnce(
             supported_versions,
-            poll_interval,
-        )) orelse return null;
+            interval,
+        )) orelse {
+            try self.maintainEarlyStreams();
+            return null;
+        };
         return self.processTransportEvent(event_value, stream_buffer);
     }
 
@@ -3501,17 +3534,27 @@ pub const EndpointServer = struct {
             self.h3.server.quic_server.endpoint.io,
             deadline,
         );
+        try self.maintainEarlyStreams();
         if (try self.pollBufferedSessionRequest()) |event| return event;
         if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
         while (true) {
-            const transport_event = try self.h3.receiveTransportWithDeadline(
+            const wait_deadline = self.earlyDeadline(absolute);
+            const transport_event = self.h3.receiveTransportWithDeadline(
                 supported_versions,
-                absolute,
-            );
+                wait_deadline,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    if (wait_deadline.raw.nanoseconds >= absolute.raw.nanoseconds) return err;
+                    try self.maintainEarlyStreams();
+                    continue;
+                },
+                else => return err,
+            };
             if (try self.processTransportEvent(
                 transport_event,
                 stream_buffer,
             )) |event| return event;
+            try self.maintainEarlyStreams();
             if (try self.pollBufferedSessionRequest()) |event| return event;
             if (try self.pollAcceptedSessions(stream_buffer)) |event| {
                 return event;
@@ -3530,6 +3573,10 @@ pub const EndpointServer = struct {
             .connected => |handle| return .{ .connected = handle },
             .closed => |closed| {
                 const handle = closed.handle;
+                if (self.early.fetchRemove(handle)) |removed| {
+                    var state = removed.value;
+                    state.deinit(self.allocator);
+                }
                 while (self.firstSessionKey(handle)) |key| {
                     const removed = self.sessions.fetchRemove(key).?.value;
                     removed.deinit(self.allocator);
@@ -3594,6 +3641,7 @@ pub const EndpointServer = struct {
         const h3 = self.h3.session(handle) orelse
             return error.InvalidSessionState;
         try h3.processRequestPacket(packet);
+        _ = try self.maintainEarlyConnection(handle, h3);
         if (try self.pollNewSessionRequest(handle, h3)) |event| return event;
         return self.pollAcceptedSessions(stream_buffer);
     }
@@ -3631,6 +3679,7 @@ pub const EndpointServer = struct {
         }
         if (self.pending.contains(handle)) return null;
         if (self.request_rejection_pending.get(handle)) |rejection| {
+            try self.noteEarlyRejection(handle, h3, rejection.stream_id);
             rejection.submit(h3) catch |err| switch (err) {
                 error.PacingLimited,
                 error.CongestionLimited,
@@ -3650,6 +3699,7 @@ pub const EndpointServer = struct {
         connect_negotiation.validateRequest(h3, owned_request.request) catch |err| {
             const failure = connect_rejection.Failure.fromError(err) orelse return err;
             const rejection = connect_rejection.Pending{ .stream_id = request.session_id.value, .failure = failure };
+            try self.noteEarlyRejection(handle, h3, request.session_id.value);
             self.request_rejection_pending.putAssumeCapacity(handle, rejection);
             rejection.submit(h3) catch |submission_error| switch (submission_error) {
                 error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
@@ -3661,6 +3711,7 @@ pub const EndpointServer = struct {
         if (self.sessionCountForConnection(handle) >=
             self.limits.max_sessions_per_connection)
         {
+            try self.noteEarlyRejection(handle, h3, request.session_id.value);
             try self.request_rejection_pending.ensureUnusedCapacity(
                 self.allocator,
                 1,
@@ -19398,4 +19449,8 @@ test {
 
 test {
     _ = @import("runtime/association/tests/early_datagram.zig");
+}
+
+test {
+    _ = @import("runtime/association/tests/early_streams.zig");
 }

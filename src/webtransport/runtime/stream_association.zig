@@ -6,6 +6,7 @@ const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const flow_receive = @import("flow/receive.zig");
 const association_prefix = @import("stream/prefix.zig");
+const buffered_rejection = @import("association/rejection.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 
@@ -260,65 +261,14 @@ fn isPeerInitiated(
     };
 }
 
-fn rejectionAlreadyStarted(
-    connection: *quic.one_rtt.Connection,
-    stream_id: u62,
-    direction: webtransport.StreamDirection,
-) bool {
-    const rejection_code =
-        webtransport.ApplicationErrorCode.buffered_stream_rejected;
-    if (connection.recvStreamStats(stream_id)) |stats| {
-        if (stats.stop_sending_sent) |stop| {
-            if (stop.application_error_code == rejection_code) return true;
-        }
-    }
-    if (direction == .bidirectional) {
-        if (connection.sendStreamStats(stream_id)) |stats| {
-            if (stats.reset) |reset| {
-                if (reset.application_error_code == rejection_code) return true;
-            }
-        }
-    }
-    return false;
-}
-
-/// Reject a syntactically valid WebTransport stream associated with another
-/// session. The transport STOP marker also remembers the decision after the
-/// association prefix has been discarded, so later STREAM frames are drained
-/// instead of being reparsed as a new prefix.
 fn rejectWrongSession(
     connection: *quic.one_rtt.Connection,
     stream_id: u62,
     direction: webtransport.StreamDirection,
     single_attempt: bool,
 ) Error!bool {
-    const rejection_code =
-        webtransport.ApplicationErrorCode.buffered_stream_rejected;
-    const already_started =
-        rejectionAlreadyStarted(connection, stream_id, direction);
-    switch (direction) {
-        .bidirectional => if (single_attempt)
-            try connection.tryCancelStream(stream_id, rejection_code)
-        else
-            try connection.cancelStream(stream_id, rejection_code),
-        .unidirectional => if (single_attempt)
-            try connection.trySendStopSending(stream_id, rejection_code)
-        else
-            try connection.sendStopSending(stream_id, rejection_code),
-    }
-    // A one-attempt dispatcher call performs no second socket submission after
-    // it first publishes the rejection. A later poll will drain and retire the
-    // stream through the already-committed, idempotent terminal state.
-    if (single_attempt and !already_started) return true;
-
-    const discarded = try connection.discardStoppedReceived(stream_id);
-    // A peer FIN/RESET makes retirement immediate (subject to RESET_STREAM ACK
-    // for bidi). Before then the next scan repeats the idempotent drain so late
-    // bytes cannot retain connection credit.
-    if (single_attempt and discarded != 0) return true;
-    _ = try connection.requestCompletedPeerStreamRelease(stream_id);
-    return !already_started or discarded != 0 or
-        connection.peerStreamClosed(stream_id);
+    return buffered_rejection.advance(connection, stream_id, direction, buffered_rejection.code(connection, stream_id, direction) orelse
+        webtransport.ApplicationErrorCode.buffered_stream_rejected, single_attempt);
 }
 
 fn identifyInternal(
@@ -342,7 +292,7 @@ fn identifyInternal(
         // their existing registry entry. An unregistered one belongs to a
         // different HTTP/3 consumer and must not be rejected as peer input.
         if (!isPeerInitiated(registry, stream_id)) return .unclaimed;
-        if (rejectionAlreadyStarted(connection, stream_id, direction)) {
+        if (buffered_rejection.code(connection, stream_id, direction) != null) {
             const progressed = try rejectWrongSession(
                 connection,
                 stream_id,

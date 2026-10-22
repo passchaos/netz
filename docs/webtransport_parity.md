@@ -1542,7 +1542,7 @@ Shared server association lookup recognizes accepted and pending Sessions on
 the same connection. Polling an active Session leaves early data for a pending
 sibling buffered until acceptance; a real QUIC/TLS regression delays the second
 Session's acceptance while the first remains active and verifies exact delivery.
-Maintenance discovery leaves other Session IDs untouched. Explicit stream
+Maintenance discovery leaves other Session IDs untouched. Standalone explicit stream
 pollers reject unknown Session IDs and continue to a valid sibling instead of
 poisoning later polls. Rejected peer bidi streams receive one atomic
 `RESET_STREAM` plus `STOP_SENDING`, peer uni streams receive
@@ -1568,7 +1568,31 @@ connection termination discard their early state. Tests cover allocation failure
 FIFO/count/byte limits, age expiry, actual QUIC pre-CONNECT reordering, acceptance
 send failure/retry, a 403 rejection and continued sibling delivery.
 
-Streams for a CONNECT that has not yet arrived still need dedicated
-connection-wide quotas, expiry and rejected-Session cleanup. Pending-Session
-preservation and early DATAGRAM retention do not establish that remaining part
-of draft-16 section 4.6.
+The shared `EndpointServer` also retains streams whose CONNECT has not yet
+arrived, with `Limits.early_connect_streams` defaulting to 64 streams, 256 KiB
+of retained offset span and a 30-second lifetime per connection. The byte policy
+includes association headers and out-of-order gaps. Metadata remains separate
+from QUIC's payload storage; acceptance releases the early claim without choosing
+a whole-stream or incremental reader. Existing registered stream records are
+never reparsed as association headers, even when their next application bytes
+look exactly like a WebTransport prefix.
+Unknown and pending Sessions share this budget. Count/byte overflow and expiry
+reject the affected stream with WT_BUFFERED_STREAM_REJECTED. Unclaimed streams
+for rejected CONNECTs, removed Sessions and already-closed Sessions instead trigger WT_SESSION_GONE;
+the exact transport marker survives prefix abandonment and late data. Before
+cancellation reaches the socket, send and metadata-allocation failures retain
+unconsumed data for retry. After submission, the marker retains the scoped
+decision while QUIC releases abandoned receive credit.
+The endpoint's socket wait includes the earliest expiry, so cleanup also runs
+without later traffic, while preserving the application's absolute deadline.
+Each maintenance step submits at most one cancellation packet and refreshes its
+dispatcher timer. Registered application streams keep their owning Session's
+lifecycle. Invalid Session IDs close the connection with H3_ID_ERROR, as required
+by draft-16 section 3.1; a closed valid Session ID still uses scoped cleanup.
+Focused tests cover both stream directions, count/byte limits, fragmented
+association headers, cancellation/allocator failure, already-owned data and
+invalid IDs. Real QUIC/TLS cases verify a stream arriving before CONNECT on an
+active sibling connection, idle expiry wakeup, delayed acceptance, and exact
+WT_SESSION_GONE after a 403 rejection with continued sibling DATAGRAM delivery.
+The dedicated early-stream policy currently applies to the shared server;
+standalone owning and client admission paths retain their QUIC receive bounds.
