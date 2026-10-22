@@ -166,10 +166,18 @@ test "HTTP/1 chunked request writer streams announced trailers" {
                 "Digest, X-Complete",
                 request.request.header("trailer").?,
             );
-            try std.testing.expectEqual(@as(usize, 2), request.request.trailers.len);
+            try std.testing.expectEqual(@as(usize, 3), request.request.trailers.len);
             try std.testing.expectEqualStrings(
-                "sha-256=first, sha-256=second",
+                "sha-256=first",
                 request.request.trailers[0].value,
+            );
+            try std.testing.expectEqualStrings(
+                "sha-256=second",
+                request.request.trailers[1].value,
+            );
+            try std.testing.expectEqualStrings(
+                "yes",
+                request.request.trailers[2].value,
             );
             try connection.writeResponse(.{
                 .headers = &.{.{
@@ -346,9 +354,14 @@ test "HTTP/1 chunked response writer streams announced trailers" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(http1.BodyFraming.chunked, response.response.body_framing);
     try std.testing.expectEqualStrings("streamed response", response.response.body);
+    try std.testing.expectEqual(@as(usize, 2), response.response.trailers.len);
     try std.testing.expectEqualStrings(
-        "sha-256=first, sha-256=second",
+        "sha-256=first",
         response.response.trailers[0].value,
+    );
+    try std.testing.expectEqualStrings(
+        "sha-256=second",
+        response.response.trailers[1].value,
     );
 
     thread.join();

@@ -118,6 +118,14 @@ benchmark response:
   deliberately sends a real `Connection: close` trailer over cleartext and
   TLS; netz reports `InvalidTrailer` and closes that connection without a
   response;
+- chunked trailer decoding preserves repeated same-name fields, their values,
+  spelling, and wire order across aggregate and streaming readers. Aggregate
+  and streaming request/response writers likewise emit every value as its own
+  field line rather than comma-coalescing values with different field
+  semantics. A trailer count exactly equal to `ParseOptions.max_headers`
+  remains valid, while the next field fails with `TooManyHeaders`. This is
+  covered against `/nav_env/Work/hyper` fixes `876effe1`, `de1483d7`, and
+  `f584091a`;
 - RFC 8470 Early-Data signaling is shared across HTTP/1, HTTP/2, and HTTP/3.
   Receivers treat any request instance, including repeated or invalid values,
   as replay risk; outbound requests require exactly one canonical value;

@@ -13272,7 +13272,7 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/1 runtime writes request trailers with chunked framing" {
+test "HTTP/1 runtime writes duplicate request trailers with chunked framing" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -13309,11 +13309,13 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
             try std.testing.expectEqualStrings("upload", request.request.body);
             try std.testing.expectEqualStrings("chunked", request.request.header("transfer-encoding").?);
             try std.testing.expectEqualStrings("Digest, X-Upload-Complete", request.request.header("trailer").?);
-            try std.testing.expectEqual(@as(usize, 2), request.request.trailers.len);
+            try std.testing.expectEqual(@as(usize, 3), request.request.trailers.len);
             try std.testing.expectEqualStrings("Digest", request.request.trailers[0].name);
-            try std.testing.expectEqualStrings("sha-256=demo, sha-256=second", request.request.trailers[0].value);
-            try std.testing.expectEqualStrings("X-Upload-Complete", request.request.trailers[1].name);
-            try std.testing.expectEqualStrings("yes", request.request.trailers[1].value);
+            try std.testing.expectEqualStrings("sha-256=demo", request.request.trailers[0].value);
+            try std.testing.expectEqualStrings("digest", request.request.trailers[1].name);
+            try std.testing.expectEqualStrings("sha-256=second", request.request.trailers[1].value);
+            try std.testing.expectEqualStrings("X-Upload-Complete", request.request.trailers[2].name);
+            try std.testing.expectEqualStrings("yes", request.request.trailers[2].value);
 
             try connection.writeResponse(.{ .body = "ok" });
         }
@@ -13344,7 +13346,7 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
     try std.testing.expectEqualStrings("ok", response.response.body);
 }
 
-test "HTTP/1 runtime writes response trailers with chunked framing" {
+test "HTTP/1 runtime writes duplicate response trailers with chunked framing" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -13414,9 +13416,11 @@ test "HTTP/1 runtime writes response trailers with chunked framing" {
     try std.testing.expectEqualStrings("download", response.response.body);
     try std.testing.expectEqualStrings("chunked", response.response.header("transfer-encoding").?);
     try std.testing.expectEqualStrings("Digest", response.response.header("trailer").?);
-    try std.testing.expectEqual(@as(usize, 1), response.response.trailers.len);
+    try std.testing.expectEqual(@as(usize, 2), response.response.trailers.len);
     try std.testing.expectEqualStrings("Digest", response.response.trailers[0].name);
-    try std.testing.expectEqualStrings("sha-256=response, sha-256=second", response.response.trailers[0].value);
+    try std.testing.expectEqualStrings("sha-256=response", response.response.trailers[0].value);
+    try std.testing.expectEqualStrings("digest", response.response.trailers[1].name);
+    try std.testing.expectEqualStrings("sha-256=second", response.response.trailers[1].value);
 }
 
 test "HTTP/1 runtime honors explicit transfer-encoding chunked writes" {

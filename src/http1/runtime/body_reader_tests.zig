@@ -438,7 +438,7 @@ test "HTTP/1 streaming request reads fixed body without aggregation" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
+test "HTTP/1 duplicate trailers survive streaming decode at exact limit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -479,7 +479,8 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
                 .allocator = server_ptr.allocator,
                 .body = &body,
             };
-            var first = try connection.readRequestStreaming(
+            var first = try connection.readRequestStreamingWithOptions(
+                .{ .max_headers = 2 },
                 &context,
                 Context.consume,
             );
@@ -491,10 +492,14 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
             try std.testing.expectEqualStrings("hello world", body.items);
             try std.testing.expect(first.header("content-length") == null);
             try std.testing.expect(!first.must_close);
-            try std.testing.expectEqual(@as(usize, 1), first.trailers.len);
+            try std.testing.expectEqual(@as(usize, 2), first.trailers.len);
             try std.testing.expectEqualStrings(
-                "sha-256=demo",
+                "first",
                 first.trailers[0].value,
+            );
+            try std.testing.expectEqualStrings(
+                "second",
+                first.trailers[1].value,
             );
 
             var second = try connection.readRequest(.{});
@@ -504,8 +509,12 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
             // connection buffer compaction performed by the second read.
             try std.testing.expectEqualStrings("/chunked", first.target);
             try std.testing.expectEqualStrings(
-                "sha-256=demo",
+                "first",
                 first.trailers[0].value,
+            );
+            try std.testing.expectEqualStrings(
+                "second",
+                first.trailers[1].value,
             );
             try connection.writeResponse(.{
                 .headers = &.{.{
@@ -528,7 +537,7 @@ test "HTTP/1 streaming request reads chunked trailers and pipeline suffix" {
         "Transfer-Encoding: chunked\r\n\r\n" ++
         "5\r\nhello\r\n" ++
         "6\r\n world\r\n" ++
-        "0\r\nDigest: sha-256=demo\r\n\r\n" ++
+        "0\r\nX-Trace: first\r\nx-trace: second\r\n\r\n" ++
         "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n";
     try writeAll(io, stream, raw);
     var response = try runtime.readResponseFromStreamForRequest(

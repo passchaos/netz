@@ -5180,6 +5180,51 @@ test "HTTP/1 chunked codec" {
     try std.testing.expectEqual(@as(usize, "5\r\nhello\r\n0\r\n\r\n".len), body_only.consumed);
 }
 
+test "HTTP/1 duplicate trailers survive aggregate chunked codec at exact limit" {
+    const allocator = std.testing.allocator;
+    const trailers = [_]Header{
+        .{ .name = "X-Trace", .value = "first" },
+        .{ .name = "x-trace", .value = "second" },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encodeChunked(&encoded, allocator, &.{"body"}, &trailers);
+    try std.testing.expectEqualStrings(
+        "4\r\nbody\r\n0\r\n" ++
+            "X-Trace: first\r\n" ++
+            "x-trace: second\r\n\r\n",
+        encoded.items,
+    );
+
+    var decoded = try decodeChunked(
+        allocator,
+        encoded.items,
+        .{ .max_headers = trailers.len },
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("body", decoded.body);
+    try std.testing.expectEqual(@as(usize, 2), decoded.trailers.len);
+    try std.testing.expectEqualStrings("X-Trace", decoded.trailers[0].name);
+    try std.testing.expectEqualStrings("first", decoded.trailers[0].value);
+    try std.testing.expectEqualStrings("x-trace", decoded.trailers[1].name);
+    try std.testing.expectEqualStrings("second", decoded.trailers[1].value);
+
+    try std.testing.expectError(
+        error.TooManyHeaders,
+        decodeChunked(allocator, encoded.items, .{ .max_headers = 1 }),
+    );
+
+    var parsed = try parseTrailerFields(
+        allocator,
+        "X-Trace: first\r\nx-trace: second\r\n",
+        .{ .max_headers = trailers.len },
+    );
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parsed.headers.len);
+    try std.testing.expectEqualStrings("first", parsed.headers[0].value);
+    try std.testing.expectEqualStrings("second", parsed.headers[1].value);
+}
+
 test "HTTP/1 chunked trailers reject forbidden fields" {
     const allocator = std.testing.allocator;
     try validateTrailers(&.{

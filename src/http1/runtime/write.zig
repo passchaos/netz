@@ -1657,7 +1657,7 @@ test "HTTP/1 writer preserves or title-cases request and response fields" {
     ) != null);
 }
 
-test "HTTP/1 title-case policy applies to merged chunked trailers" {
+test "HTTP/1 duplicate trailers encode as separate runtime field lines" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
     defer scratch.deinit(allocator);
@@ -1683,7 +1683,7 @@ test "HTTP/1 title-case policy applies to merged chunked trailers" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         message.header,
-        "0\r\nX-Checksum: one, two\r\n\r\n",
+        "0\r\nX-Checksum: one\r\nX-Checksum: two\r\n\r\n",
     ) != null);
 
     const streaming_head = try prepareStreamingResponse(allocator, .{
@@ -1710,7 +1710,7 @@ test "HTTP/1 title-case policy applies to merged chunked trailers" {
         streaming_head.header_name_casing,
     );
     try std.testing.expectEqualStrings(
-        "0\r\nX-Checksum: one, two\r\n\r\n",
+        "0\r\nX-Checksum: one\r\nX-Checksum: two\r\n\r\n",
         end,
     );
 }
@@ -3047,44 +3047,6 @@ fn writeHeaderLines(
     }
 }
 
-fn writeMergedHeaderLines(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    headers: []const http1.Header,
-    casing: HeaderNameCasing,
-) Error!void {
-    var written = try std.ArrayList(bool).initCapacity(
-        allocator,
-        headers.len,
-    );
-    defer written.deinit(allocator);
-    try written.appendNTimes(allocator, false, headers.len);
-
-    for (headers, 0..) |header, index| {
-        if (written.items[index]) continue;
-        try http1.validateHeader(header);
-        try list.ensureUnusedCapacity(allocator, header.name.len);
-        appendHeaderNameAssumeCapacity(list, header.name, casing);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        written.items[index] = true;
-
-        var next = index + 1;
-        while (next < headers.len) : (next += 1) {
-            if (written.items[next]) continue;
-            const duplicate = headers[next];
-            if (!header.eqlName(duplicate.name)) continue;
-            try http1.validateHeader(duplicate);
-            // Keep the first spelling and merge repeated trailer values into
-            // one field line, matching Hyper's behavior.
-            try list.appendSlice(allocator, ", ");
-            try list.appendSlice(allocator, duplicate.value);
-            written.items[next] = true;
-        }
-        try list.appendSlice(allocator, "\r\n");
-    }
-}
-
 fn encodeChunked(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -3108,7 +3070,7 @@ fn encodeChunked(
         try list.appendSlice(allocator, "\r\n");
     }
     try list.appendSlice(allocator, "0\r\n");
-    try writeMergedHeaderLines(list, allocator, trailers, casing);
+    try writeHeaderLines(list, allocator, trailers, casing);
     try list.appendSlice(allocator, "\r\n");
 }
 
@@ -3156,7 +3118,7 @@ pub const streaming = struct {
         );
     }
 
-    /// Encode the unique terminating chunk and merged trailer field lines.
+    /// Encode the unique terminating chunk and ordered trailer field lines.
     ///
     /// This runs before any transport write, so malformed trailers and
     /// allocation failures cannot expose a partial terminator on the wire.
@@ -3182,7 +3144,7 @@ pub const streaming = struct {
         scratch.encoded.clearRetainingCapacity();
         try http1.validateTrailers(trailers);
         try scratch.encoded.appendSlice(allocator, "0\r\n");
-        try writeMergedHeaderLines(
+        try writeHeaderLines(
             &scratch.encoded,
             allocator,
             trailers,
