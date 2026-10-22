@@ -346,3 +346,88 @@ test "WebTransport endpoint client defers paced cancellation while sibling progr
     try std.testing.expectError(error.InvalidCapsule, fixture.poll(session));
     try fixture.expectWireCancellation(session.session_id.value, true);
 }
+
+test "WebTransport endpoint client cancels malformed capsules and preserves sibling" {
+    const cases = [_]struct { bytes: []const u8, fin: bool = false }{
+        // Invalid UTF-8, short CLOSE value, oversized CLOSE declaration,
+        // nonempty DRAIN, truncated Capsule varint, and truncated H3 DATA.
+        .{ .bytes = &.{ 0, 8, 0x68, 0x43, 5, 0, 0, 0, 77, 0xff } },
+        .{ .bytes = &.{ 0, 3, 0x68, 0x43, 3 } },
+        .{ .bytes = &.{ 0, 4, 0x68, 0x43, 0x44, 5 } },
+        .{ .bytes = &.{ 0, 5, 0x80, 0, 0x78, 0xae, 1 } },
+        .{ .bytes = &.{ 0, 1, 0x40 }, .fin = true },
+        .{ .bytes = &.{ 0, 4, 0x68 }, .fin = true },
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for (cases) |case| {
+        var fixture: Fixture = undefined;
+        try fixture.init(threaded.io());
+        defer fixture.deinit();
+        const session = try fixture.addSession();
+        const sibling = try fixture.addSession();
+        try fixture.appendConnect(session, case.bytes, case.fin);
+        try std.testing.expectError(error.InvalidCapsule, fixture.poll(session));
+        try std.testing.expect(session.control.capsule_error_rejected);
+        try std.testing.expect(session.control.state.closed);
+        try std.testing.expect(!session.close_response_pending);
+        try std.testing.expect((try fixture.poll(session)) == null);
+        try std.testing.expectError(error.InvalidSessionState, session.sendDatagram(&fixture.client, "late"));
+        try fixture.expectWireCancellation(session.session_id.value, true);
+        try fixture.queueDatagram(sibling, "sibling");
+        var event = (try fixture.poll(sibling)) orelse return error.TestUnexpectedResult;
+        defer event.deinit(std.testing.allocator);
+        try std.testing.expect(event == .datagram);
+        try std.testing.expectEqualStrings("sibling", event.datagram.payload);
+        _ = try sibling.openBidirectionalStream(&fixture.client);
+    }
+}
+
+test "WebTransport endpoint client retries malformed Capsule rejection after send failure" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    const session = try fixture.addSession();
+    try fixture.appendConnect(session, &.{ 0, 3, 0x68, 0x43, 3 }, false);
+    const endpoint = fixture.client.h3.established.connection.endpoint;
+    const original_io = endpoint.io;
+    const original_available = fixture.client.h3.established.connection.availableReceivedStream(session.session_id.value).?.len;
+    var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
+    var vtable = original_io.vtable.*;
+    vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    defer endpoint.io = original_io;
+    try std.testing.expectError(error.NetworkDown, fixture.poll(session));
+    try std.testing.expect(session.control.capsule_error_pending);
+    try std.testing.expect(!session.control.capsule_error_rejected);
+    try std.testing.expectEqual(original_available, fixture.client.h3.established.connection.availableReceivedStream(session.session_id.value).?.len);
+    try std.testing.expectError(error.InvalidSessionState, session.openBidirectionalStream(&fixture.client));
+    observed.fail_on_call = null;
+    try std.testing.expectError(error.InvalidCapsule, fixture.poll(session));
+    try std.testing.expect((try fixture.poll(session)) == null);
+    try std.testing.expectEqual(@as(usize, 2), observed.calls);
+    try fixture.expectWireCancellation(session.session_id.value, true);
+}
+
+test "WebTransport endpoint client removal resumes pending malformed Capsule rejection" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    const session = try fixture.addSession();
+    const id = session.session_id;
+    try fixture.appendConnect(session, &.{ 0, 3, 0x68, 0x43, 3 }, false);
+    const connection = &fixture.client.h3.established.connection;
+    connection.pacer = .initWithRateLimit(true, 1200, 1, 0);
+    connection.pacer.budget = 0;
+    connection.pacer.setLastSentTimeNs(0);
+    try std.testing.expect((try fixture.poll(session)) == null);
+    try std.testing.expect(session.control.capsule_error_pending);
+    try std.testing.expectError(error.InvalidSessionState, session.sendDatagram(&fixture.client, "late"));
+    connection.pacer.enabled = false;
+    try std.testing.expect(try fixture.client.removeSession(id));
+    try fixture.expectWireCancellation(id.value, true);
+}

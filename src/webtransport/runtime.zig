@@ -36,28 +36,28 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
     if (@sizeOf(usize) == 8) {
         const Layout = struct {
             accepted: usize,
-            accepted_handshake: usize,
-            client: usize,
-            handshake_client: usize,
-            protected_client: usize,
+            accepted_handshake_overhead: usize,
+            client_overhead: usize,
+            handshake_client_overhead: usize,
+            protected_client_overhead: usize,
         };
         // Debug and ReleaseSafe retain extra safety state in the HTTP/3 and
-        // compression members. Exact per-mode baselines keep this useful in
-        // every build instead of making optimized runs fail spuriously.
+        // compression members. Check the WebTransport adapter overhead
+        // independently of those transports, whose own state can grow.
         const expected: Layout = switch (builtin.mode) {
             .Debug, .ReleaseSafe => .{
                 .accepted = 1_064,
-                .accepted_handshake = 17_368,
-                .client = 7_560,
-                .handshake_client = 18_072,
-                .protected_client = 9_176,
+                .accepted_handshake_overhead = 880,
+                .client_overhead = 1_000,
+                .handshake_client_overhead = 824,
+                .protected_client_overhead = 840,
             },
             .ReleaseFast, .ReleaseSmall => .{
                 .accepted = 1_056,
-                .accepted_handshake = 17_200,
-                .client = 7_448,
-                .handshake_client = 17_872,
-                .protected_client = 9_040,
+                .accepted_handshake_overhead = 872,
+                .client_overhead = 992,
+                .handshake_client_overhead = 816,
+                .protected_client_overhead = 840,
             },
         };
         try std.testing.expectEqual(
@@ -78,17 +78,20 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(
-            expected.accepted_handshake,
-            @sizeOf(AcceptedHandshakeSession),
-        );
-        try std.testing.expectEqual(expected.client, @sizeOf(ClientSession));
-        try std.testing.expectEqual(
-            expected.handshake_client,
-            @sizeOf(HandshakeClientSession),
+            expected.accepted_handshake_overhead,
+            @sizeOf(AcceptedHandshakeSession) - @sizeOf(http3.runtime.HandshakeServerSession),
         );
         try std.testing.expectEqual(
-            expected.protected_client,
-            @sizeOf(ProtectedClientSession),
+            expected.client_overhead,
+            @sizeOf(ClientSession) - @sizeOf(http3.runtime.Client),
+        );
+        try std.testing.expectEqual(
+            expected.handshake_client_overhead,
+            @sizeOf(HandshakeClientSession) - @sizeOf(http3.runtime.HandshakeClient),
+        );
+        try std.testing.expectEqual(
+            expected.protected_client_overhead,
+            @sizeOf(ProtectedClientSession) - @sizeOf(http3.runtime.ProtectedClient),
         );
     }
 }
@@ -3772,14 +3775,16 @@ pub const EndpointServer = struct {
             error.FlowControlBlocked,
             => return null,
             error.InvalidCapsule => {
-                if (!target.control.handledPostTerminalData()) {
-                    try http3.runtime.closeConnectionForProtocolError(
-                        &target.h3.established.connection,
-                        err,
-                    );
-                } else {
-                    target.close_response_pending = false;
-                }
+                _ = target.control.tryRejectInvalidCapsule(
+                    &target.h3.established.connection,
+                ) catch |rejection_err| switch (rejection_err) {
+                    error.PacingLimited,
+                    error.CongestionLimited,
+                    error.FlowControlBlocked,
+                    => return null,
+                    else => return rejection_err,
+                };
+                target.close_response_pending = false;
                 return err;
             },
             else => {
@@ -18906,5 +18911,6 @@ test {
     _ = @import("runtime/development_control_tests.zig");
     _ = stream_batch;
     _ = @import("runtime/session_control_tests.zig");
+    _ = @import("runtime/session_control/endpoint_rejection_tests.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

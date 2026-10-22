@@ -943,20 +943,16 @@ pub const Client = struct {
             error.FlowControlBlocked,
             => return null,
             error.InvalidCapsule => {
-                if (!session_value.control.handledPostTerminalData()) {
-                    self.h3.established.connection.tryResetStream(
-                        session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                    ) catch |reset_err| switch (reset_err) {
-                        error.PacingLimited,
-                        error.CongestionLimited,
-                        error.FlowControlBlocked,
-                        => return null,
-                        else => return reset_err,
-                    };
-                } else {
-                    session_value.close_response_pending = false;
-                }
+                _ = session_value.control.tryRejectInvalidCapsule(
+                    &self.h3.established.connection,
+                ) catch |rejection_err| switch (rejection_err) {
+                    error.PacingLimited,
+                    error.CongestionLimited,
+                    error.FlowControlBlocked,
+                    => return null,
+                    else => return rejection_err,
+                };
+                session_value.close_response_pending = false;
                 return err;
             },
             else => {

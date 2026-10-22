@@ -1031,8 +1031,7 @@ test "WebTransport endpoint poll refreshes timers before returning an error" {
         .not_ect,
     );
     try h3.established.connection.send(&.{.{ .ping = {} }});
-    const connection_timer = h3.established.connection
-        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(h3.established.connection.nextTimerDeadline() != null);
     try std.testing.expect(dispatcher.nextTimerDeadline() == null);
 
     var buffer: [1]u8 = undefined;
@@ -1046,7 +1045,14 @@ test "WebTransport endpoint poll refreshes timers before returning an error" {
     const endpoint_timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(handle, endpoint_timer.connection_id);
-    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    // The malformed CONNECT also schedules RESET_STREAM/STOP_SENDING. Mirror
+    // the connection's current aggregate recovery timer after that submission.
+    try std.testing.expectEqual(h3.established.connection.nextTimerDeadline().?, endpoint_timer.timer);
+    try std.testing.expect(accepted.control.capsule_error_rejected);
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.message_error),
+        h3.established.connection.sendStreamStats(0).?.reset.?.application_error_code,
+    );
 }
 
 test "WebTransport endpoint close failure still schedules expiry" {

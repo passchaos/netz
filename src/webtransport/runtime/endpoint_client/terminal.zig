@@ -46,6 +46,10 @@ pub fn finish(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
 ) session_control.Error!void {
+    if (control.capsule_error_pending) {
+        _ = try control.rejectInvalidCapsule(&h3.established.connection);
+        close_response_pending.* = false;
+    }
     if (try control.rejectPostTerminalData(&h3.established.connection)) {
         close_response_pending.* = false;
     }

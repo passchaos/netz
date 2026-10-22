@@ -881,6 +881,23 @@ cancellation before its ordinary FIN. Focused real-UDP tests inspect the peer's
 exact RESET_STREAM/STOP_SENDING codes, inject a failed socket submission, and
 verify a second Session can still receive and open streams on the connection.
 
+Shared client and server endpoints now apply RFC 9297 section 3.3 to malformed
+Capsules and truncated CONNECT DATA: they cancel only the affected stream with
+H3_MESSAGE_ERROR using an atomic RESET_STREAM/STOP_SENDING submission. Detection
+immediately blocks new application sends, while failed or paced submission
+retains the original bytes for retry. Successful rejection commits terminal
+Session state, suppresses repeated InvalidCapsule events and advances associated
+stream cleanup through the existing one-attempt path. Client Session removal
+also completes a pending malformed-message rejection. Real-UDP regressions
+cover invalid UTF-8, short and oversized CLOSE declarations, nonempty DRAIN,
+truncated Capsule varints and DATA frames, socket failure, pacing and a sibling
+Session that continues on the same connection. Registered and buffered-stream
+WT_SESSION_GONE cleanup now lives in a separate session-control module while
+preserving the existing blocking, deadline and one-attempt entry points.
+Close-storage layout regressions retain exact 296-byte Control and 456-byte
+protected-reader bounds and check WebTransport adapter overhead separately from
+embedded HTTP/3/QUIC state, so transport growth does not obscure those bounds.
+
 The 1024-byte reason limit now belongs to the core WebTransport capsule codec
 and is reused by the incremental runtime, so standalone writers and parsers
 cannot create or accept a CLOSE capsule that the session state machine would
