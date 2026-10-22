@@ -285,11 +285,22 @@ Buffered DRAIN/CLOSE/reset notifications remain available to the application;
 unnegotiated MAX_* updates are ignored, prohibited HTTP/2 Capsules remain scoped
 session errors, and forbidden CONNECT frames retain connection-level handling.
 
+HTTP/3 SETTINGS now retain the legacy and draft-16 enable codepoints separately.
+`Settings.webtransport_versions` can restrict a local advertisement to either
+wire family; an omitted set preserves the existing dual advertisement. Received
+SETTINGS record only the peer's actual enable flags. `webtransport.negotiatedVersion`
+chooses the highest common family, and runtime negotiation rejects disjoint
+advertisements. An explicit zero enable value in one family cannot disable or
+manufacture support for the other. Newer legacy session-limit identifiers take
+precedence over older identifiers regardless of payload order, including a zero
+limit. Accepted HTTP/3 0-RTT additionally rejects losing any remembered wire
+family before committing the new peer SETTINGS.
+
 Resumable deadline-bound explicit grant APIs still need runtime integration.
-These tests therefore do not establish
-full draft-16 session-flow-control compliance; highest-common draft selection and
-mandatory capability validation still require a complete version-aware handshake
-audit across modern and compatibility advertisements.
+These tests therefore do not establish full draft-16 session-flow-control
+compliance. Modern `webtransport-h3` CONNECT token selection and mandatory QUIC
+DATAGRAM/RESET_STREAM_AT capability validation still require complete runtime
+integration across modern and compatibility advertisements.
 
 ## Feature comparison
 

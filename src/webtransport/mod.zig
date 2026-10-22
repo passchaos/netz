@@ -5,6 +5,7 @@ const quic = @import("../quic/mod.zig");
 const http3 = @import("../http3/mod.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const Version = http3.WebTransportVersion;
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -217,7 +218,7 @@ fn maxQuarterStreamId() u64 {
 }
 
 pub fn enabled(settings: http3.Settings) bool {
-    return settings.enable_webtransport or settings.webtransport_max_sessions != 0;
+    return settings.webTransportVersions().any();
 }
 
 pub fn datagramsEnabled(settings: http3.Settings) bool {
@@ -255,7 +256,14 @@ pub fn ensureNegotiated(local: http3.Settings, peer: http3.Settings) Error!void 
     // Extended CONNECT with the validated :protocol pseudo-header; Chromium
     // therefore does not echo the setting in its client SETTINGS frame.
     if (!local.enable_connect_protocol) return error.WebTransportNotNegotiated;
-    if (!enabled(local) or !enabled(peer)) return error.WebTransportNotNegotiated;
+    _ = try negotiatedVersion(local, peer);
+}
+
+/// Select the highest wire family both SETTINGS advertisements actually
+/// support. A legacy peer cannot satisfy a draft-16-only local policy.
+pub fn negotiatedVersion(local: http3.Settings, peer: http3.Settings) Error!Version {
+    return local.webTransportVersions().highestCommon(peer.webTransportVersions()) orelse
+        error.WebTransportNotNegotiated;
 }
 
 pub fn ensureDatagramsNegotiated(local: http3.Settings, peer: http3.Settings) Error!void {
@@ -685,4 +693,28 @@ test "WebTransport settings negotiation and datagram budget" {
 test {
     _ = runtime;
     _ = flow_control;
+    _ = @import("runtime/negotiation_tests.zig");
+}
+
+test "WebTransport negotiation selects only the highest common wire family" {
+    const compatible = defaultSettings(.{});
+    var modern = compatible;
+    modern.webtransport_versions = .{ .draft16 = true };
+    var legacy = compatible;
+    legacy.webtransport_versions = .{ .legacy = true };
+    try std.testing.expectEqual(Version.draft16, try negotiatedVersion(compatible, compatible));
+    try std.testing.expectEqual(Version.draft16, try negotiatedVersion(modern, compatible));
+    try std.testing.expectEqual(Version.legacy, try negotiatedVersion(compatible, legacy));
+    try std.testing.expectError(error.WebTransportNotNegotiated, ensureNegotiated(modern, legacy));
+    try std.testing.expectError(error.WebTransportNotNegotiated, ensureNegotiated(legacy, modern));
+    const peer = http3.Settings.fromList(&.{.{
+        .id = @intFromEnum(http3.SettingId.webtransport_max_sessions),
+        .value = 1,
+    }});
+    try std.testing.expectEqual(Version.legacy, try negotiatedVersion(compatible, peer));
+    try std.testing.expectError(error.WebTransportNotNegotiated, negotiatedVersion(modern, peer));
+    var disabled = compatible;
+    disabled.webtransport_versions = .{};
+    try std.testing.expect(!enabled(disabled));
+    try std.testing.expectError(error.WebTransportNotNegotiated, negotiatedVersion(disabled, compatible));
 }
