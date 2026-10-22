@@ -16,7 +16,7 @@ pub const Identification = union(enum) {
 };
 
 /// Type-erased lookup used by a shared HTTP/3 endpoint to distinguish a
-/// stream for another accepted WebTransport Session from an unknown Session.
+/// stream for another accepted or pending WebTransport Session from an unknown Session.
 /// The former must remain untouched for its owner; the latter is rejected with
 /// WT_BUFFERED_STREAM_REJECTED as before.
 pub const SessionLookup = struct {
@@ -28,6 +28,28 @@ pub const SessionLookup = struct {
         return self.containsFn(self.context, self.scope, session_id);
     }
 };
+
+/// Associate complete prefixes without claiming either application reader or
+/// consuming data. Flow maintenance can then enforce session limits before a
+/// DATAGRAM-only application ever polls a stream.
+pub fn discoverBuffered(connection: *quic.one_rtt.Connection, registry: *webtransport.StreamRegistry) Error!void {
+    var stream_ids: [256]u62 = undefined;
+    var after: ?u62 = null;
+    const other_sessions = SessionLookup{ .context = registry, .scope = 0, .containsFn = leaveOtherSessions };
+    while (true) {
+        const ids = connection.receivedStreamIdsAfterInto(after, &stream_ids);
+        for (ids) |id| {
+            if (id == registry.session_id.value or registry.get(id) != null) continue;
+            _ = try identifyInternal(connection, registry, registry.session_id, id, .unset, true, other_sessions);
+        }
+        if (ids.len < stream_ids.len) return;
+        after = ids[ids.len - 1];
+    }
+}
+
+fn leaveOtherSessions(_: *const anyopaque, _: u64, _: u62) bool {
+    return true;
+}
 
 /// Request transport-state reclamation while retaining WebTransport's
 /// session-lifetime registry entry and counters.
@@ -309,7 +331,6 @@ fn identifyInternal(
     sessions: ?SessionLookup,
 ) Error!Identification {
     if (registry.get(stream_id) == null and connection.streamLifecycle(stream_id) == .closed) return .unclaimed;
-    std.debug.assert(receive_mode != .unset);
     const direction: webtransport.StreamDirection =
         if (quic.StreamId.init(stream_id).direction() == .bidirectional)
             .bidirectional
@@ -440,8 +461,8 @@ fn identifyInternal(
                 };
             }
         } else {
-            // The compatibility whole-stream API consumes prefix + payload in
-            // one transaction after FIN.
+            // Whole-stream readers consume prefix + payload after FIN. Idle
+            // discovery leaves the same prefix pending for either reader.
             stream.?.receive_prefix_len = prefix_len;
         }
         stream.?.prefix_received = true;
@@ -453,19 +474,21 @@ fn identifyInternal(
         stream.?.prefix_received = true;
     }
     if (stream.?.receive_mode == .unset) {
-        // A whole-stream poll may have parsed this peer association before FIN
-        // and later released its claim after discovering that the final body
-        // exceeds the aggregate limit. Incremental takeover must consume that
-        // already-identified prefix exactly once before exposing payload.
+        // Idle discovery and a released whole-stream claim both leave the
+        // association prefix pending. Incremental takeover consumes it exactly
+        // once, including after RESET/STOP has already abandoned receive data.
         if (receive_mode == .incremental and
             stream.?.receive_prefix_len != 0)
         {
             const prefix_len = stream.?.receive_prefix_len;
-            const release_result = if (single_attempt)
-                connection.tryReleaseReceivedCapacity(stream_id, prefix_len)
-            else
-                connection.releaseReceivedCapacity(stream_id, prefix_len);
-            try release_result;
+            const already_consumed = if (connection.recvStreamStats(stream_id)) |stats| stats.bytes_read >= prefix_len else true;
+            if (!already_consumed) {
+                const release_result = if (single_attempt)
+                    connection.tryReleaseReceivedCapacity(stream_id, prefix_len)
+                else
+                    connection.releaseReceivedCapacity(stream_id, prefix_len);
+                try release_result;
+            }
             stream.?.receive_prefix_len = 0;
         }
         stream.?.receive_mode = receive_mode;

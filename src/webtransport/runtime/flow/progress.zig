@@ -9,6 +9,7 @@ const http3 = @import("../../../http3/mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const lifecycle = @import("../connection_lifecycle.zig");
 const credits = @import("credits.zig");
+const association = @import("../stream_association.zig");
 
 pub const Error = control_mod.Error || quic.runtime.ReceiveTimeoutError;
 
@@ -32,6 +33,9 @@ pub const Progress = struct {
     context: *anyopaque,
     runFn: *const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void,
     maintainFn: *const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void,
+    // Ready DATAGRAMs need stream accounting without advancing buffered CLOSE
+    // capsules or requiring another socket wait.
+    inspectFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
 
     pub fn run(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!void {
         return self.runFn(self.context, deadline);
@@ -39,6 +43,10 @@ pub const Progress = struct {
 
     pub fn maintain(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!void {
         return self.maintainFn(self.context, deadline);
+    }
+
+    pub fn inspect(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (self.inspectFn) |function| try function(self.context, deadline);
     }
 };
 
@@ -50,7 +58,23 @@ pub fn Context(comptime H3Pointer: type) type {
         one_attempt: bool = false,
 
         pub fn progress(self: *@This()) Progress {
-            return .{ .context = self, .runFn = run, .maintainFn = maintain };
+            return .{ .context = self, .runFn = run, .maintainFn = maintain, .inspectFn = inspect };
+        }
+
+        fn inspect(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
+            try self.inspectBuffered();
+        }
+
+        pub fn inspectBuffered(self: *@This()) control_mod.Error!void {
+            const connection = &self.h3.established.connection;
+            association.discoverBuffered(connection, self.registry) catch |err| {
+                _ = lifecycle.observeWithoutCredits(self.control, self.h3, self.registry);
+                return err;
+            };
+            _ = lifecycle.observeWithoutCredits(self.control, self.h3, self.registry);
+            if (self.registry.flow_violation) return error.FlowControlViolation;
         }
 
         fn maintain(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
@@ -62,8 +86,7 @@ pub fn Context(comptime H3Pointer: type) type {
             }
             try buffered(self.control, &self.h3.established.connection);
             try self.control.ensureOpen();
-            _ = lifecycle.observeWithoutCredits(self.control, self.h3, self.registry);
-            if (self.registry.flow_violation) return error.FlowControlViolation;
+            try self.inspectBuffered();
             try self.control.ensureOpen();
             while (true) {
                 if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);

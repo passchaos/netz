@@ -248,6 +248,17 @@ rolls back both registration and its session data charge. Excess data rejects
 the affected CONNECT before application delivery, and shared-client tests verify
 that sibling sessions remain usable.
 
+Flow maintenance and DATAGRAM receivers also discover complete buffered stream
+associations before an application selects a stream reader. Discovery charges
+the Session's stream/data limits without consuming the prefix or payload and
+leaves the whole-stream/incremental choice open. Owned, caller-buffer, batch and
+nonblocking DATAGRAM receivers inspect buffered STREAM state before delivery,
+including STREAM and DATAGRAM frames arriving in the same QUIC packet. This
+inspection preserves buffered CLOSE notification and completed-DATAGRAM ordering.
+RESET/STOP abandonment and later incremental takeover return prefix credit
+only once. Tests cover both endpoint roles, fresh and queued DATAGRAMs, retained
+reader choice, scoped flow-error rejection and STOP abandonment.
+
 Successful incremental or whole-stream consumption now replenishes WT_MAX_DATA
 after half the receive window is consumed. RESET/STOP abandonment releases the
 remaining accounted body credit once. Replenishment uses the same transactional
@@ -1527,10 +1538,18 @@ place the matching WebTransport stream in the next physical table slot. Both
 the whole-stream poller and the incremental poller find the second-page target;
 the latter also starts from a stale round-robin cursor and proves the wrapped
 scan still crosses the page boundary.
-Syntactically valid WebTransport streams carrying another Session ID are now
-rejected and skipped instead of poisoning every later poll. Peer bidi streams
-receive one atomic `RESET_STREAM` plus `STOP_SENDING`, peer uni streams receive
+Shared server association lookup recognizes accepted and pending Sessions on
+the same connection. Polling an active Session leaves early data for a pending
+sibling buffered until acceptance; a real QUIC/TLS regression delays the second
+Session's acceptance while the first remains active and verifies exact delivery.
+Maintenance discovery leaves other Session IDs untouched. Explicit stream
+pollers reject unknown Session IDs and continue to a valid sibling instead of
+poisoning later polls. Rejected peer bidi streams receive one atomic
+`RESET_STREAM` plus `STOP_SENDING`, peer uni streams receive
 `STOP_SENDING`, all with `WT_BUFFERED_STREAM_REJECTED`. Retained and late bytes
 are discarded to restore connection flow-control credit, terminal streams are
 retired from QUIC without consuming this session's registry limits, and both
 blocking and one-attempt pollers continue to a valid sibling.
+Buffering streams for a CONNECT that has not yet arrived, with dedicated
+connection-wide quotas and expiry, remains separate work; pending-Session
+preservation does not establish that part of draft-16 section 4.6.

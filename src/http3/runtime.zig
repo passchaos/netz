@@ -457,6 +457,7 @@ fn receiveConnectDatagramFromSession(
     progress: anytype,
 ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!OwnedConnectDatagram {
     while (true) {
+        if (@hasDecl(@TypeOf(progress), "inspect")) try progress.inspect(deadline);
         if (try session.pollConnectDatagram(stream_id)) |datagram| {
             return datagram;
         }
@@ -507,6 +508,7 @@ fn receiveConnectDatagramIntoFromSession(
     progress: anytype,
 ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)![]u8 {
     while (true) {
+        if (@hasDecl(@TypeOf(progress), "inspect")) try progress.inspect(deadline);
         if (try session.pollConnectDatagramInto(stream_id, output)) |payload| {
             return payload;
         }
@@ -534,7 +536,10 @@ fn receiveConnectDatagramIntoFromSession(
         } else {
             try session.receiveAttachedConnectDatagramProgress(deadline);
         }
-        if (try target.finish()) |payload| return payload;
+        if (try target.finish()) |payload| {
+            if (@hasDecl(@TypeOf(progress), "inspect")) try progress.inspect(deadline);
+            return payload;
+        }
     }
 }
 

@@ -3339,6 +3339,9 @@ pub const EndpointServer = struct {
         session_id: u62,
     ) bool {
         const self: *const EndpointServer = @ptrCast(@alignCast(context));
+        if (self.pending.get(@intCast(scope))) |pending| {
+            if (pending.session_id.value == session_id) return true;
+        }
         return self.sessions.contains(.{
             .handle = @intCast(scope),
             .session_id = .init(session_id),
@@ -6751,7 +6754,10 @@ pub const AcceptedHandshakeSession = struct {
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        const datagram = try self.h3.pollConnectDatagram(
+        const datagram = try flow_datagram.poll(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
         );
         return if (datagram) |owned|
@@ -9613,7 +9619,10 @@ pub const HandshakeClientSession = struct {
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try connect_negotiation.ensure(&self.h3);
         if (!try self.prepareDispatcherPoll()) return null;
-        const result = self.h3.pollConnectDatagram(
+        const result = flow_datagram.poll(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
         );
         try self.refreshDispatcherTimer();
@@ -19367,4 +19376,12 @@ test {
 
 test {
     _ = @import("runtime/connect/application_protocol.zig");
+}
+
+test {
+    _ = @import("runtime/association/tests/pending.zig");
+}
+
+test {
+    _ = @import("runtime/association/tests/discovery.zig");
 }

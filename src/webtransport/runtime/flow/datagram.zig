@@ -11,6 +11,12 @@ const progress_mod = @import("progress.zig");
 pub const Error = control_mod.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
+pub fn poll(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62) Error!?http3.runtime.OwnedConnectDatagram {
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    try context.inspectBuffered();
+    return h3.pollConnectDatagram(stream_id);
+}
+
 pub fn receive(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62) Error!http3.runtime.OwnedConnectDatagram {
     return receiveUntil(control, h3, registry, stream_id, null) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
