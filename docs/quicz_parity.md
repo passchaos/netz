@@ -1629,6 +1629,14 @@ send rearms the same bounded retry without losing the three-PTO hard expiry; a
 draining connection never schedules or emits a response. This follows the
 rate-limited closing model audited in s2n-quic while keeping endpoint routing
 and all waits on the `std.Io` abstraction.
+Local-stream peer-frame validation now follows RFC 9000's implicit-open rule
+audited in current `/nav_env/Work/quiche`: opening a higher-numbered local
+bidirectional or unidirectional stream opens every lower stream of that type,
+even when its transport state remains lazily unallocated. Authenticated
+client/server role coverage sends `STREAM`, `RESET_STREAM`, `MAX_STREAM_DATA`,
+and `STOP_SENDING` on those lower IDs, verifies lazy half-stream creation and
+the automatic RESET response, and proves the next unopened IDs still fail
+transactionally with `STREAM_STATE_ERROR`.
 
 ## Known blockers before declaring the goal complete
 

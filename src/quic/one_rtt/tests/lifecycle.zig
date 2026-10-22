@@ -1799,6 +1799,265 @@ test "QUIC 1-RTT opens local stream ids without eager state" {
     );
 }
 
+test "QUIC 1-RTT accepts peer frames for implicitly opened local streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "implicit-client",
+        .peer_connection_id = "implicit-server",
+        .initial_send_max_streams_bidi = 3,
+        .initial_send_max_streams_uni = 3,
+        .initial_receive_max_streams_bidi = 3,
+        .initial_receive_max_streams_uni = 3,
+        .initial_send_max_stream_data_uni = 16,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "implicit-server",
+        .peer_connection_id = "implicit-client",
+        .local_endpoint = .server,
+        .initial_send_max_streams_bidi = 3,
+        .initial_send_max_streams_uni = 3,
+        .initial_receive_max_streams_bidi = 3,
+        .initial_receive_max_streams_uni = 3,
+        .initial_send_max_stream_data_uni = 16,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    // Using the third local stream of each type opens the two lower-numbered
+    // streams even though they do not yet have transport state objects.
+    try client.send(&.{
+        .{ .stream = .{ .stream_id = 8, .data = "high-bidi" } },
+        .{ .stream = .{ .stream_id = 10, .data = "high-uni" } },
+    });
+    var opened = try server.receivePacket();
+    defer opened.deinit(allocator);
+    try std.testing.expect(client.getSendStreamStats(0) == null);
+    try std.testing.expect(client.getSendStreamStats(2) == null);
+    try std.testing.expect(client.getSendStreamStats(4) == null);
+    try std.testing.expect(client.getSendStreamStats(6) == null);
+
+    try server.send(&.{
+        .{ .stream = .{
+            .stream_id = 0,
+            .data = "response",
+            .fin = true,
+        } },
+        .{ .reset_stream = .{
+            .stream_id = 4,
+            .application_error_code = 77,
+            .final_size = 0,
+        } },
+        .{ .max_stream_data = .{
+            .stream_id = 2,
+            .maximum_stream_data = 1024,
+        } },
+        .{ .stop_sending = .{
+            .stream_id = 6,
+            .application_error_code = 42,
+        } },
+    });
+    var peer_frames = try client.receivePacket();
+    defer peer_frames.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        "response",
+        client.availableReceivedStream(0).?,
+    );
+    const reset = client.streamResetReceived(4) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 77), reset.application_error_code);
+    const raised = client.getSendStreamStats(2) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1024), raised.send_limit);
+    const stopped = client.getSendStreamStats(6) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        stopped.stopped.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        stopped.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        client.stats().outgoing_streams_created,
+    );
+
+    var automatic_reset = try server.receivePacket();
+    defer automatic_reset.deinit(allocator);
+    const received_reset = server.streamResetReceived(6) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        received_reset.application_error_code,
+    );
+
+    // Exercise the opposite endpoint role and stream-ID parity on the same
+    // authenticated connection.
+    try server.send(&.{
+        .{ .stream = .{ .stream_id = 9, .data = "server-high-bidi" } },
+        .{ .stream = .{ .stream_id = 11, .data = "server-high-uni" } },
+    });
+    var server_opened = try client.receivePacket();
+    defer server_opened.deinit(allocator);
+    try std.testing.expect(server.getSendStreamStats(1) == null);
+    try std.testing.expect(server.getSendStreamStats(3) == null);
+    try std.testing.expect(server.getSendStreamStats(5) == null);
+    try std.testing.expect(server.getSendStreamStats(7) == null);
+
+    try client.send(&.{
+        .{ .stream = .{
+            .stream_id = 1,
+            .data = "client-response",
+            .fin = true,
+        } },
+        .{ .reset_stream = .{
+            .stream_id = 5,
+            .application_error_code = 88,
+            .final_size = 0,
+        } },
+        .{ .max_stream_data = .{
+            .stream_id = 3,
+            .maximum_stream_data = 2048,
+        } },
+        .{ .stop_sending = .{
+            .stream_id = 7,
+            .application_error_code = 43,
+        } },
+    });
+    var reverse_peer_frames = try server.receivePacket();
+    defer reverse_peer_frames.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        "client-response",
+        server.availableReceivedStream(1).?,
+    );
+    const reverse_reset = server.streamResetReceived(5) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 88),
+        reverse_reset.application_error_code,
+    );
+    const reverse_raised = server.getSendStreamStats(3) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 2048), reverse_raised.send_limit);
+    const reverse_stopped = server.getSendStreamStats(7) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 43),
+        reverse_stopped.stopped.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 43),
+        reverse_stopped.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        server.stats().outgoing_streams_created,
+    );
+
+    var reverse_automatic_reset = try client.receivePacket();
+    defer reverse_automatic_reset.deinit(allocator);
+    const client_received_reset = client.streamResetReceived(7) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 43),
+        client_received_reset.application_error_code,
+    );
+}
+
+test "QUIC 1-RTT rejects peer frames for unopened local streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb5} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "unopened-local",
+        .peer_connection_id = "unopened-peer",
+        .initial_send_max_streams_bidi = 2,
+        .initial_send_max_streams_uni = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), try connection.openStream());
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try connection.openUnidirectionalStream(),
+    );
+    try std.testing.expectError(
+        error.StreamStateError,
+        one_rtt.testing.applyReceivedFrames(
+            &connection,
+            0,
+            &.{.{ .stream = .{
+                .stream_id = 4,
+                .data = "not-open",
+            } }},
+            null,
+            .not_ect,
+        ),
+    );
+    try std.testing.expect(connection.recvStreamStats(4) == null);
+    try std.testing.expectError(
+        error.StreamStateError,
+        one_rtt.testing.applyReceivedFrames(
+            &connection,
+            0,
+            &.{.{ .stop_sending = .{
+                .stream_id = 6,
+                .application_error_code = 9,
+            } }},
+            null,
+            .not_ect,
+        ),
+    );
+    try std.testing.expect(connection.getSendStreamStats(6) == null);
+}
+
 test "QUIC 1-RTT ACK of ACK prunes received packet history" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

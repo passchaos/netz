@@ -15795,10 +15795,13 @@ pub const Connection = struct {
         if (self.isClosedStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             // STREAM/RESET/STREAM_DATA_BLOCKED on a locally initiated
-            // bidirectional stream is valid only after the local endpoint has
-            // opened that stream.  This matches the state checks in quicz/tquic
-            // and prevents a peer from creating local stream IDs on our behalf.
-            if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
+            // bidirectional stream is valid after that stream number has been
+            // opened. Opening a higher stream implicitly opens every lower
+            // stream of the same type even when lazy transport state does not
+            // exist yet (RFC 9000 section 2.1).
+            if (!self.localStreamOpened(stream_id)) {
+                return error.StreamStateError;
+            }
             return;
         }
         try self.validatePeerStreamCount(stream_id);
@@ -15808,10 +15811,28 @@ pub const Connection = struct {
         if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
         if (self.isClosedStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
-            if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
+            if (!self.localStreamOpened(stream_id)) {
+                return error.StreamStateError;
+            }
             return;
         }
         try self.validatePeerStreamCount(stream_id);
+    }
+
+    fn localStreamOpened(
+        self: *const Connection,
+        stream_id: u64,
+    ) bool {
+        if (stream_id > quic.varint.max_value or
+            !streamInitiatedByLocal(self.config.local_endpoint, stream_id))
+        {
+            return false;
+        }
+        const next = switch (streamDirection(stream_id)) {
+            .bidirectional => self.next_local_bidi_stream_id,
+            .unidirectional => self.next_local_uni_stream_id,
+        };
+        return stream_id < next;
     }
 
     fn validatePeerStreamCount(self: Connection, stream_id: u64) Error!void {
