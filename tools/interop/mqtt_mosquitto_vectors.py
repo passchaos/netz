@@ -9,10 +9,8 @@ MQTT bytes and therefore remain meaningful against a different broker process.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import socket
-import subprocess
 import sys
 import tempfile
 import time
@@ -25,7 +23,9 @@ from mqtt_vectors import (
     maximum_topic_hierarchy,
     pattern_matching,
     persistent_incoming_qos2,
+    persistent_subscription_restart,
     persistent_subscriptions,
+    private_bridge_no_local,
     proxy_v1_bad,
     proxy_v2_bad,
     proxy_v2_lifecycle,
@@ -41,6 +41,8 @@ from mqtt_vectors import (
     will_delay_recovery,
 )
 
+from mqtt_vectors.broker import NetzBroker, free_port
+
 BASE_SCENARIO_COUNT = 171
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
@@ -50,7 +52,9 @@ SCENARIO_COUNT = (
     + extended_authentication.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_incoming_qos2.SCENARIO_COUNT
+    + persistent_subscription_restart.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
+    + private_bridge_no_local.SCENARIO_COUNT
     + proxy_v1_bad.SCENARIO_COUNT
     + proxy_v2_bad.SCENARIO_COUNT
     + proxy_v2_lifecycle.SCENARIO_COUNT
@@ -76,12 +80,6 @@ def parse_args() -> argparse.Namespace:
         default=Path.home() / "Work/mosquitto/test",
     )
     return parser.parse_args()
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 def read_packet(sock: socket.socket) -> bytes:
@@ -168,71 +166,6 @@ def expected_connack(
         properties=properties,
         property_helper=False,
     )
-
-
-class NetzBroker:
-    def __init__(
-        self,
-        executable: Path,
-        connections: int = 1,
-        ignore_errors: bool = False,
-        restore: bool = False,
-        extra_args: tuple[str, ...] = (),
-    ):
-        self.executable = executable
-        self.connections = connections
-        self.ignore_errors = ignore_errors
-        self.restore = restore
-        self.extra_args = extra_args
-        self.port = free_port()
-        self.process: subprocess.Popen[str] | None = None
-
-    def __enter__(self) -> "NetzBroker":
-        command = [
-            str(self.executable),
-            f"--bind=127.0.0.1:{self.port}",
-            f"--connections={self.connections}",
-            "--max-queued-deliveries=1024",
-            "--max-outgoing-inflight=64",
-            "--connect-timeout-ms=5000",
-            *self.extra_args,
-        ]
-        if not self.restore:
-            command.append("--no-restore")
-        if self.ignore_errors:
-            command.append("--ignore-connection-errors")
-        self.process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        assert self.process.stdout is not None
-        line = self.process.stdout.readline()
-        if "listening" not in line:
-            raise RuntimeError(f"netz broker failed to start: {line.strip()}")
-        return self
-
-    def connect(self) -> socket.socket:
-        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
-        sock.settimeout(5)
-        return sock
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        assert self.process is not None
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.terminate()
-            self.process.wait(timeout=5)
-            if exc_type is None:
-                raise RuntimeError("netz broker did not exit after DISCONNECT")
-        if exc_type is None and self.process.returncode != 0:
-            assert self.process.stdout is not None
-            raise RuntimeError(
-                f"netz broker exited {self.process.returncode}: "
-                + self.process.stdout.read()
-            )
 
 
 def connect_client(
@@ -6444,6 +6377,14 @@ def main() -> None:
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
+    private_bridge_no_local.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    persistent_subscription_restart.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet, expect_packets_unordered,
+    )
     persistent_subscriptions.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         connect_client, expected_connack, expect_packet,

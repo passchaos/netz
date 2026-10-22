@@ -387,6 +387,13 @@ retain-as-published, which provides loop prevention and retained-flag fidelity
 unavailable in standard MQTT 3.1/3.1.1 subscription options. MQTT 5 never emits
 this private extension.
 
+The source-locked process gate now completely ports Mosquitto's
+`06-bridge-no-local.py`: MQTT 3.1 and 3.1.1 use their actual private CONNECT
+markers, while MQTT 5 uses its explicit No Local option. Each self-publication
+must be followed directly by PINGRESP with no echoed PUBLISH. A separate
+publisher then proves the same subscription still delivers, and a final PING
+barrier rejects extra or delayed self messages.
+
 `bridge_bind_address` accepts a numeric IPv4 or IPv6 source address and binds
 an ephemeral local port before every cleartext or TLS connection attempt.
 Hostname lookup is restricted to the selected address family, numeric family
@@ -673,7 +680,7 @@ block; a subsequent valid proxied CONNECT/PING proves that EOF retires only
 that peer and does not poison the finite production listener.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 287 curated raw
+deadline on every one of its finite broker processes, so all 294 curated raw
 scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
@@ -3468,7 +3475,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 287-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 294-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -3725,7 +3732,7 @@ success/revocation pairs through the production configuration path. The
 P-384 and Ed25519 paths also reject authenticated signature mutations before
 any listener binds.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 287
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 294
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators. A complete source-locked port of
 `01-connect-disconnect-v5.py` sends all four legal normal-DISCONNECT encodings:
@@ -3738,6 +3745,14 @@ source-locked persistence scenarios then port Mosquitto's
 PUBREC, the broker writes a process-restart snapshot, reconnect reports Session
 Present, and both PUBREL packets release their original Application Messages
 exactly once through complete downstream QoS 2 handshakes. A complete
+source-locked port of `11-persistent-subscription.py` restores MQTT 3.1.1/5
+subscriptions after an orderly process snapshot and requires the exact
+self-directed QoS 1 PUBLISH plus PUBACK without another SUBSCRIBE. Both
+deliveries complete through acknowledgement and PING barriers. Two companion
+cases SIGKILL the journal-backed broker while the subscribed client remains
+connected, immediately after durable SUBACK; journal restoration must preserve
+that same self-subscription without an EOF or final snapshot saving its state.
+The crash helper verifies the exit status of its own process. A complete
 source-locked port of `21-proxy-v1-bad.py` then rejects all 22 malformed v1
 prefaces: an unknown TCP family, an overlong header, missing endpoint/port
 fields, zero or overflowing ports, invalid IPv4 addresses, and IPv4 text under
@@ -4977,7 +4992,7 @@ proxy evidence for the entire suite.
    instructions, by 0.75-2.21% median. Timing/cycles were noisy and mixed, so
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
-3. Expand the source-hash-locked process gate beyond its current 287 curated
+3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-two
    upstream process sources:
    Windows-CRLF configuration, missing root configuration, the Unix listener,

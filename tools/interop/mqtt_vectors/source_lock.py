@@ -121,6 +121,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "f09b04182bc587a819e007f462000b1c781f8af7d464ed058e8b51439ccb353e",
     "broker/05-clean-session-qos1.py":
         "73b7109f7b4cc55e6734192f5d81c013bf13f4fca530bfd5f0844bd143623137",
+    "broker/06-bridge-no-local.py":
+        "9acc75259b45fcbd1e2cf71cde01354361f452444fb76c3833c605588ec983bf",
     "broker/05-session-expiry-v5.py":
         "c545a17f9740ffdec8a0c432af336bd22dca6f80b61ca4881164ed3aacd5ed68",
     "broker/05-session-expiry-kick.py":
@@ -185,6 +187,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "93c2af138cfb7be3b25f98d97658b60df07d6c43b3eebd04ff651e1c4e1fe1d7",
     "broker/11-persistent-subscription-no-local.py":
         "2a77a9da197041f80129bdba981ac6a4577503b57436ea60153f78010d52b4d6",
+    "broker/11-persistent-subscription.py":
+        "4166cc4b6a81c7f1feb135dd6479d60dc29d4f9a2ed7380c678792d87c68e19b",
     "broker/11-pub-props.py":
         "b45ab64f7ebbc978b0b4b939cd1f9ac7babeca7098d3c5a0a5ad5c41464dd724",
     "broker/11-message-expiry.py":
