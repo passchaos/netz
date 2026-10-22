@@ -574,7 +574,9 @@ pub const Builder = struct {
         directive: []const u8,
         words: anytype,
     ) Error!void {
-        if (std.mem.eql(u8, directive, "address")) {
+        if (std.mem.eql(u8, directive, "address") or
+            std.mem.eql(u8, directive, "addresses"))
+        {
             try markOnce(&self.seen.address);
             try self.parseAddresses(allocator, words);
         } else if (std.mem.eql(u8, directive, "topic")) {
@@ -1084,6 +1086,7 @@ fn directionsShareOutbound(left: Direction, right: Direction) bool {
 
 pub fn isDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "address") or
+        std.mem.eql(u8, value, "addresses") or
         std.mem.eql(u8, value, "topic") or
         std.mem.eql(u8, value, "cleansession") or
         std.mem.eql(u8, value, "local_cleansession") or

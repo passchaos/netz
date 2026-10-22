@@ -1775,7 +1775,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\listener 1883 127.0.0.1
         \\listener_allow_anonymous true
         \\connection upstream
-        \\address broker.example:2883 backup.example:3883
+        \\addresses broker.example:2883 backup.example:3883
         \\topic sensors/# in 1 local/ remote/
         \\topic $SYS/# in 0 "" ""
         \\cleansession false
@@ -2523,7 +2523,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "topic # in 0\nnotification_topic bad/+\n"),
     );
     var primary_preferred = try parse(allocator, listener ++
-        "connection addresses\naddress one.example two.example\n" ++
+        "connection addresses\naddresses one.example two.example\n" ++
         "topic # in 0\n");
     defer primary_preferred.deinit(allocator);
     try std.testing.expectEqual(
@@ -2531,6 +2531,13 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         primary_preferred.bridges[0].addressCount(),
     );
     try std.testing.expect(!primary_preferred.bridges[0].round_robin);
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-address-directive\n" ++
+            "address one.example\naddresses two.example\n" ++
+            "topic # in 0\n"),
+    );
     try std.testing.expectError(
         error.DuplicateBridgeAddress,
         parse(allocator, listener ++
@@ -2674,7 +2681,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\listener 1883 127.0.0.1
         \\listener_allow_anonymous true
         \\connection allocation-test
-        \\address broker.example:2883 backup.example:3883
+        \\addresses broker.example:2883 backup.example:3883
         \\round_robin true
         \\topic sensors/# in 1 local/ remote/
         \\topic commands/# in 2 command/ upstream/
