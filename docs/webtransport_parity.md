@@ -871,6 +871,16 @@ that stream:
   discarded only after the rejection reaches the socket, and endpoint-driven
   sessions keep enforcing this rule after their terminal event was delivered.
 
+The shared `EndpointClient` applies the same rule to every accepted Session.
+It inspects terminal CONNECT streams before sending a pending FIN reply,
+rejects late bytes after that FIN with STOP_SENDING, and retains failed or
+paced cancellation for a later poll. Local or peer CLOSE also suppresses
+associated-stream and DATAGRAM delivery and advances WT_SESSION_GONE cleanup
+one packet per poll. Explicit Session removal checks for pending protocol
+cancellation before its ordinary FIN. Focused real-UDP tests inspect the peer's
+exact RESET_STREAM/STOP_SENDING codes, inject a failed socket submission, and
+verify a second Session can still receive and open streams on the connection.
+
 The 1024-byte reason limit now belongs to the core WebTransport capsule codec
 and is reused by the incremental runtime, so standalone writers and parsers
 cannot create or accept a CLOSE capsule that the session state machine would

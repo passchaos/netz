@@ -15,6 +15,7 @@ const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
 const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
+const terminal = @import("endpoint_client/terminal.zig");
 
 const net = std.Io.net;
 
@@ -900,18 +901,11 @@ pub const Client = struct {
         session_id: webtransport.SessionId,
     ) Error!bool {
         const current = self.sessions.get(session_id.value) orelse return false;
-        if (current.close_response_pending) {
-            try self.h3.sendRequestBodyPaced(
-                session_id.value,
-                &.{},
-                true,
-            );
-            current.close_response_pending = false;
-            current.control.local_close_sent = true;
-        }
-        try session_control.terminateStreams(
-            &self.h3.established.connection,
+        try terminal.finish(
+            &self.h3,
+            &current.control,
             &current.streams,
+            &current.close_response_pending,
         );
         const removed = self.sessions.fetchRemove(session_id.value).?.value;
         removed.deinit(self);
@@ -939,31 +933,17 @@ pub const Client = struct {
         stream_buffer: []u8,
     ) Error!?Event {
         const session_id = session_value.session_id;
-        if (session_value.close_response_pending) {
-            self.h3.trySendRequestBody(
-                session_id.value,
-                &.{},
-                true,
-            ) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                error.RequestCancelled, error.RequestRejected => {},
-                else => return err,
-            };
-            session_value.close_response_pending = false;
-            session_value.control.local_close_sent = true;
-        }
-        if (!session_value.control.terminal_reported) {
-            const control_event = session_value.control.pollOnce(
-                &self.h3.established.connection,
-            ) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                error.InvalidCapsule => {
+        // Retain the detached CONNECT association until removal: late bytes
+        // after CLOSE still require H3_MESSAGE_ERROR on this stream.
+        const control_event = session_value.control.pollOnce(
+            &self.h3.established.connection,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            error.InvalidCapsule => {
+                if (!session_value.control.handledPostTerminalData()) {
                     self.h3.established.connection.tryResetStream(
                         session_id.value,
                         http3.ApplicationErrorCode.message_error,
@@ -974,24 +954,42 @@ pub const Client = struct {
                         => return null,
                         else => return reset_err,
                     };
-                    return err;
-                },
-                else => {
-                    try http3.runtime.closeConnectionForProtocolError(
-                        &self.h3.established.connection,
-                        err,
-                    );
-                    return err;
-                },
-            };
-            if (control_event) |event| {
-                if (event == .closed and
-                    !session_value.control.local_close_sent)
-                {
-                    session_value.close_response_pending = true;
+                } else {
+                    session_value.close_response_pending = false;
                 }
-                return .{ .session = event };
+                return err;
+            },
+            else => {
+                try http3.runtime.closeConnectionForProtocolError(
+                    &self.h3.established.connection,
+                    err,
+                );
+                return err;
+            },
+        };
+        if (control_event) |event| {
+            if (event == .closed and
+                !session_value.control.local_close_sent and
+                !session_value.control.local_close_failed)
+            {
+                session_value.close_response_pending = true;
             }
+            return .{ .session = event };
+        }
+        const cleanup = terminal.advanceOnce(
+            &self.h3,
+            &session_value.control,
+            &session_value.streams,
+            &session_value.close_response_pending,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        if (cleanup == .submitted or session_value.control.state.closed) {
+            return null;
         }
         if (try incremental_stream.pollOnceShared(
             &self.h3.established.connection,
@@ -1275,4 +1273,8 @@ fn findHeader(
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+test {
+    _ = @import("endpoint_client/terminal_tests.zig");
 }
