@@ -5657,6 +5657,14 @@ pub const Connection = struct {
             self.config.max_datagram_size,
             now_ns,
         ) catch |err| switch (err) {
+            error.DatagramTooLarge, error.MessageOversize => {
+                if (!self.pmtud.onProbeSendTooLarge(
+                    self.config.max_datagram_size,
+                    now_ns,
+                )) return err;
+                self.clearPmtuProbeRetry();
+                return;
+            },
             error.AntiAmplificationLimited,
             error.CongestionLimited,
             error.PacingLimited,

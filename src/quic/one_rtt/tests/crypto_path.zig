@@ -66,6 +66,33 @@ const FixedClockIo = struct {
     }
 };
 
+const RejectFirstOversizeSend = struct {
+    delegate: std.Io,
+    remaining_failures: usize = 1,
+    send_calls: usize = 0,
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: net.Socket.Handle,
+        messages: []net.OutgoingMessage,
+        flags: net.SendFlags,
+    ) struct { ?net.Socket.SendError, usize } {
+        const self: *RejectFirstOversizeSend =
+            @ptrCast(@alignCast(userdata));
+        self.send_calls += 1;
+        if (self.remaining_failures != 0) {
+            self.remaining_failures -= 1;
+            return .{ error.MessageOversize, 0 };
+        }
+        return self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+    }
+};
+
 test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     const allocator = std.testing.allocator;
 
@@ -967,6 +994,76 @@ test "QUIC 1-RTT timer automatically sends an initially ready PMTU probe" {
     var probe = try receiver.receiveBytes();
     defer probe.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1300), probe.bytes.len);
+}
+
+test "QUIC 1-RTT PMTU send oversize lowers the probe ceiling" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6c} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-oversize-local",
+        .peer_connection_id = "pmtu-oversize-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1500,
+        .max_datagram_size = 2000,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var rejecting = RejectFirstOversizeSend{ .delegate = sender.io };
+    var vtable = sender.io.vtable.*;
+    vtable.netSend = RejectFirstOversizeSend.netSend;
+    sender.io = .{ .userdata = &rejecting, .vtable = &vtable };
+    defer sender.io = rejecting.delegate;
+
+    const first = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    _ = (try connection.serviceNextTimerAt(first.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), rejecting.send_calls);
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 0), connection.bytesInFlight());
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 1350), connection.pmtud.failed_size);
+
+    const retry = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pmtu_probe,
+        retry.kind,
+    );
+    _ = (try connection.serviceNextTimerAt(retry.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 1274), connection.bytesInFlight());
+
+    var probe = try receiver.receiveBytes();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1274), probe.bytes.len);
 }
 
 test "QUIC dispatcher raise timer automatically resumes PMTU probing" {

@@ -194,6 +194,31 @@ pub const State = struct {
         self.armRaiseTimer(now_ns, peer_max_udp_payload);
     }
 
+    /// Treat a synchronous local EMSGSIZE as evidence that the attempted
+    /// probe cannot leave this host/path. Unlike an asynchronously delivered
+    /// ICMP error, this result belongs to the exact send operation and can
+    /// safely lower the current search ceiling without terminating QUIC.
+    pub fn onProbeSendTooLarge(
+        self: *State,
+        peer_max_udp_payload: usize,
+        now_ns: ?u64,
+    ) bool {
+        if (!self.shouldProbe() or self.active_probe_packet_number != null) {
+            return false;
+        }
+        const size = self.probe_size orelse return false;
+        if (size <= self.current_size) return false;
+        self.failed_size = if (self.failed_size == 0)
+            size
+        else
+            @min(self.failed_size, size);
+        self.consecutive_failures = 0;
+        self.probe_size = null;
+        self.should_probe = !self.finished(peer_max_udp_payload);
+        self.armRaiseTimer(now_ns, peer_max_udp_payload);
+        return true;
+    }
+
     pub fn onMtuSizedPacketAcked(self: *State, packet_number: u64, datagram_size: usize) void {
         const bounded_size = std.math.cast(u16, datagram_size) orelse
             std.math.maxInt(u16);

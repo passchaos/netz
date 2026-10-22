@@ -363,8 +363,12 @@ multi-step searches after ACK or loss feedback, and transmits a new probe when
 the 600-second raise timer reopens a completed search. Congestion, pacing, and
 anti-amplification limits retain probe readiness behind bounded retry deadlines
 so a blocked path neither loses the search nor creates a zero-deadline event
-loop. Focused real-UDP regressions cover the initial interest, blocked retry,
-and dispatcher-owned raise-timer path.
+loop. A synchronous local `EMSGSIZE`/configured datagram rejection belongs to
+the exact unsent probe, so it lowers the search ceiling and retries a smaller
+size instead of terminating the endpoint loop or repeating the impossible
+datagram forever. Focused real-UDP regressions cover the initial interest,
+blocked retry, exact send-size rejection, and dispatcher-owned raise-timer
+path.
 QUIC PMTU handling now also detects path MTU black holes from ordinary
 non-probe loss bursts instead of only explicit probe loss. The implementation
 records the protected datagram size for each sent packet, clears black-hole
