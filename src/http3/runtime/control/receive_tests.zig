@@ -390,6 +390,54 @@ test "HTTP/3 role-aware control extensions avoid state snapshots" {
     );
 }
 
+test "HTTP/3 role-aware control rejects oversized priority declaration transactionally" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&bytes, allocator);
+    try http3.writeSettingsFrame(&bytes, allocator, .{});
+    try quic.varint.encode(
+        &bytes,
+        allocator,
+        http3.FrameType.priority_update_request,
+    );
+    try quic.varint.encode(
+        &bytes,
+        allocator,
+        http3.max_priority_update_payload_size + 1,
+    );
+
+    var control = http3.ControlState{};
+    defer control.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        applyControlStreamFrameForRole(
+            &control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = bytes.items,
+            },
+            .server,
+        ),
+    );
+    try std.testing.expect(!control.settings.received);
+    try std.testing.expect(control.peer_control_stream_id == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_consumed_offset,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.priorityUpdates().len,
+    );
+}
+
 test "HTTP/3 client rejects split server-only control frame transactionally" {
     const allocator = std.testing.allocator;
     var bytes: std.ArrayList(u8) = .empty;

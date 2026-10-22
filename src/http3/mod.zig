@@ -59,6 +59,10 @@ pub const max_peer_origins: usize = 256;
 /// Bound total retained RFC 9218 request and push state independently of each
 /// control-frame size so a peer cannot grow connection memory with unique IDs.
 pub const default_max_priority_updates: usize = 256;
+/// Bound each retained RFC 9218 PRIORITY_UPDATE payload. This matches quiche's
+/// control-frame limit and prevents the entry-count cap from multiplying the
+/// complete 64-KiB control-stream buffering allowance.
+pub const max_priority_update_payload_size: usize = 256;
 /// Bound partial control-frame retention, including fragmented ORIGIN frames.
 pub const max_control_stream_buffer_size: usize = 64 * 1024;
 
@@ -1361,6 +1365,7 @@ pub const ControlState = struct {
             if (header.payload_length > max_control_stream_buffer_size) {
                 return error.ExcessiveLoad;
             }
+            try self.validateControlFrameHeader(header);
             const total = try header.totalLength();
             if (remaining.len < total) break;
             const frame = Frame{
@@ -1368,14 +1373,6 @@ pub const ControlState = struct {
                 .payload = remaining[header.header_length..total],
                 .consumed = total,
             };
-            // A semantic validator may choose to ignore an obsolete advisory
-            // frame, but it must not bypass the control stream's mandatory
-            // SETTINGS-first ordering.
-            if (!self.settings.received and
-                frame.frame_type != FrameType.settings)
-            {
-                return error.MissingSettings;
-            }
             if (validator) |value| {
                 if (try value.validateFrame(self.*, frame) == .ignore) {
                     consumed += total;
@@ -1407,6 +1404,50 @@ pub const ControlState = struct {
             );
         }
         self.peer_control_stream_buffer.items.len = retained;
+    }
+
+    /// Reject known-invalid control frames as soon as their type and declared
+    /// length are available. Waiting for the payload would let a peer retain a
+    /// large, already-doomed frame across many QUIC STREAM fragments.
+    fn validateControlFrameHeader(
+        self: ControlState,
+        header: Frame.Header,
+    ) Error!void {
+        if (!self.settings.received) {
+            if (header.frame_type != FrameType.settings) {
+                return error.MissingSettings;
+            }
+        } else if (header.frame_type == FrameType.settings) {
+            return error.DuplicateSettings;
+        }
+
+        switch (header.frame_type) {
+            FrameType.settings => if (header.payload_length >
+                max_settings_payload_size)
+            {
+                return error.InvalidSetting;
+            },
+            FrameType.goaway,
+            FrameType.cancel_push,
+            FrameType.max_push_id,
+            => if (header.payload_length == 0 or
+                header.payload_length > 8)
+            {
+                return error.InvalidFrame;
+            },
+            FrameType.priority_update_request,
+            FrameType.priority_update_push,
+            => if (header.payload_length == 0 or
+                header.payload_length > max_priority_update_payload_size)
+            {
+                return error.InvalidFrame;
+            },
+            FrameType.data,
+            FrameType.headers,
+            FrameType.push_promise,
+            => return error.UnexpectedFrame,
+            else => {},
+        }
     }
 
     fn controlFrameMayMutateOrError(frame_type: u64) bool {
@@ -2253,6 +2294,9 @@ pub fn writePriorityUpdateFrameRaw(
     if (frame_type != FrameType.priority_update_request and frame_type != FrameType.priority_update_push) return error.InvalidPriorityUpdate;
     const id_len = try quic.varint.length(prioritized_element_id);
     const payload_len = std.math.add(usize, id_len, field_value.len) catch return error.IntegerOverflow;
+    if (payload_len > max_priority_update_payload_size) {
+        return error.InvalidPriorityUpdate;
+    }
     try writeVarintPayloadFrame(
         list,
         allocator,
@@ -2264,6 +2308,9 @@ pub fn writePriorityUpdateFrameRaw(
 }
 
 pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
+    if (payload.len > max_priority_update_payload_size) {
+        return error.InvalidFrame;
+    }
     var cursor = wire.Cursor.init(payload);
     const id = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     return .{ .prioritized_element_id = id, .field_value = payload[cursor.pos..] };
@@ -8740,5 +8787,6 @@ test {
     _ = origin_pool;
     _ = @import("connect_ip_tests.zig");
     _ = @import("codec/header_capacity_tests.zig");
+    _ = @import("control_frame_limits_tests.zig");
     _ = @import("informational_tests.zig");
 }

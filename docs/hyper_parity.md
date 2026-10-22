@@ -1,4 +1,4 @@
-# netz vs `~/Work/hyper` HTTP/1, HTTP/2 and HTTP/3 audit
+# netz vs `/nav_env/Work/hyper` HTTP/1, HTTP/2 and HTTP/3 audit
 
 This audit tracks direct same-host evidence for the HTTP/1 and HTTP/2 portion
 of the netz improvement goal. Hyper's benchmark definitions are used where
@@ -2120,6 +2120,14 @@ connecting UDP and now consistently rejects a QPACK blocked-stream limit above
 the runtime's concurrent request-stream capacity. Codec boundary tests cover
 all six numeric SETTINGS fields and the maximum legal varint, with QPACK table
 capacity additionally bounded by the platform's addressable `usize` range.
+Incremental control-stream parsing now rejects known-invalid frame declarations
+as soon as the type and payload-length varints complete: non-SETTINGS first
+frames, duplicate SETTINGS, oversized SETTINGS, impossible single-varint
+frames, forbidden DATA/HEADERS/PUSH_PROMISE, and empty or oversized
+PRIORITY_UPDATE frames never wait for or retain their declared payload. Each
+RFC 9218 update is capped at 256 encoded payload bytes, matching the audited
+quiche boundary, so the 256-entry state cap cannot multiply the independent
+64-KiB fragmented-control buffer into multi-megabyte retained values.
 The runtime owning decode path first replaced per-field Huffman/dynamic output
 allocations with a stack-staged byte sequence, a descriptor array and one
 shared contiguous string block. Offset-based plans keep slices valid while
