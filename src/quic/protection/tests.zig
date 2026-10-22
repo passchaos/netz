@@ -1882,6 +1882,10 @@ test "QUIC short packet key update opens next and retained previous generations"
     var receiver = protection.Aes128KeyPhaseState.init(keys, false);
     var opened_next = try protection.openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), updated_packet, dcid.len, 0);
     defer opened_next.deinit(allocator);
+    try std.testing.expectEqual(
+        protection.OpenedKeyGeneration.next,
+        opened_next.key_generation,
+    );
     try std.testing.expect(opened_next.peer_initiated_key_update);
     try std.testing.expect(opened_next.packet.key_phase);
     try std.testing.expectEqualStrings("next-generation", opened_next.packet.payload);
@@ -1889,6 +1893,10 @@ test "QUIC short packet key update opens next and retained previous generations"
 
     var delayed_old = try protection.openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), old_packet, dcid.len, 0);
     defer delayed_old.deinit(allocator);
+    try std.testing.expectEqual(
+        protection.OpenedKeyGeneration.previous,
+        delayed_old.key_generation,
+    );
     try std.testing.expect(!delayed_old.peer_initiated_key_update);
     try std.testing.expect(!delayed_old.packet.key_phase);
     try std.testing.expectEqualStrings("old-generation", delayed_old.packet.payload);

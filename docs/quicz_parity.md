@@ -1663,6 +1663,20 @@ one-attempt APIs retain their single-submission boundary and schedule that
 credit through the connection timer. Tests cover buffered and late data, reset
 gaps, idempotent compatibility discard, and a failed credit send followed by
 timer-driven retry.
+Receive key updates now classify authenticated packets as current, next, or
+retained-previous generation, track the current phase's lowest packet number,
+and reuse the connection's monotonic `expected_packet_number` for its maximum,
+following RFC 9001 sections 6.4-6.5 and current
+`/nav_env/Work/s2n-quic`. A next-generation packet at or below an old-phase
+maximum, or a retained-old packet above the new-phase minimum, terminates the
+connection with `KEY_UPDATE_ERROR`; reordered old packets below that boundary
+remain accepted until previous-key discard. The minimum is lowered by reordered
+current-phase packets rather than frozen at the first update packet. A second
+peer update before acknowledgement now also sends the required connection close
+instead of returning a recoverable error. Focused tests cover both invalid
+directions, reordered new-phase arrival, legal delayed old packets, duplicate
+gating, and exact close state. The ordering state folds its ACK gate into two
+sentinel `u64`s, preserving the prior `Connection` layouts.
 
 ## Known blockers before declaring the goal complete
 

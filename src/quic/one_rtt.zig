@@ -8,6 +8,7 @@ const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const datagram_receive = @import("one_rtt/datagram_receive.zig");
 const datagram_send = @import("one_rtt/datagram_send.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
+const key_phase_order = @import("one_rtt/key_phase_order.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
 const prepared_keys = @import("one_rtt/prepared_keys.zig");
 const connection_scratch = @import("one_rtt/scratch.zig");
@@ -184,6 +185,7 @@ pub const ReceivedPacket = struct {
     from: net.IpAddress,
     packet: quic.protection.OpenedShortPacket,
     frames: []quic.Frame,
+    key_generation: quic.protection.OpenedKeyGeneration = .current,
     peer_initiated_key_update: bool = false,
 
     pub fn deinit(self: *ReceivedPacket, allocator: std.mem.Allocator) void {
@@ -1167,11 +1169,10 @@ pub const Connection = struct {
     /// these connection-owned contexts are refreshed only on phase changes.
     prepared_keys: prepared_keys.Set,
     pending_key_update_ack_threshold: ?u64 = null,
-    /// First packet received in the current peer key phase until a packet
-    /// carrying an ACK for that exact packet reaches the socket. RFC 9001
-    /// section 6.2 uses this condition, rather than acknowledgement of our
-    /// sending phase, to detect an invalid second peer update.
-    unacknowledged_peer_key_update_packet_number: ?u64 = null,
+    /// Packet-number ordering and the first not-yet-acknowledged packet in the
+    /// current peer key phase. Two sentinel u64s replace the former 16-byte
+    /// optional ACK gate without growing Connection.
+    peer_key_phase_order: key_phase_order.State = .{},
     send_key_generation_encrypted_packets: u64 = 0,
     receive_authentication_failures: u64 = 0,
     stored_new_tokens: std.ArrayList([]u8) = .empty,
@@ -5142,14 +5143,14 @@ pub const Connection = struct {
         self: *Connection,
         frames: []const quic.Frame,
     ) void {
-        const packet_number =
-            self.unacknowledged_peer_key_update_packet_number orelse return;
+        const packet_number = self.peer_key_phase_order
+            .unacknowledgedUpdate() orelse return;
         for (frames) |frame| {
             if (frame != .ack) continue;
             if (!ackFrameContainsPacketNumber(frame.ack, packet_number)) {
                 continue;
             }
-            self.unacknowledged_peer_key_update_packet_number = null;
+            self.peer_key_phase_order.clearUnacknowledgedUpdate();
             return;
         }
     }
@@ -12536,6 +12537,10 @@ pub const Connection = struct {
             packet.payload,
             true,
         );
+        self.peer_key_phase_order.accept(
+            .current,
+            packet.packet_number,
+        );
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -12673,9 +12678,12 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        if (packet.peer_initiated_key_update) {
-            try self.validatePeerKeyUpdate(packet.packet.key_phase);
-        }
+        try self.validatePeerKeyPacketOrClose(
+            packet.key_generation,
+            packet.packet.key_phase,
+            packet.packet.packet_number,
+            now_ns,
+        );
         var peer_address_update = try self.preparePeerAddressUpdate(
             from,
             bytes.len,
@@ -12709,13 +12717,12 @@ pub const Connection = struct {
             peer_connection_id_before[0..peer_connection_id_before_len],
             self.config.peer_connection_id,
         );
-        if (packet.peer_initiated_key_update) {
-            self.acceptPeerKeyUpdate(
-                packet.packet.key_phase,
-                packet.packet.packet_number,
-                now_ns,
-            );
-        }
+        self.acceptPeerKeyPacket(
+            packet.key_generation,
+            packet.packet.key_phase,
+            packet.packet.packet_number,
+            now_ns,
+        );
         self.commitPeerAddressUpdate(&peer_address_update);
         self.commitReceiveEndpoint(received_on, packet.frames);
         if (spin_connection_id_changed) {
@@ -12788,8 +12795,9 @@ pub const Connection = struct {
         const peer_initiated =
             self.send_key_phase.currentKeyPhase() != peer_key_phase;
         if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
+        self.peer_key_phase_order.accept(.next, packet_number);
         self.prepared_keys.replaceReceive(self.receive_key_phase.currentKeys());
-        self.unacknowledged_peer_key_update_packet_number = packet_number;
+        self.peer_key_phase_order.setUnacknowledgedUpdate(packet_number);
         if (self.config.qlog_observer) |observer| {
             observer.keyUpdated(
                 self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
@@ -12805,14 +12813,63 @@ pub const Connection = struct {
         }
     }
 
-    fn validatePeerKeyUpdate(
-        self: Connection,
+    fn acceptPeerKeyPacket(
+        self: *Connection,
+        generation: quic.protection.OpenedKeyGeneration,
         peer_key_phase: bool,
+        packet_number: u64,
+        now_ns: ?u64,
+    ) void {
+        if (generation == .next) {
+            self.acceptPeerKeyUpdate(
+                peer_key_phase,
+                packet_number,
+                now_ns,
+            );
+            return;
+        }
+        self.peer_key_phase_order.accept(generation, packet_number);
+    }
+
+    fn validatePeerKeyPacketOrClose(
+        self: *Connection,
+        generation: quic.protection.OpenedKeyGeneration,
+        peer_key_phase: bool,
+        packet_number: u64,
+        now_ns: ?u64,
+    ) Error!void {
+        self.validatePeerKeyPacket(
+            generation,
+            peer_key_phase,
+            packet_number,
+        ) catch |err| {
+            try self.closeTransportAt(
+                @intFromEnum(quic.TransportErrorCode.key_update_error),
+                0,
+                "key update",
+                nsToMs(now_ns),
+                null,
+            );
+            return err;
+        };
+    }
+
+    fn validatePeerKeyPacket(
+        self: Connection,
+        generation: quic.protection.OpenedKeyGeneration,
+        peer_key_phase: bool,
+        packet_number: u64,
     ) error{KeyUpdateError}!void {
+        try self.peer_key_phase_order.validate(
+            generation,
+            packet_number,
+            self.expected_packet_number,
+        );
+        if (generation != .next) return;
         const peer_initiated =
             self.send_key_phase.currentKeyPhase() != peer_key_phase;
         if (peer_initiated and
-            self.unacknowledged_peer_key_update_packet_number != null)
+            self.peer_key_phase_order.unacknowledgedUpdate() != null)
         {
             return error.KeyUpdateError;
         }
@@ -12943,9 +13000,12 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        if (packet.peer_initiated_key_update) {
-            try self.validatePeerKeyUpdate(packet.packet.key_phase);
-        }
+        try self.validatePeerKeyPacketOrClose(
+            packet.key_generation,
+            packet.packet.key_phase,
+            packet.packet.packet_number,
+            now_ns,
+        );
         var peer_address_update = try self.preparePeerAddressUpdate(
             routed.datagram.from,
             routed.datagram.bytes.len,
@@ -12979,13 +13039,12 @@ pub const Connection = struct {
             peer_connection_id_before[0..peer_connection_id_before_len],
             self.config.peer_connection_id,
         );
-        if (packet.peer_initiated_key_update) {
-            self.acceptPeerKeyUpdate(
-                packet.packet.key_phase,
-                packet.packet.packet_number,
-                now_ns,
-            );
-        }
+        self.acceptPeerKeyPacket(
+            packet.key_generation,
+            packet.packet.key_phase,
+            packet.packet.packet_number,
+            now_ns,
+        );
         self.commitPeerAddressUpdate(&peer_address_update);
         self.commitReceiveEndpoint(received_on, packet.frames);
         if (spin_connection_id_changed) {
@@ -13049,6 +13108,7 @@ pub const Connection = struct {
             .from = from,
             .packet = decoded.packet,
             .frames = frames,
+            .key_generation = decoded.key_generation,
             .peer_initiated_key_update = decoded.peer_initiated_key_update,
         };
     }
@@ -16797,6 +16857,7 @@ pub fn openReceivedBytesWithKeyUpdate(
         .from = from,
         .packet = decoded.packet,
         .frames = frames,
+        .key_generation = decoded.key_generation,
         .peer_initiated_key_update = decoded.peer_initiated_key_update,
     };
 }

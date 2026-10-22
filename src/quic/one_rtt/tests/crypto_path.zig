@@ -303,26 +303,12 @@ test "QUIC peer key update gate tracks sent acknowledgement, not ACK of local ph
         rejecting.stats().packets_received,
     );
     try std.testing.expect(rejecting.recvStreamStats(0) == null);
-
-    try rejecting.sendAck(0);
-    var recovery_ack = try client_endpoint.receiveBytes();
-    defer recovery_ack.deinit(allocator);
-    var accepted_after_ack = try one_rtt.testing.processReceivedBytesAt(
-        &rejecting,
-        client_endpoint.address(),
-        second_update,
-        .not_ect,
-        3_000,
-    );
-    defer accepted_after_ack.deinit(allocator);
+    try std.testing.expect(rejecting.closing());
     try std.testing.expectEqual(
-        @as(u64, 2),
-        rejecting.peerOneRttKeyUpdateCount(),
+        @intFromEnum(quic.TransportErrorCode.key_update_error),
+        rejecting.close_info.?.error_code,
     );
-    try std.testing.expectEqual(
-        @as(u64, "must not commit".len),
-        rejecting.recvStreamStats(0).?.bytes_received,
-    );
+    try std.testing.expectEqual(@as(u64, 0), rejecting.close_info.?.frame_type);
 }
 
 test "QUIC v2 1-RTT connection uses versioned key updates" {
@@ -660,6 +646,181 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
     }));
     try std.testing.expectEqual(@as(u64, 1), server.authenticationFailureCount());
     try std.testing.expect(!server.closing());
+}
+
+test "QUIC 1-RTT enforces key phase packet number ordering" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x45, 0x46, 0x47, 0x48 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x5c} ** quic.protection.secret_len,
+    );
+    const next_client_keys =
+        quic.protection.nextPacketProtectionKeys(client_keys);
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x5d} ** quic.protection.secret_len,
+    );
+    const ping = [_]u8{@intFromEnum(quic.FrameType.ping)};
+
+    // The first new-phase packet can be reordered ahead of a lower-numbered
+    // packet from that same phase. The lower packet becomes the authoritative
+    // minimum, so a retained-old-key packet above it is illegal.
+    const old_five = try quic.protection.sealShortPacket(
+        allocator,
+        client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 5,
+            .key_phase = false,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(old_five);
+    const new_twenty = try quic.protection.sealShortPacket(
+        allocator,
+        next_client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 20,
+            .key_phase = true,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(new_twenty);
+    const new_ten = try quic.protection.sealShortPacket(
+        allocator,
+        next_client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 10,
+            .key_phase = true,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(new_ten);
+    const old_fifteen = try quic.protection.sealShortPacket(
+        allocator,
+        client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 15,
+            .key_phase = false,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(old_fifteen);
+
+    var reordered = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer reordered.deinit();
+    inline for (.{ old_five, new_twenty, new_ten }) |bytes| {
+        var packet = try one_rtt.testing.processReceivedBytesAt(
+            &reordered,
+            client_endpoint.address(),
+            bytes,
+            .not_ect,
+            1_000,
+        );
+        packet.deinit(allocator);
+    }
+    try std.testing.expectError(
+        error.KeyUpdateError,
+        one_rtt.testing.processReceivedBytesAt(
+            &reordered,
+            client_endpoint.address(),
+            old_fifteen,
+            .not_ect,
+            2_000,
+        ),
+    );
+    try std.testing.expect(reordered.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.key_update_error),
+        reordered.close_info.?.error_code,
+    );
+
+    // A packet that initiates a new phase must also be above every packet
+    // already authenticated with the phase it retires.
+    const old_hundred = try quic.protection.sealShortPacket(
+        allocator,
+        client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 100,
+            .key_phase = false,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(old_hundred);
+    const new_fifty = try quic.protection.sealShortPacket(
+        allocator,
+        next_client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 50,
+            .key_phase = true,
+            .payload = &ping,
+        },
+    );
+    defer allocator.free(new_fifty);
+    var backwards = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer backwards.deinit();
+    var old = try one_rtt.testing.processReceivedBytesAt(
+        &backwards,
+        client_endpoint.address(),
+        old_hundred,
+        .not_ect,
+        1_000,
+    );
+    old.deinit(allocator);
+    try std.testing.expectError(
+        error.KeyUpdateError,
+        one_rtt.testing.processReceivedBytesAt(
+            &backwards,
+            client_endpoint.address(),
+            new_fifty,
+            .not_ect,
+            2_000,
+        ),
+    );
+    try std.testing.expect(backwards.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.key_update_error),
+        backwards.close_info.?.error_code,
+    );
 }
 
 test "QUIC 1-RTT connection sends and validates PMTU probes" {

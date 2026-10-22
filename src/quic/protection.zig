@@ -390,8 +390,15 @@ pub const OpenedShortPacket = struct {
     }
 };
 
+pub const OpenedKeyGeneration = enum {
+    current,
+    next,
+    previous,
+};
+
 pub const OpenedShortPacketWithKeyUpdate = struct {
     packet: OpenedShortPacket,
+    key_generation: OpenedKeyGeneration,
     /// True only when the packet authenticated with the pre-derived next key
     /// generation. Delayed packets opened with a retained previous generation
     /// keep this false so connection state does not advance twice.
@@ -2248,6 +2255,7 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
                 expected_packet_number,
                 preview,
             ),
+            .key_generation = .current,
             .peer_initiated_key_update = false,
         };
     }
@@ -2277,6 +2285,7 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
                             expected_packet_number,
                             allow_zero_fixed_bit,
                         ),
+                        .key_generation = .previous,
                         .peer_initiated_key_update = false,
                     };
                 }
@@ -2290,6 +2299,7 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
     };
     return .{
         .packet = next_packet,
+        .key_generation = .next,
         .peer_initiated_key_update = true,
     };
 }
