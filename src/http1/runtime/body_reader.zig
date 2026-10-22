@@ -101,6 +101,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []http1.Header,
             body_framing: http1.BodyFraming,
             body_bytes: usize,
+            body_allowed: bool = true,
             must_close: bool = false,
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
@@ -187,6 +188,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []const http1.Header,
             body_framing: http1.BodyFraming,
             content_length: ?usize,
+            body_allowed: bool = true,
             must_close: bool = false,
 
             pub fn header(
@@ -211,7 +213,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 allocator: std.mem.Allocator,
                 options: http1.content_coding.StreamOptions,
             ) http1.content_coding.Error!http1.content_coding.StreamDecoder {
-                return (try http1.content_coding.parseHeaders(self.headers))
+                return (try http1.content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed))
                     .streamDecoder(allocator, options);
             }
         };
@@ -433,6 +435,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .headers = head.headers,
                     .body_framing = head.body_framing,
                     .content_length = head.content_length,
+                    .body_allowed = head.body_allowed,
                     .must_close = head.must_close,
                 }) catch |err| {
                     return err;
@@ -464,6 +467,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .headers = owned_headers,
                     .body_framing = head.body_framing,
                     .body_bytes = body.body_bytes,
+                    .body_allowed = head.body_allowed,
                     .must_close = head.must_close,
                     .trailers = body.trailers.headers,
                     .trailer_bytes = body.trailers.bytes,

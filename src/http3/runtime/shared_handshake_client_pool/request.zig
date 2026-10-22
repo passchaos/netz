@@ -390,6 +390,7 @@ pub fn Transaction(
                 .stream_bytes = stream_bytes,
                 .response = .{
                     .status = head.status,
+                    .body_allowed = head.body_allowed,
                     .headers = head.headers,
                     .trailers = trailers,
                     .body = body,

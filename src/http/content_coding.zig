@@ -217,6 +217,17 @@ pub fn parseHeaders(headers: anytype) Error!Chain {
     return result;
 }
 
+/// HEAD, successful traditional CONNECT and bodyless status responses carry
+/// representation metadata rather than an encoded representation. Preserve
+/// parseHeaders for metadata inspection while selecting identity for their
+/// empty application body. Ordinary empty encoded bodies still reach the
+/// decoder and fail its normal truncation checks.
+pub fn responseDecodingChain(headers: anytype, status: u16, body_allowed: bool) Error!Chain {
+    if (!body_allowed or (status >= 100 and status < 200) or
+        status == 204 or status == 304) return .{};
+    return parseHeaders(headers);
+}
+
 pub fn decodeHeadersAlloc(
     allocator: std.mem.Allocator,
     headers: anytype,

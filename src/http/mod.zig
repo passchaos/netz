@@ -84,6 +84,9 @@ test {
     _ = client;
     _ = client_pool;
     _ = @import("content_coding/tests.zig");
+    _ = @import("content_coding/response_tests.zig");
+    _ = @import("content_coding/response_runtime_tests.zig");
+    _ = @import("content_coding/response_http1_tests.zig");
     _ = @import("alt_svc_cache_tests.zig");
     _ = @import("client_tests.zig");
     _ = @import("client_pool_tests.zig");

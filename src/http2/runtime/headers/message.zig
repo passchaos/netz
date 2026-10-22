@@ -71,6 +71,16 @@ pub fn validateExpectedContentLength(expected: ?usize, actual: usize) Error!void
     }
 }
 
+/// HEAD and 304 may advertise a representation length without transferring
+/// its content. Check their actual empty body independently of that metadata.
+pub fn validateResponseContentLength(expected: ?usize, actual: usize, body_allowed: bool) Error!void {
+    if (!body_allowed) {
+        if (actual != 0) return error.InvalidContentLength;
+        return;
+    }
+    try validateExpectedContentLength(expected, actual);
+}
+
 pub fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_len: usize) Error!void {
     if (try contentLength(headers)) |expected| {
         if (expected != body_len) return error.InvalidContentLength;

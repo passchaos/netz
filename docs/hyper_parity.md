@@ -1141,6 +1141,21 @@ semantics therefore remain identical without requiring callers to switch on
 the negotiated protocol. Decoding stays explicit: pools still preserve exact
 wire headers and bodies instead of silently rewriting cache or validator
 semantics.
+
+Response decoding now retains whether the originating request permits content.
+HEAD, successful traditional CONNECT, 1xx, 204 and 304 responses keep their
+Content-Encoding and representation-length metadata while allocating and
+caller-buffer decode helpers return the empty application body. Their streaming
+decoder factories likewise finish without constructing an inflater. Ordinary
+empty gzip GET representations still fail the normal truncation checks.
+HTTP/2's aggregate, body-bearing and independently-deadlined batch completion
+paths also validate the actual empty body separately from a HEAD/304
+Content-Length, and omit representation-only lengths from body-size limits.
+Regressions retain Content-Length 123 under a one-byte body budget across six
+live HTTP/2 receive shapes, check H1 pipeline boundaries and H1/H3 response-head
+decoder factories, and preserve the encoded GET failure control. The same
+request semantics move with HTTP/3 shared-pool/redirect and push aggregation.
+
 The same response surface now exposes zero-allocation `headers()` and
 `trailers()` iterators, plus case-insensitive `headerValues()` and
 `trailerValues()` filters and first-value lookup. They retain field-section

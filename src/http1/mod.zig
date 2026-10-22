@@ -343,6 +343,8 @@ pub const ResponseHead = struct {
     body_framing: BodyFraming,
     content_length: ?usize,
     head_len: usize,
+    /// Originating-request semantics permit response representation bytes.
+    body_allowed: bool = true,
     /// True when safe message framing requires retiring the connection even
     /// after a complete response body has been consumed.
     must_close: bool = false,
@@ -356,7 +358,7 @@ pub const ResponseHead = struct {
         allocator: std.mem.Allocator,
         options: content_coding.StreamOptions,
     ) content_coding.Error!content_coding.StreamDecoder {
-        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).streamDecoder(
             allocator,
             options,
         );
@@ -554,6 +556,8 @@ pub const Response = struct {
     headers: []Header,
     body: []const u8,
     body_framing: BodyFraming = .none,
+    /// False for HEAD, successful CONNECT and status-suppressed bodies.
+    body_allowed: bool = true,
     trailers: []Header = &.{},
     body_storage: ?[]u8 = null,
     header_value_storage: [][]u8 = &.{},
@@ -590,9 +594,8 @@ pub const Response = struct {
         allocator: std.mem.Allocator,
         max_output_len: usize,
     ) content_coding.Error!content_coding.DecodedBody {
-        return content_coding.decodeHeadersAlloc(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeAlloc(
             allocator,
-            self.headers,
             self.body,
             max_output_len,
         );
@@ -605,7 +608,7 @@ pub const Response = struct {
         out: []u8,
         scratch: []u8,
     ) content_coding.Error![]u8 {
-        return (try self.contentEncoding()).decodeInto(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeInto(
             self.body,
             out,
             scratch,
@@ -740,6 +743,7 @@ pub fn parseResponseHead(
         .reason = status_line.reason,
         .headers = exposed_headers,
         .body_framing = framing,
+        .body_allowed = !forbidden,
         .content_length = declared_content_length,
         .head_len = parsed.head_len,
         .must_close = saw_transfer_encoding and saw_content_length,
@@ -1150,6 +1154,7 @@ pub fn parseResponseWithContext(
         .headers = parsed_headers.headers,
         .body = parsed_body.body,
         .body_framing = parsed_body.framing,
+        .body_allowed = !responseForbidsBody(status, context.request_method),
         .trailers = parsed_body.trailers,
         .body_storage = parsed_body.body_storage,
         .header_value_storage = parsed_headers.value_storage,

@@ -82,6 +82,7 @@ pub const State = struct {
             .stream_id = self.stream_id,
             .response = .{
                 .status = head.status,
+                .body_allowed = head.body_allowed,
                 .headers = head.headers,
                 .trailers = trailer_fields,
                 .body = if (body_storage) |storage| storage else &.{},

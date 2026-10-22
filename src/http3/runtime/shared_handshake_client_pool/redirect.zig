@@ -395,6 +395,7 @@ pub fn Transaction(
                 .allocator = self.pool.allocator,
                 .response = .{
                     .status = head.status,
+                    .body_allowed = head.body_allowed,
                     .headers = head.headers,
                     .trailers = trailers,
                     .body = body,

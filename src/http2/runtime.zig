@@ -39,6 +39,7 @@ const responseHeaderLookup = message_headers.responseHeaderLookup;
 const validateContentLength = message_headers.validateContentLength;
 const validateExpectedContentLength =
     message_headers.validateExpectedContentLength;
+const validateResponseContentLength = message_headers.validateResponseContentLength;
 const validateDeclaredRequestLength =
     message_headers.validateDeclaredRequestLength;
 const requestShouldDefaultContentLength =
@@ -5568,6 +5569,7 @@ pub const Connection = struct {
                 .headers = state.headers.?,
                 .status = state.status.?,
                 .body = state.body_owned.?,
+                .body_allowed = !state.forbids_body,
                 .trailers = state.trailers,
             };
             state.headers = null;
@@ -6343,6 +6345,7 @@ pub const Connection = struct {
                     .headers = state.headers.?,
                     .status = state.status.?,
                     .body = state.body_owned.?,
+                    .body_allowed = !state.forbids_body,
                     .trailers = state.trailers,
                 };
                 state.headers = null;
@@ -6942,13 +6945,10 @@ pub const Connection = struct {
                         state.trailers,
                         .response_trailers,
                     );
-                    try validateExpectedContentLength(
-                        state.content_length,
-                        if (streaming_response)
-                            state.body_bytes
-                        else
-                            state.body.items.len,
-                    );
+                    try validateResponseContentLength(state.content_length, if (streaming_response)
+                        state.body_bytes
+                    else
+                        state.body.items.len, !state.forbids_body);
                     state.done = true;
                     trailers_owned = false;
                     return;
@@ -7008,9 +7008,7 @@ pub const Connection = struct {
                     state.request_method,
                     state.extended_connect,
                 );
-                if ((lookup.content_length orelse 0) >
-                    self.limits.max_body_bytes)
-                {
+                if (!state.forbids_body and (lookup.content_length orelse 0) > self.limits.max_body_bytes) {
                     return error.MessageTooLarge;
                 }
                 if (state.forbids_body) {
@@ -7037,10 +7035,7 @@ pub const Connection = struct {
                     }
                 }
                 if ((frame.header.flags & flag_end_stream) != 0) {
-                    try validateExpectedContentLength(
-                        lookup.content_length,
-                        0,
-                    );
+                    try validateResponseContentLength(state.content_length, 0, !state.forbids_body);
                     state.done = true;
                     return;
                 }
@@ -7091,10 +7086,7 @@ pub const Connection = struct {
                     (frame.header.flags & flag_end_stream) != 0,
                 );
                 if ((frame.header.flags & flag_end_stream) != 0) {
-                    try validateExpectedContentLength(
-                        state.content_length,
-                        body_len,
-                    );
+                    try validateResponseContentLength(state.content_length, body_len, !state.forbids_body);
                     state.done = true;
                     return;
                 }
@@ -7455,6 +7447,7 @@ pub const Connection = struct {
                         .headers = state.headers.?,
                         .status = state.status.?,
                         .body = state.body_owned.?,
+                        .body_allowed = !state.forbids_body,
                         .trailers = state.trailers,
                     };
                     state.headers = null;
@@ -7880,6 +7873,7 @@ pub const Connection = struct {
                 .{
                     .headers = state.headers.?,
                     .status = state.status.?,
+                    .body_allowed = !state.forbids_body,
                 },
             );
             self.endBorrowedReadCallback();
@@ -8010,10 +8004,7 @@ pub const Connection = struct {
                             state.trailers,
                             .response_trailers,
                         );
-                        try validateExpectedContentLength(
-                            state.content_length,
-                            state.body.items.len,
-                        );
+                        try validateResponseContentLength(state.content_length, state.body.items.len, !state.forbids_body);
                         state.done = true;
                         remaining -= 1;
                         continue;
@@ -8103,10 +8094,7 @@ pub const Connection = struct {
                         }
                     }
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateExpectedContentLength(
-                            lookup.content_length,
-                            0,
-                        );
+                        try validateResponseContentLength(state.content_length, 0, !state.forbids_body);
                         state.done = true;
                         remaining -= 1;
                     }
@@ -8141,10 +8129,7 @@ pub const Connection = struct {
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateExpectedContentLength(
-                            state.content_length,
-                            state.body.items.len,
-                        );
+                        try validateResponseContentLength(state.content_length, state.body.items.len, !state.forbids_body);
                         state.done = true;
                         remaining -= 1;
                     }
@@ -8254,10 +8239,7 @@ pub const Connection = struct {
                             );
                             return err;
                         };
-                        validateExpectedContentLength(
-                            state.content_length,
-                            state.body_bytes,
-                        ) catch |err| {
+                        validateResponseContentLength(state.content_length, state.body_bytes, !state.forbids_body) catch |err| {
                             self.recordResponseStreamReadError(
                                 state.stream_id,
                                 .protocol_error,
@@ -8351,9 +8333,7 @@ pub const Connection = struct {
                         state.request_method,
                         state.extended_connect,
                     );
-                    if ((lookup.content_length orelse 0) >
-                        self.limits.max_body_bytes)
-                    {
+                    if (!state.forbids_body and (lookup.content_length orelse 0) > self.limits.max_body_bytes) {
                         self.recordResponseStreamReadError(
                             state.stream_id,
                             .enhance_your_calm,
@@ -8384,10 +8364,7 @@ pub const Connection = struct {
                         }
                     }
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        validateExpectedContentLength(
-                            lookup.content_length,
-                            0,
-                        ) catch |err| {
+                        validateResponseContentLength(state.content_length, 0, !state.forbids_body) catch |err| {
                             self.recordResponseStreamReadError(
                                 state.stream_id,
                                 .protocol_error,
@@ -8460,10 +8437,7 @@ pub const Connection = struct {
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        validateExpectedContentLength(
-                            state.content_length,
-                            state.body_bytes,
-                        ) catch |err| {
+                        validateResponseContentLength(state.content_length, state.body_bytes, !state.forbids_body) catch |err| {
                             self.recordResponseStreamReadError(
                                 state.stream_id,
                                 .protocol_error,
@@ -14981,6 +14955,7 @@ pub const Connection = struct {
             .headers = final_headers,
             .status = status,
             .body = owned_body,
+            .body_allowed = !responseForbidsBody(status, request_method, extended_connect),
             .trailers = trailers,
             .trailers_only = trailers_only,
         };
@@ -15220,6 +15195,7 @@ pub const Connection = struct {
                         begin(context, StreamingResponseHead{
                             .headers = decoded,
                             .status = status,
+                            .body_allowed = !responseForbidsBody(status, pending.request_method, pending.extended_connect),
                         }) catch |err| {
                             if ((frame.header.flags & flag_end_stream) == 0) {
                                 self.writeResetStreamFrame(
@@ -15461,16 +15437,13 @@ pub const Connection = struct {
         const final_headers = headers orelse
             return error.MissingPseudoHeader;
         const status = response_status orelse return error.MissingPseudoHeader;
-        if (responseForbidsBody(status, request_method, false) and
-            body.items.len != 0)
-        {
-            return error.InvalidContentLength;
-        }
-        try validateExpectedContentLength(response_content_length, body.items.len);
+        const body_allowed = !responseForbidsBody(status, request_method, false);
+        try validateResponseContentLength(response_content_length, body.items.len, body_allowed);
         return .{
             .headers = final_headers,
             .status = status,
             .body = try body.toOwnedSlice(self.allocator),
+            .body_allowed = body_allowed,
             .trailers = trailers,
         };
     }
@@ -17858,6 +17831,8 @@ pub const OwnedResponse = struct {
     headers: []http2.Hpack.HeaderField,
     status: u16,
     body: []u8,
+    /// False when originating-request semantics suppress representation data.
+    body_allowed: bool = true,
     trailers: []http2.Hpack.HeaderField = &.{},
     /// The final response head carried END_STREAM, so no DATA or trailing
     /// HEADERS could have committed an upper-layer response.
@@ -17882,9 +17857,8 @@ pub const OwnedResponse = struct {
         allocator: std.mem.Allocator,
         max_output_len: usize,
     ) content_coding.Error!content_coding.DecodedBody {
-        return content_coding.decodeHeadersAlloc(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeAlloc(
             allocator,
-            self.headers,
             self.body,
             max_output_len,
         );
@@ -17895,7 +17869,7 @@ pub const OwnedResponse = struct {
         out: []u8,
         scratch: []u8,
     ) content_coding.Error![]u8 {
-        return (try self.contentEncoding()).decodeInto(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeInto(
             self.body,
             out,
             scratch,
@@ -17944,13 +17918,14 @@ pub const StreamingResponse = struct {
 pub const StreamingResponseHead = struct {
     headers: []const http2.Hpack.HeaderField,
     status: u16,
+    body_allowed: bool = true,
 
     pub fn streamContentDecoder(
         self: StreamingResponseHead,
         allocator: std.mem.Allocator,
         options: content_coding.StreamOptions,
     ) content_coding.Error!content_coding.StreamDecoder {
-        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).streamDecoder(
             allocator,
             options,
         );
@@ -19440,7 +19415,11 @@ pub const ClientDuplexStream = struct {
                 self.maybeRelease();
             }
             headers_owned = false;
-            return .{ .head = .{ .headers = headers, .status = status } };
+            return .{ .head = .{
+                .headers = headers,
+                .status = status,
+                .body_allowed = !self.response_body_forbidden,
+            } };
         }
         if (!end_stream) return error.UnexpectedFrame;
         if (self.response_body_forbidden) return error.InvalidContentLength;

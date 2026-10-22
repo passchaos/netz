@@ -3709,6 +3709,8 @@ pub const DecodedResponse = struct {
     trailers: []Qpack.HeaderField = &.{},
     body: []const u8,
     body_storage: ?[]u8 = null,
+    /// False when originating-request semantics suppress representation data.
+    body_allowed: bool = true,
     consumed: usize,
     qpack_section_acknowledgments: usize = 0,
 
@@ -3739,9 +3741,8 @@ pub const DecodedResponse = struct {
         allocator: std.mem.Allocator,
         max_output_len: usize,
     ) content_coding.Error!content_coding.DecodedBody {
-        return content_coding.decodeHeadersAlloc(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeAlloc(
             allocator,
-            self.headers,
             self.body,
             max_output_len,
         );
@@ -3752,7 +3753,7 @@ pub const DecodedResponse = struct {
         out: []u8,
         scratch: []u8,
     ) content_coding.Error![]u8 {
-        return (try self.contentEncoding()).decodeInto(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).decodeInto(
             self.body,
             out,
             scratch,
@@ -3837,7 +3838,7 @@ pub const DecodedResponseHead = struct {
         allocator: std.mem.Allocator,
         options: content_coding.StreamOptions,
     ) content_coding.Error!content_coding.StreamDecoder {
-        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).streamDecoder(
             allocator,
             options,
         );
@@ -4436,6 +4437,7 @@ fn decodeResponseWithFieldDecoder(
         .trailers = message.trailers,
         .body = message.body,
         .body_storage = message.body_storage,
+        .body_allowed = !responseSuppressesBody(final_status, semantics),
         .consumed = message.consumed,
         .qpack_section_acknowledgments = message.qpack_section_acknowledgments,
     };
