@@ -1636,6 +1636,13 @@ applies 421 before release, discarding the connection if that exclusion cannot
 be recorded. A real shared-endpoint matrix verifies origin-keyed ticket capture,
 same-handle coalescing, certificate-mismatch isolation, original-origin reuse
 after 421, and a fresh connection for the excluded origin.
+HTTP/3 CONNECT Datagram associations also expose an opt-in
+`discardOnConnectionClose` policy. A QUIC connection terminal signal then frees
+queued application payloads and becomes the effective terminal reason, including
+after an earlier stream FIN. The default retains the explicit FIFO queue-drain
+contract. Scoped-association and caller-buffer regressions verify both policies
+on the same registry and late policy activation after a terminal signal.
+
 RFC 9298 CONNECT-UDP now has typed HTTP/1.1, HTTP/2, and HTTP/3 surfaces above
 the existing generic Upgrade, Extended CONNECT, HTTP Datagram, and Capsule
 APIs. `http3.connect_udp` holds the version-independent protocol model,

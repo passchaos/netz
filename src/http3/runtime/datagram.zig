@@ -81,6 +81,7 @@ pub const Registry = struct {
     const Association = struct {
         stream_id: u62,
         stream_detached: bool = false,
+        discard_on_connection_close: bool = false,
         queue: std.ArrayList([]u8) = .empty,
         head: usize = 0,
         queued_bytes: usize = 0,
@@ -94,6 +95,24 @@ pub const Registry = struct {
 
         fn count(self: Association) usize {
             return self.queue.items.len - self.head;
+        }
+
+        fn discard(self: *Association, allocator: std.mem.Allocator) void {
+            for (self.queue.items[self.head..]) |payload| allocator.free(payload);
+            self.queue.clearRetainingCapacity();
+            self.head = 0;
+            self.queued_bytes = 0;
+        }
+
+        fn markTerminal(self: *Association, allocator: std.mem.Allocator, state: Terminal) void {
+            if (state == .connection_closed and self.discard_on_connection_close) {
+                self.discard(allocator);
+                // Protocols that terminate with their QUIC connection cannot
+                // retain an earlier stream FIN as the effective end reason.
+                self.terminal = state;
+            } else if (self.terminal == null) {
+                self.terminal = state;
+            }
         }
 
         fn compact(self: *Association) void {
@@ -265,14 +284,24 @@ pub const Registry = struct {
         state: Terminal,
     ) void {
         const index = self.index.get(stream_id) orelse return;
-        if (self.associations.items[index].terminal == null) {
-            self.associations.items[index].terminal = state;
-        }
+        self.associations.items[index].markTerminal(self.allocator, state);
     }
 
     pub fn markAllTerminal(self: *Registry, state: Terminal) void {
         for (self.associations.items) |*association| {
-            if (association.terminal == null) association.terminal = state;
+            association.markTerminal(self.allocator, state);
+        }
+    }
+
+    /// Opt a protocol association into immediate queue discard when its
+    /// underlying QUIC connection terminates. Registration defaults to the
+    /// HTTP Datagram queue-drain contract; WebTransport opts in at acceptance.
+    pub fn discardOnConnectionClose(self: *Registry, stream_id: u62) void {
+        const index = self.index.get(stream_id) orelse return;
+        const association = &self.associations.items[index];
+        association.discard_on_connection_close = true;
+        if (association.terminal) |state| {
+            if (state == .connection_closed) association.discard(self.allocator);
         }
     }
 
@@ -753,4 +782,8 @@ test "HTTP/3 CONNECT datagram terminal state drains payloads first" {
         (try registry.drainedTerminal(0)).?,
     );
     try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
+}
+
+test {
+    _ = @import("datagram/tests/connection_close.zig");
 }
