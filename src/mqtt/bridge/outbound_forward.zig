@@ -93,9 +93,22 @@ pub fn Operations(comptime Self: type) type {
                 }
                 return err;
             };
-            if (target_result == .expired) {
-                _ = self.acknowledgeSource(source_publish, 0);
-                return;
+            switch (target_result) {
+                .expired => {
+                    _ = self.acknowledgeSource(source_publish, 0);
+                    return;
+                },
+                .completed => {
+                    if (source_publish.qos != .at_most_once) {
+                        self.completeSource(
+                            source_publish,
+                            source_epoch,
+                            0,
+                        );
+                    }
+                    return;
+                },
+                .published => {},
             }
             if (source_publish.qos == .at_most_once) return;
             errdefer self.source.disconnectTransport();
@@ -144,13 +157,16 @@ pub fn Operations(comptime Self: type) type {
                                     expiry_interval,
                                     received_at_ns,
                                 );
-                                if (target_result == .expired) {
-                                    self.completeSource(
-                                        source_publish,
-                                        source_epoch,
-                                        0,
-                                    );
-                                    return;
+                                switch (target_result) {
+                                    .expired, .completed => {
+                                        self.completeSource(
+                                            source_publish,
+                                            source_epoch,
+                                            0,
+                                        );
+                                        return;
+                                    },
+                                    .published => {},
                                 }
                                 target_packet_id = target_result.published orelse
                                     return error.UnexpectedPacket;
@@ -218,16 +234,25 @@ pub fn Operations(comptime Self: type) type {
                 received_at_ns,
                 std.Io.Clock.awake.now(self.target.io).nanoseconds,
             )) return .expired;
+            const active = self.target.connection() orelse
+                return error.ConnectionUnavailable;
+            const target_qos: mqtt.QoS = @enumFromInt(@min(
+                @intFromEnum(source_publish.qos),
+                @intFromEnum(active.peerMaximumQoS()),
+            ));
             self.target_delivery.reset();
             const attempt = try self.target.publishOneAttempt(
                 topic,
                 source_publish.payload,
                 .{
-                    .qos = source_publish.qos,
-                    .retain = self.preserve_retain and source_publish.retain,
+                    .qos = target_qos,
+                    .retain = self.preserve_retain and
+                        source_publish.retain and
+                        active.peerRetainAvailable(),
                     .properties = properties.items,
                 },
             );
+            if (target_qos == .at_most_once) return .completed;
             if (source_publish.qos == .at_least_once) {
                 const stats = try self.target.outgoingStats();
                 if (stats.queued_count == 0 and stats.inflight_count == 0) {

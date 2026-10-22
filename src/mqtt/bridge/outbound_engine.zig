@@ -158,6 +158,7 @@ const TargetDeliveryState = struct {
 
 pub const TargetPublishResult = union(enum) {
     published: ?u16,
+    completed,
     expired,
 };
 
@@ -1131,6 +1132,30 @@ pub fn Engine(comptime Source: type) type {
             target_topic: []const u8,
             properties: []mqtt.Property,
         ) Error!bool {
+            const target_connection = self.target.connection() orelse
+                return error.ConnectionUnavailable;
+            if (target_connection.peerMaximumQoS() != .exactly_once) {
+                const source_packet_id = source_publish.packet_id.?;
+                try self.source.stageIncomingQoS2(source_packet_id);
+                var staged = true;
+                defer if (staged) {
+                    self.source.discardStagedIncomingQoS2(
+                        source_packet_id,
+                    ) catch {};
+                };
+                if (self.sourceProtocol() != .v5) {
+                    return error.InvalidQoS;
+                }
+                try self.source.flushStagedIncomingQoS2(
+                    source_packet_id,
+                    // QoS Not Supported (0x9b) describes the target's
+                    // CONNACK capability but is not legal in PUBREC. Use the
+                    // packet-specific Implementation Specific Error instead.
+                    .{ .reason_code = 0x83 },
+                );
+                staged = false;
+                return false;
+            }
             const coordinator = &(self.coordinator orelse
                 return error.QoS2RequiresDurableCoordinator);
             const source_packet_id = source_publish.packet_id.?;
@@ -1147,7 +1172,9 @@ pub fn Engine(comptime Source: type) type {
                 source_publish.payload,
                 .{
                     .qos = .exactly_once,
-                    .retain = self.preserve_retain and source_publish.retain,
+                    .retain = self.preserve_retain and
+                        source_publish.retain and
+                        target_connection.peerRetainAvailable(),
                     .properties = properties,
                 },
             ) catch |err| switch (err) {

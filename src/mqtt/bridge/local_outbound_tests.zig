@@ -1162,6 +1162,248 @@ test "local outbound bridge adapts notification Will and target protocol" {
     if (remote_state.err) |err| return err;
 }
 
+test "local outbound bridge honors target publish capabilities" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+
+    const Remote = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{
+                .protocol = .v5,
+                .maximum_qos = .at_most_once,
+                .retain_available = false,
+            });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                mqtt.QoS.at_most_once,
+                publish.publish.qos,
+            );
+            try std.testing.expect(!publish.publish.retain);
+            try std.testing.expectEqualStrings(
+                "remote/capability/value",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "adapted",
+                publish.publish.payload,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var remote_state = Remote{ .server = &remote };
+    const remote_thread = try std.Thread.spawn(
+        .{},
+        Remote.run,
+        .{&remote_state},
+    );
+    var joined = false;
+    defer if (!joined) remote_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.LocalBridge.initEndpoints(
+        allocator,
+        io,
+        .{ .broker = &local, .id = [_]u8{0x57} ** 16 },
+        .{ .address = remote.address() },
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "publish-capability-source",
+                .clean_start = false,
+                .properties = &.{.{ .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 60,
+                } }},
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "publish-capability-target",
+            },
+            .rules = &.{.{
+                .filter = "capability/#",
+                .qos = .at_least_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
+            }},
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+
+    try local.publishLocal(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = true,
+        .topic = "local/capability/value",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "adapted",
+    });
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try bridge.source.pendingCount(),
+    );
+    try bridge.disconnect(0);
+
+    remote_thread.join();
+    joined = true;
+    if (remote_state.err) |err| return err;
+}
+
+test "local outbound bridge rejects QoS2 unsupported by target" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    try local.createCommitLog(tmp.dir, "broker.log", .{});
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+
+    const Remote = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{
+                .protocol = .v5,
+                .maximum_qos = .at_least_once,
+            });
+            defer accepted.deinit(self.server.allocator);
+            // The bridge must terminate the source transaction with a
+            // negative PUBREC instead of sending a QoS 2 PUBLISH that violates
+            // the successful CONNACK. Any PUBLISH makes readDisconnect fail.
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var remote_state = Remote{ .server = &remote };
+    const remote_thread = try std.Thread.spawn(
+        .{},
+        Remote.run,
+        .{&remote_state},
+    );
+    var joined = false;
+    defer if (!joined) remote_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.LocalBridge.initEndpoints(
+        allocator,
+        io,
+        .{ .broker = &local, .id = [_]u8{0x58} ** 16 },
+        .{ .address = remote.address() },
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "qos2-capability-source",
+                .clean_start = false,
+                .properties = &.{.{ .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 60,
+                } }},
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "qos2-capability-target",
+                .clean_start = false,
+                .properties = &.{.{ .four_byte = .{
+                    .id = .session_expiry_interval,
+                    .value = 60,
+                } }},
+            },
+            .rules = &.{.{
+                .filter = "capability/#",
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
+            }},
+            .coordinator = .{
+                .bridge_id = [_]u8{0x58} ** 16,
+                .dir = tmp.dir,
+                .sub_path = "bridge.log",
+                .mode = .create,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+
+    try local.publishLocal(.{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "local/capability/qos2",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "unsupported",
+    });
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!bridge.hasPendingDurableQoS2());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try bridge.source.pendingCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try bridge.source.outgoingStats()).incoming_qos2_count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        local.stats().session_inflight_messages,
+    );
+    try bridge.disconnect(0);
+
+    remote_thread.join();
+    joined = true;
+    if (remote_state.err) |err| return err;
+}
+
 test "local outbound lazy bridge connects at threshold and retires when idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

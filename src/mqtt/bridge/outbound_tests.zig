@@ -67,6 +67,7 @@ fn runQoS1ReconnectCase(
     target_session_present: bool,
     expire_before_reconnect: bool,
     source_reconnects_while_pending: bool,
+    downgrade_after_reconnect: bool,
 ) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -214,6 +215,7 @@ fn runQoS1ReconnectCase(
         expect_user_property: bool,
         session_present: bool,
         expire_before_reconnect: bool,
+        downgrade_after_reconnect: bool,
         first_received: *std.Io.Event,
         allow_reconnect: *std.Io.Event,
         first_packet_id: u16 = 0,
@@ -261,6 +263,11 @@ fn runQoS1ReconnectCase(
                 .protocol = self.protocol,
                 .topic_alias_maximum = 0,
                 .session_present = self.session_present,
+                .maximum_qos = if (self.downgrade_after_reconnect)
+                    .at_most_once
+                else
+                    null,
+                .retain_available = !self.downgrade_after_reconnect,
             });
             defer second.deinit(self.server.allocator);
             if (self.expire_before_reconnect) {
@@ -274,7 +281,18 @@ fn runQoS1ReconnectCase(
                 self.session_present,
                 retry.publish.dup,
             );
-            if (self.session_present) {
+            try std.testing.expectEqual(
+                if (self.downgrade_after_reconnect)
+                    mqtt.QoS.at_most_once
+                else
+                    mqtt.QoS.at_least_once,
+                retry.publish.qos,
+            );
+            try std.testing.expectEqual(
+                !self.downgrade_after_reconnect,
+                retry.publish.retain,
+            );
+            if (self.session_present and !self.downgrade_after_reconnect) {
                 try std.testing.expectEqual(
                     self.first_packet_id,
                     retry.publish.packet_id.?,
@@ -288,7 +306,9 @@ fn runQoS1ReconnectCase(
                 self.expect_user_property,
                 retry.publish.properties,
             );
-            try second.connection.writePubAck(retry.publish.packet_id.?, 0);
+            if (!self.downgrade_after_reconnect) {
+                try second.connection.writePubAck(retry.publish.packet_id.?, 0);
+            }
             var disconnect = try second.connection.readDisconnect();
             defer disconnect.deinit(self.server.allocator);
         }
@@ -312,6 +332,7 @@ fn runQoS1ReconnectCase(
         .expect_user_property = source_protocol == .v5 and target_protocol == .v5,
         .session_present = target_session_present,
         .expire_before_reconnect = expire_before_reconnect,
+        .downgrade_after_reconnect = downgrade_after_reconnect,
         .first_received = &target_first_received,
         .allow_reconnect = &allow_target_reconnect,
     };
@@ -443,27 +464,31 @@ fn runQoS1ReconnectCase(
 }
 
 test "outbound bridge resumes target QoS1 before acknowledging source" {
-    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, true, false, false);
-    try runQoS1ReconnectCase(.v5, .v5, true, false, false);
+    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, true, false, false, false);
+    try runQoS1ReconnectCase(.v5, .v5, true, false, false, false);
 }
 
 test "outbound bridge republishes QoS1 when target Session is lost" {
-    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, false, false, false);
-    try runQoS1ReconnectCase(.v5, .v5, false, false, false);
+    try runQoS1ReconnectCase(.v3_1_1, .v3_1_1, false, false, false, false);
+    try runQoS1ReconnectCase(.v5, .v5, false, false, false, false);
 }
 
 test "outbound bridge does not extend expiry across target reconnect" {
-    try runQoS1ReconnectCase(.v5, .v5, true, true, false);
-    try runQoS1ReconnectCase(.v5, .v5, false, true, false);
+    try runQoS1ReconnectCase(.v5, .v5, true, true, false, false);
+    try runQoS1ReconnectCase(.v5, .v5, false, true, false, false);
 }
 
 test "outbound bridge crosses MQTT protocol versions" {
-    try runQoS1ReconnectCase(.v3_1_1, .v5, true, false, false);
-    try runQoS1ReconnectCase(.v5, .v3_1_1, true, false, false);
+    try runQoS1ReconnectCase(.v3_1_1, .v5, true, false, false, false);
+    try runQoS1ReconnectCase(.v5, .v3_1_1, true, false, false, false);
 }
 
 test "outbound bridge reconnects source while target QoS1 is pending" {
-    try runQoS1ReconnectCase(.v5, .v5, true, false, true);
+    try runQoS1ReconnectCase(.v5, .v5, true, false, true, false);
+}
+
+test "outbound bridge applies target capabilities after Session loss" {
+    try runQoS1ReconnectCase(.v5, .v5, false, false, false, true);
 }
 
 test "outbound bridge routes between two brokers" {
@@ -1166,7 +1191,7 @@ test "outbound bridge durably completes cross-broker QoS2" {
             const source_packet_id = (try accepted.connection.writePublish(
                 "local/sensors/room",
                 "exactly once",
-                .{ .qos = .exactly_once },
+                .{ .qos = .exactly_once, .retain = true },
             )).?;
             try self.target_pubrel_seen.waitTimeout(
                 self.server.io,
@@ -1207,12 +1232,16 @@ test "outbound bridge durably completes cross-broker QoS2" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            var accepted = try self.server.accept(.{
+                .protocol = .v5,
+                .retain_available = false,
+            });
             defer accepted.deinit(self.server.allocator);
             var publish = try accepted.connection.readPublish();
             defer publish.deinit(self.server.allocator);
             try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.publish.qos);
             try std.testing.expect(!publish.publish.dup);
+            try std.testing.expect(!publish.publish.retain);
             try std.testing.expectEqualStrings(
                 "remote/sensors/room",
                 publish.publish.topic,
@@ -1827,6 +1856,154 @@ test "outbound bridge restores target QoS2 at durable PUBREL boundary" {
     }));
     try std.testing.expect(!restored.hasPendingDurableQoS2());
     try restored.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge reports target QoS2 capability rejection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x02},
+                &.{},
+            );
+            const packet_id = (try accepted.connection.writePublish(
+                "local/capability/qos2",
+                "unsupported",
+                .{ .qos = .exactly_once },
+            )).?;
+            var pubrec = try accepted.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            try std.testing.expectEqual(@as(u8, 0x83), pubrec.ack.reason_code);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{
+                .protocol = .v5,
+                .maximum_qos = .at_least_once,
+            });
+            defer accepted.deinit(self.server.allocator);
+            // Any PUBLISH violates the negotiated Maximum QoS: preserving
+            // source QoS 2 semantics cannot be represented at this target.
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{ .server = &source };
+    var target_peer = TargetPeer{ .server = &target };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer if (!source_joined) source_thread.join();
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer if (!target_joined) target_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "qos2-capability-source",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "qos2-capability-target",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .rule = .{
+                .filter = "capability/#",
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
+            },
+            .coordinator = .{
+                .bridge_id = [_]u8{0x98} ** 16,
+                .dir = tmp.dir,
+                .sub_path = "qos2-capability.log",
+                .mode = .create,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!bridge.hasPendingDurableQoS2());
+    try bridge.disconnect(0);
 
     source_thread.join();
     source_joined = true;
