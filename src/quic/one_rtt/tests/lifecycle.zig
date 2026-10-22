@@ -661,6 +661,93 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     }
 }
 
+test "QUIC 1-RTT application close truncates reason within path MTU" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf4} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "close-sender",
+        .peer_connection_id = "close-receiver",
+        .local_endpoint = .server,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "close-receiver",
+        .peer_connection_id = "close-sender",
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    const reason: []const u8 = "€" ** 700;
+    sender.handshake_status = .{ .server_pending = null };
+    try sender.closeApplication(quic.varint.max_value, reason);
+    try std.testing.expect(sender.handshake_status.needsHandshakeDone());
+    try std.testing.expectEqualStrings(
+        reason,
+        sender.close_info.?.reason_phrase,
+    );
+    var packet = try receiver.receivePacket();
+    defer packet.deinit(allocator);
+    const received = receiver.peerCloseInfo().?.application;
+    try std.testing.expectEqual(quic.varint.max_value, received.error_code);
+    try std.testing.expect(received.reason_phrase.len != 0);
+    try std.testing.expect(received.reason_phrase.len < reason.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(
+        received.reason_phrase,
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        reason[0..received.reason_phrase.len],
+        received.reason_phrase,
+    );
+    try std.testing.expectEqual(@as(usize, 1), sender.sent.packets.items.len);
+    const initial_datagram_size = sender.sent.packets.items[0].datagram_size;
+    try std.testing.expect(
+        initial_datagram_size <=
+            sender.currentSendDatagramSize(),
+    );
+
+    sender.pmtud.current_size = quic.pmtu.min_udp_payload_size;
+    try sender.resendClose();
+    try std.testing.expectEqual(@as(usize, 2), sender.sent.packets.items.len);
+    const resent_datagram_size = sender.sent.packets.items[1].datagram_size;
+    try std.testing.expect(
+        resent_datagram_size <= quic.pmtu.min_udp_payload_size,
+    );
+    try std.testing.expect(resent_datagram_size < initial_datagram_size);
+    try std.testing.expectEqualStrings(
+        reason,
+        sender.close_info.?.reason_phrase,
+    );
+}
+
 test "QUIC 1-RTT local close installs state when socket send fails" {
     const allocator = std.testing.allocator;
 

@@ -1488,6 +1488,14 @@ millisecond storage, so it cannot expire before RFC 9000's minimum; shared
 endpoint schedulers therefore retire ordinary and protocol-error closes without
 requiring another peer packet. Explicit `close*At` timestamps remain available
 for deterministic embedders and tests.
+Close packet construction also budgets the complete short-header/CID/packet-
+number/AEAD overhead and the actual QUIC-varint widths of transport or
+application error codes. Oversized reasons are truncated to the largest
+prefix that fits the current path MTU, preserving a code-point boundary for
+valid UTF-8, while the local `CloseInfo` retains the full diagnostic.
+`resendClose` recomputes that prefix against the current PMTU and packet-number
+width, so a path-size change cannot strand a closing connection behind
+`DatagramTooLarge`.
 The shared endpoint also consumes routed datagrams for connections already in
 closing or draining state instead of surfacing `ConnectionClosed` as a fatal
 multi-connection loop error, while retaining the connection's close-expiry

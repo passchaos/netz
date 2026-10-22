@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("mod.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const closed_streams = @import("one_rtt/closed_streams.zig");
+const close_packet = @import("one_rtt/close_packet.zig");
 const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const datagram_receive = @import("one_rtt/datagram_receive.zig");
@@ -9691,15 +9692,8 @@ pub const Connection = struct {
     pub fn resendClose(self: *Connection) Error!void {
         const close_info = self.close_info orelse return error.ConnectionClosed;
         if (close_info.state != .closing) return error.ConnectionClosed;
-        const frame: quic.Frame = if (close_info.application) .{ .application_close = .{
-            .error_code = close_info.error_code,
-            .reason_phrase = close_info.reason_phrase,
-        } } else .{ .connection_close = .{
-            .error_code = close_info.error_code,
-            .frame_type = close_info.frame_type,
-            .reason_phrase = close_info.reason_phrase,
-        } };
-        try self.sendTrackedFramesAllowClosing(&.{frame});
+        const frame = try self.closeFrameForSend(close_info);
+        try self.sendCloseFrame(frame);
     }
 
     pub fn closeApplication(self: *Connection, error_code: u64, reason_phrase: []const u8) Error!void {
@@ -14693,9 +14687,19 @@ pub const Connection = struct {
         }
     }
 
-    fn sendTrackedFramesAllowClosing(self: *Connection, frames: []const quic.Frame) Error!void {
+    /// Close packet sizing is exact for one frame. Do not route this through
+    /// automatic HANDSHAKE_DONE or ACK_FREQUENCY augmentation.
+    fn sendCloseFrame(self: *Connection, frame: quic.Frame) Error!void {
         if (self.idle_timed_out or self.closed() or self.draining()) return error.ConnectionClosed;
-        try self.sendTrackedFramesEcnAt(frames, .not_ect, self.monotonicNowNs());
+        const frames = [_]quic.Frame{frame};
+        const traits = try self.validateOutboundFrames(&frames);
+        try self.validateNextPacketNumber();
+        try self.sendTrackedFramesEcnAtUncheckedRaw(
+            &frames,
+            .not_ect,
+            self.monotonicNowNs(),
+            traits,
+        );
     }
 
     fn noteSentStreams(self: *Connection, frames: []const quic.Frame) void {
@@ -14747,19 +14751,9 @@ pub const Connection = struct {
         var owns_reason = true;
         errdefer if (owns_reason) owned.deinit(self.endpoint.allocator);
 
-        const frame: quic.Frame = if (owned.application)
-            .{ .application_close = .{
-                .error_code = owned.error_code,
-                .reason_phrase = owned.reason_phrase,
-            } }
-        else
-            .{ .connection_close = .{
-                .error_code = owned.error_code,
-                .frame_type = owned.frame_type,
-                .reason_phrase = owned.reason_phrase,
-            } };
+        const frame = try self.closeFrameForSend(owned);
         const send_error: ?Error = blk: {
-            self.sendTrackedFrames(&.{frame}) catch |err| break :blk err;
+            self.sendCloseFrame(frame) catch |err| break :blk err;
             break :blk null;
         };
 
@@ -14784,6 +14778,38 @@ pub const Connection = struct {
             installed.state,
         );
         if (send_error) |err| return err;
+    }
+
+    fn closeFrameForSend(
+        self: *Connection,
+        close: CloseInfo,
+    ) Error!quic.Frame {
+        const kind: close_packet.Kind = if (close.application)
+            .{ .application = close.error_code }
+        else
+            .{ .transport = .{
+                .error_code = close.error_code,
+                .frame_type = close.frame_type,
+            } };
+        const reason_phrase = try close_packet.reasonPrefix(.{
+            .kind = kind,
+            .reason_phrase = close.reason_phrase,
+            .destination_connection_id_len = self.config.peer_connection_id.len,
+            .packet_number = self.next_packet_number,
+            .largest_acknowledged = self.sent.largestAcknowledged(),
+            .max_datagram_size = self.currentSendDatagramSize(),
+        });
+        return if (close.application)
+            .{ .application_close = .{
+                .error_code = close.error_code,
+                .reason_phrase = reason_phrase,
+            } }
+        else
+            .{ .connection_close = .{
+                .error_code = close.error_code,
+                .frame_type = close.frame_type,
+                .reason_phrase = reason_phrase,
+            } };
     }
 
     fn setCloseInfo(self: *Connection, close: struct {
