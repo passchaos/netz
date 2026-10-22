@@ -953,6 +953,7 @@ pub const Client = struct {
                     else => return rejection_err,
                 };
                 session_value.close_response_pending = false;
+                session_value.control.capsule_error_reported = true;
                 return err;
             },
             else => {

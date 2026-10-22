@@ -13,6 +13,7 @@ const datagram_owned = @import("runtime/datagram/owned.zig");
 const datagram_send = @import("runtime/datagram/send.zig");
 const endpoint_client = @import("runtime/endpoint_client.zig");
 const session_control = @import("runtime/session_control.zig");
+const capsule_rejection = @import("runtime/session_control/rejection.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream/batch.zig");
@@ -3785,6 +3786,7 @@ pub const EndpointServer = struct {
                     else => return rejection_err,
                 };
                 target.close_response_pending = false;
+                target.control.capsule_error_reported = true;
                 return err;
             },
             else => {
@@ -5425,6 +5427,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return ownedHandshakeDatagram(
             try self.h3.receiveConnectDatagram(self.session_id.value),
@@ -5437,6 +5440,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5454,6 +5458,8 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5474,6 +5480,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         output: []u8,
     ) Error![]u8 {
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5490,6 +5497,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError![]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5506,6 +5514,8 @@ pub const AcceptedHandshakeSession = struct {
         output: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError![]u8 {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5525,6 +5535,7 @@ pub const AcceptedHandshakeSession = struct {
         received_count: *usize,
     ) Error!void {
         received_count.* = 0;
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5544,6 +5555,7 @@ pub const AcceptedHandshakeSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5563,6 +5575,8 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5576,6 +5590,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(
             &self.h3,
@@ -5593,6 +5608,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         return self.receiveManyDatagramsWithDeadline(
             count,
             .fromNow(self.h3.established.connection.endpoint.io, .{
@@ -5607,6 +5623,8 @@ pub const AcceptedHandshakeSession = struct {
         count: usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -6349,6 +6367,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveStream(
         self: *AcceptedHandshakeSession,
     ) Error!OwnedHandshakeStream {
+        try self.control.ensureOpen();
         return receiveHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -6362,6 +6381,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
@@ -6372,6 +6392,8 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         return receiveHandshakeSessionStreamWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6385,6 +6407,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn pollCompleteStream(
         self: *AcceptedHandshakeSession,
     ) Error!?OwnedHandshakeStream {
+        try self.control.ensureOpen();
         return handshake_stream.poll(
             &self.h3.established.connection,
             &self.streams,
@@ -6398,6 +6421,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         out: []u8,
     ) Error!StreamRead {
+        try self.control.ensureOpen();
         return readHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -6412,6 +6436,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6429,6 +6454,8 @@ pub const AcceptedHandshakeSession = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6444,6 +6471,7 @@ pub const AcceptedHandshakeSession = struct {
         stream_id: u62,
         out: []u8,
     ) Error!StreamRead {
+        try self.control.ensureOpen();
         return incremental_stream.readId(
             &self.h3.established.connection,
             &self.streams,
@@ -6460,6 +6488,7 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         return self.readStreamIdWithDeadline(
             stream_id,
             out,
@@ -6476,6 +6505,8 @@ pub const AcceptedHandshakeSession = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         return incremental_stream.readIdWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6540,6 +6571,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         out: []u8,
     ) Error!?StreamRead {
+        try self.control.ensureOpen();
         if (out.len == 0) return error.BufferTooShort;
         return incremental_stream.poll(
             &self.h3.established.connection,
@@ -6553,6 +6585,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn pollDatagram(
         self: *AcceptedHandshakeSession,
     ) Error!?OwnedHandshakeDatagram {
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -6570,17 +6603,20 @@ pub const AcceptedHandshakeSession = struct {
     pub fn pollSessionEvent(
         self: *AcceptedHandshakeSession,
     ) Error!?SessionEvent {
+        if (capsule_rejection.pending(&self.control)) {
+            try capsule_rejection.finish(&self.control, &self.h3.established.connection, &self.streams);
+            return error.InvalidCapsule;
+        }
         if (self.pending_session_event == null) {
             self.pending_session_event = self.control.poll(
                 &self.h3.established.connection,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    if (!self.control.handledPostTerminalData()) {
-                        try self.h3.established.connection.resetStream(
-                            self.session_id.value,
-                            http3.ApplicationErrorCode.message_error,
-                        );
-                    }
+                    try capsule_rejection.finish(
+                        &self.control,
+                        &self.h3.established.connection,
+                        &self.streams,
+                    );
                     return err;
                 },
                 else => {
@@ -7003,19 +7039,22 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        if (capsule_rejection.pending(&self.control)) {
+            try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);
+            return error.InvalidCapsule;
+        }
         if (self.pending_session_event == null) {
-            self.pending_session_event = self.control.pollOnce(
+            self.pending_session_event = self.control.pollWithDeadline(
                 &self.h3.established.connection,
+                deadline,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    if (!self.control.handledPostTerminalData()) {
-                        try self.h3.established.connection
-                            .resetStreamWithDeadline(
-                            self.session_id.value,
-                            http3.ApplicationErrorCode.message_error,
-                            deadline,
-                        );
-                    }
+                    try capsule_rejection.finishWithDeadline(
+                        &self.control,
+                        &self.h3.established.connection,
+                        &self.streams,
+                        deadline,
+                    );
                     return err;
                 },
                 else => {
@@ -7086,8 +7125,9 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         if (event != .closed and event != .reset) return;
-        _ = try self.control.tryRejectPostTerminalData(
+        _ = try self.control.rejectPostTerminalDataWithDeadline(
             &self.h3.established.connection,
+            deadline,
         );
         if (event == .closed and !self.control.local_close_sent and
             !self.control.local_close_failed and
@@ -9178,6 +9218,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return ownedHandshakeDatagram(
@@ -9191,6 +9232,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9209,6 +9251,8 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9230,6 +9274,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         output: []u8,
     ) Error![]u8 {
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9247,6 +9292,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError![]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9264,6 +9310,8 @@ pub const HandshakeClientSession = struct {
         output: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError![]u8 {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9284,6 +9332,7 @@ pub const HandshakeClientSession = struct {
         received_count: *usize,
     ) Error!void {
         received_count.* = 0;
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9304,6 +9353,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9324,6 +9374,8 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -9341,6 +9393,7 @@ pub const HandshakeClientSession = struct {
     pub fn pollDatagram(
         self: *HandshakeClientSession,
     ) Error!?OwnedHandshakeDatagram {
+        try self.control.ensureDatagramReceiveOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -9358,6 +9411,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(
@@ -9376,6 +9430,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveManyDatagramsWithDeadline(
             count,
@@ -9391,6 +9446,8 @@ pub const HandshakeClientSession = struct {
         count: usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureDatagramReceiveOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
@@ -10064,6 +10121,7 @@ pub const HandshakeClientSession = struct {
     pub fn receiveStream(
         self: *HandshakeClientSession,
     ) Error!OwnedHandshakeStream {
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStream(
             &self.h3.established.connection,
@@ -10078,6 +10136,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
@@ -10089,6 +10148,8 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStreamWithDeadline(
             &self.h3.established.connection,
@@ -10102,6 +10163,7 @@ pub const HandshakeClientSession = struct {
     pub fn pollCompleteStream(
         self: *HandshakeClientSession,
     ) Error!?OwnedHandshakeStream {
+        try self.control.ensureOpen();
         if (!try self.prepareDispatcherPoll()) return null;
         const result = if (self.dispatcher != null)
             handshake_stream.pollOnce(
@@ -10157,6 +10219,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         out: []u8,
     ) Error!?StreamRead {
+        try self.control.ensureOpen();
         if (out.len == 0) return error.BufferTooShort;
         if (!try self.prepareDispatcherPoll()) return null;
         const result = if (self.dispatcher != null)
@@ -10182,6 +10245,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         out: []u8,
     ) Error!StreamRead {
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return readHandshakeSessionStream(
             &self.h3.established.connection,
@@ -10197,6 +10261,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
@@ -10215,6 +10280,8 @@ pub const HandshakeClientSession = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
@@ -10231,6 +10298,7 @@ pub const HandshakeClientSession = struct {
         stream_id: u62,
         out: []u8,
     ) Error!StreamRead {
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readId(
             &self.h3.established.connection,
@@ -10248,6 +10316,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.ensureOpen();
         return self.readStreamIdWithDeadline(
             stream_id,
             out,
@@ -10264,6 +10333,8 @@ pub const HandshakeClientSession = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try self.control.ensureOpen();
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readIdWithDeadline(
             &self.h3.established.connection,
@@ -10811,17 +10882,20 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         if (self.dispatcher == null) {
+            if (capsule_rejection.pending(&self.control)) {
+                try capsule_rejection.finish(&self.control, &self.h3.established.connection, &self.streams);
+                return error.InvalidCapsule;
+            }
             if (self.pending_session_event == null) {
                 self.pending_session_event = self.control.poll(
                     &self.h3.established.connection,
                 ) catch |err| switch (err) {
                     error.InvalidCapsule => {
-                        if (!self.control.handledPostTerminalData()) {
-                            try self.h3.established.connection.resetStream(
-                                self.session_id.value,
-                                http3.ApplicationErrorCode.message_error,
-                            );
-                        }
+                        try capsule_rejection.finish(
+                            &self.control,
+                            &self.h3.established.connection,
+                            &self.streams,
+                        );
                         return err;
                     },
                     else => {
@@ -10879,19 +10953,22 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        if (capsule_rejection.pending(&self.control)) {
+            try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);
+            return error.InvalidCapsule;
+        }
         if (self.pending_session_event == null) {
-            self.pending_session_event = self.control.pollOnce(
+            self.pending_session_event = self.control.pollWithDeadline(
                 &self.h3.established.connection,
+                deadline,
             ) catch |err| switch (err) {
                 error.InvalidCapsule => {
-                    if (!self.control.handledPostTerminalData()) {
-                        try self.h3.established.connection
-                            .resetStreamWithDeadline(
-                            self.session_id.value,
-                            http3.ApplicationErrorCode.message_error,
-                            deadline,
-                        );
-                    }
+                    try capsule_rejection.finishWithDeadline(
+                        &self.control,
+                        &self.h3.established.connection,
+                        &self.streams,
+                        deadline,
+                    );
                     return err;
                 },
                 else => {
@@ -10960,8 +11037,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         if (event != .closed and event != .reset) return;
-        _ = try self.control.tryRejectPostTerminalData(
+        _ = try self.control.rejectPostTerminalDataWithDeadline(
             &self.h3.established.connection,
+            deadline,
         );
         if (event == .closed and !self.control.local_close_sent and
             !self.control.local_close_failed and
@@ -10994,6 +11072,14 @@ pub const HandshakeClientSession = struct {
     fn pollSessionEventOnce(
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
+        if (capsule_rejection.pending(&self.control)) {
+            const ready = capsule_rejection.finishOnce(&self.control, &self.h3.established.connection, &self.streams) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
+                else => return err,
+            };
+            if (!ready) return null;
+            return error.InvalidCapsule;
+        }
         const event = self.control.pollOnce(
             &self.h3.established.connection,
         ) catch |err| switch (err) {
@@ -11002,20 +11088,12 @@ pub const HandshakeClientSession = struct {
             error.FlowControlBlocked,
             => return null,
             error.InvalidCapsule => {
-                if (!self.control.handledPostTerminalData()) {
-                    self.h3.established.connection.tryResetStream(
-                        self.session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                    ) catch |reset_err| switch (reset_err) {
-                        error.PacingLimited,
-                        error.CongestionLimited,
-                        error.FlowControlBlocked,
-                        => return null,
-                        else => return reset_err,
-                    };
-                } else {
-                    self.close_response_pending = false;
-                }
+                const ready = capsule_rejection.finishOnce(&self.control, &self.h3.established.connection, &self.streams) catch |rejection_err| switch (rejection_err) {
+                    error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
+                    else => return rejection_err,
+                };
+                self.close_response_pending = false;
+                if (!ready) return null;
                 return err;
             },
             else => {
@@ -18912,5 +18990,6 @@ test {
     _ = stream_batch;
     _ = @import("runtime/session_control_tests.zig");
     _ = @import("runtime/session_control/endpoint_rejection_tests.zig");
+    _ = @import("runtime/session_control/handshake_rejection_tests.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

@@ -898,6 +898,23 @@ Close-storage layout regressions retain exact 296-byte Control and 456-byte
 protected-reader bounds and check WebTransport adapter overhead separately from
 embedded HTTP/3/QUIC state, so transport growth does not obscure those bounds.
 
+Independent handshake-backed client/server sessions now share the same Capsule
+rejection coordinator. They cancel CONNECT and finish WT_SESSION_GONE stream
+cleanup before reporting InvalidCapsule. A timeout or socket error preserves
+that pending notification even when CONNECT cancellation already succeeded;
+the next receive resumes unfinished cleanup without replaying committed
+terminal frames. Absolute deadlines also bound post-CLOSE suffix cancellation
+and receive-credit pacing while retaining the peer's exact close code/reason.
+Dispatcher-backed clients advance one terminal packet per poll before reporting
+the retained error. All standalone application-stream and DATAGRAM receive
+surfaces reject terminal or pending-close state, including complete-stream and
+batch APIs, while retaining ConnectDatagramAssociationClosed for terminated
+DATAGRAM receives; session-control receives continue observing peer CLOSE/FIN.
+Batch failures still clear their caller-owned progress count before validation.
+Five real-UDP regressions exercise both roles, cancellation timeout, cleanup
+timeout, preserved CLOSE metadata, and bounded dispatcher progress through a
+production Extended CONNECT exchange with preconfigured packet-protection keys.
+
 The 1024-byte reason limit now belongs to the core WebTransport capsule codec
 and is reused by the incremental runtime, so standalone writers and parsers
 cannot create or accept a CLOSE capsule that the session state machine would

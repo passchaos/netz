@@ -7,6 +7,7 @@
 //! 1024-byte UTF-8 reason.
 
 const std = @import("std");
+const deadline_policy = @import("../../internal/deadline.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -95,6 +96,7 @@ pub const Control = struct {
     /// only after its RESET_STREAM/STOP_SENDING packet is submitted.
     capsule_error_pending: bool = false,
     capsule_error_rejected: bool = false,
+    capsule_error_reported: bool = false,
 
     h3_stage: H3Stage = .frame_type,
     h3_varint: VarIntDecoder = .{},
@@ -193,6 +195,11 @@ pub const Control = struct {
         }
     }
 
+    pub fn ensureDatagramReceiveOpen(self: *const Control) Error!void {
+        if (self.state.closed) return error.ConnectDatagramAssociationClosed;
+        try self.ensureOpen();
+    }
+
     pub fn beginLocalClose(self: *Control) Error!void {
         try self.ensureOpen();
         self.local_close_started = true;
@@ -269,6 +276,27 @@ pub const Control = struct {
         connection: *quic.one_rtt.Connection,
     ) Error!?Event {
         return self.pollInternal(connection, true);
+    }
+
+    /// Wait only for pacing that can advance within this absolute deadline.
+    /// Congestion remains visible as a null poll so the HTTP/3 owner can route
+    /// incoming ACK and protocol traffic before retrying the parser.
+    pub fn pollWithDeadline(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!?Event {
+        while (true) {
+            _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+            return self.pollOnce(connection) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try connection.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                error.CongestionLimited, error.FlowControlBlocked => null,
+                else => return err,
+            };
+        }
     }
 
     fn pollInternal(
@@ -378,6 +406,22 @@ pub const Control = struct {
         return true;
     }
 
+    pub fn rejectPostTerminalDataWithDeadline(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+        if (!self.notePostTerminalData(connection)) return false;
+        try connection.cancelStreamWithDeadline(
+            self.session_id.value,
+            http3.ApplicationErrorCode.message_error,
+            deadline,
+        );
+        self.commitPostTerminalDataRejection();
+        return true;
+    }
+
     pub fn handledPostTerminalData(self: Control) bool {
         return self.post_terminal_data_rejected;
     }
@@ -413,6 +457,23 @@ pub const Control = struct {
         try connection.tryCancelStream(
             self.session_id.value,
             http3.ApplicationErrorCode.message_error,
+        );
+        self.commitCapsuleErrorRejection();
+        return true;
+    }
+
+    pub fn rejectInvalidCapsuleWithDeadline(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+        if (self.handledInvalidCapsule()) return false;
+        self.capsule_error_pending = true;
+        try connection.cancelStreamWithDeadline(
+            self.session_id.value,
+            http3.ApplicationErrorCode.message_error,
+            deadline,
         );
         self.commitCapsuleErrorRejection();
         return true;
