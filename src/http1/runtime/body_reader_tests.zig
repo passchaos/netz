@@ -771,6 +771,73 @@ test "HTTP/1 streaming request rejects connection-control trailers" {
     try std.testing.expectEqualStrings("body", context.body.items);
 }
 
+test "HTTP/1 streaming response makes TE plus CL one-shot" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Content-Length: invalid\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "2\r\nok\r\n0\r\n\r\n";
+    const TestError = runtime.Error;
+    const Reader = @import("body_reader.zig").Reader(TestError);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            const count = @min(out.len, self.bytes.len - self.offset);
+            @memcpy(out[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+    const Context = struct {
+        body: std.ArrayList(u8) = .empty,
+
+        fn begin(_: *@This(), head: Reader.ResponseHead) !void {
+            try std.testing.expectEqual(http1.BodyFraming.chunked, head.body_framing);
+            try std.testing.expect(head.content_length == null);
+            try std.testing.expect(head.header("content-length") == null);
+            try std.testing.expect(head.must_close);
+            try std.testing.expect(!head.keepAlive());
+        }
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    var source = Source{ .bytes = raw };
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var context: Context = .{};
+    defer context.body.deinit(allocator);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{},
+    };
+    var response = try reader.readResponse(
+        .GET,
+        &context,
+        Context.begin,
+        Context.consume,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", context.body.items);
+    try std.testing.expect(response.header("content-length") == null);
+    try std.testing.expect(response.must_close);
+    try std.testing.expect(!response.keepAlive());
+}
+
 test "HTTP/1 streaming response observes informational heads" {
     const allocator = std.testing.allocator;
     const raw =

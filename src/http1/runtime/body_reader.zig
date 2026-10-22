@@ -101,6 +101,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []http1.Header,
             body_framing: http1.BodyFraming,
             body_bytes: usize,
+            must_close: bool = false,
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
@@ -129,7 +130,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: Response) bool {
-                return http1.headersKeepAlive(
+                return !self.must_close and http1.headersKeepAlive(
                     self.version,
                     self.headers,
                 );
@@ -186,6 +187,24 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []const http1.Header,
             body_framing: http1.BodyFraming,
             content_length: ?usize,
+            must_close: bool = false,
+
+            pub fn header(
+                self: ResponseHead,
+                name: []const u8,
+            ) ?[]const u8 {
+                for (self.headers) |field| {
+                    if (field.eqlName(name)) return field.value;
+                }
+                return null;
+            }
+
+            pub fn keepAlive(self: ResponseHead) bool {
+                return !self.must_close and http1.headersKeepAlive(
+                    self.version,
+                    self.headers,
+                );
+            }
 
             pub fn streamContentDecoder(
                 self: ResponseHead,
@@ -321,6 +340,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                             .headers = &.{},
                             .body_framing = .close_delimited,
                             .content_length = null,
+                            .must_close = true,
                         }) catch |err| return err;
                         const body = try self.readCloseDelimited(
                             callback_context,
@@ -335,6 +355,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                             .headers = @constCast(&[_]http1.Header{}),
                             .body_framing = .close_delimited,
                             .body_bytes = body.body_bytes,
+                            .must_close = true,
                         };
                     }
                 }
@@ -412,6 +433,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .headers = head.headers,
                     .body_framing = head.body_framing,
                     .content_length = head.content_length,
+                    .must_close = head.must_close,
                 }) catch |err| {
                     return err;
                 };
@@ -442,6 +464,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .headers = owned_headers,
                     .body_framing = head.body_framing,
                     .body_bytes = body.body_bytes,
+                    .must_close = head.must_close,
                     .trailers = body.trailers.headers,
                     .trailer_bytes = body.trailers.bytes,
                     .trailer_value_storage = body.trailers.value_storage,

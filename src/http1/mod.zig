@@ -343,6 +343,9 @@ pub const ResponseHead = struct {
     body_framing: BodyFraming,
     content_length: ?usize,
     head_len: usize,
+    /// True when safe message framing requires retiring the connection even
+    /// after a complete response body has been consumed.
+    must_close: bool = false,
 
     pub fn header(self: ResponseHead, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
@@ -365,6 +368,11 @@ pub const ResponseHead = struct {
             .content_length => std.math.add(usize, self.head_len, self.content_length.?) catch error.ContentLengthOverflow,
             .chunked, .close_delimited => null,
         };
+    }
+
+    pub fn keepAlive(self: ResponseHead) bool {
+        return !self.must_close and
+            headersKeepAlive(self.version, self.headers);
     }
 };
 
@@ -551,6 +559,10 @@ pub const Response = struct {
     header_value_storage: [][]u8 = &.{},
     trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
+    /// True when Transfer-Encoding overrode a received Content-Length. RFC
+    /// 9112 treats that combination as a potential response-splitting signal;
+    /// the current message is parseable, but this connection is one-shot.
+    must_close: bool = false,
 
     pub fn deinit(self: *Response, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);
@@ -601,7 +613,8 @@ pub const Response = struct {
     }
 
     pub fn keepAlive(self: Response) bool {
-        return headersKeepAlive(self.version, self.headers);
+        return !self.must_close and
+            headersKeepAlive(self.version, self.headers);
     }
 
     /// Return the selected protocol from a valid 101 Switching Protocols
@@ -689,7 +702,18 @@ pub fn parseResponseHead(
     try validateTransferEncodingForVersion(version, parsed.headers);
     early_data.validateForbiddenFields(parsed.headers) catch
         return error.InvalidResponse;
-    const declared_content_length = try contentLength(parsed.headers);
+    const saw_transfer_encoding = wire.findHeader(
+        parsed.headers,
+        "transfer-encoding",
+    ) != null;
+    const saw_content_length = wire.findHeader(
+        parsed.headers,
+        "content-length",
+    ) != null;
+    const declared_content_length = if (saw_transfer_encoding)
+        null
+    else
+        try contentLength(parsed.headers);
 
     const forbidden = responseForbidsBody(status, context.request_method);
     const framing: BodyFraming = if (forbidden) .none else switch (bodyFraming(parsed.headers) catch |err| switch (err) {
@@ -706,14 +730,19 @@ pub fn parseResponseHead(
         .none => .close_delimited,
         else => |value| value,
     };
+    const exposed_headers = if (saw_transfer_encoding)
+        stripHeaderInPlace(parsed.headers, "content-length")
+    else
+        parsed.headers;
     return .{
         .version = version,
         .status = status,
         .reason = status_line.reason,
-        .headers = parsed.headers,
+        .headers = exposed_headers,
         .body_framing = framing,
         .content_length = declared_content_length,
         .head_len = parsed.head_len,
+        .must_close = saw_transfer_encoding and saw_content_length,
     };
 }
 
@@ -1090,6 +1119,14 @@ pub fn parseResponseWithContext(
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
     early_data.validateForbiddenFields(parsed_headers.headers) catch
         return error.InvalidResponse;
+    const saw_transfer_encoding = wire.findHeader(
+        parsed_headers.headers,
+        "transfer-encoding",
+    ) != null;
+    const saw_content_length = wire.findHeader(
+        parsed_headers.headers,
+        "content-length",
+    ) != null;
     const consumed_head = head_end + 4;
     const parsed_body = if (responseForbidsBody(status, context.request_method))
         ParsedBody{
@@ -1100,7 +1137,7 @@ pub fn parseResponseWithContext(
     else
         try parseResponseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
-    if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
+    if (saw_transfer_encoding) {
         try parsed_headers.stripContentLength(allocator);
     }
     early_data.validateForbiddenFields(parsed_body.trailers) catch
@@ -1118,6 +1155,7 @@ pub fn parseResponseWithContext(
         .header_value_storage = parsed_headers.value_storage,
         .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
+        .must_close = saw_transfer_encoding and saw_content_length,
     };
 }
 
@@ -5445,6 +5483,56 @@ test "HTTP/1 Transfer-Encoding grammar is quote aware and strict" {
         error.InvalidTransferEncoding,
         parseResponseHead(malformed_response, &header_storage, .{}, .{}),
     );
+}
+
+test "HTTP/1 response TE plus CL is sanitized and one-shot in either order" {
+    const allocator = std.testing.allocator;
+    const responses = [_][]const u8{
+        "HTTP/1.1 200 OK\r\n" ++
+            "Content-Length: 999\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "Content-Length: 999\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\n" ++
+            "Content-Length: invalid\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+    };
+
+    for (responses) |raw| {
+        var header_storage: [8]Header = undefined;
+        const head = try parseResponseHead(
+            raw,
+            &header_storage,
+            .{},
+            .{},
+        );
+        try std.testing.expectEqual(BodyFraming.chunked, head.body_framing);
+        try std.testing.expect(head.content_length == null);
+        try std.testing.expect(head.header("content-length") == null);
+        try std.testing.expect(head.must_close);
+        try std.testing.expect(!head.keepAlive());
+
+        var response = try parseResponse(allocator, raw, .{});
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(BodyFraming.chunked, response.body_framing);
+        try std.testing.expectEqualStrings("ok", response.body);
+        try std.testing.expect(response.header("content-length") == null);
+        try std.testing.expect(response.must_close);
+        try std.testing.expect(!response.keepAlive());
+    }
+
+    const transfer_only =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "2\r\nok\r\n0\r\n\r\n";
+    var response = try parseResponse(allocator, transfer_only, .{});
+    defer response.deinit(allocator);
+    try std.testing.expect(!response.must_close);
+    try std.testing.expect(response.keepAlive());
 }
 
 test "HTTP/1 response body framing helpers" {

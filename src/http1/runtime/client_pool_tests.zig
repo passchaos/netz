@@ -918,6 +918,99 @@ test "HTTP/1 client pool discards close in any Connection response field" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 client pool retires TE plus CL response connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept();
+            defer first.close();
+            self.accepts += 1;
+            var first_request = try first.readRequest(.{});
+            defer first_request.deinit(self.server.allocator);
+            try writeRawAll(
+                self.server.io,
+                first.stream,
+                "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Length: invalid\r\n" ++
+                    "Transfer-Encoding: chunked\r\n\r\n" ++
+                    "3\r\none\r\n0\r\n\r\n",
+            );
+
+            // Keep the ambiguous-response socket open. A client that derives
+            // reuse only from the sanitized headers will send its next request
+            // there and leave this fresh accept waiting until timeout.
+            var second = try self.server.acceptWithTimeout(
+                .fromSeconds(2),
+            );
+            defer second.close();
+            self.accepts += 1;
+            var second_request = try second.readRequest(.{});
+            defer second_request.deinit(self.server.allocator);
+            try second.writeResponse(.{
+                .body = "two",
+                .request_method = second_request.request.method,
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, server.address(), "/ambiguous");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, server.address(), "/fresh");
+    defer allocator.free(second_uri);
+    var first = try pool.requestUriWithTimeout(
+        first_uri,
+        .{},
+        .fromSeconds(3),
+    );
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expect(first.response.header("content-length") == null);
+    try std.testing.expect(first.response.must_close);
+    try std.testing.expect(!first.response.keepAlive());
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(3),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
 test "HTTP/1 client pool reuses verified TLS connection" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

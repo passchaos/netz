@@ -313,7 +313,13 @@ request metadata, but the request is marked `must_close` so `keepAlive()` is
 false regardless of header order or an explicit `Connection: keep-alive`. The
 HTTP/1 serve loop therefore completes exactly that response with
 `Connection: close` and never interprets a buffered pipeline suffix as another
-request. Response-side framing semantics are unchanged.
+request. Response parsing now applies the symmetric intermediary boundary:
+Transfer-Encoding wins, every received Content-Length is removed from borrowed,
+aggregate, and streaming metadata (including an invalid value in either field
+order), and `must_close` prevents the socket from returning to the client pool.
+A real-socket regression deliberately keeps the ambiguous-response connection
+open; the second request must arrive on a fresh accepted socket, proving reuse
+does not depend on EOF or a peer-supplied `Connection: close`.
 
 The parser also mirrors Hyper's explicitly opt-in HTTP/1 compatibility
 controls while preserving strict defaults.
