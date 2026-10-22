@@ -3539,6 +3539,107 @@ test "QUIC bounded stream send consumes positive credit tails" {
     if (shared.err) |err| return err;
 }
 
+test "QUIC STREAM sender retains payload when only the header fits capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa3} ** quic.protection.secret_len,
+    );
+    const stream_id: u64 = 1 << 14;
+    const stream_count = (stream_id >> 2) + 1;
+    const offset: u64 = 1 << 30;
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "capacity-client",
+        .peer_connection_id = "capacity-server",
+        .initial_send_max_streams_bidi = stream_count,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "capacity-server",
+        .peer_connection_id = "capacity-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_bidi = stream_count,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const header_only = [_]quic.Frame{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = offset,
+        .data = &.{},
+    } }};
+    const one_byte = [_]quic.Frame{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = offset,
+        .data = "x",
+    } }};
+    const header_packet_len = try client.packetLenForFramesAtOffset(
+        0,
+        &header_only,
+    );
+    const payload_packet_len = try client.packetLenForFramesAtOffset(
+        0,
+        &one_byte,
+    );
+    try std.testing.expectEqual(header_packet_len + 1, payload_packet_len);
+
+    const initial_window = client.congestion.congestion_window;
+    const initial_connection_credit = client.connectionSendAvailable();
+    client.congestion.congestion_window = header_packet_len;
+    try std.testing.expectError(
+        error.CongestionLimited,
+        client.trySend(&one_byte),
+    );
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight());
+    try std.testing.expectEqual(
+        initial_connection_credit,
+        client.connectionSendAvailable(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        client.stats().outgoing_streams_created,
+    );
+    try std.testing.expect(client.getSendStreamStats(stream_id) == null);
+
+    client.congestion.congestion_window = initial_window;
+    try client.trySend(&one_byte);
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), received.frames.len);
+    try std.testing.expect(received.frames[0] == .stream);
+    try std.testing.expectEqual(offset, received.frames[0].stream.offset);
+    try std.testing.expectEqualStrings("x", received.frames[0].stream.data);
+    try std.testing.expectEqual(
+        offset + 1,
+        client.getSendStreamStats(stream_id).?.highest_sent_offset,
+    );
+}
+
 test "QUIC bounded stream send reports socket-visible prefix" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

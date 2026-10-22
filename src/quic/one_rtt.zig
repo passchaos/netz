@@ -3150,6 +3150,15 @@ pub const Connection = struct {
             sent_time_ns,
             validated_traits,
         );
+        // Congestion reserve occurs again at the final packet commit, but its
+        // capacity check must precede lazy STREAM state creation. Otherwise a
+        // packet that can fit only the STREAM header returns
+        // CongestionLimited after consuming a local stream ID/state slot.
+        if (prepared.is_in_flight and
+            prepared.packet_len > self.congestionAvailable())
+        {
+            return error.CongestionLimited;
+        }
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
 
         // Pacing preflight above is deliberately mutation-free. Once it

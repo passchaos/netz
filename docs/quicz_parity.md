@@ -1686,6 +1686,16 @@ path state. Protected routed-packet coverage migrates 1024 -> 49152 -> 1025
 with `disable_active_migration` enabled, then proves a 1025 -> 443 packet is
 dropped without advancing the peer tuple, expected packet number, or receive
 statistics.
+STREAM send preflight now also checks the complete protected packet against
+available congestion credit before materializing lazy stream state. This keeps
+the existing exact `Frame.wireLen`/CID/packet-number/AEAD sizing while closing
+the same near-capacity ownership boundary audited in current
+`/nav_env/Work/quiche`: when cwnd can hold a four-byte stream ID and eight-byte
+offset header but not one payload byte, the send returns `CongestionLimited`
+without consuming a stream slot, flow credit, packet number, or recovery state.
+A real UDP regression restores the window and sends that exact retained byte;
+batch sends already performed their full-packet congestion preflight before
+stream materialization.
 
 ## Known blockers before declaring the goal complete
 
