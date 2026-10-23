@@ -12,6 +12,7 @@ pub fn Receiver(comptime Context: anytype) type {
             const charged_len = frame.payload.len;
             try self.recv_connection_window.receive(charged_len);
             var windows_granted = false;
+            var adaptive_connection_increment: u31 = 0;
             // Only roll back a local DATA debit. An adaptive control submission
             // can grant that freed credit to the peer; after its successful write
             // the whole receive transaction is committed, even if a later policy
@@ -46,6 +47,9 @@ pub fn Receiver(comptime Context: anytype) type {
                 const connection_before = self.recv_connection_window.value;
                 const stream_before = stream_window.value;
                 try Context.grantAdaptive(self);
+                if (self.recv_connection_window.value > connection_before) {
+                    adaptive_connection_increment = @intCast(self.recv_connection_window.value - connection_before);
+                }
                 windows_granted = self.recv_connection_window.value != connection_before or
                     stream_window.value != stream_before;
             }
@@ -68,6 +72,7 @@ pub fn Receiver(comptime Context: anytype) type {
                 .data = data.data,
                 .padding_len = data.padding_len,
                 .budget_charge = budget_charge,
+                .adaptive_connection_increment = adaptive_connection_increment,
             };
         }
     };

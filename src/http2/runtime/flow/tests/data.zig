@@ -4,7 +4,7 @@ const runtime = @import("../../../runtime.zig");
 const budget = @import("../../data_frame_budget.zig");
 const window = @import("../window.zig");
 
-const Mode = enum { committed_abort, deferred_abort, failed_write, accepted_budget };
+const Mode = enum { committed_abort, deferred_abort, failed_write, accepted_budget, skipped_connection_grant };
 
 test "HTTP/2 DATA termination preserves a committed adaptive window grant" {
     try exercise(.committed_abort);
@@ -20,6 +20,10 @@ test "HTTP/2 DATA adaptive write failure preserves local windows and retires con
 
 test "HTTP/2 DATA budget uses the committed adaptive window target" {
     try exercise(.accepted_budget);
+}
+
+test "HTTP/2 DATA reports only adaptive connection credit actually granted" {
+    try exercise(.skipped_connection_grant);
 }
 
 fn exercise(mode: Mode) !void {
@@ -79,10 +83,10 @@ fn exercise(mode: Mode) !void {
     }
     try runtime.testing.addActivePeerStream(&connection, 1);
     const stream_window = try runtime.testing.recvStreamWindow(&connection, 1);
-    const initial_value = window.max_value - @intFromBool(mode == .accepted_budget);
+    const initial_value = if (mode == .skipped_connection_grant) window.default_value else window.max_value - @intFromBool(mode == .accepted_budget);
     const initial_increment: u31 = @intCast(initial_value - window.default_value);
-    try connection.sendWindowUpdate(0, initial_increment);
-    try connection.sendWindowUpdate(1, initial_increment);
+    try connection.sendWindowUpdate(0, if (mode == .skipped_connection_grant) @intCast(window.max_value - window.default_value) else initial_increment);
+    if (initial_increment != 0) try connection.sendWindowUpdate(1, initial_increment);
     try std.testing.expectEqual(initial_value, stream_window.value);
     if (mode == .deferred_abort) {
         try runtime.testing.addActivePeerStream(&connection, 3);
@@ -90,34 +94,49 @@ fn exercise(mode: Mode) !void {
         try connection.sendWindowUpdate(3, initial_increment);
     }
     const before_grant = recorder.bytes.items.len;
-    // An actual SETTINGS_INITIAL_WINDOW_SIZE grant must first be deferred:
-    // both windows are already at the protocol maximum.
+    // Defer SETTINGS until DATA processing, either at the stream maximum or
+    // behind an outstanding ACK. The latter can advance the logical target
+    // without a connection grant when explicit credit is already near maximum.
+    if (mode == .skipped_connection_grant) connection.awaiting_settings_ack = true;
     try runtime.testing.queueAdaptiveWindowTarget(&connection, 65_537);
+    if (mode == .skipped_connection_grant) connection.awaiting_settings_ack = false;
     try std.testing.expectEqual(before_grant, recorder.bytes.items.len);
     try std.testing.expectEqual(@as(?u32, 65_537), connection.adaptive_queued_target);
     if (mode == .accepted_budget) {
         connection.data_frame_budget.spent = budget.maximum(budget.automatic, 65_535) - 254;
-    } else {
+    } else if (mode != .skipped_connection_grant) {
         connection.data_frame_budget.empty_frames = budget.max_empty_frames;
     }
     recorder.fail_prefix = mode == .failed_write;
     const padded_empty = [_]u8{ 1, 0 };
-    const payload: []const u8 = if (mode == .accepted_budget) "x" else &padded_empty;
+    const accepted = mode == .accepted_budget or mode == .skipped_connection_grant;
+    const payload: []const u8 = if (accepted) "x" else &padded_empty;
     const received = runtime.testing.receiveDataPayload(&connection, 1, .{
-        .header = .{ .length = @intCast(payload.len), .frame_type = .data, .flags = if (mode == .accepted_budget) 0 else 0x8, .stream_id = 1 },
+        .header = .{ .length = @intCast(payload.len), .frame_type = .data, .flags = if (accepted) 0 else 0x8, .stream_id = 1 },
         .payload = payload,
     });
-    if (mode == .accepted_budget) {
+    if (accepted) {
         const data = try received;
         try std.testing.expectEqualStrings("x", data.data);
+        try std.testing.expectEqual(@as(u31, if (mode == .skipped_connection_grant) 0 else 2), data.adaptive_connection_increment);
         // The old target's 32767-byte budget would reject this charge. The
         // real committed target raises it to 32768 before DATA validation.
-        try std.testing.expectEqual(@as(u32, 32768), connection.data_frame_budget.spent);
+        if (mode == .accepted_budget) try std.testing.expectEqual(@as(u32, 32768), connection.data_frame_budget.spent);
         connection.data_frame_budget.release(data.budget_charge);
         try std.testing.expect(!connection.aggregate_timeout_unusable);
     } else {
         try std.testing.expectError(if (mode == .failed_write) error.NetworkDown else error.ConnectionGoAway, received);
         try std.testing.expect(connection.aggregate_timeout_unusable);
+    }
+    if (mode == .skipped_connection_grant) {
+        try std.testing.expectEqual(window.max_value - 1, connection.recv_connection_window.value);
+        try std.testing.expectEqual(window.default_value + 1, stream_window.value);
+        try std.testing.expectEqual(@as(u32, 65_537), connection.recv_connection_window_target);
+        try std.testing.expectEqual(@as(?u32, null), connection.adaptive_queued_target);
+        const settings = try http2.Frame.parse(recorder.bytes.items[before_grant..]);
+        try std.testing.expect(settings.header.frame_type == .settings);
+        try std.testing.expectEqual(http2.FrameHeader.encoded_len + 6, recorder.bytes.items.len - before_grant);
+        return;
     }
     try std.testing.expectEqual(window.max_value, connection.recv_connection_window.value);
     try std.testing.expectEqual(window.max_value, stream_window.value);

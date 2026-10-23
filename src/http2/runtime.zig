@@ -3632,6 +3632,8 @@ const ReceivedDataPayload = struct {
     data: []const u8,
     padding_len: u8,
     budget_charge: u8,
+    // Actual adaptive credit granted during this DATA, separate from releases.
+    adaptive_connection_increment: u31 = 0,
 };
 
 pub const Connection = struct {
@@ -6787,6 +6789,7 @@ pub const Connection = struct {
                 informational,
                 deadline,
                 read_timed_out,
+                null,
                 context,
                 consume,
                 frame,
@@ -6939,6 +6942,7 @@ pub const Connection = struct {
         informational: ?BatchInformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
         read_timed_out: *bool,
+        adaptive_connection_increment: ?*u31,
         context: anytype,
         comptime consume: anytype,
         frame: http2.Frame,
@@ -7105,6 +7109,7 @@ pub const Connection = struct {
                     frame,
                 );
                 defer self.releaseDataFrameBudget(data);
+                if (adaptive_connection_increment) |increment| increment.* = data.adaptive_connection_increment;
                 const body_len = checkedResponseBodyLength(
                     state.content_length,
                     if (streaming_response)
@@ -7786,6 +7791,7 @@ pub const Connection = struct {
         }
 
         const connection_before = self.recv_connection_window.value;
+        var adaptive_connection_increment: u31 = 0;
         var read_timed_out = false;
         const had_final_head = state.headers != null;
         var callback_error: ?anyerror = null;
@@ -7820,6 +7826,7 @@ pub const Connection = struct {
                 null,
                 deadline,
                 &read_timed_out,
+                &adaptive_connection_increment,
                 {},
                 undefined,
                 frame,
@@ -7830,6 +7837,7 @@ pub const Connection = struct {
                 null,
                 deadline,
                 &read_timed_out,
+                &adaptive_connection_increment,
                 &data_context,
                 DataContext.consume,
                 frame,
@@ -7840,6 +7848,7 @@ pub const Connection = struct {
             state_index,
             connection_before,
             self.recv_connection_window.value,
+            adaptive_connection_increment,
         );
         process_result catch |err| {
             if (callback_error) |application_error| {
@@ -38150,6 +38159,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/response/body_length_tests.zig");
     _ = @import("runtime/frame/tests/io.zig");

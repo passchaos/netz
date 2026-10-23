@@ -2612,6 +2612,17 @@ caller-owned reset policy. Real h2c regressions cover aggregation, padded
 fallback, callbacks, batches, duplex events, and serveOne, including cumulative
 overruns, zero invalid-content delivery, exact rejected-DATA credit, no handler
 invocation, and subsequent connection reuse.
+Independent response batches now distinguish adaptive connection-window growth
+from returned DATA credit. DATA receive reports the connection increment that
+was actually advertised during its adaptive grant; batch accounting removes
+that increment before recording held payload credit. A logical target increase
+that omits a WINDOW_UPDATE near the protocol maximum reports zero granted
+credit. This preserves existing per-stream credit across growth and returns it
+exactly when a malformed response, callback rejection, or deadline terminates
+the stream. Real h2c aggregate and streaming regressions trigger deferred
+SETTINGS during padded DATA and exercise a subsequent Content-Length overrun,
+per-stream expiration, and callback rejection. They verify exact connection
+credit, healthy sibling completion, and later reuse.
 Peer HTTP/3 unidirectional-stream classification also waits when a reordered
 FIN arrives before offset zero instead of treating the temporarily unavailable
 type as malformed. A complete zero-byte stream declares no critical type and
