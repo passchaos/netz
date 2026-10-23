@@ -19336,6 +19336,7 @@ test {
 
 test {
     _ = @import("runtime/endpoint_client/removal_tests.zig");
+    _ = @import("runtime/endpoint_client/open_timeout_tests.zig");
 }
 
 test {

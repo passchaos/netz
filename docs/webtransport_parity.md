@@ -832,6 +832,20 @@ Session-ID-only prefix with an ordinary HTTP/3 DATA/HEADERS frame.
 
 ## Incremental stream and cancellation evidence
 
+Shared `EndpointClient` opening failures retain a bounded cleanup owner until
+CONNECT cancellation is submitted. Cleanup uses one-attempt HTTP/3 cancellation
+and retries on later client operations or Session removal, so congestion,
+pacing, and a failed socket send cannot turn an ordinary opening timeout into
+whole-connection termination or extend it with a pacing wait. Cleanup capacity
+is reserved before sending CONNECT, and pending attempts count against the
+same local/peer admission bound as accepted Sessions. Early DATAGRAMs for the
+failed CONNECT are discarded; associated streams remain owned during retries
+and are terminated with `WT_SESSION_GONE` without consuming sibling traffic.
+Application-protocol failures use the same queue with `WT_ALPN_ERROR`.
+Real protected-UDP regressions cover congestion, pacing, socket failure,
+allocation failure before and after CONNECT submission, admission recovery,
+early stream cleanup, and continued sibling stream/DATAGRAM traffic.
+
 `HandshakeClientSession` and `AcceptedHandshakeSession` expose `readStream`,
 `writeStream`, `writeStreams`, `finishStream`, `resetStream`, and `stopStream`.
 `readStream`

@@ -13,12 +13,12 @@ const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
 const connect_negotiation = @import("connect/negotiation.zig");
 const application_protocol = webtransport.application_protocol;
-const protocol_negotiation = @import("connect/application_protocol.zig");
 const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
 const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
 const terminal = @import("endpoint_client/terminal.zig");
+const open_cleanup = @import("endpoint_client/open_cleanup.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
@@ -401,6 +401,7 @@ pub const Client = struct {
     h3: http3.runtime.HandshakeClient,
     max_sessions: usize,
     sessions: std.AutoHashMapUnmanaged(u62, *Session) = .empty,
+    pending_open_cleanup: open_cleanup.Pending = .{},
     last_ready_session_id: ?u62 = null,
 
     fn observeConnection(self: *Client) bool {
@@ -415,6 +416,7 @@ pub const Client = struct {
 
     fn ensureConnectionOpen(self: *Client) Error!void {
         if (self.observeConnection()) return error.ConnectionClosed;
+        try self.pending_open_cleanup.advance(&self.h3);
     }
 
     pub fn connect(
@@ -610,6 +612,7 @@ pub const Client = struct {
             self.allocator.destroy(entry.*);
         }
         self.sessions.deinit(self.allocator);
+        self.pending_open_cleanup.deinit(self.allocator);
         self.h3.deinit();
         self.* = undefined;
     }
@@ -774,7 +777,7 @@ pub const Client = struct {
         defer _ = self.observeConnection();
         const version = try connect_negotiation.prepareClient(&self.h3, deadline);
         const peer = self.h3.control.settings.peer;
-        if (self.sessions.count() >= sessionCapacity(
+        if (self.sessions.count() + self.pending_open_cleanup.count() >= sessionCapacity(
             self.max_sessions,
             peer.webtransport_max_sessions,
         )) {
@@ -793,6 +796,7 @@ pub const Client = struct {
         );
         defer headers.deinit(self.allocator);
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
+        try self.pending_open_cleanup.reserve(self.allocator);
         const request = http3.Request{
             .method = "CONNECT",
             .path = options.path,
@@ -805,7 +809,7 @@ pub const Client = struct {
         else
             try self.h3.startRequest(request, null);
         var protocol_failure = false;
-        errdefer if (protocol_failure) self.h3.tryCancelRequest(stream_id, webtransport.ApplicationErrorCode.alpn_error) catch {} else self.h3.cancelRequest(stream_id, http3.ApplicationErrorCode.request_cancelled) catch {};
+        errdefer self.pending_open_cleanup.abandon(&self.h3, stream_id, if (protocol_failure) webtransport.ApplicationErrorCode.alpn_error else http3.ApplicationErrorCode.request_cancelled);
         const session_id = webtransport.SessionId.init(stream_id);
         var streams = try handshake_stream.initRegistry(
             self.allocator,
@@ -841,7 +845,7 @@ pub const Client = struct {
         }
         errdefer response.deinit(self.allocator);
         try validateSuccessfulResponse(response);
-        protocol_negotiation.validateResponse(&self.h3, stream_id, &offer, response, deadline) catch |err| {
+        _ = offer.validateResponse(response.headers) catch |err| {
             protocol_failure = true;
             return err;
         };
@@ -962,6 +966,7 @@ pub const Client = struct {
         const current = self.sessions.get(session_id.value) orelse return false;
         if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
         if (self.h3.callback_reader_active) return error.ConcurrentRead;
+        if (!self.observeConnection()) try self.pending_open_cleanup.advance(&self.h3);
         current.control.bindFlow(current.streams.flow);
         try terminal.finish(
             &self.h3,
@@ -1231,7 +1236,7 @@ pub const Client = struct {
         session_id: u62,
     ) bool {
         const self: *const Client = @ptrCast(@alignCast(context));
-        return self.sessions.contains(session_id);
+        return self.sessions.contains(session_id) or self.pending_open_cleanup.contains(session_id);
     }
 };
 
