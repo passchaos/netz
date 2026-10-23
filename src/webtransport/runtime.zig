@@ -50,6 +50,7 @@ pub const EndpointClientRejection = endpoint_client.Rejection;
 pub const StableConnectionId = quic.one_rtt.StableConnectionId;
 
 test {
+    _ = @import("runtime/stream/recovery_tests.zig");
     _ = @import("runtime/layout_tests.zig");
 }
 
@@ -6583,6 +6584,17 @@ pub const AcceptedHandshakeSession = struct {
             .flushPendingAckWithDeadline(deadline);
     }
 
+    pub fn waitForStreamRecoveryIdleWithTimeout(self: *AcceptedHandshakeSession, stream_id: u62, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForStreamRecoveryIdleWithDeadline(stream_id, .fromNow(self.h3.established.connection.endpoint.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn waitForStreamRecoveryIdleWithDeadline(self: *AcceptedHandshakeSession, stream_id: u62, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        return @import("runtime/stream/recovery.zig").wait(ReceiveTimeoutError, &self.control, &self.h3, &self.streams, stream_id, deadline);
+    }
+
     /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
     /// control/QPACK and unrelated requests progress while the detached
     /// WebTransport CONNECT stream and associated streams remain available to
@@ -10484,6 +10496,20 @@ pub const HandshakeClientSession = struct {
             .flushPendingAckWithDeadline(deadline);
     }
 
+    pub fn waitForStreamRecoveryIdleWithTimeout(self: *HandshakeClientSession, stream_id: u62, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (self.h3.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForStreamRecoveryIdleWithDeadline(stream_id, .fromNow(self.h3.established.connection.endpoint.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn waitForStreamRecoveryIdleWithDeadline(self: *HandshakeClientSession, stream_id: u62, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (self.h3.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        return @import("runtime/stream/recovery.zig").wait(ReceiveTimeoutError, &self.control, &self.h3, &self.streams, stream_id, deadline);
+    }
+
     /// Drive one timer-aware QUIC receive without consuming WebTransport data.
     ///
     /// Event loops waiting on a peer-side terminal condition still need to
@@ -13904,6 +13930,14 @@ pub const StatefulProtectedClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         return self.session.waitForRecoveryIdleWithDeadline(deadline);
+    }
+
+    pub fn waitForStreamRecoveryIdleWithTimeout(self: *StatefulProtectedClientSession, stream_id: u62, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        return self.session.waitForStreamRecoveryIdleWithTimeout(stream_id, timeout);
+    }
+
+    pub fn waitForStreamRecoveryIdleWithDeadline(self: *StatefulProtectedClientSession, stream_id: u62, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        return self.session.waitForStreamRecoveryIdleWithDeadline(stream_id, deadline);
     }
 
     pub fn serviceTransport(

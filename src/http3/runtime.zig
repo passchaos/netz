@@ -11432,6 +11432,19 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    pub fn waitForStreamRecoveryIdleWithTimeout(self: *HandshakeServerSession, stream_id: u62, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForStreamRecoveryIdleWithDeadline(stream_id, .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }));
+    }
+
+    /// Wait only for the selected stream's submitted DATA/FIN/RESET delivery.
+    /// Other requests remain routed while ACK, loss and PTO processing runs.
+    pub fn waitForStreamRecoveryIdleWithDeadline(self: *HandshakeServerSession, stream_id: u62, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return @import("runtime/stream/recovery.zig").wait(ReceiveTimeoutError, self, stream_id, deadline, HandshakeServerSession.receiveRequestPacketUntil);
+    }
+
     fn applyStreamingRequestEvent(
         self: *HandshakeServerSession,
         entry: *StreamingRequestSet.Entry,
@@ -19121,6 +19134,20 @@ pub const HandshakeClient = struct {
         while (self.established.connection.pendingDeliveryRecovery()) {
             try self.pollControlWithDeadline(deadline);
         }
+    }
+
+    pub fn waitForStreamRecoveryIdleWithTimeout(self: *HandshakeClient, stream_id: u62, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForStreamRecoveryIdleWithDeadline(stream_id, .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }));
+    }
+
+    /// Drain one stream's reliable delivery without waiting for siblings.
+    pub fn waitForStreamRecoveryIdleWithDeadline(self: *HandshakeClient, stream_id: u62, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return @import("runtime/stream/recovery.zig").wait(ReceiveTimeoutError, self, stream_id, deadline, HandshakeClient.pollControlWithDeadline);
     }
 
     /// Advertise the inclusive server-push ID limit.

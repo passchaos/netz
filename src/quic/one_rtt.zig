@@ -7145,6 +7145,12 @@ pub const Connection = struct {
         return self.recovery.hasPendingDeliveryFrames();
     }
 
+    /// STREAM bytes/FIN or RESET delivery still protected for one send half.
+    /// Unrelated streams and connection receive-credit frames are excluded.
+    pub fn pendingStreamDeliveryRecovery(self: *const Connection, stream_id: u64) bool {
+        return self.recovery.hasPendingStreamData(stream_id) or self.recovery.hasPendingResetStream(stream_id);
+    }
+
     pub fn sendAck(self: *Connection, ack_delay: u64) Error!void {
         var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
         var heap_ranges: ?[]quic.AckRange = null;

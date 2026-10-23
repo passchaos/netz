@@ -234,6 +234,7 @@ pub fn main(init: std.process.Init) !void {
 
     const bidi = try client.openBidirectionalStream();
     try client.sendStream(bidi, client_bidi, true);
+    try client.waitForStreamRecoveryIdleWithTimeout(bidi, .fromSeconds(2));
     var read_buffer: [64]u8 = undefined;
     _ = try receiveExpectedStream(
         &client,
@@ -247,6 +248,7 @@ pub fn main(init: std.process.Init) !void {
 
     const uni = try client.openUnidirectionalStream();
     try client.sendStream(uni, client_uni, true);
+    try client.waitForStreamRecoveryIdleWithTimeout(uni, .fromSeconds(2));
     _ = try receiveExpectedStream(
         &client,
         &read_buffer,

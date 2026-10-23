@@ -1374,6 +1374,29 @@ requires PTO retransmission and exact peer code/reason delivery, then drains
 the automatic reverse FIN before either endpoint is destroyed. Dispatcher-
 bound sessions continue to rely on their endpoint event loop and reject this
 blocking operation.
+
+Independently owned handshake client/server sessions also expose
+`waitForStreamRecoveryIdleWithTimeout` / `waitForStreamRecoveryIdleWithDeadline`
+for one associated send direction. The selected stream's DATA, FIN and
+RESET_STREAM/RESET_STREAM_AT remain protected by normal QUIC ACK/loss/PTO
+processing, while outstanding sibling streams do not prolong that wait.
+Inbound associated traffic remains available to ordinary readers. Timeouts
+remain retryable under a later deadline; ownership, receive-only direction,
+awake-clock, callback-reader and dispatcher checks precede transport progress.
+The shared implementation lives in `runtime/stream/recovery.zig`, and HTTP/3
+handshake client/server APIs expose the same per-stream waiting through
+`http3/runtime/stream/recovery.zig`. The QUIC layer supplies a read-only
+stream-scoped delivery query without adding send-path metadata. Wire regressions
+exercise both endpoint roles, bidi/uni FIN and RESET, outstanding sibling FIN,
+preserved inbound data, timeout/retry, and recovery after a dropped target
+packet.
+
+The focused WebTransport and HTTP/3 lifecycle/recovery/QPACK matrix passes 485
+tests in Debug and ReleaseFast, and package reachability passes two tests. The
+bidirectional wtransport gate now invokes the per-stream wait after bidi and
+uni FIN submission in both netz roles, then completes cancellation, concurrent
+sibling reuse and session close with the external peer.
+
 The advisory DRAIN capsule has matching `drainWithTimeout` and
 `drainWithDeadline` APIs. It is encoded once into fixed storage, retains its
 socket-visible byte offset after timeout, rejects interleaved application or

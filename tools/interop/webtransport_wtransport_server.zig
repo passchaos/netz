@@ -348,6 +348,7 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print("netz WebTransport interop received bidi\n", .{});
     try session.sendStream(bidi_stream_id, server_bidi, true);
+    try session.waitForStreamRecoveryIdleWithTimeout(bidi_stream_id, .fromSeconds(2));
 
     _ = try receiveExpectedStream(
         &session,
@@ -361,6 +362,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("netz WebTransport interop received uni\n", .{});
     const response_uni = try session.openUnidirectionalStream();
     try session.sendStream(response_uni, server_uni, true);
+    try session.waitForStreamRecoveryIdleWithTimeout(response_uni, .fromSeconds(2));
     if (allowed_origins.len != 0) {
         // Browser WritableStreams do not promise that a completed write was
         // placed on the wire before a following abort. Accept any validated
