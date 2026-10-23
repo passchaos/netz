@@ -5,6 +5,7 @@
 const std = @import("std");
 const http1 = @import("../../../http1/mod.zig");
 const framing = @import("../../../http1/runtime/message/framing.zig");
+const close_delimited = @import("../../../http1/runtime/message/close_delimited.zig");
 const storage = @import("storage.zig");
 const Limits = @import("../common.zig").Limits;
 
@@ -30,6 +31,17 @@ pub fn Reader(comptime Context: type) type {
     return struct {
         const Transport = Context.TransportType;
         const Error = Context.ErrorType;
+        const EofBodyReader = close_delimited.Reader(struct {
+            pub const TransportType = Transport;
+            pub const ErrorType = Error;
+
+            pub fn readUntil(transport: Transport, output: []u8, deadline: ?std.Io.Clock.Timestamp) Error!usize {
+                return if (deadline) |absolute|
+                    Context.readWithDeadline(transport, output, absolute)
+                else
+                    Context.read(transport, output);
+            }
+        });
 
         pub fn readResponseBytes(
             allocator: std.mem.Allocator,
@@ -67,41 +79,43 @@ pub fn Reader(comptime Context: type) type {
                 return result;
             }
 
+            // Validate every body boundary already known from the head or
+            // buffered chunk prefix before allocating the rejection copy.
+            // Bytes after a complete fixed/chunked/bodyless rejection belong
+            // to a discarded successor, not to this retained response.
+            const extra = switch (parsed_head.body_framing) {
+                .none => head.extra[0..0],
+                .content_length => blk: {
+                    const length = parsed_head.content_length.?;
+                    if (length > limits.max_rejection_body_bytes) return error.BodyTooLarge;
+                    break :blk head.extra[0..@min(head.extra.len, length)];
+                },
+                .chunked => blk: {
+                    const layout = framing.chunkedBodyLayout(head.extra, limits.max_head_bytes, limits.max_rejection_body_bytes) catch |err| switch (err) {
+                        error.BufferTooShort => break :blk head.extra,
+                        else => return err,
+                    };
+                    break :blk head.extra[0..layout.wire_len];
+                },
+                .close_delimited => blk: {
+                    if (head.extra.len > limits.max_rejection_body_bytes) return error.BodyTooLarge;
+                    break :blk head.extra;
+                },
+            };
             var bytes: std.ArrayList(u8) = .empty;
             errdefer bytes.deinit(allocator);
             try bytes.ensureTotalCapacity(
                 allocator,
-                std.math.add(usize, head.head.len, head.extra.len) catch
+                std.math.add(usize, head.head.len, extra.len) catch
                     return error.BodyTooLarge,
             );
             bytes.appendSliceAssumeCapacity(head.head);
-            bytes.appendSliceAssumeCapacity(head.extra);
+            bytes.appendSliceAssumeCapacity(extra);
             const body_start = head.head.len;
 
             var scratch: [4096]u8 = undefined;
-            if (framing.responseHeadUsesCloseDelimitedBody(
-                head.head[0 .. head.head.len - 4],
-                .GET,
-            )) {
-                if (bytes.items.len - body_start > limits.max_rejection_body_bytes) {
-                    return error.BodyTooLarge;
-                }
-                while (true) {
-                    const count = if (deadline) |absolute|
-                        try Context.readWithDeadline(transport, &scratch, absolute)
-                    else
-                        try Context.read(transport, &scratch);
-                    if (count == 0) break;
-                    const body_len = std.math.add(
-                        usize,
-                        bytes.items.len - body_start,
-                        count,
-                    ) catch return error.BodyTooLarge;
-                    if (body_len > limits.max_rejection_body_bytes) {
-                        return error.BodyTooLarge;
-                    }
-                    try bytes.appendSlice(allocator, scratch[0..count]);
-                }
+            if (parsed_head.body_framing == .close_delimited) {
+                try EofBodyReader.collect(allocator, transport, &bytes, body_start, limits.max_rejection_body_bytes, &scratch, deadline);
                 return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
             }
 

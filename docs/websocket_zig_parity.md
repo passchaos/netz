@@ -1712,3 +1712,18 @@ them without another copy into the WebSocket receive buffer. Bodyless interim
 Successful 101 responses reject `Content-Length`, `Transfer-Encoding`, and
 `Trailer` on both the server writer and client validator; caller-supplied
 server fields are checked before the transactional writer changes its output.
+
+HTTP/1 rejected-response retention now checks body boundaries before allocating
+the response copy. An excessive declared Content-Length, buffered chunk-size
+prefix, or EOF-delimited body returns `BodyTooLarge` without body I/O or a
+rejection-buffer allocation. Complete fixed-length and chunked entities retain
+only their own wire bytes, including trailers; bodyless responses discard all
+coalesced successors. EOF-delimited reads share HTTP/1's bounded collector,
+which reads at most the remaining quota plus one overflow-detection byte under
+the original absolute deadline. Accepted 101 heads and coalesced WebSocket
+frames still transfer their original allocations even with a zero rejection
+body limit. The adjacent handshake regressions cover fail-first allocation,
+exact and zero limits, entity boundaries, trailers, and ownership transfer.
+The focused WS/WSS, Unix, proxy, redirect and MQTT WebSocket handshake matrix
+passes 239 tests in both Debug and ReleaseFast; package API reachability passes
+its two tests.

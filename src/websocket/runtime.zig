@@ -17604,6 +17604,7 @@ test {
     _ = @import("runtime/handshake/response_tests.zig");
     _ = @import("runtime/handshake/request_tests.zig");
     _ = @import("runtime/handshake/receive_tests.zig");
+    _ = @import("runtime/handshake/body_limit_tests.zig");
     _ = @import("runtime/handshake/head_budget_tests.zig");
     _ = handshake_acceptance;
     _ = @import("runtime/message_io_tests.zig");
