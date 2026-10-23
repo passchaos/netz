@@ -43,6 +43,7 @@ const validateResponseContentLength = message_headers.validateResponseContentLen
 const checkedResponseBodyLength = message_headers.checkedResponseBodyLength;
 const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
+const header_block_limits = @import("runtime/headers/block_limits.zig");
 const response_credit = @import("runtime/response/credit.zig");
 const validateDeclaredRequestLength =
     message_headers.validateDeclaredRequestLength;
@@ -11179,17 +11180,13 @@ pub const Connection = struct {
         } else {
             const pending = self.pending_duplex_sibling_header.getPtr().?;
             if (frame.header.frame_type != .continuation or frame.header.stream_id != pending.header.stream_id) return error.UnexpectedFrame;
-            pending.header.continuation_count += 1;
             pending.queued_continuation_count += 1;
-            if (pending.header.continuation_count > self.maxContinuationFrames()) return error.MessageTooLarge;
-            try pending.header.bytes.appendSlice(self.allocator, frame.payload);
-            try pending.header.validateSize(self);
-            pending.header.end_headers = (frame.header.flags & flag_end_headers) != 0;
+            try pending.header.appendContinuation(self, frame);
         }
         if (!self.pending_duplex_sibling_header.getPtr().?.header.end_headers) return;
         try self.duplex_sibling_headers.ensureUnusedCapacity(self.allocator, 1);
         const pending = self.pending_duplex_sibling_header.getPtr().?;
-        const fields = try decodeOwnedHeaders(self.allocator, pending.header.bytes.items, self.limits, &self.hpack_decoder);
+        const fields = try pending.header.decode(self);
         self.duplex_sibling_headers.appendAssumeCapacity(.{
             .stream_id = pending.header.stream_id,
             .headers = fields,
@@ -11208,13 +11205,9 @@ pub const Connection = struct {
             } else if (self.pending_duplex_sibling_header.getPtr()) |pending| {
                 if (!pending.overflow_included and overflow.frame.header.frame_type == .continuation) {
                     if (overflow.frame.header.stream_id != pending.header.stream_id) return error.UnexpectedFrame;
-                    pending.header.continuation_count += 1;
                     pending.queued_continuation_count += 1;
                     pending.overflow_included = true;
-                    if (pending.header.continuation_count > self.maxContinuationFrames()) return error.MessageTooLarge;
-                    try pending.header.bytes.appendSlice(self.allocator, overflow.frame.payload);
-                    try pending.header.validateSize(self);
-                    pending.header.end_headers = (overflow.frame.header.flags & flag_end_headers) != 0;
+                    try pending.header.appendContinuation(self, overflow.frame);
                 }
             }
         }
@@ -15795,6 +15788,8 @@ pub const Connection = struct {
     ) Error!void {
         const promise = try self.validatePushPromiseForClientStream(frame);
         var flags = frame.header.flags;
+        var limit_exceeded = false;
+        const byte_limit = header_block_limits.byteLimit(self.limits.max_frame_payload, self.limits.max_header_fields);
         const block = if ((flags & flag_end_headers) != 0)
             promise.header_block
         else blk: {
@@ -15817,9 +15812,12 @@ pub const Connection = struct {
                     return error.UnexpectedFrame;
                 }
                 continuation_count += 1;
-                if (continuation_count > max_continuations) {
-                    return error.MessageTooLarge;
-                }
+                const next_len = std.math.add(usize, self.header_block_scratch.items.len, continuation.frame.payload.len) catch return error.MessageTooLarge;
+                limit_exceeded = header_block_limits.completeOverflow(continuation_count, max_continuations, next_len, byte_limit, (continuation.frame.header.flags & flag_end_headers) != 0) catch |err| {
+                    self.serve_read_connection_error = .excessive_header_block;
+                    self.aggregate_timeout_unusable = true;
+                    return @errorCast(err);
+                };
                 try self.header_block_scratch.appendSlice(
                     self.allocator,
                     continuation.frame.payload,
@@ -15828,6 +15826,18 @@ pub const Connection = struct {
             }
             break :blk self.header_block_scratch.items;
         };
+        if (limit_exceeded) {
+            self.hpack_decoder.discardBlock(self.allocator, block) catch |err| {
+                if (self.hpack_decoder.lastDecodeWasCompressionError()) {
+                    self.serve_read_connection_error = .compression;
+                    self.aggregate_timeout_unusable = true;
+                }
+                return @errorCast(err);
+            };
+            try self.push_state.notePeerStreamId(self.allocator, promise.promised_stream_id);
+            try self.writeLocalErrorResetStream(promise.promised_stream_id, .refused_stream);
+            return;
+        }
         const headers = try decodeOwnedHeaders(
             self.allocator,
             block,
@@ -16393,9 +16403,20 @@ pub const Connection = struct {
             deadline,
             raw_continuations,
         );
+        if (block.limit_exceeded) {
+            self.hpack_decoder.discardBlock(self.allocator, block.bytes) catch |err| {
+                if (self.hpack_decoder.lastDecodeWasCompressionError()) {
+                    self.serve_read_connection_error = .compression;
+                    self.aggregate_timeout_unusable = true;
+                }
+                return @errorCast(err);
+            };
+            self.recordResponseStreamReadError(first.header.stream_id, .enhance_your_calm);
+            return error.MessageTooLarge;
+        }
         return self.hpack_decoder.decodeBlockOwnedWithLimit(
             self.allocator,
-            block,
+            block.bytes,
             self.limits.max_header_fields,
             self.limits.max_header_list_size,
         ) catch |err| {
@@ -16420,7 +16441,7 @@ pub const Connection = struct {
         first: http2.Frame,
         deadline: ?std.Io.Clock.Timestamp,
         raw_continuations: bool,
-    ) Error![]const u8 {
+    ) Error!header_block_limits.Collected {
         const header_mode = self.push_ingress_headers_active;
         self.push_ingress_headers_active = true;
         defer self.push_ingress_headers_active = header_mode;
@@ -16430,11 +16451,8 @@ pub const Connection = struct {
             if (priority.stream_dependency == first.header.stream_id) return error.InvalidFrame;
         }
         var flags = first.header.flags;
-        const header_block_limit = std.math.mul(
-            usize,
-            self.limits.max_frame_payload,
-            self.limits.max_header_fields +| 1,
-        ) catch std.math.maxInt(usize);
+        var limit_exceeded = false;
+        const header_block_limit = header_block_limits.byteLimit(self.limits.max_frame_payload, self.limits.max_header_fields);
         const block = if ((flags & flag_end_headers) != 0)
             first_headers.header_block
         else blk: {
@@ -16464,41 +16482,21 @@ pub const Connection = struct {
                     return error.UnexpectedFrame;
                 }
                 continuation_count += 1;
-                if (continuation_count > max_continuations) {
-                    if ((frame.frame.header.flags & flag_end_headers) == 0) {
-                        self.serve_read_connection_error =
-                            .excessive_header_block;
-                        self.aggregate_timeout_unusable = true;
-                    } else {
-                        self.recordResponseStreamReadError(
-                            first.header.stream_id,
-                            .enhance_your_calm,
-                        );
-                    }
-                    return error.MessageTooLarge;
-                }
+                const next_len = std.math.add(usize, self.header_block_scratch.items.len, frame.frame.payload.len) catch return error.MessageTooLarge;
+                limit_exceeded = header_block_limits.completeOverflow(continuation_count, max_continuations, next_len, header_block_limit, (frame.frame.header.flags & flag_end_headers) != 0) catch |err| {
+                    self.serve_read_connection_error = .excessive_header_block;
+                    self.aggregate_timeout_unusable = true;
+                    return @errorCast(err);
+                };
                 try self.header_block_scratch.appendSlice(
                     self.allocator,
                     frame.frame.payload,
                 );
-                if (self.header_block_scratch.items.len > header_block_limit) {
-                    if ((frame.frame.header.flags & flag_end_headers) == 0) {
-                        self.serve_read_connection_error =
-                            .excessive_header_block;
-                        self.aggregate_timeout_unusable = true;
-                    } else {
-                        self.recordResponseStreamReadError(
-                            first.header.stream_id,
-                            .enhance_your_calm,
-                        );
-                    }
-                    return error.MessageTooLarge;
-                }
                 flags = frame.frame.header.flags;
             }
             break :blk self.header_block_scratch.items;
         };
-        return block;
+        return .{ .bytes = block, .limit_exceeded = limit_exceeded };
     }
 
     fn writePushPromiseBlock(
@@ -18814,6 +18812,7 @@ const DuplexHeaderBlock = struct {
     end_stream: bool,
     end_headers: bool,
     continuation_count: usize = 0,
+    limit_exceeded: bool = false,
     bytes: std.ArrayList(u8) = .empty,
 
     fn init(
@@ -18861,23 +18860,26 @@ const DuplexHeaderBlock = struct {
                 connection.sendGoAwayUntil(connection.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline) catch {};
                 return error.UnexpectedFrame;
             }
-            self.continuation_count = std.math.add(
-                usize,
-                self.continuation_count,
-                1,
-            ) catch return error.MessageTooLarge;
-            if (self.continuation_count > connection.maxContinuationFrames()) {
-                return error.MessageTooLarge;
-            }
-            try self.bytes.appendSlice(
-                connection.allocator,
-                continuation.frame.payload,
-            );
-            try self.validateSize(connection);
-            self.end_headers =
-                (continuation.frame.header.flags & flag_end_headers) != 0;
+            try self.appendContinuation(connection, continuation.frame);
         }
-        return try decodeOwnedHeaders(
+        return try self.decode(connection);
+    }
+
+    fn decode(self: *DuplexHeaderBlock, connection: *Connection) Error![]http2.Hpack.HeaderField {
+        if (self.limit_exceeded) {
+            connection.hpack_decoder.discardBlock(connection.allocator, self.bytes.items) catch |err| {
+                if (connection.hpack_decoder.lastDecodeWasCompressionError()) {
+                    connection.serve_read_connection_error = .compression;
+                    connection.aggregate_timeout_unusable = true;
+                }
+                return @errorCast(err);
+            };
+            // A caller may observe the same terminal error again. Do not
+            // replay the rejected block's dynamic-table updates on retry.
+            self.bytes.clearRetainingCapacity();
+            return error.MessageTooLarge;
+        }
+        return decodeOwnedHeaders(
             connection.allocator,
             self.bytes.items,
             connection.limits,
@@ -18885,15 +18887,29 @@ const DuplexHeaderBlock = struct {
         );
     }
 
+    fn appendContinuation(self: *DuplexHeaderBlock, connection: *Connection, frame: http2.Frame) Error!void {
+        self.continuation_count = std.math.add(usize, self.continuation_count, 1) catch return error.MessageTooLarge;
+        self.end_headers = (frame.header.flags & flag_end_headers) != 0;
+        const next_len = std.math.add(usize, self.bytes.items.len, frame.payload.len) catch return error.MessageTooLarge;
+        self.limit_exceeded = header_block_limits.completeOverflow(
+            self.continuation_count,
+            connection.maxContinuationFrames(),
+            next_len,
+            header_block_limits.byteLimit(connection.limits.max_frame_payload, connection.limits.max_header_fields),
+            self.end_headers,
+        ) catch |err| {
+            connection.serve_read_connection_error = .excessive_header_block;
+            connection.aggregate_timeout_unusable = true;
+            return @errorCast(err);
+        };
+        try self.bytes.appendSlice(connection.allocator, frame.payload);
+    }
+
     fn validateSize(
         self: DuplexHeaderBlock,
         connection: *const Connection,
     ) Error!void {
-        const limit = std.math.mul(
-            usize,
-            connection.limits.max_frame_payload,
-            connection.limits.max_header_fields + 1,
-        ) catch return error.MessageTooLarge;
+        const limit = header_block_limits.byteLimit(connection.limits.max_frame_payload, connection.limits.max_header_fields);
         if (self.bytes.items.len > limit) return error.MessageTooLarge;
     }
 
@@ -38166,6 +38182,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/headers/limit_reuse_tests.zig");
     _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");

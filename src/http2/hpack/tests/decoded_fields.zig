@@ -9,6 +9,40 @@ const inserted = "\x40" ++ huffman_string ++ huffman_string;
 const dynamic_name = "\x0f\x2f" ++ huffman_string;
 const indexed = "\xbe";
 
+test "HTTP/2 HPACK discard preserves dynamic state and malformed input errors" {
+    const allocator = std.testing.allocator;
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    try decoder.discardBlock(allocator, inserted);
+    const fields = try decoder.decodeBlockOwnedWithLimit(allocator, indexed, 1, 4096);
+    defer Hpack.freeOwnedFields(allocator, fields);
+    try std.testing.expectEqualStrings("www.example.com", fields[0].value);
+    try std.testing.expectError(error.InvalidEncoding, decoder.discardBlock(allocator, inserted ++ "\x80"));
+    try std.testing.expect(decoder.lastDecodeWasCompressionError());
+    try std.testing.expectError(error.BufferTooShort, decoder.discardBlock(allocator, inserted ++ "\x40"));
+    try std.testing.expect(decoder.lastDecodeWasCompressionError());
+    try decoder.discardBlock(allocator, "\x20");
+    try std.testing.expectEqual(@as(usize, 0), decoder.dynamic_table.used);
+}
+
+fn discardLargeEntry(allocator: std.mem.Allocator) !void {
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    encoder.setMaxDynamicTableSize(allocator, 16 * 1024);
+    var decoder = Hpack.Decoder{ .max_dynamic_table_size = 16 * 1024 };
+    defer decoder.deinit(allocator);
+    const block = try encoder.encodeBlockRetained(allocator, &.{.{ .name = "large", .value = "a" ** 6000 }});
+    try decoder.discardBlock(allocator, block);
+    const fields = try decoder.decodeBlockOwnedWithLimit(allocator, indexed, 1, 16 * 1024);
+    defer Hpack.freeOwnedFields(allocator, fields);
+    try std.testing.expectEqualStrings("large", fields[0].name);
+    try std.testing.expectEqualStrings("a" ** 6000, fields[0].value);
+}
+
+test "HTTP/2 HPACK discard releases large dynamic-entry scratch on all allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, discardLargeEntry, .{});
+}
+
 fn decodeAllocationLifecycle(allocator: std.mem.Allocator, standalone: bool) !void {
     const block = inserted ++ dynamic_name ++ indexed ++ literal ** 16;
     var decoder = Hpack.Decoder{};

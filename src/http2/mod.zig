@@ -1431,6 +1431,16 @@ pub const Hpack = struct {
         pub fn lastDecodeWasCompressionError(self: Decoder) bool {
             return self.last_decode_compression_error;
         }
+
+        /// Validate a complete rejected field section and apply its dynamic
+        /// table updates without allocating application field output.
+        pub fn discardBlock(self: *Decoder, allocator: std.mem.Allocator, block: []const u8) !void {
+            const fields = self.decodeBlockOwnedWithLimit(allocator, block, 0, std.math.maxInt(usize)) catch |err| {
+                if (err == error.BufferTooShort and !self.lastDecodeWasCompressionError()) return;
+                return err;
+            };
+            freeOwnedFields(allocator, fields);
+        }
     };
 
     pub const Encoder = struct {
@@ -2117,6 +2127,7 @@ pub const Hpack = struct {
             );
             const temporary_allocator = temporary_fallback.get();
             const temporary = try temporary_allocator.alloc(u8, temporary_len);
+            defer temporary_allocator.free(temporary);
             const name = temporary[0..name_plan.decoded_len];
             try name_plan.decodeInto(name);
             const value = temporary[name.len..][0..value_plan.decoded_len];

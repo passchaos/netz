@@ -2637,6 +2637,19 @@ CONTINUATION ordering, and unterminated continuation floods emit one connection
 GOAWAY before owned batch state is released. Real h2c regressions cover these cases, exact reset
 and GOAWAY codes, rejected-DATA credit, local stream release, synchronized HPACK
 reuse, and original application errors.
+Completed HEADERS and PUSH_PROMISE sections that cross continuation-count or
+compressed assembly-byte limits now finish HPACK validation without retaining
+application fields before reporting the stream resource error. The collector
+retains at most one terminal frame beyond its assembly bound; an unfinished
+over-limit section still terminates the connection. Normal, duplex, deferred,
+and pushed header collection use the same completion rule. Rejected promises
+receive REFUSED_STREAM while their parent continues; rejected pushed responses
+retain their own terminal error. Repeated duplex observation of a rejected
+complete block cannot reapply its dynamic-table updates. Real h2c regressions
+verify aggregate, callback, server, duplex, and push recovery, indexed fields on
+later requests, and compressed-byte overflow. HPACK discard validates malformed
+input and releases temporary storage for entries above the stack scratch size,
+including every allocation-failure boundary.
 Peer HTTP/3 unidirectional-stream classification also waits when a reordered
 FIN arrives before offset zero instead of treating the temporarily unavailable
 type as malformed. A complete zero-byte stream declares no critical type and
