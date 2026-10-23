@@ -9,6 +9,7 @@ const wire = @import("../internal/wire.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
+const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -7711,6 +7712,12 @@ fn readTransportUntil(
         transport.read(buffer);
 }
 
+const EofBodyReader = close_delimited.Reader(struct {
+    pub const TransportType = RuntimeTransport;
+    pub const ErrorType = Error;
+    pub const readUntil = readTransportUntil;
+});
+
 fn readHttp09Body(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -7719,21 +7726,10 @@ fn readHttp09Body(
     scratch: []u8,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
-    // HTTP/0.9 has no framing metadata; EOF is the only message boundary.
-    // Keep the same decoded-body and outer-deadline guarantees as an HTTP/1.x
-    // close-delimited response, and reject an empty EOF so a stale connection
-    // cannot masquerade as a successful legacy response.
-    while (true) {
-        if (bytes.items.len > max_body_bytes) return error.BodyTooLarge;
-        const remaining = max_body_bytes - bytes.items.len;
-        const read_buf = scratch[0..@min(scratch.len, remaining +| 1)];
-        const n = try readTransportUntil(transport, read_buf, deadline);
-        if (n == 0) {
-            if (bytes.items.len == 0) return error.ConnectionClosed;
-            return bytes.toOwnedSlice(allocator);
-        }
-        try bytes.appendSlice(allocator, read_buf[0..n]);
-    }
+    try EofBodyReader.collect(allocator, transport, bytes, 0, max_body_bytes, scratch, deadline);
+    // A silent stale socket is not a valid legacy response.
+    if (bytes.items.len == 0) return error.ConnectionClosed;
+    return bytes.toOwnedSlice(allocator);
 }
 
 fn ensureResponseHeadDeadlineForBuffer(
@@ -9069,16 +9065,7 @@ fn readMessageBytesWithContext(
 
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
-        while (true) {
-            const n = try readTransportUntil(
-                transport,
-                &scratch,
-                body_deadline,
-            );
-            if (n == 0) break;
-            try bytes.appendSlice(allocator, scratch[0..n]);
-            if (bytes.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
-        }
+        try EofBodyReader.collect(allocator, transport, &bytes, body_start, limits.max_body_bytes, &scratch, body_deadline);
         return bytes.toOwnedSlice(allocator);
     }
 
@@ -9395,16 +9382,7 @@ fn readMessageBytesBufferedWithContext(
 
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(head, request_method)) {
         const body_start = head_end.? + 4;
-        while (true) {
-            const n = try readTransportUntil(
-                transport,
-                &scratch,
-                body_deadline,
-            );
-            if (n == 0) break;
-            try inbuf.appendSlice(allocator, scratch[0..n]);
-            if (inbuf.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
-        }
+        try EofBodyReader.collect(allocator, transport, inbuf, body_start, limits.max_body_bytes, &scratch, body_deadline);
         const bytes = try inbuf.toOwnedSlice(allocator);
         inbuf.* = .empty;
         return bytes;
@@ -14487,9 +14465,11 @@ test {
     _ = runtime_write;
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");
+    _ = close_delimited;
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
+    _ = @import("runtime/close_delimited_limit_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");
     _ = @import("runtime/response_timeout_tests.zig");

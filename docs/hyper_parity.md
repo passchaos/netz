@@ -387,6 +387,25 @@ semantics.
 The representation is receive-only: every request and response writer rejects
 `.http_0_9`.
 
+Aggregate EOF-delimited response reads now share
+`src/http1/runtime/message/close_delimited.zig` across buffered HTTP/1,
+non-buffered HTTP/1, and opt-in HTTP/0.9. The body budget includes bytes already
+coalesced after the response head, so peer EOF cannot bypass a small
+`max_body_bytes` limit. Every later read is bounded to the remaining quota plus
+one overflow-detection byte; the total is checked before retaining bytes or
+growing the buffer, under the original absolute deadline. An oversized
+prebuffered entity fails before more I/O even if the peer remains silent and
+an allocator refuses every allocation. Exact and zero-length limits still
+accept legal EOF, while the legacy empty-response rejection remains in force.
+Real TCP, standard TLS and certificate-pinned native TLS clients become
+unusable after overflow. A warmed pool rejects an overflowing reused socket
+without applying its stale-connection retry policy, releases its connection
+slot, and completes a later request through a fresh connection. Deterministic
+cases also cover HTTP/1.0 and non-chunked Transfer-Encoding precedence over
+Content-Length, plus exact and maximum-word-size collector budgets.
+The focused HTTP/1, HTTP/0.9, TLS and connection-pool Debug gate passes
+440/440 tests; public-module checks pass 2/2.
+
 The streaming chunked-body reader now applies the same opt-in obs-fold policy
 to trailers instead of silently retaining a stricter second parser. Strict
 mode continues to reject folded trailers. Compatibility mode unfolds each
