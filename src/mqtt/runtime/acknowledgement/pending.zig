@@ -1,0 +1,81 @@
+//! Owned interleaved MQTT packets bounded by count and complete wire bytes.
+
+const std = @import("std");
+const Packet = @import("../packet_transport.zig").OwnedPacket;
+
+pub const default_max_bytes: usize = 32 * 1024 * 1024;
+pub const Error = std.mem.Allocator.Error || error{TooManyPendingPackets};
+
+pub const State = struct {
+    packets: std.ArrayList(Packet) = .empty,
+    head: usize = 0,
+    queued_bytes: usize = 0,
+    /// The packet already left the transport before an append failed. Retain
+    /// it after the ordinary prefix; max_packet_size bounds this extra packet.
+    overflow: ?Packet = null,
+
+    pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        for (self.packets.items[self.head..]) |*packet| packet.deinit(allocator);
+        self.packets.deinit(allocator);
+        if (self.overflow) |*packet| packet.deinit(allocator);
+        self.* = .{};
+    }
+
+    pub fn count(self: State) usize {
+        return self.packets.items.len - self.head + @intFromBool(self.overflow != null);
+    }
+
+    pub fn ensureAvailable(self: State, max_packets: usize, max_bytes: usize) error{TooManyPendingPackets}!void {
+        if (self.overflow != null or self.count() >= max_packets or self.queued_bytes >= max_bytes) {
+            return error.TooManyPendingPackets;
+        }
+    }
+
+    /// Ownership transfers only after append succeeds. Refuse either quota
+    /// before allocation or compaction, and charge bytes only after commit.
+    pub fn append(self: *State, allocator: std.mem.Allocator, packet: Packet, max_packets: usize, max_bytes: usize) Error!void {
+        if (self.overflow != null or self.count() >= max_packets or
+            self.queued_bytes > max_bytes or packet.bytes.len > max_bytes - self.queued_bytes)
+        {
+            return error.TooManyPendingPackets;
+        }
+        if (self.head != 0 and self.packets.items.len == self.packets.capacity) self.compact();
+        try self.packets.append(allocator, packet);
+        self.queued_bytes += packet.bytes.len;
+    }
+
+    pub fn retainOverflow(self: *State, packet: Packet) void {
+        std.debug.assert(self.overflow == null);
+        self.overflow = packet;
+    }
+
+    /// Popped packets belong to the caller. Their wire bytes stop consuming
+    /// queue quota immediately, while the emergency packet always comes last.
+    pub fn pop(self: *State) ?Packet {
+        if (self.head < self.packets.items.len) {
+            const packet = self.packets.items[self.head];
+            self.head += 1;
+            self.queued_bytes -= packet.bytes.len;
+            return packet;
+        }
+        std.debug.assert(self.queued_bytes == 0);
+        self.packets.clearRetainingCapacity();
+        self.head = 0;
+        if (self.overflow) |packet| {
+            self.overflow = null;
+            return packet;
+        }
+        return null;
+    }
+
+    fn compact(self: *State) void {
+        const remaining = self.packets.items.len - self.head;
+        @memmove(self.packets.items[0..remaining], self.packets.items[self.head..]);
+        self.packets.items.len = remaining;
+        self.head = 0;
+    }
+};
+
+test {
+    _ = @import("pending_tests.zig");
+}

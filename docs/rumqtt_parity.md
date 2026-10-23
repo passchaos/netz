@@ -354,6 +354,24 @@ The focused client/runtime, reconnect, TLS, WebSocket and Unix matrix passes
 245 tests in Debug and ReleaseFast. Package reachability and the two-Mosquitto
 OutboundBridge gate also pass, including QoS 0/1/2 and durable restart recovery.
 
+The same correlated-response queue now also enforces
+`Limits.max_pending_packet_bytes`, defaulting to 32 MiB, independently of the
+256-packet count limit. Its accounting covers complete MQTT wire packets,
+including Topic and Properties, and returns byte credit as soon as an ordinary
+reader takes ownership. Count/byte refusal precedes queue allocation or
+compaction; allocation failure leaves both counters unchanged. An already-read
+overflow packet still follows the queued prefix and is separately bounded by
+`max_packet_size`. Zero byte credit disables correlated-response helpers before
+their request write. The queue lifecycle lives in
+`runtime/acknowledgement/pending.zig`, with adjacent exact-limit, compaction,
+overflow, integer-boundary and allocation-failure tests. Real connections cover
+SUBSCRIBE across MQTT 3.1/3.1.1/5, and PING/UNSUBSCRIBE across MQTT 3.1.1/5,
+including recovery of the retained packets and the still-pending response.
+On 64-bit targets the byte policy adds eight bytes to the compact live
+connection limits, while its counter adds eight bytes to the on-demand queue.
+The focused queue/client/runtime/reconnect, TLS, WebSocket and Unix matrix
+passes 253 tests in Debug and ReleaseFast; package reachability passes two tests.
+
 After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is

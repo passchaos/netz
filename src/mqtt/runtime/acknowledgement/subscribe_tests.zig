@@ -1,7 +1,7 @@
 const std = @import("std");
 const mqtt = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
-const Mode = enum { normal, earlier_ping, overflow, wrong_id, wrong_count };
+const Mode = enum { normal, earlier_ping, overflow, byte_overflow, wrong_id, wrong_count };
 
 test "MQTT client SUBSCRIBE preserves PUBLISH before SUBACK" {
     for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| try receive(protocol, .normal);
@@ -13,6 +13,10 @@ test "MQTT client SUBSCRIBE preserves packets queued by an earlier PING" {
 
 test "MQTT client SUBSCRIBE retains the overflowing packet and pending SUBACK" {
     try receive(.v5, .overflow);
+}
+
+test "MQTT client SUBSCRIBE byte quota retains the overflowing packet and pending SUBACK" {
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| try receive(protocol, .byte_overflow);
 }
 
 test "MQTT client SUBSCRIBE rejects uncorrelated SUBACK after interleaved PUBLISH" {
@@ -34,6 +38,10 @@ test "MQTT client SUBSCRIBE pending queue failures precede I/O and Packet Identi
     try std.testing.expectError(error.TooManyPendingPackets, client.subscribe(&.{.{ .topic_filter = "valid/#" }}, .{}));
     try std.testing.expect(!failing.has_induced_failure);
     client.limits.max_pending_ping_packets = 1;
+    client.limits.max_pending_packet_bytes = 0;
+    try std.testing.expectError(error.TooManyPendingPackets, client.subscribe(&.{.{ .topic_filter = "valid/#" }}, .{}));
+    try std.testing.expect(!failing.has_induced_failure);
+    client.limits.max_pending_packet_bytes = 32 * 1024 * 1024;
     try std.testing.expectError(error.OutOfMemory, client.subscribe(&.{.{ .topic_filter = "valid/#" }}, .{}));
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(client.pending_packets == null);
@@ -89,7 +97,12 @@ fn receive(protocol: mqtt.ProtocolVersion, mode: Mode) !void {
     var client = try runtime.Client.connect(allocator, io, server.address(), .{
         .client_id = "subscribe-wire-order",
         .protocol = protocol,
-        .limits = .{ .max_pending_ping_packets = if (mode == .overflow) 1 else 256 },
+        .limits = .{
+            .max_pending_ping_packets = if (mode == .overflow) 1 else 256,
+            // The first independently specified wire PUBLISH is 23 bytes
+            // in MQTT 5 (empty Property Length) and 22 in legacy MQTT.
+            .max_pending_packet_bytes = if (mode == .byte_overflow) (if (protocol == .v5) 23 else 22) else 32 * 1024 * 1024,
+        },
     });
     defer client.close();
     if (mode == .earlier_ping) try client.pingWithTimeout(.fromSeconds(2));
@@ -98,7 +111,7 @@ fn receive(protocol: mqtt.ProtocolVersion, mode: Mode) !void {
     const attempt = client.subscribe(&.{.{ .topic_filter = "subscribe/#" }}, .{});
     switch (mode) {
         .normal, .earlier_ping => suback = try attempt,
-        .overflow => {
+        .overflow, .byte_overflow => {
             try std.testing.expectError(error.TooManyPendingPackets, attempt);
             // A second operation cannot write while emergency storage is full.
             try std.testing.expectError(error.TooManyPendingPackets, client.subscribe(&.{.{ .topic_filter = "subscribe/#" }}, .{}));
@@ -118,7 +131,7 @@ fn receive(protocol: mqtt.ProtocolVersion, mode: Mode) !void {
         try std.testing.expectEqualStrings(payload, publish.publish.payload);
         try std.testing.expectEqual(index == 0, publish.publish.retain);
     }
-    if (mode == .overflow) suback = try client.readSubAck();
+    if (mode == .overflow or mode == .byte_overflow) suback = try client.readSubAck();
     if (suback) |owned| {
         try std.testing.expectEqual(@as(u16, 1), owned.suback.packet_id);
         try std.testing.expectEqualSlices(u8, &.{0}, owned.suback.reason_codes);

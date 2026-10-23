@@ -82,6 +82,10 @@ pub const Limits = struct {
     /// Reaching the bound fails the operation, with one already-consumed
     /// overflow packet retained separately so wire order remains recoverable.
     max_pending_ping_packets: usize = 256,
+    /// Complete MQTT wire bytes retained by correlated-response helpers.
+    /// One packet already consumed before a quota/allocator failure is kept
+    /// separately, bounded by max_packet_size. Zero disables these helpers.
+    max_pending_packet_bytes: usize = pending_packets_module.default_max_bytes,
     /// MQTT exchanges many small PUBLISH/PUBACK packets. Disable Nagle by
     /// default so a publisher window does not repeatedly fall onto the Linux
     /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
@@ -116,11 +120,13 @@ pub const Limits = struct {
 const ConnectionLimits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
     max_pending_ping_packets: usize = 256,
+    max_pending_packet_bytes: usize = pending_packets_module.default_max_bytes,
 
     fn from(limits: Limits) ConnectionLimits {
         return .{
             .max_packet_size = limits.max_packet_size,
             .max_pending_ping_packets = limits.max_pending_ping_packets,
+            .max_pending_packet_bytes = limits.max_pending_packet_bytes,
         };
     }
 };
@@ -3093,14 +3099,8 @@ fn problemInformationProperty(property: mqtt.Property) bool {
 
 /// Queue state used by blocking correlated-response helpers while they
 /// preserve interleaved application packets for the next ordinary read.
-const PendingPacketState = struct {
-    packets: std.ArrayList(OwnedPacket) = .empty,
-    head: usize = 0,
-    /// One packet already removed from the wire is retained after a queue-cap
-    /// or allocation failure. The next ordinary reader recovers it after the
-    /// queued prefix.
-    overflow: ?OwnedPacket = null,
-};
+const pending_packets_module = @import("runtime/acknowledgement/pending.zig");
+const PendingPacketState = pending_packets_module.State;
 
 pub const write_property_staging_capacity = 8;
 
@@ -3151,8 +3151,8 @@ pub const Connection = struct {
     /// Larger sets retain this exact-capacity overflow allocation across
     /// writes while the connection's single-writer boundary is held.
     write_property_overflow: ?[]mqtt.Property = null,
-    /// Allocated before the first synchronous PINGREQ. Broker connections and
-    /// event-loop clients therefore do not pay for blocking-ping queue state.
+    /// Allocated before the first synchronous correlated-response wait.
+    /// Ordinary event reads do not allocate this queue state.
     pending_packets: ?*PendingPacketState = null,
     /// Owned metadata from an explicitly trusted PROXY protocol listener.
     /// Keeping it beside rather than inside the transport allows the same
@@ -6796,22 +6796,17 @@ pub const Connection = struct {
 
     fn pendingPacketCount(self: *const Connection) usize {
         const pending = self.pending_packets orelse return 0;
-        return pending.packets.items.len - pending.head +
-            @intFromBool(pending.overflow != null);
+        return pending.count();
     }
 
     fn ensurePendingPacketQueueAvailable(self: *Connection) Error!void {
-        if (self.limits.max_pending_ping_packets == 0) {
+        if (self.limits.max_pending_ping_packets == 0 or
+            self.limits.max_pending_packet_bytes == 0)
+        {
             return error.TooManyPendingPackets;
         }
         if (self.pending_packets) |pending| {
-            if (pending.overflow != null or
-                self.pendingPacketCount() >=
-                    self.limits.max_pending_ping_packets)
-            {
-                return error.TooManyPendingPackets;
-            }
-            return;
+            return pending.ensureAvailable(self.limits.max_pending_ping_packets, self.limits.max_pending_packet_bytes);
         }
         const pending = try self.allocator.create(PendingPacketState);
         pending.* = .{};
@@ -6827,19 +6822,13 @@ pub const Connection = struct {
         pub const queuePacket = Connection.queuePendingPacket;
 
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
-            const pending = connection.pending_packets.?;
-            std.debug.assert(pending.overflow == null);
-            pending.overflow = packet;
+            connection.pending_packets.?.retainOverflow(packet);
         }
     });
 
     fn clearPendingPacketState(self: *Connection) void {
         const pending = self.pending_packets orelse return;
-        for (pending.packets.items[pending.head..]) |*packet| {
-            packet.deinit(self.allocator);
-        }
-        pending.packets.deinit(self.allocator);
-        if (pending.overflow) |*packet| packet.deinit(self.allocator);
+        pending.deinit(self.allocator);
         self.allocator.destroy(pending);
         self.pending_packets = null;
     }
@@ -6848,52 +6837,12 @@ pub const Connection = struct {
         self: *Connection,
         packet: OwnedPacket,
     ) Error!void {
-        const pending = self.pending_packets.?;
-        // Check the semantic bound before append. The caller handles either a
-        // full queue or allocator failure by using the emergency slot.
-        if (self.pendingPacketCount() >=
-            self.limits.max_pending_ping_packets)
-        {
-            return error.TooManyPendingPackets;
-        }
-        if (pending.head != 0 and
-            pending.packets.items.len == pending.packets.capacity)
-        {
-            self.compactPendingPackets();
-        }
-        try pending.packets.append(self.allocator, packet);
-    }
-
-    fn compactPendingPackets(self: *Connection) void {
-        const pending = self.pending_packets.?;
-        if (pending.head == 0) return;
-        const remaining = pending.packets.items.len - pending.head;
-        if (remaining != 0) {
-            @memmove(
-                pending.packets.items[0..remaining],
-                pending.packets.items[pending.head..],
-            );
-        }
-        pending.packets.items.len = remaining;
-        pending.head = 0;
+        return self.pending_packets.?.append(self.allocator, packet, self.limits.max_pending_ping_packets, self.limits.max_pending_packet_bytes);
     }
 
     fn popPendingPacket(self: *Connection) ?OwnedPacket {
         const pending = self.pending_packets orelse return null;
-        if (pending.head < pending.packets.items.len) {
-            const packet = pending.packets.items[pending.head];
-            pending.head += 1;
-            return packet;
-        }
-        // Clear the consumed prefix only after it is exhausted. The overflow
-        // packet always followed that prefix on the wire and must remain last.
-        pending.packets.clearRetainingCapacity();
-        pending.head = 0;
-        if (pending.overflow) |packet| {
-            pending.overflow = null;
-            return packet;
-        }
-        return null;
+        return pending.pop();
     }
 
     fn validateReadPacket(
@@ -8037,7 +7986,7 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 792), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 800), @sizeOf(Connection));
         try std.testing.expectEqual(
             @as(usize, 2),
             @sizeOf(ConnectionCapabilities),
@@ -8211,6 +8160,7 @@ test "MQTT Connection retains only post-admission limits" {
     const configured = Limits{
         .max_packet_size = 12_345,
         .max_pending_ping_packets = 7,
+        .max_pending_packet_bytes = 2_048,
         .tcp_nodelay = false,
         .proxy_protocol = .v2,
         .proxy_v2_require_tls = true,
@@ -8226,8 +8176,9 @@ test "MQTT Connection retains only post-admission limits" {
         configured.max_pending_ping_packets,
         active.max_pending_ping_packets,
     );
+    try std.testing.expectEqual(configured.max_pending_packet_bytes, active.max_pending_packet_bytes);
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 16), @sizeOf(ConnectionLimits));
+        try std.testing.expectEqual(@as(usize, 24), @sizeOf(ConnectionLimits));
     }
 
     const connection = Connection{
@@ -8354,7 +8305,7 @@ test "MQTT Connection allocates Topic Alias tables by direction" {
     }
 }
 
-test "MQTT Connection allocates blocking PING state on demand" {
+test "MQTT Connection allocates response waiting state on demand" {
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
         .{ .fail_index = 0 },
@@ -8380,7 +8331,7 @@ test "MQTT Connection allocates blocking PING state on demand" {
     try std.testing.expect(connection.pending_packets == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 88), @sizeOf(PendingPacketState));
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(PendingPacketState));
         try std.testing.expectEqual(
             @sizeOf(?*PendingPacketState),
             @sizeOf(@FieldType(Connection, "pending_packets")),
@@ -11638,5 +11589,6 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 test {
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
+    _ = @import("runtime/acknowledgement/byte_limit_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
 }
