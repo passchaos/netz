@@ -862,6 +862,23 @@ messages without acknowledgement, then Clean Start atomically removes the
 subscriptions and restored outgoing inflight state. A third broker requires
 Session Present false, no stale delivery, and a no-subscriber publication
 result, proving the cleanup itself survived another snapshot/restart.
+SUBSCRIBE filter updates now commit the durable Session policy and router
+index together under the broker state lock. Previously, a route-allocation
+failure could occur after `Store.setSubscription` had accepted a new filter,
+leaving an offline persistent Session with an unindexed subscription. The
+inline `Router.PreparedSubscription` prepares a reversible route without an
+extra transaction-record allocation; `broker/subscription_change.zig` then
+updates Session storage and commits only after both succeed. Session allocation
+or byte-limit failures restore the prepared route, while a per-Session count
+refusal is checked before route allocation so one packet can still report
+independent successes and quota results. Existing filters remain replaceable
+at the cap. Rollback preserves old QoS, No Local and Subscription Identifier
+policy without allocating. A real broker regression runs MQTT 3.1, 3.1.1 and
+5 through a failed new-filter allocation and verifies the previously accepted
+subscription still queues offline traffic. The targeted subscription/router/
+retained/Session Debug and ReleaseFast gates pass 130/130 tests each;
+public-module checks pass 2/2.
+
 Source-locked ports of `15-persist-subscription-v3-1-1.py` and
 `15-persist-subscription-v5-0.py` add a separate three-generation subscription
 path. QoS 0/1/2 grants restore with exact live delivery, MQTT 5 preserves

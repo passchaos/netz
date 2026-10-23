@@ -667,6 +667,10 @@ const SessionAckResult = struct {
     owned: bool,
     persistent_changed: bool,
 };
+const subscription_change = @import("broker/subscription_change.zig");
+test {
+    _ = subscription_change;
+}
 const subscriberId = session_route.connectionSubscriberId;
 const nextConnectionGeneration = session_route.nextConnectionGeneration;
 const sessionSubscriberId = session_route.sessionSubscriberId;
@@ -5811,7 +5815,9 @@ pub const Broker = struct {
                 }
             else
                 true;
-            const session_existed = self.sessions.setSubscription(
+            const session_existed = subscription_change.apply(
+                &self.sessions,
+                &self.router,
                 session_handle,
                 granted,
                 subscription_identifier,
@@ -5831,15 +5837,7 @@ pub const Broker = struct {
                 else => return err,
             };
             persistent_changed = persistent_changed or !unchanged;
-            const route_id = try self.sessions.routeId(session_handle);
-            const existed = self.router.subscribeWithIdentifierStatus(
-                sessionSubscriberId(route_id),
-                granted,
-                subscription_identifier,
-            ) catch |err| {
-                return err;
-            };
-            std.debug.assert(existed == session_existed);
+            const existed = session_existed;
             reasons[index] = @intFromEnum(granted.qos);
             const deliveries = self.retained.deliveriesAlloc(
                 self.allocator,

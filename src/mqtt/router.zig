@@ -13,6 +13,7 @@ const BatchContext = struct {
     pub const findEntry = Router.findEntry;
 };
 pub const SubscriptionBatch = @import("router/batch.zig").SubscriptionBatch(BatchContext);
+pub const PreparedSubscription = @import("router/batch.zig").PreparedSubscription(BatchContext);
 
 pub const SubscriberId = u64;
 
@@ -155,6 +156,10 @@ pub const Router = struct {
     /// router's serialization boundary until the batch commits or deinitializes.
     pub fn beginSubscriptionBatch(self: *Router, subscriber_id: SubscriberId, capacity: usize) Error!SubscriptionBatch {
         return SubscriptionBatch.init(self, subscriber_id, capacity);
+    }
+
+    pub fn prepareSubscription(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription, identifier: ?usize) Error!PreparedSubscription {
+        return PreparedSubscription.init(self, subscriber_id, subscription, identifier);
     }
 
     pub fn subscribe(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription) Error!void {

@@ -2304,6 +2304,7 @@ test {
     _ = @import("broker/connect_admission_tests.zig");
     _ = @import("broker/connack_admission_tests.zig");
     _ = @import("broker/subscription_admission_tests.zig");
+    _ = @import("broker/subscription_change_tests.zig");
     _ = @import("broker/registration_persistence_tests.zig");
     _ = @import("broker/listener_tests.zig");
     _ = @import("broker/unix_listener_tests.zig");

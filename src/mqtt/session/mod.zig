@@ -1655,6 +1655,19 @@ pub const Store = struct {
         return .{ .nanoseconds = deadline };
     }
 
+    /// Check the per-Session count before another subsystem prepares a route.
+    /// Existing filters remain replaceable when the count has reached its cap.
+    pub fn checkSubscriptionLimit(self: *Store, handle: Handle, topic_filter: []const u8) Error!void {
+        const value = try self.getSession(handle);
+        if (value.subscription_count < self.options.max_subscriptions_per_session) return;
+        for (value.subscriptions.items) |item| {
+            if (item) |subscription| {
+                if (std.mem.eql(u8, subscription.topic_filter, topic_filter)) return;
+            }
+        }
+        return error.SubscriptionLimitExceeded;
+    }
+
     pub fn setSubscription(
         self: *Store,
         handle: Handle,
