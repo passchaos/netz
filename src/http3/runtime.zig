@@ -35797,6 +35797,7 @@ test {
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/client/owned_head_tests.zig");
     _ = @import("runtime/qpack/tests/cancellation.zig");
+    _ = @import("runtime/qpack/tests/decoder_progress.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_dispatcher_relay_tests.zig");
     _ = @import("runtime/connect_ip_tests.zig");

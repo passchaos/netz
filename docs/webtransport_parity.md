@@ -873,6 +873,14 @@ all instruction bytes for the next turn. Protected-UDP tests verify delayed
 acknowledgments, entry pinning until peer cancellation, ordinary completion,
 and exact cancellation/prefix bytes alongside the budget and rollback cases.
 
+QPACK decoder insert feedback also survives a partially processed encoder-stream
+batch. Instruction decoding or insertion can fail after earlier table updates
+and receive offsets were committed; the decoder queues their Insert Count
+Increment before returning the error, using capacity reserved before mutation.
+Retry emits only the remaining increment, and retransmitted consumed bytes
+cannot duplicate table entries or feedback. Allocation-point fault injection,
+recovery, and invalid-suffix regressions cover those transitions.
+
 Peer `STOP_SENDING` rejection also completes scoped cleanup after QUIC has
 already submitted its matching RESET. QUIC cancellation preserves that
 RESET's original error code and final size while using the caller's requested

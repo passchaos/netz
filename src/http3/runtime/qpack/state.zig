@@ -239,7 +239,12 @@ pub const QpackDecodeState = struct {
         // allocation failure leaves both stream consumption and table state
         // retryable.
         try self.decoder_instructions.ensureUnusedCapacity(self.allocator, 11);
-        var inserted_total: u64 = 0;
+        const starting_insert_count = self.table.insert_count;
+        // Earlier instructions remain committed when a later decode or
+        // insertion fails. Their feedback must survive that return as well.
+        defer if (self.table.insert_count != starting_insert_count) {
+            self.recordInsertCountAssumeCapacity(self.table.insert_count - starting_insert_count);
+        };
         while (receive.available().len != 0) {
             const available = receive.available();
             var decoded = http3.Qpack.decodeEncoderInstruction(
@@ -251,19 +256,12 @@ pub const QpackDecodeState = struct {
                 else => return error.QpackEncoderStreamError,
             };
             defer decoded.deinit(self.allocator);
-            const before = self.table.insert_count;
             applyDecodedEncoderInstruction(&self.table, decoded.instruction) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => return error.QpackEncoderStreamError,
             };
             try receive.consume(decoded.consumed);
-            inserted_total = std.math.add(
-                u64,
-                inserted_total,
-                self.table.insert_count - before,
-            ) catch return error.QpackDecoderStreamError;
         }
-        if (inserted_total != 0) try self.recordInsertCount(inserted_total);
     }
 
     pub fn decodeFieldSection(
@@ -382,14 +380,14 @@ pub const QpackDecodeState = struct {
         ) catch unreachable;
     }
 
-    fn recordInsertCount(self: *QpackDecodeState, inserted: u64) Error!void {
+    fn recordInsertCountAssumeCapacity(self: *QpackDecodeState, inserted: u64) void {
         const next = std.math.add(u64, self.acknowledged_insert_count, inserted) catch
-            return error.QpackDecoderStreamError;
-        try http3.Qpack.writeDecoderInstruction(
+            unreachable;
+        http3.Qpack.writeDecoderInstruction(
             &self.decoder_instructions,
             self.allocator,
             .{ .insert_count_increment = inserted },
-        );
+        ) catch unreachable;
         self.acknowledged_insert_count = next;
     }
 };
