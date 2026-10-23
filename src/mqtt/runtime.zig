@@ -77,8 +77,8 @@ pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
     /// Maximum interleaved Control Packets retained while a synchronous client
     /// operation waits for its correlated response. MQTT permits the broker to
-    /// send ordinary traffic at any time, so PING and UNSUBSCRIBE preserve
-    /// those packets for the next typed reader instead of consuming them.
+    /// send ordinary traffic at any time, so SUBSCRIBE, UNSUBSCRIBE and PING
+    /// preserve those packets for the next typed reader.
     /// Reaching the bound fails the operation, with one already-consumed
     /// overflow packet retained separately so wire order remains recoverable.
     max_pending_ping_packets: usize = 256,
@@ -5106,12 +5106,13 @@ pub const Connection = struct {
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
         try self.validateOutgoingPacketType(.subscribe);
         try self.validateOutgoingSubscribe(subscriptions, options.properties);
+        try self.ensurePendingPacketQueueAvailable();
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Subscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
         try self.writeGeneratedPacket(self.write_scratch.items, .subscribe);
 
-        var suback = try self.readSubAck();
+        var suback = try self.finishReadSubAck(try AckReader.read(self, .suback, null));
         errdefer suback.deinit(self.allocator);
         if (suback.suback.packet_id != packet_id or suback.suback.reason_codes.len != subscriptions.len) {
             return error.UnexpectedPacket;
@@ -5171,7 +5172,11 @@ pub const Connection = struct {
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
-        var packet = try self.readPacket();
+        return self.finishReadSubAck(try self.readPacket());
+    }
+
+    fn finishReadSubAck(self: *Connection, packet_value: OwnedPacket) Error!OwnedSubAck {
+        var packet = packet_value;
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .suback) return error.UnexpectedPacket;
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
@@ -5188,38 +5193,15 @@ pub const Connection = struct {
         try self.ensurePendingPacketQueueAvailable();
         try self.writeGeneratedPacket(self.write_scratch.items, .unsubscribe);
 
-        while (true) {
-            // As with PINGRESP, MQTT permits ordinary server traffic between
-            // the request and its correlated acknowledgement. Read only from
-            // the transport here so packets queued by an earlier operation
-            // retain their original position ahead of this UNSUBSCRIBE.
-            var packet = try self.readTransportPacket();
-            var packet_owned = true;
-            defer if (packet_owned) packet.deinit(self.allocator);
-            if (packet.fixed.packet_type == .unsuback) {
-                packet_owned = false;
-                var unsuback = try self.finishReadUnsubAck(packet);
-                errdefer unsuback.deinit(self.allocator);
-                try validateUnsubAckResponse(
-                    self.protocol,
-                    unsuback.unsuback,
-                    packet_id,
-                    topic_filters.len,
-                );
-                return unsuback;
-            }
-            self.queuePendingPacket(packet) catch |err| {
-                // The packet has already left the transport. Preserve it in
-                // the emergency slot so the next reader can recover the exact
-                // wire order even when the configured bound is exhausted.
-                const pending = self.pending_packets.?;
-                std.debug.assert(pending.overflow == null);
-                pending.overflow = packet;
-                packet_owned = false;
-                return err;
-            };
-            packet_owned = false;
-        }
+        var unsuback = try self.finishReadUnsubAck(try AckReader.read(self, .unsuback, null));
+        errdefer unsuback.deinit(self.allocator);
+        try validateUnsubAckResponse(
+            self.protocol,
+            unsuback.unsuback,
+            packet_id,
+            topic_filters.len,
+        );
+        return unsuback;
     }
 
     pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
@@ -5332,31 +5314,9 @@ pub const Connection = struct {
             mqtt.writePingInto(&encoded, false),
             .pingreq,
         );
-        while (true) {
-            // Do not consume the pending queue while waiting: those packets
-            // predate this PING and re-queueing them would loop forever.
-            var packet = if (deadline) |absolute|
-                try self.readTransportPacketWithDeadline(absolute)
-            else
-                try self.readTransportPacket();
-            var packet_owned = true;
-            defer if (packet_owned) packet.deinit(self.allocator);
-            if (packet.fixed.packet_type == .pingresp) {
-                try mqtt.validatePing(packet.bytes, true);
-                return;
-            }
-            self.queuePendingPacket(packet) catch |err| {
-                // The packet has already left the transport. Retain it even
-                // when the configured cap or allocator rejects a queue slot,
-                // so the caller can drain the exact wire sequence afterward.
-                const pending = self.pending_packets.?;
-                std.debug.assert(pending.overflow == null);
-                pending.overflow = packet;
-                packet_owned = false;
-                return err;
-            };
-            packet_owned = false;
-        }
+        var packet = try AckReader.read(self, .pingresp, deadline);
+        defer packet.deinit(self.allocator);
+        try mqtt.validatePing(packet.bytes, true);
     }
 
     pub fn readPingReq(self: *Connection) Error!void {
@@ -6857,6 +6817,21 @@ pub const Connection = struct {
         pending.* = .{};
         self.pending_packets = pending;
     }
+
+    const AckReader = @import("runtime/acknowledgement/wait.zig").Reader(struct {
+        pub const ConnectionType = Connection;
+        pub const PacketType = OwnedPacket;
+        pub const ErrorType = Error;
+        pub const readPacket = Connection.readTransportPacket;
+        pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
+        pub const queuePacket = Connection.queuePendingPacket;
+
+        pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
+            const pending = connection.pending_packets.?;
+            std.debug.assert(pending.overflow == null);
+            pending.overflow = packet;
+        }
+    });
 
     fn clearPendingPacketState(self: *Connection) void {
         const pending = self.pending_packets orelse return;
@@ -11661,5 +11636,7 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 }
 
 test {
+    _ = @import("runtime/acknowledgement/subscribe_tests.zig");
+    _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
 }

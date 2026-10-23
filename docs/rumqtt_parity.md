@@ -338,6 +338,22 @@ without tearing down current inbound subscriptions. Legal PUBLISH traffic
 interleaved before an UNSUBACK is retained in wire order, acknowledged, and
 deliberately discarded; disabling the option omits the cleanup packet.
 
+Synchronous SUBSCRIBE now also retains PUBLISH packets received before SUBACK,
+as permitted by MQTT's section 3.8.4. Earlier queued packets keep their original
+position, the complete SUBACK still validates Packet Identifier and reason
+count, and later typed reads deliver the preserved messages. SUBSCRIBE,
+UNSUBSCRIBE and PING share `runtime/acknowledgement/wait.zig`, including the
+configured pending-packet bound, emergency overflow retention, and the original
+PING deadline. Queue refusal occurs before a SUBSCRIBE write or Packet
+Identifier mutation. Adjacent MQTT 3.1/3.1.1/5 wire tests cover early retained
+traffic, older pending traffic, overflow recovery, and mismatched SUBACKs. A
+two-connection MQTT 3.1.1/5 reconnect test proves fresh-Session subscription
+replay accepts early QoS 1 publications and delivers them through normal
+application polling and PUBACK handling.
+The focused client/runtime, reconnect, TLS, WebSocket and Unix matrix passes
+245 tests in Debug and ReleaseFast. Package reachability and the two-Mosquitto
+OutboundBridge gate also pass, including QoS 0/1/2 and durable restart recovery.
+
 After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is
