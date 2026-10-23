@@ -42,6 +42,7 @@ const validateExpectedContentLength =
 const validateResponseContentLength = message_headers.validateResponseContentLength;
 const checkedResponseBodyLength = message_headers.checkedResponseBodyLength;
 const checkedBodyLength = message_headers.checkedBodyLength;
+const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const response_credit = @import("runtime/response/credit.zig");
 const validateDeclaredRequestLength =
     message_headers.validateDeclaredRequestLength;
@@ -10472,6 +10473,8 @@ pub const Connection = struct {
         }
         if (self.role != .server) return error.UnexpectedFrame;
         if (requests.len == 0) return;
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
 
         var expected_stack: [16]?usize = undefined;
         var done_stack: [16]bool = undefined;
@@ -10495,39 +10498,32 @@ pub const Connection = struct {
         var completed: usize = 0;
         var active_uninitialized_stream_id: ?u31 = null;
         var timeout_lost_state = false;
-        var rejected_data: ?ServeReadStreamError = null;
-        errdefer {
-            if (timeout_lost_state) {
-                self.aggregate_timeout_unusable = true;
-                if (active_uninitialized_stream_id) |stream_id| {
-                    // The inner admission guard may already have removed the
-                    // active marker. The peer still needs an explicit cancel
-                    // for the incomplete header block visible on the wire.
-                    self.writeResetStreamFrame(stream_id, .cancel) catch {};
-                    self.releasePeerStream(stream_id);
-                    self.forgetStreamWindows(stream_id);
-                }
-            }
-            for (requests[0..initialized]) |*streaming_request| {
-                // Every request still owns an open response half even when its
-                // inbound DATA already ended. Cancel the whole batch so a
-                // callback/framing failure cannot strand clients waiting for
-                // responses that this API will never produce.
-                const rejection = rejected_data;
-                if (rejection != null and rejection.?.stream_id == streaming_request.stream_id) {
-                    self.abandonPeerRequestInternal(streaming_request.stream_id, rejection.?.code, true);
-                } else {
-                    self.cancelPeerRequest(streaming_request.stream_id);
-                }
-                streaming_request.deinit(self.allocator);
-            }
-        }
+        var current_stream_id: ?u31 = null;
+        var stream_error_code: ?http2.ErrorCode = null;
+        var callback_failed = false;
+        errdefer |err| request_batch_cleanup.abort(self, requests[0..initialized], .{
+            .cause = err,
+            .stream_id = current_stream_id,
+            .stream_code = stream_error_code,
+            .uninitialized_stream_id = active_uninitialized_stream_id,
+            .read_timed_out = timeout_lost_state,
+            .callback_failed = callback_failed,
+        }, .{
+            .sendConnectionError = sendServeReadError,
+            .streamErrorCode = serveRequestStreamErrorCode,
+            .reset = writeResetStreamFrame,
+            .errorReset = writeLocalErrorResetStream,
+            .releasePeer = releasePeerStream,
+            .forgetWindows = forgetStreamWindows,
+        });
 
         while (completed < requests.len) {
+            current_stream_id = null;
+            stream_error_code = null;
             const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| {
                 timeout_lost_state = deadline != null and
                     err == error.Timeout and initialized != 0;
-                return err;
+                return @errorCast(err);
             }).frame;
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
@@ -10543,35 +10539,33 @@ pub const Connection = struct {
                         requests[0..initialized],
                         frame.header.stream_id,
                     )) |index| {
-                        if (done[index] or
-                            (frame.header.flags & flag_end_stream) == 0)
-                        {
-                            return error.UnexpectedFrame;
-                        }
-                        requests[index].trailers = self.readHeaderBlockUntil(
+                        current_stream_id = frame.header.stream_id;
+                        // HPACK state is shared across streams. Decode even a
+                        // rejected HEADERS block before checking its message
+                        // state so later requests keep the same dynamic table.
+                        const trailers = self.readHeaderBlockUntil(
                             frame,
                             deadline,
                         ) catch |err| {
                             timeout_lost_state =
                                 deadline != null and err == error.Timeout;
-                            return err;
+                            return @errorCast(err);
                         };
                         var trailers_owned = true;
-                        errdefer if (trailers_owned) {
-                            freeHeaders(
-                                self.allocator,
-                                requests[index].trailers,
-                            );
-                            requests[index].trailers = &.{};
-                        };
+                        errdefer if (trailers_owned) freeHeaders(self.allocator, trailers);
+                        if (done[index] or (frame.header.flags & flag_end_stream) == 0) {
+                            stream_error_code = if (done[index]) .stream_closed else .protocol_error;
+                            return error.UnexpectedFrame;
+                        }
                         try validateHeaderBlock(
-                            requests[index].trailers,
+                            trailers,
                             .request_trailers,
                         );
                         try self.finishBatchStreamingRequest(
                             &requests[index],
                             expected[index],
                         );
+                        requests[index].trailers = trailers;
                         done[index] = true;
                         completed += 1;
                         trailers_owned = false;
@@ -10591,26 +10585,23 @@ pub const Connection = struct {
                         ) catch |err| {
                             timeout_lost_state =
                                 deadline != null and err == error.Timeout;
-                            return err;
+                            return @errorCast(err);
                         };
                         continue;
                     }
                     active_uninitialized_stream_id = stream_id;
+                    current_stream_id = stream_id;
                     var stream_reserved = true;
                     errdefer if (stream_reserved) {
                         self.releasePeerStream(stream_id);
                     };
-                    if (initialized == requests.len) {
-                        return error.UnexpectedFrame;
-                    }
-
                     const headers = self.readHeaderBlockUntil(
                         frame,
                         deadline,
                     ) catch |err| {
                         timeout_lost_state =
                             deadline != null and err == error.Timeout;
-                        return err;
+                        return @errorCast(err);
                     };
                     var headers_owned = true;
                     errdefer if (headers_owned) {
@@ -10620,7 +10611,14 @@ pub const Connection = struct {
                     const lookup = try requestHeaderLookup(headers);
                     const method = lookup.method orelse
                         return error.MissingPseudoHeader;
-                    if (methodIsConnect(method)) return error.InvalidHeader;
+                    if (initialized == requests.len) {
+                        stream_error_code = .refused_stream;
+                        return error.UnexpectedFrame;
+                    }
+                    if (methodIsConnect(method)) {
+                        stream_error_code = .refused_stream;
+                        return error.InvalidHeader;
+                    }
                     if (lookup.protocol != null) {
                         return error.InvalidHeader;
                     }
@@ -10665,12 +10663,17 @@ pub const Connection = struct {
                         requests[0..initialized],
                         frame.header.stream_id,
                     ) orelse return error.UnexpectedFrame;
-                    if (done[index]) return error.UnexpectedFrame;
+                    current_stream_id = frame.header.stream_id;
                     const data = try self.receiveDataPayload(
                         frame.header.stream_id,
                         frame,
                     );
                     defer self.releaseDataFrameBudget(data);
+                    if (done[index]) {
+                        self.releaseConnectionCapacity(frame.payload.len) catch {};
+                        stream_error_code = .stream_closed;
+                        return error.UnexpectedFrame;
+                    }
                     requests[index].body_bytes = checkedBodyLength(
                         expected[index],
                         requests[index].body_bytes,
@@ -10679,8 +10682,7 @@ pub const Connection = struct {
                         (frame.header.flags & flag_end_stream) != 0,
                     ) catch |err| {
                         self.releaseConnectionCapacity(frame.payload.len) catch {};
-                        rejected_data = .{ .stream_id = frame.header.stream_id, .code = responseStreamErrorCode(err).? };
-                        return err;
+                        return @errorCast(err);
                     };
                     if (data.data.len != 0) {
                         consume(
@@ -10688,13 +10690,14 @@ pub const Connection = struct {
                             frame.header.stream_id,
                             data.data,
                         ) catch |err| {
+                            callback_failed = true;
                             // The error path resets every batch member, so no
                             // stream credit will be consumed again. Restore
                             // only the shared connection window.
                             self.releaseConnectionCapacity(
                                 frame.payload.len,
                             ) catch {};
-                            return err;
+                            return @errorCast(err);
                         };
                     }
                     try self.maybeReleaseReceivedCapacity(
@@ -10730,6 +10733,10 @@ pub const Connection = struct {
                         continue;
                     }
                     return error.StreamReset;
+                },
+                .continuation => {
+                    self.serve_read_connection_error = .frame_sequence;
+                    return error.UnexpectedFrame;
                 },
                 else => return error.UnexpectedFrame,
             }
@@ -38159,6 +38166,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/response/body_length_tests.zig");

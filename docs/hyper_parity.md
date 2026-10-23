@@ -2623,6 +2623,20 @@ the stream. Real h2c aggregate and streaming regressions trigger deferred
 SETTINGS during padded DATA and exercise a subsequent Content-Length overrun,
 per-stream expiration, and callback rejection. They verify exact connection
 credit, healthy sibling completion, and later reuse.
+Server streaming request batches now apply precise wire errors to initial
+heads and trailers as well as DATA. The failing admitted stream is reset even
+when header validation prevented initialization of its output slot; remaining
+response halves receive CANCEL. Invalid fields or lengths use PROTOCOL_ERROR,
+resource limits use ENHANCE_YOUR_CALM, and frames on a completed request use
+STREAM_CLOSED. Valid requests beyond this API's result capacity or CONNECT
+lifetime support are refused with REFUSED_STREAM. Callback rejection remains
+CANCEL even when the callback returns InvalidContentLength or Timeout.
+Rejected HEADERS sections are still HPACK-decoded before message-state checks,
+preserving shared table state for later streams. HPACK failure, invalid
+CONTINUATION ordering, and unterminated continuation floods emit one connection
+GOAWAY before owned batch state is released. Real h2c regressions cover these cases, exact reset
+and GOAWAY codes, rejected-DATA credit, local stream release, synchronized HPACK
+reuse, and original application errors.
 Peer HTTP/3 unidirectional-stream classification also waits when a reordered
 FIN arrives before offset zero instead of treating the temporarily unavailable
 type as malformed. A complete zero-byte stream declares no critical type and
