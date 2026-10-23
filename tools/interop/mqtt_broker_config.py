@@ -71,6 +71,7 @@ from mqtt_broker_config_session_persistence import (
 from mqtt_broker_config_subscription_persistence import (
     run_persistent_subscription_snapshot_case,
 )
+from mqtt_scenarios.subscription_lifecycle import run_subscription_lifecycle_case
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -78,6 +79,14 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
+    "broker/02-subscribe-persistence-flipflop.py":
+        "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
+    "broker/11-persistent-subscription.py":
+        "4166cc4b6a81c7f1feb135dd6479d60dc29d4f9a2ed7380c678792d87c68e19b",
+    "broker/11-persistent-subscription-no-local.py":
+        "2a77a9da197041f80129bdba981ac6a4577503b57436ea60153f78010d52b4d6",
+    "broker/11-subscription-id.py":
+        "bc736a56c9d4e53e346e17d21d17e1dcc477b1693c34fdc6c0dac50854d448aa",
     "broker/01-connect-listener-allow-anonymous.py":
         "56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214",
     "broker/01-connect-uname-or-anon.py":
@@ -144,6 +153,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-persistence-restart", action="store_true")
+    selected.add_argument("--only-subscription-lifecycle", action="store_true")
     selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -7551,6 +7561,15 @@ def main() -> None:
     os.environ[FINITE_TEST_ENV] = "1"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
+        if args.only_subscription_lifecycle:
+            run_subscription_lifecycle_case(args.broker, directory)
+            print(
+                "MQTT subscription lifecycle integration passed: "
+                "upstream_sources=4 protocols=mqttv311+mqttv5 broker_generations=6 "
+                "self-delivery+no-local+queued-identifiers+clean-start-flipflop=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
         if args.only_security_reload:
             run_security_reload_case(args.broker, directory)
             print(
@@ -7828,6 +7847,7 @@ def main() -> None:
         run_retained_property_persistence_case(args.broker, directory)
         run_persistent_session_clean_start_case(args.broker, directory)
         run_persistent_subscription_snapshot_case(args.broker, directory)
+        run_subscription_lifecycle_case(args.broker, directory)
         run_expired_message_persistence_case(args.broker, directory)
         run_packet_size_connection_scope_case(args.broker, directory)
         run_outgoing_qos2_snapshot_case(args.broker, directory)

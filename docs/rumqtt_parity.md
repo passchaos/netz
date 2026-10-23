@@ -869,6 +869,35 @@ Subscription Identifiers 100/101/102, and the second generation removes the
 QoS 2 filter. The third generation routes only QoS 0/1, returns MQTT 5 No
 matching subscribers for the removed topic, and answers PING before any stale
 delivery, proving the UNSUBSCRIBE tombstone survived another snapshot.
+Four additional source-locked process ports cover
+`11-persistent-subscription.py`, `11-persistent-subscription-no-local.py`,
+`11-subscription-id.py`, and `02-subscribe-persistence-flipflop.py`. The focused
+`--only-subscription-lifecycle` gate runs three real broker generations for each
+of MQTT 3.1.1 and MQTT 5. A persistent subscriber receives its own ordinary
+publication before and after restart; MQTT 5's No Local filter excludes self
+publications while accepting another client's publication. Transport EOF is
+observed after DISCONNECT before the helper publishes, so the next snapshot
+contains provably unsent offline deliveries. Reconnect receives those messages
+without a new SUBSCRIBE and with exact Subscription Identifiers 53/54. A
+persistent/clean-transient/fresh-persistent sequence then leaves exactly one
+subscription owner, using the two-byte identifier 131 on MQTT 5. The third
+broker restores only this new subscription: no duplicate old owner or removed
+No Local filter can reappear. PING barriers verify absence of extra messages
+and completion of acknowledgements without sleep-based delivery assumptions.
+The scenario lives under `tools/interop/mqtt_scenarios/` rather than expanding
+the config runner's monolithic scenario bodies. Independent wire-image tests
+reject wrong DUP/QoS flags, zero Packet Identifiers, changed Subscription
+Identifiers/payloads, error PUBACKs, and mismatched acknowledgement identifiers.
+The ReleaseSafe process gate passes all six broker generations, and the helper
+and source-lock checker suites pass 8/8 and 6/6 tests respectively. It is also
+included in the ordinary `interop-mqtt-broker-config` gate. Run just this scope
+with:
+
+```sh
+zig build interop-mqtt-broker-config -Doptimize=ReleaseSafe -- \
+  --only-subscription-lifecycle \
+  --mosquitto-test-root ~/Work/mosquitto/test
+```
 Scheduled-Will tests cover downtime deadline reduction, canonical publisher
 restoration, reconnect cancellation, driver publication after an actual broker
 restart and retained-Will storage. This snapshot surface still has narrower
@@ -5116,8 +5145,10 @@ proxy evidence for the entire suite.
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 294 curated
-   scenarios. The strict broker configuration adapter now locks twenty-two
+   scenarios. The strict broker configuration adapter now locks twenty-six
    upstream process sources:
+   persistent subscription self-delivery, persisted No Local, queued
+   Subscription Identifiers, persistent/clean-session flipflop,
    Windows-CRLF configuration, missing root configuration, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous

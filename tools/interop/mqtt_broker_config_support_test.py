@@ -9,6 +9,7 @@ from unittest import mock
 
 import mqtt_broker_config_bridge
 import mqtt_broker_config
+from mqtt_scenarios import subscription_lifecycle
 from mqtt_broker_config import wait_process_line
 
 
@@ -153,6 +154,36 @@ class CrlServerFixtureTest(unittest.TestCase):
                 mqtt_broker_config.ensure_signed_crl_server_identity(
                     directory,
                 )
+
+
+class SubscriptionLifecycleOracleTest(unittest.TestCase):
+    # Independent MQTT 5 wire image: topic=subpub/local, Packet Identifier=42,
+    # Subscription Identifier=53, payload=message.
+    delivery = bytes.fromhex("000c7375627075622f6c6f63616c002a020b356d657373616765")
+
+    def test_accepts_exact_initial_delivery(self) -> None:
+        self.assertEqual(subscription_lifecycle._delivery(
+            0x32, self.delivery, 5, "subpub/local", b"message", 53,
+        ), 42)
+
+    def test_rejects_wrong_flags_identifier_and_payload(self) -> None:
+        invalid = (
+            (0x3A, self.delivery),
+            (0x30, self.delivery),
+            (0x32, self.delivery[:14] + b"\x00\x00" + self.delivery[16:]),
+            (0x32, self.delivery[:18] + b"\x36" + self.delivery[19:]),
+            (0x32, self.delivery[:-1] + b"x"),
+            (0x32, b"\xff\xff"),
+        )
+        for first, body in invalid:
+            with self.subTest(first=first, body=body.hex()), self.assertRaises(AssertionError):
+                subscription_lifecycle._delivery(first, body, 5, "subpub/local", b"message", 53)
+
+    def test_no_matching_ack_does_not_hide_errors_or_wrong_packet_id(self) -> None:
+        subscription_lifecycle._puback(0x40, bytes.fromhex("012c10"), 300, 5, matched=False)
+        for body, matched in (("012c87", False), ("012d10", False), ("012c10", True)):
+            with self.subTest(body=body, matched=matched), self.assertRaises(AssertionError):
+                subscription_lifecycle._puback(0x40, bytes.fromhex(body), 300, 5, matched=matched)
 
 
 if __name__ == "__main__":
