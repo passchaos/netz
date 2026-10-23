@@ -165,6 +165,20 @@ that no response is sent before admission, custom acceptance fields survive the
 wire, a 401 response carries its body and closes, and delayed admission expires
 the original deadline. This closes the reference server's pre-upgrade handler
 gap without introducing a callback or worker-pool policy into the transport.
+Client HTTP/1 Upgrade now establishes its HTTP-phase deadline before nonce,
+header preparation, and request serialization. The earlier of that deadline
+and the caller's outer deadline bounds tracked request writing and all response
+reads; the response phase cannot regain time spent writing. The extracted
+`runtime/handshake/request.zig` retains target/Host validation, exact head-size
+preflight, field-capacity policy, and bodyless encoding. Its common handshake
+writer covers direct WS/WSS, caller-connected streams, URI/host, and proxy
+composition without a separate request send path. Injected slow and partial
+writes prove that WS and WSS HTTP-phase limits cancel request output, shorter
+phase limits survive a wider caller-stream budget, and failure closes a
+transferred stream so the peer sees EOF rather than waiting for its own timeout.
+The combined request/response handshake, deadline, WSS/Unix, proxy, redirect,
+resolver, and MQTT connection gate passes 213/213 tests in Debug and
+ReleaseFast; public-module package checks pass 2/2.
 HTTP/1 TCP, Unix, and native TLS admission additionally implement RFC 6455
 version negotiation: an otherwise valid request offering a version other than
 13 receives a bounded final `426 Upgrade Required` with

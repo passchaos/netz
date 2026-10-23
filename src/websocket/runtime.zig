@@ -24,6 +24,7 @@ const handshake_headers = @import("runtime/handshake/headers.zig");
 const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
 const handshake_response = @import("runtime/handshake/response.zig");
+const handshake_request = @import("runtime/handshake/request.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
 const stream_io = @import("../internal/stream_io.zig");
@@ -457,7 +458,7 @@ const RuntimeTransport = union(enum) {
     }
 };
 
-const HandshakeResponseWriter = handshake_response.Writer(struct {
+const HandshakeWriter = handshake_response.Writer(struct {
     pub const TransportType = RuntimeTransport;
     pub const ErrorType = Error;
     pub const writeWithDeadline = RuntimeTransport.writeWithDeadline;
@@ -1427,8 +1428,8 @@ fn receiveUpgradeRequestFromTransport(
                 allocator,
                 request.method,
                 limits.max_head_bytes,
-                HandshakeResponseWriter{ .transport = transport, .deadline = deadline },
-                HandshakeResponseWriter.write,
+                HandshakeWriter{ .transport = transport, .deadline = deadline },
+                HandshakeWriter.write,
             );
             return err;
         },
@@ -2032,7 +2033,7 @@ pub const PendingUpgrade = struct {
     }
 
     fn writeResponse(self: *PendingUpgrade, response_head: []const u8, body: []const u8) Error!void {
-        const writer = HandshakeResponseWriter{ .transport = self.transport, .deadline = self.deadline };
+        const writer = HandshakeWriter{ .transport = self.transport, .deadline = self.deadline };
         writer.write(response_head, body) catch |err| {
             // HTTP response bytes have an ambiguous peer-visible prefix.
             // Another 101 or rejection cannot safely follow this failure.
@@ -4684,6 +4685,14 @@ pub const Client = struct {
         options: ConnectOptions,
         outer_deadline: ?std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
+        const deadline = deadline_policy.earlier(
+            outer_deadline,
+            if (options.limits.http1_handshake_timeout) |timeout|
+                try handshakeDeadline(transport, timeout)
+            else
+                null,
+        );
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(io, absolute);
         var nonce: [16]u8 = undefined;
         try std.Io.randomSecure(io, &nonce);
         var key: [24]u8 = undefined;
@@ -4758,9 +4767,8 @@ pub const Client = struct {
             header_index += 1;
         }
         @memcpy(headers[header_index..], options.extra_headers);
-        try writeHttpUpgradeRequest(
+        try handshake_request.write(
             allocator,
-            transport,
             .{
                 .method = .GET,
                 .target = options.target,
@@ -4768,15 +4776,10 @@ pub const Client = struct {
                 .headers = headers,
             },
             options.limits.max_head_bytes,
+            HandshakeWriter{ .transport = transport, .deadline = deadline },
+            HandshakeWriter.write,
         );
 
-        const deadline = deadline_policy.earlier(
-            outer_deadline,
-            if (options.limits.http1_handshake_timeout) |timeout|
-                try handshakeDeadline(transport, timeout)
-            else
-                null,
-        );
         var head = try readHttpHeadFromTransport(
             allocator,
             transport,
@@ -13233,92 +13236,6 @@ fn readHttpUpgradeResponseBytes(
     return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
 }
 
-fn writeHttpUpgradeRequest(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    options: http1_runtime.RequestOptions,
-    max_head_bytes: usize,
-) Error!void {
-    try http1.validateRequestTargetForMethod(options.method, options.target);
-    var has_host = false;
-    for (options.headers) |header| {
-        if (header.eqlName("host")) has_host = true;
-    }
-    const header_count = std.math.add(
-        usize,
-        options.headers.len,
-        @intFromBool(!has_host and options.host != null),
-    ) catch return error.HeadersTooLarge;
-    var header_stack: [handshake_storage.stack_capacity]http1.Header =
-        undefined;
-    const headers = try handshake_storage.acquire(
-        http1.Header,
-        allocator,
-        &header_stack,
-        header_count,
-    );
-    defer handshake_storage.release(
-        http1.Header,
-        allocator,
-        &header_stack,
-        headers,
-    );
-    @memcpy(headers[0..options.headers.len], options.headers);
-    if (!has_host) {
-        if (options.host) |host| {
-            headers[options.headers.len] = .{ .name = "Host", .value = host };
-        }
-    }
-    try http1.validateHostHeaderBlock(options.version, headers);
-    // Preflight the exact bodyless request-head size before allocating the
-    // serialization buffer. `extra_headers` is caller-controlled, so checking
-    // only after encoding would not make max_head_bytes a memory bound.
-    var head_len = std.math.add(
-        usize,
-        options.method.string().len,
-        1,
-    ) catch return error.HeadersTooLarge;
-    head_len = std.math.add(usize, head_len, options.target.len) catch
-        return error.HeadersTooLarge;
-    head_len = std.math.add(usize, head_len, 1) catch
-        return error.HeadersTooLarge;
-    head_len = std.math.add(usize, head_len, options.version.string().len) catch
-        return error.HeadersTooLarge;
-    head_len = std.math.add(usize, head_len, 2) catch
-        return error.HeadersTooLarge;
-    for (headers) |header| {
-        head_len = std.math.add(usize, head_len, header.name.len) catch
-            return error.HeadersTooLarge;
-        head_len = std.math.add(usize, head_len, 2) catch
-            return error.HeadersTooLarge;
-        head_len = std.math.add(usize, head_len, header.value.len) catch
-            return error.HeadersTooLarge;
-        head_len = std.math.add(usize, head_len, 2) catch
-            return error.HeadersTooLarge;
-        if (head_len > max_head_bytes) return error.HeadersTooLarge;
-    }
-    head_len = std.math.add(usize, head_len, 2) catch
-        return error.HeadersTooLarge;
-    if (head_len > max_head_bytes) return error.HeadersTooLarge;
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try http1.writeRequestChecked(
-        &encoded,
-        allocator,
-        options.method,
-        options.target,
-        options.version,
-        headers,
-        options.body,
-    );
-    // Upgrade requests never carry a body, so the encoded request is exactly
-    // the head. Enforce the public head limit before exposing any bytes to the
-    // transport; otherwise custom fields could bypass the receive-side bound.
-    std.debug.assert(encoded.items.len == head_len);
-    try transport.writeAll(encoded.items);
-}
-
 fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, max_head_bytes: usize) Error!HttpHead {
     return readHttpHeadFromTransport(
         allocator,
@@ -17950,6 +17867,7 @@ test {
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");
+    _ = @import("runtime/handshake/request_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");

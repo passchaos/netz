@@ -1,4 +1,4 @@
-//! One absolute budget for HTTP responses emitted before WebSocket framing.
+//! One absolute budget for HTTP handshake messages before WebSocket framing.
 //! Unbounded callers retain their scatter write; bounded callers advance the
 //! header and body under the same deadline without renewing it.
 
