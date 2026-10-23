@@ -23,9 +23,10 @@ pub const Limits = struct {
     /// Maximum logical application-message bytes before outbound compression
     /// and after inbound decompression or fragment assembly.
     max_message_bytes: usize = 16 * 1024 * 1024,
-    /// Optional absolute budget for the HTTP/1 Upgrade request/response head.
-    /// Partial bytes do not renew it. TLS handshake time and Extended CONNECT
-    /// are governed by their underlying HTTP transports.
+    /// Optional budget for the complete HTTP/1 Upgrade phase, including the
+    /// body of a rejected response. One absolute deadline spans request writing
+    /// and response reading; partial bytes do not renew it. TLS handshake time
+    /// and Extended CONNECT are governed by their underlying HTTP transports.
     http1_handshake_timeout: ?std.Io.Duration = null,
     /// Disable Nagle for latency-sensitive frame boundaries. WebSocket
     /// messages are already application-framed and control replies should not

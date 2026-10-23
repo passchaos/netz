@@ -25,6 +25,7 @@ const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
 const handshake_response = @import("runtime/handshake/response.zig");
 const handshake_request = @import("runtime/handshake/request.zig");
+const handshake_receive = @import("runtime/handshake/receive.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
 const stream_io = @import("../internal/stream_io.zig");
@@ -463,6 +464,13 @@ const HandshakeWriter = handshake_response.Writer(struct {
     pub const ErrorType = Error;
     pub const writeWithDeadline = RuntimeTransport.writeWithDeadline;
     pub const writeAllParts = RuntimeTransport.writeAllParts;
+});
+
+const HandshakeReader = handshake_receive.Reader(struct {
+    pub const TransportType = RuntimeTransport;
+    pub const ErrorType = Error;
+    pub const read = RuntimeTransport.read;
+    pub const readWithDeadline = RuntimeTransport.readWithDeadline;
 });
 
 fn transportStream(transport: RuntimeTransport) net.Stream {
@@ -4843,7 +4851,7 @@ pub const Client = struct {
             transport,
             &head,
             options.limits,
-            outer_deadline,
+            deadline,
         );
         if (response_bytes.extra != null) head_owned = false;
         errdefer allocator.free(response_bytes.bytes);
@@ -13103,138 +13111,10 @@ fn finishIncomingMessageForConnection(
 
 const compressedFragmentRange = message_state.compressedFragmentRange;
 
-const HttpHead = struct {
-    head: []u8,
-    extra: []u8,
-
-    fn deinit(self: *HttpHead, allocator: std.mem.Allocator) void {
-        allocator.free(self.head);
-        allocator.free(self.extra);
-        self.* = undefined;
-    }
-};
-
-const HttpUpgradeResponseBytes = struct {
-    bytes: []u8,
-    /// Bytes following a successful 101 head belong to WebSocket framing.
-    /// Rejection responses instead consume their complete HTTP body here.
-    extra: ?[]u8,
-};
-
-fn readHttpUpgradeResponseBytes(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    head: *HttpHead,
-    limits: Limits,
-    body_deadline: ?std.Io.Clock.Timestamp,
-) Error!HttpUpgradeResponseBytes {
-    var header_stack: [handshake_storage.stack_capacity]http1.Header =
-        undefined;
-    const header_storage = try handshake_storage.acquire(
-        http1.Header,
-        allocator,
-        &header_stack,
-        limits.max_response_headers,
-    );
-    defer handshake_storage.release(
-        http1.Header,
-        allocator,
-        &header_stack,
-        header_storage,
-    );
-    const parsed_head = try http1.parseResponseHead(
-        head.head,
-        header_storage,
-        http1HandshakeResponseParseOptions(limits),
-        .{ .request_method = .GET },
-    );
-    if (parsed_head.status == 101) {
-        const result: HttpUpgradeResponseBytes = .{
-            .bytes = head.head,
-            .extra = head.extra,
-        };
-        head.* = undefined;
-        return result;
-    }
-
-    var bytes: std.ArrayList(u8) = .empty;
-    errdefer bytes.deinit(allocator);
-    try bytes.ensureTotalCapacity(
-        allocator,
-        std.math.add(usize, head.head.len, head.extra.len) catch
-            return error.BodyTooLarge,
-    );
-    bytes.appendSliceAssumeCapacity(head.head);
-    bytes.appendSliceAssumeCapacity(head.extra);
-    const body_start = head.head.len;
-
-    var scratch: [4096]u8 = undefined;
-    if (http1_message_framing.responseHeadUsesCloseDelimitedBody(
-        head.head[0 .. head.head.len - 4],
-        .GET,
-    )) {
-        if (bytes.items.len - body_start > limits.max_rejection_body_bytes) {
-            return error.BodyTooLarge;
-        }
-        while (true) {
-            const count = if (body_deadline) |absolute|
-                try transport.readWithDeadline(&scratch, absolute)
-            else
-                try transport.read(&scratch);
-            if (count == 0) break;
-            const body_len = std.math.add(
-                usize,
-                bytes.items.len - body_start,
-                count,
-            ) catch return error.BodyTooLarge;
-            if (body_len > limits.max_rejection_body_bytes) {
-                return error.BodyTooLarge;
-            }
-            try bytes.appendSlice(allocator, scratch[0..count]);
-        }
-        return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
-    }
-
-    const target_len = while (true) {
-        const len = http1_message_framing.messageTargetLength(
-            bytes.items,
-            head.head.len - 4,
-            limits.max_head_bytes,
-            limits.max_rejection_body_bytes,
-            .GET,
-        ) catch |err| switch (err) {
-            error.BufferTooShort => {
-                const count = if (body_deadline) |absolute|
-                    try transport.readWithDeadline(scratch[0..1], absolute)
-                else
-                    try transport.read(scratch[0..1]);
-                if (count == 0) return error.ConnectionClosed;
-                try bytes.appendSlice(allocator, scratch[0..count]);
-                continue;
-            },
-            else => |other| return other,
-        };
-        break len;
-    };
-    try bytes.ensureTotalCapacity(allocator, target_len);
-    while (bytes.items.len < target_len) {
-        const count = if (body_deadline) |absolute|
-            try transport.readWithDeadline(
-                scratch[0..@min(scratch.len, target_len - bytes.items.len)],
-                absolute,
-            )
-        else
-            try transport.read(
-                scratch[0..@min(scratch.len, target_len - bytes.items.len)],
-            );
-        if (count == 0) return error.ConnectionClosed;
-        try bytes.appendSlice(allocator, scratch[0..count]);
-    }
-    // Rejected connections are closed, so any bytes beyond this response are
-    // intentionally discarded rather than exposed as ambiguous pipeline data.
-    bytes.items.len = target_len;
-    return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
-}
+const HttpHead = handshake_receive.Head;
+const readHttpUpgradeResponseBytes = HandshakeReader.readResponseBytes;
+const readHttpHeadFromTransport = HandshakeReader.readHead;
+const readHttpHeadFromTransportWithInitial = HandshakeReader.readHeadWithInitial;
 
 fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, max_head_bytes: usize) Error!HttpHead {
     return readHttpHeadFromTransport(
@@ -13257,52 +13137,6 @@ fn http1HandshakeResponseParseOptions(limits: Limits) http1.ParseOptions {
     };
 }
 
-fn readHttpHeadFromTransport(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    max_head_bytes: usize,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!HttpHead {
-    return readHttpHeadFromTransportWithInitial(
-        allocator,
-        transport,
-        max_head_bytes,
-        deadline,
-        &.{},
-    );
-}
-
-fn readHttpHeadFromTransportWithInitial(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    max_head_bytes: usize,
-    deadline: ?std.Io.Clock.Timestamp,
-    initial: []const u8,
-) Error!HttpHead {
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(allocator);
-    try bytes.appendSlice(allocator, initial);
-    var scratch: [4096]u8 = undefined;
-    while (true) {
-        if (try findHttpHeadEndWithinLimit(bytes.items, max_head_bytes)) |head_end| {
-            const split = head_end + 4;
-            const head = try allocator.dupe(u8, bytes.items[0..split]);
-            errdefer allocator.free(head);
-            return .{
-                .head = head,
-                .extra = try allocator.dupe(u8, bytes.items[split..]),
-            };
-        }
-        const read_buf = scratch[0..@min(scratch.len, max_head_bytes - bytes.items.len)];
-        const n = if (deadline) |absolute|
-            try transport.readWithDeadline(read_buf, absolute)
-        else
-            try transport.read(read_buf);
-        if (n == 0) return error.ConnectionClosed;
-        try bytes.appendSlice(allocator, scratch[0..n]);
-    }
-}
-
 fn handshakeDeadline(
     transport: RuntimeTransport,
     timeout: std.Io.Duration,
@@ -13315,15 +13149,6 @@ fn handshakeDeadline(
         .tls_server => |connection| connection.io,
     };
     return .fromNow(io, .{ .raw = timeout, .clock = .awake });
-}
-
-fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?usize {
-    if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |head_end| {
-        if (head_end + 4 > max_head_bytes) return error.HeadersTooLarge;
-        return head_end;
-    }
-    if (bytes.len >= max_head_bytes) return error.HeadersTooLarge;
-    return null;
 }
 
 const validateServerHandshake = handshake_headers.validateHttp1Server;
@@ -17841,16 +17666,6 @@ test "WebSocket connection serializes concurrent sends" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
-    const exact = "GET /chat HTTP/1.1\r\nHost: example\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, exact.len - 4), try findHttpHeadEndWithinLimit(exact, exact.len));
-    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(exact, exact.len - 1));
-
-    const incomplete = "GET /chat HTTP/1.1\r\nHost: example";
-    try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
-    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
-}
-
 test {
     _ = h3;
     _ = @import("runtime/message/tests/buffer.zig");
@@ -17868,6 +17683,7 @@ test {
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");
     _ = @import("runtime/handshake/request_tests.zig");
+    _ = @import("runtime/handshake/receive_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
