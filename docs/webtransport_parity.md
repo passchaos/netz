@@ -846,6 +846,21 @@ Real protected-UDP regressions cover congestion, pacing, socket failure,
 allocation failure before and after CONNECT submission, admission recovery,
 early stream cleanup, and continued sibling stream/DATAGRAM traffic.
 
+That cleanup ownership also covers the allocation and partial transmission of
+the CONNECT HEADERS itself. HTTP/3 `startRequestOwned` and
+`startRequestOwnedWithDeadline` report every allocated request stream even on
+failure; their streaming-head sender retains the exact submitted prefix across
+pacing, flow-control, and congestion progress. A truncated request head is
+canceled on that stream instead of rolling back through whole-connection
+termination. Outbound body offsets are published only after the complete head
+is submitted. Protected-UDP cases verify a one-byte partial head under pacing
+and congestion timeout, zero-byte and partial socket failure with exact RESET
+final sizes, and a large CONNECT head that resumes ACK progress and is decoded
+completely by its peer while the first Session remains active.
+An additional dynamic-QPACK case retains the speculative field-section
+references while cancellation is paced, then releases them after the scoped
+cancellation is submitted.
+
 `HandshakeClientSession` and `AcceptedHandshakeSession` expose `readStream`,
 `writeStream`, `writeStreams`, `finishStream`, `resetStream`, and `stopStream`.
 `readStream`

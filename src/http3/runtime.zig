@@ -383,6 +383,7 @@ const sendProtectedPushStreamingHeadsWithDeadline =
 const sendConnectionStreamingHead = message_sender.sendConnectionStreamingHead;
 const sendConnectionStreamingHeadWithDeadline =
     message_sender.sendConnectionStreamingHeadWithDeadline;
+const sendConnectionStreamingHeadProgress = message_sender.sendConnectionStreamingHeadProgress;
 const sendProtectedStreamingHead = message_sender.sendProtectedStreamingHead;
 const sendProtectedStreamingHeadWithDeadline =
     message_sender.sendProtectedStreamingHeadWithDeadline;
@@ -15026,6 +15027,44 @@ pub const HandshakeClient = struct {
         body_length: ?usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, null);
+    }
+
+    /// Begin a request whose caller owns any allocated stream even when
+    /// HEADERS submission fails. Such failures require scoped cancellation;
+    /// they never replay a partial head or close the connection to roll back.
+    pub fn startRequestOwned(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        owner: *?u62,
+    ) Error!u62 {
+        owner.* = null;
+        return self.startRequestUntilReportingOwner(request_options, body_length, null, owner) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
+    }
+
+    pub fn startRequestOwnedWithDeadline(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        owner: *?u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        owner.* = null;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, owner);
+    }
+
+    fn startRequestUntilReportingOwner(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        deadline: ?std.Io.Clock.Timestamp,
+        owner: ?*?u62,
+    ) ReceiveTimeoutError!u62 {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = self.next_stream_id;
@@ -15057,20 +15096,25 @@ pub const HandshakeClient = struct {
         var transport_reserved = lifecycle_exists;
         var head_sent = false;
         errdefer {
-            if (!head_sent) self.qpack_encode.abandonStream(stream_id);
-            if (transport_reserved and self.requestStreamSendRetryable(
-                stream_id,
-                next_stream_id,
-            )) {
-                self.next_stream_id = stream_id;
+            if (owner != null and transport_reserved) {
+                owner.?.* = stream_id;
+                self.next_stream_id = next_stream_id;
             } else {
-                if (transport_reserved and self.established.connection
-                    .nextLocalBidirectionalStreamId() == next_stream_id)
-                {
-                    self.next_stream_id = next_stream_id;
+                if (!head_sent) self.qpack_encode.abandonStream(stream_id);
+                if (transport_reserved and self.requestStreamSendRetryable(
+                    stream_id,
+                    next_stream_id,
+                )) {
+                    self.next_stream_id = stream_id;
+                } else {
+                    if (transport_reserved and self.established.connection
+                        .nextLocalBidirectionalStreamId() == next_stream_id)
+                    {
+                        self.next_stream_id = next_stream_id;
+                    }
+                    _ = self.request_lifecycle.finish(stream_id) catch false;
+                    _ = self.outbound_bodies.finish(stream_id);
                 }
-                _ = self.request_lifecycle.finish(stream_id) catch false;
-                _ = self.outbound_bodies.finish(stream_id);
             }
         }
         self.stream_send_scratch.reset();
@@ -15131,7 +15175,36 @@ pub const HandshakeClient = struct {
             std.debug.assert(transport_id == stream_id);
             transport_reserved = true;
         }
-        if (deadline) |absolute| {
+        if (owner) |retained| {
+            retained.* = stream_id;
+            var committed: usize = 0;
+            while (true) {
+                sendConnectionStreamingHeadProgress(
+                    &self.established.connection,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    stream_id,
+                    streaming.expected_length,
+                    streaming.body_allowed,
+                    false,
+                    self.options,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.outbound_bodies,
+                    &committed,
+                    deadline,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) return err;
+                        if (deadline) |absolute| try self.receiveResponseProgressForSendUntil(stream_id, absolute) else try self.receiveResponseProgressForSend(stream_id);
+                        continue;
+                    },
+                    else => return err,
+                };
+                break;
+            }
+        } else if (deadline) |absolute| {
             while (true) {
                 sendConnectionStreamingHeadWithDeadline(
                     &self.established.connection,
@@ -35863,6 +35936,7 @@ test {
     _ = @import("runtime/client/tests/deadline.zig");
     _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
+    _ = @import("runtime/client/owned_head_tests.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_dispatcher_relay_tests.zig");
     _ = @import("runtime/connect_ip_tests.zig");

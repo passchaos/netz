@@ -804,12 +804,13 @@ pub const Client = struct {
             .authority = options.authority,
             .headers = headers.fields,
         };
-        const stream_id = if (deadline) |absolute|
-            try self.h3.startRequestWithDeadline(request, null, absolute)
-        else
-            try self.h3.startRequest(request, null);
+        var request_owner: ?u62 = null;
         var protocol_failure = false;
-        errdefer self.pending_open_cleanup.abandon(&self.h3, stream_id, if (protocol_failure) webtransport.ApplicationErrorCode.alpn_error else http3.ApplicationErrorCode.request_cancelled);
+        errdefer if (request_owner) |id| self.pending_open_cleanup.abandon(&self.h3, id, if (protocol_failure) webtransport.ApplicationErrorCode.alpn_error else http3.ApplicationErrorCode.request_cancelled);
+        const stream_id = if (deadline) |absolute|
+            try self.h3.startRequestOwnedWithDeadline(request, null, &request_owner, absolute)
+        else
+            try self.h3.startRequestOwned(request, null, &request_owner);
         const session_id = webtransport.SessionId.init(stream_id);
         var streams = try handshake_stream.initRegistry(
             self.allocator,
