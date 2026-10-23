@@ -668,6 +668,35 @@ next poll so its nonblocking contract remains exact. Small-window regressions
 verify both that discarding six of eight bytes emits MAX_DATA without changing
 the stream receive limit, and that a targeted sibling read still completes
 after the cancelled stream receives later DATA.
+The shared abandoned-receive cleanup now also handles a locally stopped
+stream whose `RESET_STREAM_AT` Reliable Size has not arrived contiguously.
+A preceding STOP_SENDING has already abandoned application reads and returned
+QUIC receive credit; waiting for those reads again used to trap WebTransport
+Session credit and suppress the reset notification. The cleanup in
+`runtime/association/abandoned.zig` now settles the complete final-size Session
+charge and retains the peer's exact reset code/final size for one later event.
+A targeted sibling can complete first without hiding that event. QUIC still
+retains the missing reliable prefix for transport validation and reclamation:
+late bytes are discarded, invalid Final Size is rejected, and neither Session
+credit nor the application event can be counted twice. A stream without local
+STOP_SENDING still delivers its reliable prefix before reset. This follows the
+abandoned-read boundary discussed in
+[reliable-reset draft-11 section 5.4](https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-5.4)
+and Quinn's receive-stop contract without bypassing QUIC's prefix state.
+Sixteen deterministic cases combine client/server roles, bidi/uni directions,
+RESET-before/after-STOP ordering, and ordinary/one-attempt cleanup. They first
+reproduced a 10-byte final-size Session charge with only one byte consumed;
+the repaired path consumes all ten before the missing prefix arrives, preserves
+sibling delivery, reports one reset, and rejects invalid late final-size data.
+The independent wtransport gate also remains green in both endpoint roles,
+including exact reset/stop codes, concurrent sibling reuse, and recovery after
+one dropped STOP_SENDING packet.
+The focused WebTransport and QUIC reliable-reset/stopped-receive/reset-prefix
+Debug gate passes 479/479 tests; public-module checks pass 2/2.
+The compact-storage assertions in `runtime/layout_tests.zig` retain their
+adapter budgets while accounting for the wrapper tail padding induced by an
+embedded HTTP/3 transport's alignment. This avoids treating the existing
+16-byte transport alignment as added WebTransport state in optimized builds.
 The stateful protected client facade also forwards targeted `readStreamId*`
 polling and explicit delayed-ACK flushing, removing the last associated-stream
 surface differences from its owned handshake session.

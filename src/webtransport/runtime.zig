@@ -49,68 +49,8 @@ pub const EndpointClientAnyEvent = endpoint_client.AnyEvent;
 pub const EndpointClientRejection = endpoint_client.Rejection;
 pub const StableConnectionId = quic.one_rtt.StableConnectionId;
 
-test "WebTransport sessions keep inbound and outbound close storage compact" {
-    if (@sizeOf(usize) == 8) {
-        const Layout = struct {
-            accepted: usize,
-            accepted_handshake_overhead: usize,
-            client_overhead: usize,
-            handshake_client_overhead: usize,
-            protected_client_overhead: usize,
-        };
-        // Debug and ReleaseSafe retain extra safety state in the HTTP/3 and
-        // compression members. Check the WebTransport adapter overhead
-        // independently of those transports, whose own state can grow.
-        const expected: Layout = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => .{
-                .accepted = 1_144,
-                .accepted_handshake_overhead = 960,
-                .client_overhead = 1_056,
-                .handshake_client_overhead = 880,
-                .protected_client_overhead = 888,
-            },
-            .ReleaseFast, .ReleaseSmall => .{
-                .accepted = 1_136,
-                .accepted_handshake_overhead = 952,
-                .client_overhead = 1_048,
-                .handshake_client_overhead = 872,
-                .protected_client_overhead = 888,
-            },
-        };
-        try std.testing.expectEqual(
-            @as(usize, 344),
-            @sizeOf(session_control.Control),
-        );
-        try std.testing.expectEqual(
-            @as(usize, 504),
-            @sizeOf(protected_control.Reader),
-        );
-        try std.testing.expectEqual(
-            @as(usize, 160),
-            @sizeOf(PendingSessionClose),
-        );
-        try std.testing.expectEqual(expected.accepted, @sizeOf(AcceptedSession));
-        try std.testing.expectEqual(
-            @as(usize, 944),
-            @sizeOf(AcceptedProtectedSession),
-        );
-        try std.testing.expectEqual(
-            expected.accepted_handshake_overhead,
-            @sizeOf(AcceptedHandshakeSession) - @sizeOf(http3.runtime.HandshakeServerSession),
-        );
-        try std.testing.expectEqual(
-            expected.client_overhead,
-            @sizeOf(ClientSession) - @sizeOf(http3.runtime.Client),
-        );
-        try std.testing.expectEqual(
-            expected.handshake_client_overhead,
-            @sizeOf(HandshakeClientSession) - @sizeOf(http3.runtime.HandshakeClient),
-        );
-        try std.testing.expectEqual(
-            expected.protected_client_overhead,
-            @sizeOf(ProtectedClientSession) - @sizeOf(http3.runtime.ProtectedClient),
-        );
-    }
+test {
+    _ = @import("runtime/layout_tests.zig");
 }
 
 test "WebTransport pending close uses inline then exact heap storage" {
@@ -19319,6 +19259,7 @@ test {
 
 test {
     _ = @import("runtime/association/tests/discovery.zig");
+    _ = @import("runtime/association/tests/abandoned.zig");
     _ = @import("runtime/association/tests/invalid_session_id.zig");
 }
 
