@@ -126,11 +126,7 @@ pub const Store = struct {
     pub fn data(self: *Store, allocator: std.mem.Allocator, stream_id: u31, bytes: []const u8, end_stream: bool, limits: Limits) Error!void {
         const entry = self.get(stream_id) orelse return error.UnexpectedFrame;
         if (entry.finished or entry.headers == null) return error.UnexpectedFrame;
-        if (!entry.body_allowed and bytes.len != 0) return error.InvalidContentLength;
-        const length = std.math.add(usize, entry.body.items.len, bytes.len) catch return error.MessageTooLarge;
-        if (length > limits.max_body_bytes) return error.MessageTooLarge;
-        if (entry.body_allowed and entry.content_length != null and length > entry.content_length.?) return error.InvalidContentLength;
-        if (end_stream) try message.validateResponseContentLength(entry.content_length, length, entry.body_allowed);
+        _ = try message.checkedResponseBodyLength(entry.content_length, entry.body.items.len, bytes.len, limits.max_body_bytes, entry.body_allowed, end_stream);
         try self.checkCharge(bytes.len, limits.max_bytes);
         try entry.body.appendSlice(allocator, bytes);
         self.retained_bytes += bytes.len;

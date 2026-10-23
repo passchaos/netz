@@ -81,6 +81,28 @@ pub fn validateResponseContentLength(expected: ?usize, actual: usize, body_allow
     try validateExpectedContentLength(expected, actual);
 }
 
+/// Validate DATA before retaining or exposing it. A declared length is an
+/// upper bound throughout the response and must match exactly at END_STREAM
+/// (RFC 9113 section 8.1.1). Count content only, excluding DATA padding.
+pub fn checkedResponseBodyLength(
+    expected: ?usize,
+    current: usize,
+    additional: usize,
+    max_body_bytes: usize,
+    body_allowed: bool,
+    end_stream: bool,
+) error{ InvalidContentLength, MessageTooLarge }!usize {
+    if (!body_allowed and (current != 0 or additional != 0)) return error.InvalidContentLength;
+    const next = std.math.add(usize, current, additional) catch return error.MessageTooLarge;
+    if (next > max_body_bytes) return error.MessageTooLarge;
+    if (body_allowed) {
+        if (expected) |length| {
+            if (next > length or (end_stream and next != length)) return error.InvalidContentLength;
+        }
+    }
+    return next;
+}
+
 pub fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_len: usize) Error!void {
     if (try contentLength(headers)) |expected| {
         if (expected != body_len) return error.InvalidContentLength;

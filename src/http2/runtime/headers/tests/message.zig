@@ -2,6 +2,25 @@ const std = @import("std");
 const http2 = @import("../../../mod.zig");
 const headers = @import("../message.zig");
 
+test "HTTP/2 response DATA length checks overruns and final short bodies before delivery" {
+    const checked = headers.checkedResponseBodyLength;
+    try std.testing.expectEqual(@as(usize, 2), try checked(3, 0, 2, 10, true, false));
+    try std.testing.expectEqual(@as(usize, 3), try checked(3, 2, 1, 10, true, true));
+    try std.testing.expectEqual(@as(usize, 3), try checked(3, 3, 0, 10, true, true));
+    try std.testing.expectError(error.InvalidContentLength, checked(1, 0, 2, 10, true, false));
+    try std.testing.expectError(error.InvalidContentLength, checked(3, 1, 1, 10, true, true));
+    try std.testing.expectError(error.InvalidContentLength, checked(3, 2, 0, 10, true, true));
+    try std.testing.expectError(error.InvalidContentLength, checked(0, 0, 1, 10, true, false));
+    // Representation metadata on HEAD/304 does not describe DATA content.
+    try std.testing.expectEqual(@as(usize, 0), try checked(123, 0, 0, 0, false, true));
+    try std.testing.expectError(error.InvalidContentLength, checked(123, 0, 1, 10, false, false));
+    try std.testing.expectEqual(@as(usize, 2), try checked(null, 1, 1, 2, true, true));
+    try std.testing.expectError(error.MessageTooLarge, checked(null, 1, 2, 2, true, false));
+    const max = std.math.maxInt(usize);
+    try std.testing.expectEqual(max, try checked(null, max - 1, 1, max, true, true));
+    try std.testing.expectError(error.MessageTooLarge, checked(null, max, 1, max, true, false));
+}
+
 test "HTTP/2 message headers validate request targets and pseudo ordering" {
     const valid = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },

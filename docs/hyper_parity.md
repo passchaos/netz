@@ -2583,6 +2583,21 @@ connection error because the next frame boundary cannot be recovered. Rejected
 DATA restores its already-consumed connection receive credit before stream
 cleanup. Real h2c tests cover aggregate, streaming, and batch response paths,
 sibling reuse, and connection-error precedence.
+Response DATA length is now checked before retention, borrowed callbacks, or
+duplex events. A declared Content-Length is enforced as an upper bound even
+without END_STREAM, and a short final DATA frame is rejected before delivery.
+Aggregate, streaming, ordinary batch, independently-deadlined batch, duplex,
+and Extended CONNECT rejection readers share the checked growth rule with
+push buffering; HEAD/304 representation lengths keep their existing semantics.
+Classified stream errors on bounded callback reads retain their stream-local
+reset policy without entering timeout cleanup. Rejected padded DATA returns
+its full charged connection payload, and independent batch cleanup records
+only the net credit still held after processing, preventing a second refund.
+Real h2c regressions cover both length violations across these reader paths,
+zero delivery of rejected content, exact credit accounting, healthy sibling
+completion, and subsequent connection reuse. Direct duplex readers continue
+to leave reset policy to their caller, and CONNECT rejection retains its
+existing cancellation policy.
 Peer HTTP/3 unidirectional-stream classification also waits when a reordered
 FIN arrives before offset zero instead of treating the temporarily unavailable
 type as malformed. A complete zero-byte stream declares no critical type and

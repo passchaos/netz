@@ -40,6 +40,8 @@ const validateContentLength = message_headers.validateContentLength;
 const validateExpectedContentLength =
     message_headers.validateExpectedContentLength;
 const validateResponseContentLength = message_headers.validateResponseContentLength;
+const checkedResponseBodyLength = message_headers.checkedResponseBodyLength;
+const response_credit = @import("runtime/response/credit.zig");
 const validateDeclaredRequestLength =
     message_headers.validateDeclaredRequestLength;
 const requestShouldDefaultContentLength =
@@ -7101,22 +7103,20 @@ pub const Connection = struct {
                     frame,
                 );
                 defer self.releaseDataFrameBudget(data);
-                if (state.forbids_body and data.data.len != 0) {
-                    self.releaseConnectionCapacity(frame.payload.len) catch {};
-                    return error.InvalidContentLength;
-                }
-                const body_len = std.math.add(
-                    usize,
+                const body_len = checkedResponseBodyLength(
+                    state.content_length,
                     if (streaming_response)
                         state.body_bytes
                     else
                         state.body.items.len,
                     data.data.len,
-                ) catch return error.MessageTooLarge;
-                if (body_len > self.limits.max_body_bytes) {
+                    self.limits.max_body_bytes,
+                    !state.forbids_body,
+                    (frame.header.flags & flag_end_stream) != 0,
+                ) catch |err| {
                     self.releaseConnectionCapacity(frame.payload.len) catch {};
-                    return error.MessageTooLarge;
-                }
+                    return @errorCast(err);
+                };
                 if (streaming_response) {
                     state.body_bytes = body_len;
                     if (data.data.len != 0) {
@@ -7140,7 +7140,6 @@ pub const Connection = struct {
                     (frame.header.flags & flag_end_stream) != 0,
                 );
                 if ((frame.header.flags & flag_end_stream) != 0) {
-                    try validateResponseContentLength(state.content_length, body_len, !state.forbids_body);
                     state.done = true;
                     return;
                 }
@@ -7590,14 +7589,6 @@ pub const Connection = struct {
         return observer.finish(self, state, control);
     }
 
-    fn clearIndividualBatchConnectionCredit(
-        controls: []IndividualBatchControl,
-    ) void {
-        for (controls) |*control| {
-            control.unreleased_connection_bytes = 0;
-        }
-    }
-
     fn failIndividualStreamingCallback(
         self: *Connection,
         states: []BatchResponseState,
@@ -7793,13 +7784,6 @@ pub const Connection = struct {
         }
 
         const connection_before = self.recv_connection_window.value;
-        if (frame.header.frame_type == .data) {
-            control.unreleased_connection_bytes = std.math.add(
-                usize,
-                control.unreleased_connection_bytes,
-                frame.payload.len,
-            ) catch return error.MessageTooLarge;
-        }
         var read_timed_out = false;
         const had_final_head = state.headers != null;
         var callback_error: ?anyerror = null;
@@ -7849,10 +7833,13 @@ pub const Connection = struct {
                 frame,
             ),
         };
+        try response_credit.account(
+            controls,
+            state_index,
+            connection_before,
+            self.recv_connection_window.value,
+        );
         process_result catch |err| {
-            if (self.recv_connection_window.value > connection_before) {
-                clearIndividualBatchConnectionCredit(controls);
-            }
             if (callback_error) |application_error| {
                 try self.failIndividualStreamingCallback(
                     states,
@@ -7913,9 +7900,6 @@ pub const Connection = struct {
             }
             return @errorCast(err);
         };
-        if (self.recv_connection_window.value > connection_before) {
-            clearIndividualBatchConnectionCredit(controls);
-        }
         if (observer.isStreaming() and !had_final_head and
             state.headers != null)
         {
@@ -8160,30 +8144,25 @@ pub const Connection = struct {
                         frame,
                     );
                     defer self.releaseDataFrameBudget(data);
-                    if (state.forbids_body and data.data.len != 0) {
-                        self.releaseConnectionCapacity(
-                            frame.payload.len,
-                        ) catch {};
-                        return error.InvalidContentLength;
-                    }
-                    const body_len = std.math.add(
-                        usize,
+                    _ = checkedResponseBodyLength(
+                        state.content_length,
                         state.body.items.len,
                         data.data.len,
-                    ) catch return error.MessageTooLarge;
-                    if (body_len > self.limits.max_body_bytes) {
+                        self.limits.max_body_bytes,
+                        !state.forbids_body,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    ) catch |err| {
                         self.releaseConnectionCapacity(
                             frame.payload.len,
                         ) catch {};
-                        return error.MessageTooLarge;
-                    }
+                        return @errorCast(err);
+                    };
                     try state.body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(
                         state.stream_id,
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateResponseContentLength(state.content_length, state.body.items.len, !state.forbids_body);
                         state.done = true;
                         remaining -= 1;
                     }
@@ -8221,11 +8200,9 @@ pub const Connection = struct {
     ) !void {
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
-        var current_stream_id: ?u31 = null;
         var remaining: usize = 0;
         for (states) |state| remaining += @intFromBool(!state.done);
         while (remaining != 0) {
-            current_stream_id = null;
             const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| {
                 read_timed_out.* = deadline != null and err == error.Timeout;
                 return err;
@@ -8249,7 +8226,6 @@ pub const Connection = struct {
                 frame.header.stream_id,
             ) orelse return error.UnexpectedFrame;
             const state = &states[state_index];
-            current_stream_id = state.stream_id;
             if (state.done) return error.UnexpectedFrame;
             switch (frame.header.frame_type) {
                 .push_promise => {
@@ -8436,31 +8412,23 @@ pub const Connection = struct {
                         frame,
                     );
                     defer self.releaseDataFrameBudget(data);
-                    if (state.forbids_body and data.data.len != 0) {
+                    state.body_bytes = checkedResponseBodyLength(
+                        state.content_length,
+                        state.body_bytes,
+                        data.data.len,
+                        self.limits.max_body_bytes,
+                        !state.forbids_body,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    ) catch |err| {
                         self.releaseConnectionCapacity(
                             frame.payload.len,
                         ) catch {};
                         self.recordResponseStreamReadError(
                             state.stream_id,
-                            .protocol_error,
+                            responseStreamErrorCode(err).?,
                         );
-                        return error.InvalidContentLength;
-                    }
-                    state.body_bytes = std.math.add(
-                        usize,
-                        state.body_bytes,
-                        data.data.len,
-                    ) catch return error.MessageTooLarge;
-                    if (state.body_bytes > self.limits.max_body_bytes) {
-                        self.releaseConnectionCapacity(
-                            frame.payload.len,
-                        ) catch {};
-                        self.recordResponseStreamReadError(
-                            current_stream_id.?,
-                            .enhance_your_calm,
-                        );
-                        return error.MessageTooLarge;
-                    }
+                        return err;
+                    };
                     if (data.data.len != 0) {
                         consume(
                             context,
@@ -8491,13 +8459,6 @@ pub const Connection = struct {
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        validateResponseContentLength(state.content_length, state.body_bytes, !state.forbids_body) catch |err| {
-                            self.recordResponseStreamReadError(
-                                state.stream_id,
-                                .protocol_error,
-                            );
-                            return err;
-                        };
                         state.done = true;
                         remaining -= 1;
                     }
@@ -15010,22 +14971,28 @@ pub const Connection = struct {
                     if (headers == null) return error.UnexpectedFrame;
                     const data = try self.receiveDataPayload(stream_id, frame);
                     defer self.releaseDataFrameBudget(data);
-                    if (body.items.len + data.data.len > self.limits.max_body_bytes) {
+                    _ = checkedResponseBodyLength(
+                        response_content_length,
+                        body.items.len,
+                        data.data.len,
+                        self.limits.max_body_bytes,
+                        true,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    ) catch |err| {
                         // The DATA payload already consumed connection credit.
                         // A stream-local size rejection must restore that shared
                         // credit before terminating this response.
                         self.releaseConnectionCapacity(
                             frame.payload.len,
                         ) catch {};
-                        return error.MessageTooLarge;
-                    }
+                        return @errorCast(err);
+                    };
                     try body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(
                         stream_id,
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        if (headers != null) try validateExpectedContentLength(response_content_length, body.items.len);
                         break;
                     }
                 },
@@ -15160,10 +15127,13 @@ pub const Connection = struct {
             self.sendRecordedResponseReadError(stream_id);
         };
         // Bounded reads fail closed whenever discarded parser or transport
-        // state makes resumption unsafe. Callback rejection is the exception:
-        // even error.Timeout from a callback remains stream-local because the
-        // reader cancels that stream explicitly without losing wire state.
-        defer if (!completed and deadline != null and !callback_failed) {
+        // state makes resumption unsafe. Callback rejection and classified
+        // protocol errors already have their own cleanup policy; applying a
+        // timeout CANCEL here would also poison a reusable connection.
+        defer if (!completed and deadline != null and !callback_failed and
+            self.serve_read_connection_error == null and
+            self.serve_read_stream_error == null)
+        {
             self.failTimedOutResponse(stream_id);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
@@ -15363,21 +15333,23 @@ pub const Connection = struct {
                         frame,
                     );
                     defer self.releaseDataFrameBudget(data);
-                    body_bytes = std.math.add(
-                        usize,
+                    body_bytes = checkedResponseBodyLength(
+                        expected_body_len,
                         body_bytes,
                         data.data.len,
-                    ) catch return error.MessageTooLarge;
-                    if (body_bytes > self.limits.max_body_bytes) {
+                        self.limits.max_body_bytes,
+                        true,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    ) catch |err| {
                         self.releaseConnectionCapacity(
                             frame.payload.len,
                         ) catch {};
                         self.recordResponseStreamReadError(
                             stream_id,
-                            .enhance_your_calm,
+                            responseStreamErrorCode(err).?,
                         );
-                        return error.MessageTooLarge;
-                    }
+                        return err;
+                    };
                     if (data.data.len != 0) {
                         {
                             try self.beginBorrowedReadCallback();
@@ -15410,10 +15382,6 @@ pub const Connection = struct {
                         (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateExpectedContentLength(
-                            expected_body_len,
-                            body_bytes,
-                        );
                         break;
                     }
                 },
@@ -15710,25 +15678,6 @@ pub const Connection = struct {
                 },
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
-                    const parsed_data = try http2.DataPayload.parse(
-                        frame.frame,
-                    );
-                    const next_len = std.math.add(
-                        usize,
-                        body.items.len,
-                        parsed_data.data.len,
-                    ) catch return error.MessageTooLarge;
-                    if (next_len > self.limits.max_body_bytes) {
-                        const oversized_data = try self.receiveDataPayload(
-                            stream_id,
-                            frame.frame,
-                        );
-                        defer self.releaseDataFrameBudget(oversized_data);
-                        try self.releaseConnectionCapacity(
-                            frame.frame.payload.len,
-                        );
-                        return error.MessageTooLarge;
-                    }
                     const data = try self.receiveDataPayload(
                         stream_id,
                         frame.frame,
@@ -15740,15 +15689,17 @@ pub const Connection = struct {
                             frame.frame.payload.len,
                         ) catch {};
                     };
-                    try body.appendSlice(self.allocator, data.data);
                     const ended =
                         (frame.frame.header.flags & flag_end_stream) != 0;
-                    if (ended) {
-                        try validateExpectedContentLength(
-                            expected_body_len,
-                            body.items.len,
-                        );
-                    }
+                    _ = try checkedResponseBodyLength(
+                        expected_body_len,
+                        body.items.len,
+                        data.data.len,
+                        self.limits.max_body_bytes,
+                        true,
+                        ended,
+                    );
+                    try body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(
                         stream_id,
                         ended,
@@ -19466,30 +19417,22 @@ pub const ClientDuplexStream = struct {
                         frame.frame,
                     );
                     defer self.connection.releaseDataFrameBudget(payload);
-                    if (self.response_body_forbidden and
-                        payload.data.len != 0)
-                    {
-                        return error.InvalidContentLength;
-                    }
-                    self.response_body_bytes = std.math.add(
-                        usize,
-                        self.response_body_bytes,
-                        payload.data.len,
-                    ) catch return error.MessageTooLarge;
-                    if (self.response_body_bytes >
-                        self.connection.limits.max_body_bytes)
-                    {
-                        return error.MessageTooLarge;
-                    }
                     const end_stream =
                         (frame.frame.header.flags & flag_end_stream) != 0;
+                    self.response_body_bytes = checkedResponseBodyLength(
+                        self.response_content_length,
+                        self.response_body_bytes,
+                        payload.data.len,
+                        self.connection.limits.max_body_bytes,
+                        !self.response_body_forbidden,
+                        end_stream,
+                    ) catch |err| {
+                        self.connection.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
+                        return @errorCast(err);
+                    };
                     if (end_stream) {
-                        if (!self.response_body_forbidden) {
-                            try validateExpectedContentLength(
-                                self.response_content_length,
-                                self.response_body_bytes,
-                            );
-                        }
                         self.response_finished = true;
                         self.maybeRelease();
                     }
@@ -38209,6 +38152,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/response/body_length_tests.zig");
     _ = @import("runtime/frame/tests/io.zig");
     _ = @import("runtime/frame/tests/wire.zig");
     _ = @import("runtime/flow/tests/window.zig");
