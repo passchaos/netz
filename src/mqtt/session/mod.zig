@@ -12,6 +12,7 @@ const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
 const StorageCache = @import("../storage_cache.zig").Cache;
+const open_admission = @import("open.zig");
 pub const SharedPublication = @import("../broker/publication.zig").Publication;
 const shared_publication_wire = std.math.maxInt(usize);
 
@@ -1234,17 +1235,18 @@ pub const Store = struct {
             return error.InvalidClientId;
         }
         var replaced_connection = false;
+        var replacement_index: ?usize = null;
         if (self.client_index.get(client_id)) |index| {
             if (self.isExpired(self.sessions.items[index].?, now)) {
-                self.removeAt(index);
+                replacement_index = index;
             }
         }
         if (clean_start) {
             if (self.client_index.get(client_id)) |index| {
                 replaced_connection = self.sessions.items[index].?.connected;
-                self.removeAt(index);
+                replacement_index = index;
             }
-        } else if (self.client_index.get(client_id)) |index| {
+        } else if (replacement_index == null) if (self.client_index.get(client_id)) |index| {
             const session = &self.sessions.items[index].?;
             replaced_connection = session.connected;
             if (session.expiry_interval == 0) {
@@ -1253,7 +1255,7 @@ pub const Store = struct {
                 // that connection, so Clean Start=0 cannot resume this state
                 // or report Session Present. Keep `replaced_connection` set so
                 // the broker still sends the required takeover shutdown.
-                self.removeAt(index);
+                replacement_index = index;
             } else {
                 const generation = self.nextGeneration();
                 // Every resumed/takeover Network Connection gets a fresh
@@ -1288,23 +1290,17 @@ pub const Store = struct {
                     .replaced_connection = replaced_connection,
                 };
             }
-        }
+        };
 
-        if (self.session_count >= self.options.max_sessions) {
-            return error.SessionLimitExceeded;
-        }
-        const client_owned = try self.allocator.dupe(u8, client_id);
+        const final_count = try open_admission.finalCount(self.session_count, replacement_index != null, self.options.max_sessions);
+        const replacement_bytes = if (replacement_index) |index| self.sessions.items[index].?.allocation_bytes else 0;
+        const client_owned = try open_admission.prepareClientId(self.allocator, self.options, client_id, self.total_bytes, replacement_bytes);
         errdefer self.allocator.free(client_owned);
-        if (client_owned.len > self.options.max_session_bytes or
-            client_owned.len > self.options.max_total_bytes -|
-                self.total_bytes)
-        {
-            return error.SessionByteLimitExceeded;
-        }
-        try self.client_index.ensureUnusedCapacity(self.allocator, 1);
-        try self.route_index.ensureUnusedCapacity(self.allocator, 1);
+        const index_capacity = std.math.cast(u32, final_count) orelse return error.SessionLimitExceeded;
+        try self.client_index.ensureTotalCapacity(self.allocator, index_capacity);
+        try self.route_index.ensureTotalCapacity(self.allocator, index_capacity);
         var appended_slot = false;
-        const index = for (self.sessions.items, 0..) |
+        const index = replacement_index orelse for (self.sessions.items, 0..) |
             maybe_session,
             candidate,
         | {
@@ -1321,6 +1317,9 @@ pub const Store = struct {
         };
         const generation = self.nextGeneration();
         const route_id = self.nextRouteId();
+        // Every fallible admission step completed. Retire the old state only
+        // at this commit point and reuse its already-reserved table slot.
+        if (replacement_index != null) self.removeAt(index);
         self.sessions.items[index] = .{
             .generation = generation,
             .route_id = route_id,
@@ -3987,4 +3986,5 @@ test "Session unselected transmission tracks the QoS 2 handshake" {
 test {
     _ = @import("tests.zig");
     _ = @import("ack_tests.zig");
+    _ = @import("open_tests.zig");
 }

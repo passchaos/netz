@@ -3082,6 +3082,17 @@ or disk I/O.
 
 ## Will Delay scheduler
 
+Session Store replacement prepares the new owned ClientID, slot, and indexes
+before retiring the prior Session. Clean Start, transient takeover, and expired
+Session replacement use the final Session count and byte total for admission,
+including credit for the state being replaced. An allocation or limit failure
+therefore preserves the old handle, subscriptions, queued/inflight QoS state,
+and accounting. Borrowed ClientID input is copied before its Session storage
+is retired. Successful replacement invalidates the old generation and installs
+a new route identity; the broker records that durable transition only after
+Session admission commits. Fault injection and final-budget replacement cases
+cover connected, offline, transient, and expired lifetimes.
+
 `mqtt.will_scheduler.Scheduler` deep-owns the Will Message and MQTT 5 Will
 Properties, indexes entries by ClientID, and orders deadlines with an indexed
 binary min-heap. Accepted CONNECT reserves heap capacity so subsequent network

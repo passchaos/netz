@@ -4985,10 +4985,6 @@ pub const Broker = struct {
                 );
             }
         };
-        // Clean Start may remove the previous Session before allocating its
-        // replacement, so carry that durable deletion through any later error.
-        persistent_changed = persistent_changed or previous_session_persistent;
-        progress.rollback_changed = persistent_changed;
         const previous_route_id = if (previous_session_handle) |handle|
             self.sessions.routeId(handle) catch null
         else
@@ -5016,6 +5012,11 @@ pub const Broker = struct {
             self.sessionExpiryForConnectLocked(effective_connect),
             now,
         );
+        // A rejected Session admission preserves the old state. Once its
+        // replacement commits, later Will/router/CONNACK failures still need
+        // to carry that durable transition to persistence.
+        persistent_changed = persistent_changed or previous_session_persistent;
+        progress.rollback_changed = persistent_changed;
         if (previous_route_id) |route_id| {
             _ = self.session_owners.remove(route_id);
         }
