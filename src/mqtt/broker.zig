@@ -16,6 +16,7 @@ const runtime = @import("runtime.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const session_subscriptions = @import("broker/session_subscriptions.zig");
+const connection_storage = @import("broker/connection_storage.zig");
 const load_metrics = @import("broker/load_metrics.zig");
 const local_consumer_mod = @import("broker/local_consumer.zig");
 const publish_counters = @import("broker/publish_counters.zig");
@@ -714,8 +715,8 @@ const ClientSlot = struct {
         registration_aborted: bool = false,
         _padding: u1 = 0,
     } = .{},
-    /// Allocated only after policy and Session admission, immediately before a
-    /// successful CONNACK. Keeping the large transport/session state out of
+    /// Allocated after CONNECT policy checks and before Session admission.
+    /// Attached after successful CONNACK. Keeping transport/session state out of
     /// line prevents every unused capacity slot from reserving a Connection.
     connection: ?*runtime.Connection = null,
     /// Presence lives in `state`, avoiding an extra machine word for each
@@ -4582,6 +4583,7 @@ pub const Broker = struct {
         accept_options: runtime.AcceptOptions,
         registration: Registration,
         registration_progress: RegistrationProgress,
+        storage: *connection_storage.Storage,
         pending_owned: *bool,
         result: *?anyerror,
     ) Error!ClientTask {
@@ -4601,27 +4603,13 @@ pub const Broker = struct {
                 true,
             );
         };
-        // Reserve stable storage before sending a successful CONNACK. An
-        // allocation failure can then roll registration back without first
-        // telling the peer that its Session was accepted.
-        const stored_connection = try self.allocator.create(
-            runtime.Connection,
-        );
-        var stored_connection_owned = true;
-        var stored_connection_initialized = false;
-        errdefer if (stored_connection_owned) {
-            if (stored_connection_initialized) stored_connection.close();
-            self.allocator.destroy(stored_connection);
-        };
         var accepted = try pending.finish(accept_options);
         pending_owned.* = false;
         var accepted_owns_connection = true;
         errdefer if (accepted_owns_connection) {
             accepted.deinit(self.allocator);
         };
-        stored_connection.* = accepted.connection;
-        accepted.connection = undefined;
-        stored_connection_initialized = true;
+        storage.adopt(&accepted.connection);
         accepted_owns_connection = false;
         errdefer accepted.connect.deinit(self.allocator);
         if (registration.replaced_owner_id) |owner_id| {
@@ -4630,10 +4618,10 @@ pub const Broker = struct {
         self.attachConnection(
             index,
             registration.subscriber_id,
-            stored_connection,
+            storage.get(),
             registration.persistent_changed,
         );
-        stored_connection_owned = false;
+        _ = storage.take();
         registration_needs_rollback = false;
         // A threshold reached during the provisional CONNECT window was left
         // pending by SnapshotBusy. Attachment retries that snapshot and any
@@ -4825,6 +4813,11 @@ pub const Broker = struct {
                 effective_connect.will = null;
             }
         }
+        // Reserve the eventual slot-owned connection before Session/Will/route
+        // admission can change an existing owner's state. Policy refusals above
+        // need no such storage; later failures release this uninitialized value.
+        var storage = try connection_storage.Storage.init(self.allocator);
+        defer storage.deinit();
         var registration_progress: RegistrationProgress = .{};
         const registration = self.register(
             index,
@@ -4908,6 +4901,7 @@ pub const Broker = struct {
             accept_options,
             registration,
             registration_progress,
+            &storage,
             &pending_owned,
             result,
         ));

@@ -3111,6 +3111,21 @@ The focused Router, Session, Will, broker admission/lifecycle, and persistence
 gate passes 254/254 tests in Debug and ReleaseFast; public-module package
 checks pass 2/2.
 
+The broker reserves stable `runtime.Connection` storage after CONNECT policy
+checks and before Session/Will/router admission. Allocation failure therefore
+cannot advance an existing Session generation, detach its live owner, cancel
+its Will, or apply Clean Start. Completed negotiation moves the accepted
+transport into that reservation, then transfers ownership to the attached
+client slot; failures and quota refusals release unused storage. This remains
+per-CONNECT allocation rather than preallocation for every capacity slot.
+TCP fault injection covers MQTT 3.1/3.1.1/5 with both continued and Clean Start
+replacement, including acknowledgement of the prior in-flight publication and
+continued delivery. Authorization refusal precedes this allocation, and Session
+quota refusal still sends the expected CONNACK while cleaning the reservation.
+The focused lifecycle, routing, admission, listener/deadline, protocol, and
+persistence gate passes 306/306 tests in Debug and ReleaseFast; public-module
+package checks pass 2/2.
+
 Broker CONNECT admission now prepares the Will before Session replacement and
 old-owner detachment. `prepareConnectWithSource` owns the new message and
 reserves scheduler capacity without changing the prior Will; `commitConnect`
@@ -4737,8 +4752,8 @@ proxy evidence for the entire suite.
    optional tags. On the audited 64-bit target these changes reduce each idle
    `ClientSlot` from 1,824 to 96 bytes; the default 1,024-slot broker therefore
    reserves 1,769,472 fewer bytes before clients connect. Stable Connection
-   storage is allocated before sending a successful CONNACK and transferred to
-   the slot only after that write succeeds. Generated IDs, optional ACL
+   storage is allocated after CONNECT policy checks and before Session
+   admission, then transferred to the slot after successful CONNACK. Generated IDs, optional ACL
    metadata, and client buffers remain owned until the client task releases its
    borrowed policy/CONNECT views, and all optional storage is freed on
    rollback, disconnect, or broker destruction. Raw TCP, TLS, WebSocket,

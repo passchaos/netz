@@ -5,13 +5,67 @@ const runtime = context.runtime_mod;
 
 test "broker failed subscription restoration preserves live Session capability" {
     for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| {
-        for ([_]usize{ 2, 3 }) |failure_offset| {
-            try failedRestoration(protocol, failure_offset);
+        for ([_]usize{ 3, 4 }) |failure_offset| {
+            try failedAdmission(protocol, failure_offset, false);
         }
     }
 }
 
-fn failedRestoration(protocol: mqtt.ProtocolVersion, failure_offset: usize) !void {
+test "broker failed connection storage allocation preserves prior Session" {
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| {
+        try failedAdmission(protocol, 0, false);
+        try failedAdmission(protocol, 0, true);
+    }
+}
+
+test "broker connection storage handles policy and Session quota refusal" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |policy_refusal| {
+        var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+        defer threaded.deinit();
+        const io = threaded.io();
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var broker = try context.testBrokerFn(allocator, io, 1, 64);
+        defer broker.deinit();
+        broker.allocator = failing.allocator();
+        if (!policy_refusal) broker.sessions.options.max_sessions = 0;
+        const Policy = struct {
+            allocator: *std.testing.FailingAllocator,
+            refuse: bool,
+            called: std.atomic.Value(bool) = .init(false),
+
+            fn authorize(context_ptr: *anyopaque, _: mqtt.Connect) bool {
+                const self: *@This() = @ptrCast(@alignCast(context_ptr));
+                if (self.refuse) self.allocator.fail_index = self.allocator.alloc_index;
+                self.called.store(true, .release);
+                return !self.refuse;
+            }
+        };
+        var policy = Policy{ .allocator = &failing, .refuse = policy_refusal };
+        broker.options.connect_authorization = .{ .context = &policy, .authorize = Policy.authorize };
+        var serve = context.ServeStateType{ .broker = &broker, .connection_count = 1 };
+        const thread = try std.Thread.spawn(.{}, context.ServeStateType.run, .{&serve});
+        var joined = false;
+        defer if (!joined) thread.join();
+        defer failing.fail_index = std.math.maxInt(usize);
+        var result = try runtime.Client.connectAttemptWithTimeout(allocator, io, broker.address(), .{
+            .protocol = .v5,
+            .client_id = "storage-refusal",
+        }, .fromSeconds(5));
+        defer result.deinit(allocator);
+        try std.testing.expect(!result.accepted());
+        try std.testing.expectEqual(@as(u8, if (policy_refusal) 0x87 else 0x89), result.connack.connack.reason_code);
+        try context.joinServerFn(thread, &joined, &serve);
+        try std.testing.expect(policy.called.load(.acquire));
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), broker.sessions.count());
+        try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+        try std.testing.expect(!broker.slots[0].state.active);
+        try std.testing.expect(broker.slots[0].connection == null);
+    }
+}
+
+fn failedAdmission(protocol: mqtt.ProtocolVersion, failure_offset: usize, clean_start: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -30,9 +84,9 @@ fn failedRestoration(protocol: mqtt.ProtocolVersion, failure_offset: usize) !voi
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             if (connect.username) |username| {
                 if (std.mem.eql(u8, username, "replacement")) {
-                    // A resumed subscriber allocates its delivery descriptor
-                    // and queue first. Reject the restoration copy or journal
-                    // reservation before either can change Session ownership.
+                    // Stable connection storage comes first, then a resumed
+                    // subscriber's delivery descriptor/queue and restoration
+                    // copy/journal. Arm the requested preparation boundary.
                     self.allocator.fail_index = self.allocator.alloc_index + self.offset;
                     self.armed.store(true, .release);
                 }
@@ -78,7 +132,7 @@ fn failedRestoration(protocol: mqtt.ProtocolVersion, failure_offset: usize) !voi
     const attempted = runtime.Client.connectAttemptWithTimeout(allocator, io, broker.address(), .{
         .protocol = protocol,
         .client_id = "restore-admission",
-        .clean_start = false,
+        .clean_start = clean_start,
         .username = "replacement",
         .properties = if (protocol == .v5) &.{.{ .four_byte = .{ .id = .session_expiry_interval, .value = 0 } }} else &.{},
     }, .fromSeconds(5));
