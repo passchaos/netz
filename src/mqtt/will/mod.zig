@@ -6,7 +6,8 @@
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
-const owned_properties = @import("../owned_properties.zig");
+const entry_mod = @import("entry.zig");
+const Entry = entry_mod.Entry;
 const persistence = @import("../persistence/codec.zig");
 const indexed_heap = @import("indexed_heap.zig");
 
@@ -54,6 +55,29 @@ pub const AcceptResult = struct {
     previous: CloseResult,
     previous_due: ?Handle,
     current: ?Handle,
+};
+
+/// Owns a prepared Will without changing the prior connection's lifecycle.
+/// The scheduler must remain alive and unchanged until commit or deinit. Only
+/// one preparation may be outstanding; callers serialize both phases with
+/// other scheduler operations. Without a new Will, ClientID remains borrowed
+/// through commit. With a Will, all identity and message data are owned here.
+pub const PreparedConnect = struct {
+    scheduler: *Scheduler,
+    client_id: []const u8,
+    clean_start: bool,
+    now: std.Io.Timestamp,
+    previous_handle: ?Handle,
+    previous_preview: CloseResult,
+    previous_was_claimed: bool,
+    entry: ?Entry,
+    pending: bool = true,
+
+    /// Also valid after commit, which transfers the owned entry to Scheduler.
+    pub fn deinit(self: *PreparedConnect) void {
+        if (self.entry) |*entry| entry.deinit(self.scheduler.allocator);
+        self.* = undefined;
+    }
 };
 
 pub const Due = struct {
@@ -105,42 +129,6 @@ pub const Due = struct {
                 .properties = properties.items,
             },
         );
-    }
-};
-
-const State = enum {
-    connected,
-    scheduled,
-    /// Removed from the deadline heap by `pollDue`; publication is now
-    /// committed and a later reconnect must not suppress or reschedule it.
-    due,
-};
-
-const Entry = struct {
-    generation: u64,
-    client_id: []u8,
-    source_username: ?[]u8,
-    source_listener_id: ?u64,
-    topic: []u8,
-    payload: []u8,
-    qos: mqtt.QoS,
-    retain: bool,
-    properties: []mqtt.Property,
-    will_delay_interval: u32,
-    message_expiry_interval: ?u32,
-    session_expiry_interval: u32,
-    state: State = .connected,
-    deadline_ns: i96 = 0,
-    heap_index: ?usize = null,
-    allocation_bytes: usize,
-
-    fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        owned_properties.deinit(allocator, self.properties);
-        if (self.source_username) |value| allocator.free(value);
-        allocator.free(self.payload);
-        allocator.free(self.topic);
-        allocator.free(self.client_id);
-        self.* = undefined;
     }
 };
 
@@ -431,8 +419,8 @@ pub const Scheduler = struct {
 
     /// Install the Will associated with a newly accepted CONNECT.
     ///
-    /// Prefer `acceptConnect`, which atomically applies prior-connection
-    /// lifecycle rules before deep-copying this Will.
+    /// Prefer `acceptConnect`, which prepares the new Will before atomically
+    /// applying prior-connection lifecycle rules.
     pub fn set(
         self: *Scheduler,
         client_id: []const u8,
@@ -463,7 +451,9 @@ pub const Scheduler = struct {
             if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
             try mqtt.validateUtf8String(value);
         }
-        var entry = try self.prepare(
+        var entry = try entry_mod.prepare(
+            self.allocator,
+            self.options,
             client_id,
             will,
             source_username,
@@ -535,6 +525,27 @@ pub const Scheduler = struct {
         session_expiry_interval: u32,
         now: std.Io.Timestamp,
     ) Error!AcceptResult {
+        var prepared = try self.prepareConnectWithSource(
+            connect,
+            source_username,
+            source_listener_id,
+            session_expiry_interval,
+            now,
+        );
+        defer prepared.deinit();
+        return self.commitConnect(&prepared);
+    }
+
+    /// Validate, own and reserve the new Will before broker Session admission.
+    /// Failure or deinit preserves the old Will and its publication deadline.
+    pub fn prepareConnectWithSource(
+        self: *Scheduler,
+        connect: mqtt.Connect,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        session_expiry_interval: u32,
+        now: std.Io.Timestamp,
+    ) Error!PreparedConnect {
         const previous_index = self.client_index.get(connect.client_id);
         const previous_handle = if (previous_index) |index| blk: {
             const entry = self.entries.items[index].?;
@@ -553,7 +564,7 @@ pub const Scheduler = struct {
             CloseResult.no_will;
 
         // Deep-copy and reserve every resource for the new Will before
-        // changing the old Session. A malformed or over-limit CONNECT can
+        // changing its lifecycle. A malformed or over-limit CONNECT can
         // therefore be rejected without accidentally canceling/publishing the
         // prior Will.
         var prepared: ?Entry = if (connect.will) |message| blk: {
@@ -564,7 +575,9 @@ pub const Scheduler = struct {
                     self.entries.items[previous_index.?].?.allocation_bytes
             else
                 self.total_bytes;
-            break :blk try self.prepare(
+            break :blk try entry_mod.prepare(
+                self.allocator,
+                self.options,
                 connect.client_id,
                 message,
                 source_username,
@@ -584,32 +597,50 @@ pub const Scheduler = struct {
             );
         }
 
+        return .{
+            .scheduler = self,
+            .client_id = if (prepared) |entry| entry.client_id else connect.client_id,
+            .clean_start = connect.clean_start,
+            .now = now,
+            .previous_handle = previous_handle,
+            .previous_preview = previous_preview,
+            .previous_was_claimed = previous_was_claimed,
+            .entry = prepared,
+        };
+    }
+
+    /// Commit under the same serialization boundary as preparation. Every
+    /// allocation and validation has already succeeded, so broker Session
+    /// takeover cannot be followed by a rejected Will admission.
+    pub fn commitConnect(self: *Scheduler, prepared: *PreparedConnect) AcceptResult {
+        std.debug.assert(prepared.scheduler == self and prepared.pending);
+        std.debug.assert(std.meta.eql(self.handleForClient(prepared.client_id), prepared.previous_handle));
         const previous = self.onReconnect(
-            connect.client_id,
-            connect.clean_start,
-            now,
+            prepared.client_id,
+            prepared.clean_start,
+            prepared.now,
         );
-        std.debug.assert(previous == previous_preview);
+        std.debug.assert(previous == prepared.previous_preview);
         // A Will already returned by pollDue belongs to that polling caller;
         // don't hand the same publication handle to the reconnect path too.
-        const previous_due = if (previous == .due_now and !previous_was_claimed)
-            previous_handle
+        const previous_due = if (previous == .due_now and !prepared.previous_was_claimed)
+            prepared.previous_handle
         else
             null;
         // A due old Will remains indexed until release. It cannot coexist with
         // the new Will under the same ClientID, so detach its ClientID index
         // while retaining the generation-safe publication handle.
         if (previous == .due_now) {
-            const entry = try self.getEntry(previous_handle.?);
+            const entry = self.getEntry(prepared.previous_handle.?) catch unreachable;
             _ = self.client_index.fetchRemove(entry.client_id).?;
         }
+        const current = if (prepared.entry) |entry| self.installPrepared(entry) else null;
+        prepared.entry = null;
+        prepared.pending = false;
         return .{
             .previous = previous,
             .previous_due = previous_due,
-            .current = if (prepared) |entry|
-                self.installPrepared(entry)
-            else
-                null,
+            .current = current,
         };
     }
 
@@ -850,80 +881,6 @@ pub const Scheduler = struct {
         self.removeAt(handle.index);
     }
 
-    fn prepare(
-        self: *Scheduler,
-        client_id: []const u8,
-        will: mqtt.LastWill,
-        source_username: ?[]const u8,
-        source_listener_id: ?u64,
-        session_expiry_interval: u32,
-        final_count: usize,
-        final_base_bytes: usize,
-    ) Error!Entry {
-        try mqtt.validateTopicName(will.topic);
-        try validateWillProperties(will.properties, will.payload);
-        if (final_count > self.options.max_wills) {
-            return error.WillLimitExceeded;
-        }
-
-        const client_owned = try self.allocator.dupe(u8, client_id);
-        errdefer self.allocator.free(client_owned);
-        const source_username_owned = if (source_username) |value|
-            try self.allocator.dupe(u8, value)
-        else
-            null;
-        errdefer if (source_username_owned) |value| self.allocator.free(value);
-        const topic_owned = try self.allocator.dupe(u8, will.topic);
-        errdefer self.allocator.free(topic_owned);
-        const payload_owned = try self.allocator.dupe(u8, will.payload);
-        errdefer self.allocator.free(payload_owned);
-        const property_result = owned_properties.clone(
-            self.allocator,
-            will.properties,
-            owned_properties.keepAll,
-        ) catch |err| switch (err) {
-            error.OwnedPropertyLimitExceeded => return error.WillByteLimitExceeded,
-            else => return @errorCast(err),
-        };
-        errdefer owned_properties.deinit(
-            self.allocator,
-            property_result.properties,
-        );
-        const bytes = std.math.add(
-            usize,
-            client_owned.len + topic_owned.len + payload_owned.len,
-            if (source_username_owned) |value| value.len else 0,
-        ) catch return error.WillByteLimitExceeded;
-        const total_bytes = std.math.add(
-            usize,
-            bytes,
-            property_result.allocation_bytes,
-        ) catch return error.WillByteLimitExceeded;
-        if (total_bytes > self.options.max_will_bytes or
-            total_bytes > self.options.max_total_bytes -| final_base_bytes)
-        {
-            return error.WillByteLimitExceeded;
-        }
-
-        return .{
-            // Generation is assigned only after every installation resource
-            // has been reserved and the entry can be committed.
-            .generation = 0,
-            .client_id = client_owned,
-            .source_username = source_username_owned,
-            .source_listener_id = source_listener_id,
-            .topic = topic_owned,
-            .payload = payload_owned,
-            .qos = will.qos,
-            .retain = will.retain,
-            .properties = property_result.properties,
-            .will_delay_interval = mqtt.willDelayInterval(will.properties) orelse 0,
-            .message_expiry_interval = mqtt.messageExpiryInterval(will.properties),
-            .session_expiry_interval = session_expiry_interval,
-            .allocation_bytes = total_bytes,
-        };
-    }
-
     fn reserveInstall(
         self: *Scheduler,
         final_count: usize,
@@ -1064,13 +1021,6 @@ fn setHeapPosition(
     scheduler.entries.items[entry_index].?.heap_index = position;
 }
 
-fn validateWillProperties(
-    properties: []const mqtt.Property,
-    payload: []const u8,
-) Error!void {
-    return mqtt.validateWillProperties(properties, payload);
-}
-
 fn connectSessionExpiry(connect: mqtt.Connect) u32 {
     return switch (connect.protocol) {
         .v5 => mqtt.sessionExpiryInterval(connect.properties) orelse 0,
@@ -1092,4 +1042,5 @@ fn addSeconds(now_ns: i96, seconds: u32) i96 {
 
 test {
     _ = @import("tests.zig");
+    _ = @import("connect_tests.zig");
 }

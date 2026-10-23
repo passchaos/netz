@@ -4827,6 +4827,14 @@ pub const Broker = struct {
                 try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
             }
+            if (err == error.WillLimitExceeded or err == error.WillByteLimitExceeded) {
+                try self.refuseResolvedConnect(
+                    pending,
+                    .{ .reason_code = if (pending.connect.connect.protocol == .v5) 0x97 else 0x03 },
+                    &pending_owned,
+                );
+                return null;
+            }
             return err;
         };
         const subscriber_id = registration.subscriber_id;
@@ -5006,6 +5014,17 @@ pub const Broker = struct {
                 1,
             );
         }
+        // Reject Will resource failures before replacing any Session or
+        // detaching its current owner. Preparation is discarded if Session
+        // admission or subscription restoration fails; commit cannot fail.
+        var prepared_will = try self.wills.prepareConnectWithSource(
+            effective_connect,
+            effective_connect.username,
+            retained_source_id,
+            self.sessionExpiryForConnectLocked(effective_connect),
+            now,
+        );
+        defer prepared_will.deinit();
         const opened_session = try self.sessions.open(
             effective_connect.client_id,
             effective_connect.clean_start,
@@ -5013,7 +5032,7 @@ pub const Broker = struct {
             now,
         );
         // A rejected Session admission preserves the old state. Once its
-        // replacement commits, later Will/router/CONNACK failures still need
+        // replacement commits, later router/CONNACK failures still need
         // to carry that durable transition to persistence.
         persistent_changed = persistent_changed or previous_session_persistent;
         progress.rollback_changed = persistent_changed;
@@ -5064,21 +5083,7 @@ pub const Broker = struct {
         const previous_handle = self.wills.handleForClient(
             effective_connect.client_id,
         );
-        const accepted_will = self.wills.acceptConnectWithSource(
-            effective_connect,
-            effective_connect.username,
-            retained_source_id,
-            self.sessionExpiryForConnectLocked(effective_connect),
-            now,
-        ) catch |err| {
-            self.rollbackOpenedSessionLocked(
-                opened_session.handle,
-                opened_session.route_id,
-                opened_session.session_present,
-                now,
-            );
-            return err;
-        };
+        const accepted_will = self.wills.commitConnect(&prepared_will);
         if (accepted_will.previous == .canceled) {
             if (previous_handle) |handle| {
                 _ = self.will_publishers.remove(handle);
@@ -9060,7 +9065,7 @@ test "MQTT publisher route plans reuse bounded slot storage" {
     broker.releaseClaimedSlot(slot_index);
 }
 
-test "MQTT failed Clean Start journals the durable deletion" {
+test "MQTT Clean Start journals only committed Session replacement" {
     const backing = std.testing.allocator;
     var threaded = std.Io.Threaded.init(backing, .{});
     defer threaded.deinit();
@@ -9110,10 +9115,11 @@ test "MQTT failed Clean Start journals the durable deletion" {
     try broker.sessions.disconnect(old.handle, null, now);
     try broker.createCommitLog(tmp.dir, "failed-clean.log", .{});
 
-    // Arm the next allocation so registration fails immediately after Clean
-    // Start removes the old durable Session. The out-progress bit must survive
-    // that error.
+    // Failure while preparing the replacement must preserve the durable
+    // Session and must not journal a deletion that never committed.
     const slot_index = try broker.claimSlot();
+    var slot_claimed = true;
+    defer if (slot_claimed) broker.releaseClaimedSlot(slot_index);
     var progress: RegistrationProgress = .{};
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
@@ -9132,9 +9138,43 @@ test "MQTT failed Clean Start journals the durable deletion" {
             &progress,
         ),
     );
-    broker.releaseClaimedSlot(slot_index);
-    try std.testing.expect(progress.rollback_changed);
+    try std.testing.expect(!progress.rollback_changed);
+    try std.testing.expectEqual(@as(?session_mod.Handle, old.handle), broker.sessions.find(
+        "failed-clean-start",
+        std.Io.Clock.awake.now(io),
+    ));
+    try std.testing.expectEqual(@as(usize, 1), broker.router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 1), broker.pending_qos2.count());
     failing.fail_index = std.math.maxInt(usize);
+    broker.finishPartialPersistentChange(progress.rollback_changed);
+
+    {
+        var rejected_image = try Broker.init(backing, io, .{
+            .limits = .{ .max_connections = 1 },
+        });
+        defer rejected_image.deinit();
+        try rejected_image.restoreCommitLog(tmp.dir, "failed-clean.log", .{});
+        try std.testing.expect(rejected_image.sessions.find(
+            "failed-clean-start",
+            std.Io.Clock.awake.now(io),
+        ) != null);
+        try std.testing.expectEqual(@as(usize, 1), rejected_image.router.subscriptionCount());
+        try std.testing.expectEqual(@as(usize, 1), rejected_image.pending_qos2.count());
+    }
+
+    // Once replacement commits, aborting the provisional connection at the
+    // CONNACK boundary must persist its deletion of the prior durable state.
+    progress = .{};
+    const registration = try broker.register(slot_index, .{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 30,
+        .client_id = "failed-clean-start",
+    }, null, null, broker.options.auto_client_id_prefix, &progress);
+    try std.testing.expect(progress.rollback_changed);
+    broker.abortRegistration(slot_index, registration.subscriber_id, progress.rollback_changed);
+    broker.releaseClaimedSlot(slot_index);
+    slot_claimed = false;
     broker.finishPartialPersistentChange(progress.rollback_changed);
 
     var restored = try Broker.init(backing, io, .{

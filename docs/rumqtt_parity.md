@@ -3093,6 +3093,26 @@ a new route identity; the broker records that durable transition only after
 Session admission commits. Fault injection and final-budget replacement cases
 cover connected, offline, transient, and expired lifetimes.
 
+Broker CONNECT admission now prepares the Will before Session replacement and
+old-owner detachment. `prepareConnectWithSource` owns the new message and
+reserves scheduler capacity without changing the prior Will; `commitConnect`
+applies reconnect semantics without allocation under the same broker state
+lock. Session preparation failure drops that temporary Will. Will validation,
+allocation, count, and byte-limit failures therefore preserve the prior
+Session, subscription routes, live owner, Will, and publisher association.
+Will quota rejection sends CONNACK 0x97 for MQTT 5 and 0x03 for MQTT 3.1/3.1.1.
+TCP regressions exercise all three protocol versions and both Clean Start
+values, verify continued message delivery, and inject Will-copy, scheduler-index,
+and Session-preparation allocation failures. Scheduler fault injection also
+covers every preparation allocation, unchanged delayed-Will deadlines on abort,
+owned source/property data, and allocation-free commit. This ordering follows
+Mosquitto's `will__read` before `connect__on_authorised` takeover. Journal
+regressions distinguish rejected preparation from an already-committed
+replacement whose provisional connection is later aborted.
+The focused Session, Will, broker ownership/admission, and persistence gate
+passes 286/286 tests in both Debug and ReleaseFast; the public-module package
+check passes 2/2.
+
 `mqtt.will_scheduler.Scheduler` deep-owns the Will Message and MQTT 5 Will
 Properties, indexes entries by ClientID, and orders deadlines with an indexed
 binary min-heap. Accepted CONNECT reserves heap capacity so subsequent network
