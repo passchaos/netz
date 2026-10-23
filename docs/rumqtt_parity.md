@@ -3093,6 +3093,24 @@ a new route identity; the broker records that durable transition only after
 Session admission commits. Fault injection and final-budget replacement cases
 cover connected, offline, transient, and expired lifetimes.
 
+Resumed CONNECT also prepares subscription routing before Session generation,
+expiry, retransmission state, or owner changes. `Router.beginSubscriptionBatch`
+reserves a bounded rollback journal, preserves prior delivery policies and
+subscription identifiers, and can rebuild missing ordinary/shared routes.
+Commit and rollback allocate nothing; aborted preparation removes only its
+new entries, restores existing metadata, and preserves shared-group selection
+state. Existing stable Session routes are reused rather than re-indexed.
+Clean Start and transient takeover skip restoration of state that cannot be
+continued. Real TCP fault injection for MQTT 3.1/3.1.1/5 covers subscription
+copy and batch journal reservation failures, including a replacement requesting
+Session Expiry zero: the original handle, owner, Will, expiry, and in-flight
+window remain valid, and the old client can acknowledge then receive fresh
+traffic. A successful-resume case proves missing normal/shared route rebuild,
+subscription identifiers, No Local, and Retain As Published.
+The focused Router, Session, Will, broker admission/lifecycle, and persistence
+gate passes 254/254 tests in Debug and ReleaseFast; public-module package
+checks pass 2/2.
+
 Broker CONNECT admission now prepares the Will before Session replacement and
 old-owner detachment. `prepareConnectWithSource` owns the new message and
 reserves scheduler capacity without changing the prior Will; `commitConnect`

@@ -15,6 +15,7 @@ const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
+const session_subscriptions = @import("broker/session_subscriptions.zig");
 const load_metrics = @import("broker/load_metrics.zig");
 const local_consumer_mod = @import("broker/local_consumer.zig");
 const publish_counters = @import("broker/publish_counters.zig");
@@ -5058,6 +5059,17 @@ pub const Broker = struct {
             now,
         );
         defer prepared_will.deinit();
+        // Route preparation may copy subscriptions or recreate a missing
+        // index. Any failure rolls its batch back while the old Session and
+        // live owner still retain their complete capabilities.
+        var prepared_subscriptions = try session_subscriptions.prepare(
+            self.allocator,
+            &self.router,
+            &self.sessions,
+            previous_session_handle,
+            effective_connect.clean_start,
+        );
+        defer prepared_subscriptions.deinit();
         const opened_session = try self.sessions.open(
             effective_connect.client_id,
             effective_connect.clean_start,
@@ -5065,7 +5077,7 @@ pub const Broker = struct {
             now,
         );
         // A rejected Session admission preserves the old state. Once its
-        // replacement commits, later router/CONNACK failures still need
+        // replacement commits, later CONNACK failures still need
         // to carry that durable transition to persistence.
         persistent_changed = persistent_changed or previous_session_persistent;
         progress.rollback_changed = persistent_changed;
@@ -5101,18 +5113,7 @@ pub const Broker = struct {
             opened_session.route_id,
             id,
         );
-        self.restoreSessionSubscriptions(
-            opened_session.handle,
-            opened_session.route_id,
-        ) catch |err| {
-            self.rollbackOpenedSessionLocked(
-                opened_session.handle,
-                opened_session.route_id,
-                opened_session.session_present,
-                now,
-            );
-            return err;
-        };
+        prepared_subscriptions.commit();
         const previous_handle = self.wills.handleForClient(
             effective_connect.client_id,
         );
@@ -5432,49 +5433,6 @@ pub const Broker = struct {
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
-    }
-
-    fn restoreSessionSubscriptions(
-        self: *Broker,
-        handle: session_mod.Handle,
-        route_id: u64,
-    ) Error!void {
-        return self.restoreSessionSubscriptionsTo(
-            &self.router,
-            handle,
-            route_id,
-        );
-    }
-
-    fn restoreSessionSubscriptionsTo(
-        self: *Broker,
-        target_router: *router_mod.Router,
-        handle: session_mod.Handle,
-        route_id: u64,
-    ) Error!void {
-        const session_stats = try self.sessions.stats(handle);
-        const subscriptions = try self.allocator.alloc(
-            session_mod.Subscription,
-            session_stats.subscription_count,
-        );
-        defer self.allocator.free(subscriptions);
-        const restored = try self.sessions.subscriptionsInto(
-            handle,
-            subscriptions,
-        );
-        for (restored) |subscription| {
-            _ = try target_router.subscribeWithIdentifierStatus(
-                sessionSubscriberId(route_id),
-                .{
-                    .topic_filter = subscription.topic_filter,
-                    .qos = subscription.qos,
-                    .no_local = subscription.no_local,
-                    .retain_as_published = subscription.retain_as_published,
-                    .retain_handling = subscription.retain_handling,
-                },
-                subscription.subscription_identifier,
-            );
-        }
     }
 
     fn restoreSessionSubscriptionsFrom(

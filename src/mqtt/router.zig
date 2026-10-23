@@ -3,8 +3,16 @@ const mqtt = @import("mod.zig");
 
 pub const Error = mqtt.Error || error{
     SubscriptionNotFound,
+    SubscriptionBatchFull,
     MatchBufferTooSmall,
 };
+
+const BatchContext = struct {
+    pub const RouterType = Router;
+    pub const ErrorType = Error;
+    pub const findEntry = Router.findEntry;
+};
+pub const SubscriptionBatch = @import("router/batch.zig").SubscriptionBatch(BatchContext);
 
 pub const SubscriberId = u64;
 
@@ -141,6 +149,12 @@ pub const Router = struct {
     /// client/filter membership, not only distinct `{group, filter}` keys.
     pub fn sharedSubscriptionCount(self: Router) usize {
         return self.shared_entry_count;
+    }
+
+    /// Prepare up to `capacity` reversible subscription updates. Hold the
+    /// router's serialization boundary until the batch commits or deinitializes.
+    pub fn beginSubscriptionBatch(self: *Router, subscriber_id: SubscriberId, capacity: usize) Error!SubscriptionBatch {
+        return SubscriptionBatch.init(self, subscriber_id, capacity);
     }
 
     pub fn subscribe(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription) Error!void {
@@ -1577,4 +1591,8 @@ fn testSubscriptionAllocationFailures(allocator: std.mem.Allocator) !void {
         .qos = .exactly_once,
         .retain_as_published = true,
     });
+}
+
+test {
+    _ = @import("router/batch_tests.zig");
 }
