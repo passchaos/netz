@@ -4,6 +4,7 @@ const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 const deflate = @import("../internal/deflate.zig");
 const compression_context = @import("compression_context.zig");
+const server_handshake = @import("handshake/server.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const CompressionContext = compression_context.CompressionContext;
@@ -1557,80 +1558,7 @@ fn isTchar(byte: u8) bool {
     };
 }
 
-pub fn writeServerHandshake(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    client_key: []const u8,
-    extra_headers: []const wire.Header,
-) !void {
-    try validateClientKey(client_key);
-    try validateServerHandshakeHeaders(extra_headers);
-    const response_prefix =
-        "HTTP/1.1 101 Switching Protocols\r\n" ++
-        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
-    const key = acceptKey(client_key);
-    var response_len = response_prefix.len + key.len;
-    response_len = std.math.add(usize, response_len, 2) catch
-        return error.PayloadTooLarge;
-    for (extra_headers) |header| {
-        response_len = std.math.add(usize, response_len, header.name.len) catch
-            return error.PayloadTooLarge;
-        response_len = std.math.add(usize, response_len, 2) catch
-            return error.PayloadTooLarge;
-        response_len = std.math.add(usize, response_len, header.value.len) catch
-            return error.PayloadTooLarge;
-        response_len = std.math.add(usize, response_len, 2) catch
-            return error.PayloadTooLarge;
-    }
-    response_len = std.math.add(usize, response_len, 2) catch
-        return error.PayloadTooLarge;
-
-    try list.ensureUnusedCapacity(allocator, response_len);
-    list.appendSliceAssumeCapacity(response_prefix);
-    list.appendSliceAssumeCapacity(&key);
-    list.appendSliceAssumeCapacity("\r\n");
-    for (extra_headers) |header| {
-        list.appendSliceAssumeCapacity(header.name);
-        list.appendSliceAssumeCapacity(": ");
-        list.appendSliceAssumeCapacity(header.value);
-        list.appendSliceAssumeCapacity("\r\n");
-    }
-    list.appendSliceAssumeCapacity("\r\n");
-}
-
-fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
-    var saw_protocol = false;
-    var saw_extensions = false;
-    for (headers) |header| {
-        try http1.validateHeader(header);
-        if (header.eqlName("upgrade") or
-            header.eqlName("connection") or
-            header.eqlName("sec-websocket-accept") or
-            header.eqlName("content-length") or
-            header.eqlName("transfer-encoding") or
-            header.eqlName("trailer"))
-        {
-            // The writer owns the mandatory fields, while a 101 response cannot
-            // carry HTTP/1 message framing. Reject both groups before output.
-            return error.InvalidHandshake;
-        }
-        if (header.eqlName("sec-websocket-protocol")) {
-            if (saw_protocol) return error.InvalidHandshake;
-            saw_protocol = true;
-            if (!validSubprotocolToken(wire.trimOws(header.value))) return error.InvalidHandshake;
-        } else if (header.eqlName("sec-websocket-extensions")) {
-            if (saw_extensions) return error.InvalidHandshake;
-            saw_extensions = true;
-            _ = try ExtensionNegotiation.validateResponseWithPolicy(
-                header.value,
-                .{
-                    .enable_permessage_deflate = true,
-                    .allow_context_takeover = true,
-                },
-            );
-        }
-    }
-}
+pub const writeServerHandshake = server_handshake.write;
 
 pub const MessageAssembler = struct {
     allocator: std.mem.Allocator,
@@ -3762,116 +3690,6 @@ test "WebSocket handshake rejects malformed nonce" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(req));
-}
-
-test "WebSocket server handshake writer validates generated response" {
-    const allocator = std.testing.allocator;
-    var response: std.ArrayList(u8) = .empty;
-    defer response.deinit(allocator);
-    const original = "existing output";
-    try response.appendSlice(allocator, original);
-
-    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
-        &response,
-        allocator,
-        "not-base64",
-        &.{},
-    ));
-    try std.testing.expectEqualStrings(original, response.items);
-    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
-        &response,
-        allocator,
-        "dGhlIHNhbXBsZSBub25jZQ==",
-        &.{.{ .name = "Sec-WebSocket-Accept", .value = "duplicate" }},
-    ));
-    try std.testing.expectEqualStrings(original, response.items);
-    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
-        &response,
-        allocator,
-        "dGhlIHNhbXBsZSBub25jZQ==",
-        &.{
-            .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v1" },
-            .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v2" },
-        },
-    ));
-    try std.testing.expectEqualStrings(original, response.items);
-    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
-        &response,
-        allocator,
-        "dGhlIHNhbXBsZSBub25jZQ==",
-        &.{.{ .name = "Sec-WebSocket-Protocol", .value = "bad protocol" }},
-    ));
-    try std.testing.expectEqualStrings(original, response.items);
-    try std.testing.expectError(error.MalformedHeader, writeServerHandshake(
-        &response,
-        allocator,
-        "dGhlIHNhbXBsZSBub25jZQ==",
-        &.{.{ .name = "X-Test", .value = "ok\r\nInjected: yes" }},
-    ));
-    try std.testing.expectEqualStrings(original, response.items);
-
-    for ([_]wire.Header{
-        .{ .name = "cOnTeNt-LeNgTh", .value = "0" },
-        .{ .name = "TrAnSfEr-EnCoDiNg", .value = "chunked" },
-        .{ .name = "TrAiLeR", .value = "X-Checksum" },
-    }) |header| {
-        try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
-            &response,
-            allocator,
-            "dGhlIHNhbXBsZSBub25jZQ==",
-            &.{header},
-        ));
-        try std.testing.expectEqualStrings(original, response.items);
-    }
-}
-
-test "WebSocket server handshake write is transactional and exactly reserved" {
-    const allocator = std.testing.allocator;
-    const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
-    const extra_headers = &[_]wire.Header{
-        .{ .name = "X-Test", .value = "ok" },
-    };
-    const expected =
-        "HTTP/1.1 101 Switching Protocols\r\n" ++
-        "Upgrade: websocket\r\n" ++
-        "Connection: Upgrade\r\n" ++
-        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
-        "X-Test: ok\r\n" ++
-        "\r\n";
-
-    var failure: std.ArrayList(u8) = .empty;
-    defer failure.deinit(allocator);
-    try failure.ensureTotalCapacityPrecise(allocator, "seed".len);
-    failure.appendSliceAssumeCapacity("seed");
-    var fail_first = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 0 },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        writeServerHandshake(
-            &failure,
-            fail_first.allocator(),
-            client_key,
-            extra_headers,
-        ),
-    );
-    try std.testing.expectEqualStrings("seed", failure.items);
-
-    var exact_storage: [expected.len]u8 = undefined;
-    var exact = std.ArrayList(u8).initBuffer(&exact_storage);
-    var no_alloc = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 0 },
-    );
-    try writeServerHandshake(
-        &exact,
-        no_alloc.allocator(),
-        client_key,
-        extra_headers,
-    );
-    try std.testing.expect(!no_alloc.has_induced_failure);
-    try std.testing.expectEqualStrings(expected, exact.items);
 }
 
 test {

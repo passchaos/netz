@@ -153,7 +153,28 @@ value owns the transport until an outcome succeeds or it is deinitialized.
 Validation failures allow another decision; a response write failure marks the
 pending value terminal, shuts down its socket, and blocks another 101 or
 rejection from following an ambiguous wire prefix. Request and TLS metadata
-remain valid until `deinit` releases ownership. Injected slow and partial TCP/WSS
+remain valid until `deinit` releases ownership.
+Server response-head limits now apply before descriptor or byte allocation.
+`runtime/handshake/acceptance.zig` preflights mandatory 101 fields together with
+negotiated, configured, and per-request fields; the codec's shared
+`handshake/server.zig` validates singleton fields across those groups and keeps
+transactional exact-reservation writing. The public `writeServerHandshake`
+entry point is unchanged. `runtime/handshake/rejection.zig` likewise accounts
+for the status/reason, application fields, `Connection: close`, generated
+Content-Length, and final CRLF before preparing an ordinary rejection or
+an automatic 426. A 304 remains bodyless without a generated length, and HEAD
+suppression retains the ordinary representation length. Encoded response heads
+reserve their exact checked size. An allocator that refuses every allocation
+now sees `HeadersTooLarge` without being called for an oversized head. Real
+TCP and pinned-WSS tests exceed the 16-descriptor stack path, then successfully
+retry the same pending request, proving no response prefix or terminal state
+escaped the size failure. Independent wire expectations cover exact-fit and
+one-byte-short limits, decimal length widths, 304/HEAD framing, and invalid
+status, reason, or caller framing fields.
+The focused server-codec, response-budget, HTTP/1 handshake, Unix/WSS, proxy,
+redirect and MQTT-over-WebSocket Debug gate passes 241/241 tests; public-module
+checks pass 2/2.
+Injected slow and partial TCP/WSS
 writes verify timeout propagation, one budget across header/body, retained
 metadata, and failed-response retry rejection. The focused handshake, WSS/Unix,
 server lifecycle, Close timeout,

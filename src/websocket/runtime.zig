@@ -25,6 +25,7 @@ const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
 const handshake_response = @import("runtime/handshake/response.zig");
 const handshake_request = @import("runtime/handshake/request.zig");
+const handshake_acceptance = @import("runtime/handshake/acceptance.zig");
 const handshake_receive = @import("runtime/handshake/receive.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
@@ -1879,72 +1880,21 @@ pub const PendingUpgrade = struct {
     ) Error!Connection {
         if (self.response_write_failed) return error.ConnectionClosed;
         const allocator = self.allocator;
-        try validateUpgradeAcceptHeaders(additional_headers);
-        const combined_count = std.math.add(
-            usize,
-            self.options.extra_headers.len,
-            additional_headers.len,
-        ) catch return error.HeadersTooLarge;
-        var response: std.ArrayList(u8) = .empty;
-        defer response.deinit(allocator);
-        const negotiated_count: usize =
-            @as(usize, @intFromBool(self.selected_protocol != null)) +
-            @as(usize, @intFromBool(self.selected_extension != null));
-        const response_count = std.math.add(
-            usize,
-            combined_count,
-            negotiated_count,
-        ) catch return error.HeadersTooLarge;
-        var response_stack: [handshake_storage.stack_capacity]http1.Header =
-            undefined;
-        const response_fields = try handshake_storage.acquire(
-            http1.Header,
-            allocator,
-            &response_stack,
-            response_count,
-        );
-        defer handshake_storage.release(
-            http1.Header,
-            allocator,
-            &response_stack,
-            response_fields,
-        );
-        var response_index: usize = 0;
-        if (self.selected_protocol) |protocol| {
-            response_fields[response_index] = .{
-                .name = "Sec-WebSocket-Protocol",
-                .value = protocol,
-            };
-            response_index += 1;
-        }
-        if (self.selected_extension) |extension| {
-            response_fields[response_index] = .{
-                .name = "Sec-WebSocket-Extensions",
-                .value = extension,
-            };
-            response_index += 1;
-        }
-        @memcpy(
-            response_fields[response_index..][0..self.options.extra_headers.len],
-            self.options.extra_headers,
-        );
-        response_index += self.options.extra_headers.len;
-        @memcpy(response_fields[response_index..], additional_headers);
-        try websocket.writeServerHandshake(
-            &response,
-            self.allocator,
-            self.client_key,
-            response_fields,
-        );
-        if (response.items.len > self.limits.max_head_bytes) {
-            return error.HeadersTooLarge;
-        }
+        const response = try handshake_acceptance.prepare(allocator, .{
+            .client_key = self.client_key,
+            .protocol = self.selected_protocol,
+            .extension = self.selected_extension,
+            .configured_headers = self.options.extra_headers,
+            .additional_headers = additional_headers,
+            .max_head_bytes = self.limits.max_head_bytes,
+        });
+        defer allocator.free(response);
         if (self.deadline) |deadline| {
             _ = try deadline_policy.usableAwake(self.io, deadline);
         }
         const io = self.io;
         const transport = self.transport;
-        try self.writeResponse(response.items, &.{});
+        try self.writeResponse(response, &.{});
 
         const selected_protocol = self.selected_protocol;
         const request_head = self.request_head;
@@ -1990,49 +1940,19 @@ pub const PendingUpgrade = struct {
         body: []const u8,
     ) Error!void {
         if (self.response_write_failed) return error.ConnectionClosed;
-        if (status < 300 or status > 599) return error.InvalidStatus;
         const allocator = self.allocator;
-        try validateUpgradeRejectionHeaders(response_headers);
-        const response_count = std.math.add(
-            usize,
-            response_headers.len,
-            1,
-        ) catch return error.HeadersTooLarge;
-        var response_stack: [handshake_storage.stack_capacity]http1.Header =
-            undefined;
-        const response_fields = try handshake_storage.acquire(
-            http1.Header,
-            allocator,
-            &response_stack,
-            response_count,
-        );
-        defer handshake_storage.release(
-            http1.Header,
-            allocator,
-            &response_stack,
-            response_fields,
-        );
-        @memcpy(response_fields[0..response_headers.len], response_headers);
-        response_fields[response_headers.len] = .{
-            .name = "Connection",
-            .value = "close",
-        };
         var scratch: http1_write.Scratch = .{};
         defer scratch.deinit(allocator);
-        const message = try http1_write.prepareResponse(
+        const message = try handshake_rejection.prepare(
             allocator,
-            .{
-                .status = status,
-                .reason = reason,
-                .headers = response_fields,
-                .body = body,
-                .request_method = self.request.method,
-            },
+            self.request.method,
+            status,
+            reason,
+            response_headers,
+            body,
+            self.limits.max_head_bytes,
             &scratch,
         );
-        if (message.header.len > self.limits.max_head_bytes) {
-            return error.HeadersTooLarge;
-        }
         if (self.deadline) |deadline| {
             _ = try deadline_policy.usableAwake(self.io, deadline);
         }
@@ -17684,6 +17604,8 @@ test {
     _ = @import("runtime/handshake/response_tests.zig");
     _ = @import("runtime/handshake/request_tests.zig");
     _ = @import("runtime/handshake/receive_tests.zig");
+    _ = @import("runtime/handshake/head_budget_tests.zig");
+    _ = handshake_acceptance;
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
