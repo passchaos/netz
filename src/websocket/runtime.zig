@@ -23,6 +23,7 @@ const message_state = @import("runtime/message/state.zig");
 const handshake_headers = @import("runtime/handshake/headers.zig");
 const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
+const handshake_response = @import("runtime/handshake/response.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
 const stream_io = @import("../internal/stream_io.zig");
@@ -455,6 +456,13 @@ const RuntimeTransport = union(enum) {
         }
     }
 };
+
+const HandshakeResponseWriter = handshake_response.Writer(struct {
+    pub const TransportType = RuntimeTransport;
+    pub const ErrorType = Error;
+    pub const writeWithDeadline = RuntimeTransport.writeWithDeadline;
+    pub const writeAllParts = RuntimeTransport.writeAllParts;
+});
 
 fn transportStream(transport: RuntimeTransport) net.Stream {
     return switch (transport) {
@@ -1419,8 +1427,8 @@ fn receiveUpgradeRequestFromTransport(
                 allocator,
                 request.method,
                 limits.max_head_bytes,
-                transport,
-                writeUnsupportedVersionParts,
+                HandshakeResponseWriter{ .transport = transport, .deadline = deadline },
+                HandshakeResponseWriter.write,
             );
             return err;
         },
@@ -1475,14 +1483,6 @@ fn receiveUpgradeRequestFromTransport(
         .selected_extension = selected_extension,
         .negotiated_extension = negotiated_extension,
     };
-}
-
-fn writeUnsupportedVersionParts(
-    transport: RuntimeTransport,
-    header: []const u8,
-    body: []const u8,
-) Error!void {
-    try transport.writeAllParts(header, body);
 }
 
 pub const AsyncServeError = Error || std.Io.Cancelable;
@@ -1790,6 +1790,7 @@ pub const PendingUpgrade = struct {
     selected_protocol: ?[]u8,
     selected_extension: ?[]u8,
     negotiated_extension: websocket.ExtensionNegotiation,
+    response_write_failed: bool = false,
 
     pub fn deinit(self: *PendingUpgrade) void {
         const allocator = self.allocator;
@@ -1867,6 +1868,7 @@ pub const PendingUpgrade = struct {
         self: *PendingUpgrade,
         additional_headers: []const http1.Header,
     ) Error!Connection {
+        if (self.response_write_failed) return error.ConnectionClosed;
         const allocator = self.allocator;
         try validateUpgradeAcceptHeaders(additional_headers);
         const combined_count = std.math.add(
@@ -1933,7 +1935,7 @@ pub const PendingUpgrade = struct {
         }
         const io = self.io;
         const transport = self.transport;
-        try transport.writeAll(response.items);
+        try self.writeResponse(response.items, &.{});
 
         const selected_protocol = self.selected_protocol;
         const request_head = self.request_head;
@@ -1978,6 +1980,7 @@ pub const PendingUpgrade = struct {
         response_headers: []const http1.Header,
         body: []const u8,
     ) Error!void {
+        if (self.response_write_failed) return error.ConnectionClosed;
         if (status < 300 or status > 599) return error.InvalidStatus;
         const allocator = self.allocator;
         try validateUpgradeRejectionHeaders(response_headers);
@@ -2024,8 +2027,21 @@ pub const PendingUpgrade = struct {
         if (self.deadline) |deadline| {
             _ = try deadline_policy.usableAwake(self.io, deadline);
         }
-        try self.transport.writeAllParts(message.header, message.body);
+        try self.writeResponse(message.header, message.body);
         self.deinit();
+    }
+
+    fn writeResponse(self: *PendingUpgrade, response_head: []const u8, body: []const u8) Error!void {
+        const writer = HandshakeResponseWriter{ .transport = self.transport, .deadline = self.deadline };
+        writer.write(response_head, body) catch |err| {
+            // HTTP response bytes have an ambiguous peer-visible prefix.
+            // Another 101 or rejection cannot safely follow this failure.
+            // Keep metadata/TLS ownership alive for deinit, but wake the peer
+            // and block all later response writes immediately.
+            self.response_write_failed = true;
+            transportStream(self.transport).shutdown(self.io, .both) catch {};
+            return err;
+        };
     }
 
     pub fn forbidden(self: *PendingUpgrade) Error!void {
@@ -17933,6 +17949,7 @@ test {
     _ = @import("runtime/error_close_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
+    _ = @import("runtime/handshake/response_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");

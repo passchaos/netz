@@ -145,10 +145,20 @@ both outcomes prevent applications from overriding WebSocket negotiation or
 HTTP body-framing fields. TCP, Unix, and WSS timeout/deadline entry points apply
 one absolute budget to listener accept and the complete HTTP/TLS Upgrade; a
 timeout/accept race closes any late accepted socket. The original deadline also
-remains in force across the application decision instead of being renewed
-before the response write. A pending value owns the transport until one outcome succeeds;
-validation or write failures leave that ownership with the caller so `deinit`
-can close it deterministically. Existing `accept*` entry points remain
+remains in force across the application decision and every response write.
+`runtime/handshake/response.zig` applies that same absolute budget to 101,
+rejection headers and body, and automatic 426 version negotiation on TCP/Unix
+and native TLS. Unbounded callers keep the existing scatter write. A pending
+value owns the transport until an outcome succeeds or it is deinitialized.
+Validation failures allow another decision; a response write failure marks the
+pending value terminal, shuts down its socket, and blocks another 101 or
+rejection from following an ambiguous wire prefix. Request and TLS metadata
+remain valid until `deinit` releases ownership. Injected slow and partial TCP/WSS
+writes verify timeout propagation, one budget across header/body, retained
+metadata, and failed-response retry rejection. The focused handshake, WSS/Unix,
+server lifecycle, Close timeout,
+and MQTT-over-WebSocket gate passes 210/210 tests in Debug and ReleaseFast,
+with public-module package checks passing 2/2. Existing `accept*` entry points remain
 compatible wrappers that receive and immediately accept. End-to-end TCP, Unix,
 and WSS tests inspect credentials before 101; the TCP tests additionally prove
 that no response is sent before admission, custom acceptance fields survive the
