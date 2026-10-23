@@ -57,6 +57,12 @@ pub const Handle = struct {
     generation: u64,
 };
 
+const OpenContext = struct {
+    pub const StoreType = Store;
+    pub const HandleType = Handle;
+};
+pub const PreparedOpen = open_admission.PreparedOpen(OpenContext);
+
 pub const OpenResult = struct {
     handle: Handle,
     route_id: u64,
@@ -1231,6 +1237,18 @@ pub const Store = struct {
         expiry_interval: u32,
         now: std.Io.Timestamp,
     ) Error!OpenResult {
+        var prepared = try self.prepareOpen(client_id, clean_start, expiry_interval, now);
+        defer prepared.deinit();
+        return self.commitOpen(&prepared);
+    }
+
+    pub fn prepareOpen(
+        self: *Store,
+        client_id: []const u8,
+        clean_start: bool,
+        expiry_interval: u32,
+        now: std.Io.Timestamp,
+    ) Error!PreparedOpen {
         if (client_id.len == 0 and !clean_start) {
             return error.InvalidClientId;
         }
@@ -1257,35 +1275,11 @@ pub const Store = struct {
                 // the broker still sends the required takeover shutdown.
                 replacement_index = index;
             } else {
-                const generation = self.nextGeneration();
-                // Every resumed/takeover Network Connection gets a fresh
-                // handle. This immediately invalidates the old connection's
-                // capability to mutate the shared Session after takeover.
-                session.generation = generation;
-                session.connected = true;
-                if (expiry_interval == 0) {
-                    self.persistent_session_count -= 1;
-                }
-                session.expiry_interval = expiry_interval;
-                session.expires_at_ns = null;
-                session.next_inflight_send = no_inflight_send;
-                for (session.inflight.items, 0..) |*inflight, inflight_index| {
-                    if (inflight.packet_id == 0) continue;
-                    noteInflightNeedsSend(
-                        session,
-                        inflight_index,
-                        inflight,
-                    );
-                    inflight.retransmission = true;
-                }
-                std.debug.assert(session.sent_publish_count == 0);
-                session.sent_publish_count = 0;
                 return .{
-                    .handle = .{
-                        .index = index,
-                        .generation = session.generation,
-                    },
-                    .route_id = session.route_id,
+                    .store = self,
+                    .index = index,
+                    .previous = .{ .index = index, .generation = session.generation },
+                    .expiry_interval = expiry_interval,
                     .session_present = true,
                     .replaced_connection = replaced_connection,
                 };
@@ -1315,17 +1309,76 @@ pub const Store = struct {
         {
             _ = self.sessions.pop();
         };
+        return .{
+            .store = self,
+            .index = index,
+            .previous = if (replacement_index != null) .{ .index = index, .generation = self.sessions.items[index].?.generation } else null,
+            .client_id = client_owned,
+            .expiry_interval = expiry_interval,
+            .session_present = false,
+            .replaced_connection = replaced_connection,
+            .appended_slot = appended_slot,
+        };
+    }
+
+    /// Commit a prepared open under the same Store serialization boundary.
+    /// Every admission allocation and limit check has already succeeded.
+    pub fn commitOpen(self: *Store, prepared: *PreparedOpen) OpenResult {
+        std.debug.assert(prepared.store == self and !prepared.committed);
+        const index = prepared.index;
+        if (prepared.previous) |previous| {
+            std.debug.assert(self.sessions.items[index].?.generation == previous.generation);
+        } else {
+            std.debug.assert(self.sessions.items[index] == null);
+        }
+        if (prepared.session_present) {
+            const session = &self.sessions.items[index].?;
+            const generation = self.nextGeneration();
+            // Every resumed/takeover Network Connection gets a fresh
+            // handle. This immediately invalidates the old connection's
+            // capability to mutate the shared Session after takeover.
+            session.generation = generation;
+            session.connected = true;
+            if (prepared.expiry_interval == 0) {
+                self.persistent_session_count -= 1;
+            }
+            session.expiry_interval = prepared.expiry_interval;
+            session.expires_at_ns = null;
+            session.next_inflight_send = no_inflight_send;
+            for (session.inflight.items, 0..) |*inflight, inflight_index| {
+                if (inflight.packet_id == 0) continue;
+                noteInflightNeedsSend(
+                    session,
+                    inflight_index,
+                    inflight,
+                );
+                inflight.retransmission = true;
+            }
+            std.debug.assert(session.sent_publish_count == 0);
+            session.sent_publish_count = 0;
+            prepared.committed = true;
+            return .{
+                .handle = .{
+                    .index = index,
+                    .generation = session.generation,
+                },
+                .route_id = session.route_id,
+                .session_present = true,
+                .replaced_connection = prepared.replaced_connection,
+            };
+        }
+        const client_owned = prepared.client_id.?;
         const generation = self.nextGeneration();
         const route_id = self.nextRouteId();
         // Every fallible admission step completed. Retire the old state only
         // at this commit point and reuse its already-reserved table slot.
-        if (replacement_index != null) self.removeAt(index);
+        if (prepared.previous != null) self.removeAt(index);
         self.sessions.items[index] = .{
             .generation = generation,
             .route_id = route_id,
             .client_id = client_owned,
             .connected = true,
-            .expiry_interval = expiry_interval,
+            .expiry_interval = prepared.expiry_interval,
             .expires_at_ns = null,
             .allocation_bytes = client_owned.len,
         };
@@ -1335,13 +1388,15 @@ pub const Store = struct {
         );
         self.route_index.putAssumeCapacityNoClobber(route_id, index);
         self.session_count += 1;
-        self.persistent_session_count += @intFromBool(expiry_interval != 0);
+        self.persistent_session_count += @intFromBool(prepared.expiry_interval != 0);
         self.total_bytes += client_owned.len;
+        prepared.client_id = null;
+        prepared.committed = true;
         return .{
             .handle = .{ .index = index, .generation = generation },
             .route_id = route_id,
             .session_present = false,
-            .replaced_connection = replaced_connection,
+            .replaced_connection = prepared.replaced_connection,
         };
     }
 

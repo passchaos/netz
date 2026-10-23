@@ -1,4 +1,5 @@
 const std = @import("std");
+const connack_preparation = @import("runtime/connack.zig");
 const builtin = @import("builtin");
 const mqtt = @import("mod.zig");
 const redirect = @import("redirect.zig");
@@ -1165,11 +1166,38 @@ pub const AcceptedClient = struct {
     }
 };
 
+/// An owned response prepared before a broker changes Session state. Encoded
+/// bytes own all property data. Keep the pending client alive through deadline
+/// validation and finishing; disposing the plan only releases its owned bytes.
+/// Deinit can follow either abort or successful ownership transfer.
+pub const PreparedAcceptance = struct {
+    pending: *PendingAcceptedClient,
+    connack: connack_preparation.Prepared,
+    deadline: ?std.Io.Clock.Timestamp,
+    reason_code: u8,
+    session_present: bool,
+    max_outgoing_topic_aliases: u16,
+    consumed: bool = false,
+
+    pub fn validateDeadline(self: *const PreparedAcceptance) Error!void {
+        std.debug.assert(!self.consumed);
+        if (earliestClockDeadline(self.deadline, self.pending.admission_deadline)) |absolute| {
+            _ = try deadline_policy.usableAwake(self.pending.connection.transport.ioHandle(), absolute);
+        }
+    }
+
+    pub fn deinit(self: *PreparedAcceptance) void {
+        self.connack.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Server-side CONNECT accepted at the packet/runtime layer but not yet
 /// acknowledged.
 ///
-/// Stateful brokers inspect the owned CONNECT, open/restore Session State,
-/// then call `finish` so Session Present reflects that atomic decision.
+/// Stateful brokers may prepare a response for prospective Session State,
+/// commit admission, then call `finishPrepared`. The synchronous `finish`
+/// convenience path preserves the same encoding and negotiation behavior.
 pub const PendingAcceptedClient = struct {
     connection: Connection,
     connect: OwnedConnect,
@@ -1184,6 +1212,14 @@ pub const PendingAcceptedClient = struct {
     authentication_authorized: bool = false,
     authentication_rejection_reason: ?u8 = null,
     authentication_data: ?[]u8 = null,
+
+    /// Check the original CONNECT budget after caller policy work and before
+    /// that caller starts stateful admission or further resource preparation.
+    pub fn validateAdmissionDeadline(self: *const PendingAcceptedClient) Error!void {
+        if (self.admission_deadline) |deadline| {
+            _ = try deadline_policy.usableAwake(self.connection.transport.ioHandle(), deadline);
+        }
+    }
 
     pub fn finish(
         self: *PendingAcceptedClient,
@@ -1224,6 +1260,37 @@ pub const PendingAcceptedClient = struct {
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!AcceptedClient {
+        var prepared = try self.prepareFinishMaybeBefore(options, deadline);
+        defer prepared.deinit();
+        return self.finishPrepared(&prepared);
+    }
+
+    /// Build and validate CONNACK before a stateful owner's admission commit.
+    /// Authentication and negotiated state remain unchanged until finish.
+    pub fn prepareFinish(self: *PendingAcceptedClient, options: AcceptOptions) Error!PreparedAcceptance {
+        return self.prepareFinishMaybeBefore(options, self.admission_deadline);
+    }
+
+    pub fn prepareFinishWithTimeout(self: *PendingAcceptedClient, options: AcceptOptions, timeout: std.Io.Duration) Error!PreparedAcceptance {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.prepareFinishWithDeadline(options, .fromNow(self.connection.transport.ioHandle(), .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn prepareFinishWithDeadline(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PreparedAcceptance {
+        _ = try deadline_policy.usableAwake(self.connection.transport.ioHandle(), deadline);
+        return self.prepareFinishMaybeBefore(options, earliestClockDeadline(self.admission_deadline, deadline));
+    }
+
+    fn prepareFinishMaybeBefore(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!PreparedAcceptance {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connection.transport.ioHandle(), absolute);
         const resolved = try self.resolvedOptions(options);
         if (self.authentication_rejection_reason) |reason_code| {
             if (resolved.reason_code != reason_code) {
@@ -1235,10 +1302,6 @@ pub const PendingAcceptedClient = struct {
             self.client_id_was_empty,
             resolved.reason_code == 0,
             resolved.assigned_client_identifier,
-        );
-        self.connection.peer_topic_alias_maximum = @min(
-            self.connection.peer_topic_alias_maximum,
-            resolved.max_outgoing_topic_aliases,
         );
         var properties: [5]mqtt.Property = undefined;
         var property_count: usize = 0;
@@ -1282,14 +1345,6 @@ pub const PendingAcceptedClient = struct {
                 } };
                 property_count += 1;
             }
-        } else if (self.authentication_data != null) {
-            // A failed CONNACK ends Enhanced Authentication instead of
-            // negotiating method-specific output. Keep refusal packets free
-            // of application data even if a policy staged some beforehand.
-            if (self.authentication_data) |data| {
-                self.connection.allocator.free(data);
-                self.authentication_data = null;
-            }
         }
         if (resolved.server_reference) |reference| {
             properties[property_count] = .{ .utf8 = .{
@@ -1316,26 +1371,37 @@ pub const PendingAcceptedClient = struct {
             .subscription_identifier_available = resolved.subscription_identifier_available,
             .shared_subscription_available = resolved.shared_subscription_available,
         };
-        if (deadline) |absolute|
-            try self.connection.writeConnAckWithDeadline(
-                connack_options,
-                absolute,
-            )
-        else
-            try self.connection.writeConnAck(connack_options);
-        if (resolved.reason_code == 0 and
-            self.connection.authentication.phase == .authenticating)
-        {
+        var connack = try self.connection.prepareConnAck(connack_options);
+        errdefer connack.deinit();
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connection.transport.ioHandle(), absolute);
+        return .{
+            .pending = self,
+            .connack = connack,
+            .deadline = deadline,
+            .reason_code = resolved.reason_code,
+            .session_present = resolved.session_present,
+            .max_outgoing_topic_aliases = resolved.max_outgoing_topic_aliases,
+        };
+    }
+
+    /// Send a previously prepared response under its original deadline, then
+    /// move the accepted connection and CONNECT to their new owner. The plan
+    /// must belong to this pending client; deinit remains valid after finish.
+    pub fn finishPrepared(self: *PendingAcceptedClient, prepared: *PreparedAcceptance) Error!AcceptedClient {
+        std.debug.assert(prepared.pending == self and !prepared.consumed);
+        try prepared.validateDeadline();
+        const deadline = earliestClockDeadline(self.admission_deadline, prepared.deadline);
+        try self.connection.writePreparedConnAckMaybeBefore(&prepared.connack, deadline);
+        self.connection.peer_topic_alias_maximum = @min(self.connection.peer_topic_alias_maximum, prepared.max_outgoing_topic_aliases);
+        if (prepared.reason_code == 0 and self.connection.authentication.phase == .authenticating) {
             try self.connection.authentication.finishServerInitial();
         }
         if (self.authentication_data) |data| {
             self.connection.allocator.free(data);
             self.authentication_data = null;
         }
-        const accepted = AcceptedClient{
-            .connection = self.connection,
-            .connect = self.connect,
-        };
+        prepared.consumed = true;
+        const accepted = AcceptedClient{ .connection = self.connection, .connect = self.connect };
         self.* = undefined;
         return accepted;
     }
@@ -4207,179 +4273,40 @@ pub const Connection = struct {
         return self.writeConnAckMaybeBefore(options, deadline);
     }
 
+    fn prepareConnAck(self: *Connection, options: ConnAckOptions) Error!connack_preparation.Prepared {
+        return self.prepareConnAckMode(options, false);
+    }
+
+    fn prepareConnAckMode(self: *Connection, options: ConnAckOptions, reuse_scratch: bool) Error!connack_preparation.Prepared {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        try self.validateOutgoingPacketType(.connack);
+        try self.authentication.ensurePacketAllowed(.connack);
+        return if (reuse_scratch) connack_preparation.prepareReusingScratch(self, options) else connack_preparation.prepare(self, options);
+    }
+
+    fn writePreparedConnAckMaybeBefore(
+        self: *Connection,
+        prepared: *connack_preparation.Prepared,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        std.debug.assert(prepared.owner == self and !prepared.written);
+        if (deadline) |absolute|
+            try self.writeGeneratedPacketWithDeadline(prepared.bytes(), .connack, absolute)
+        else
+            try self.writeGeneratedPacket(prepared.bytes(), .connack);
+        prepared.apply(self);
+        prepared.written = true;
+    }
+
     fn writeConnAckMaybeBefore(
         self: *Connection,
         options: ConnAckOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        try self.validateOutgoingPacketType(.connack);
-        const accepted = options.reason_code == 0;
-        const accepted_v5 = accepted and self.protocol == .v5;
-        const add_receive_maximum = accepted_v5 and
-            mqtt.receiveMaximum(options.properties) == null and
-            options.max_outgoing_inflight != std.math.maxInt(u16);
-        const add_maximum_packet_size = accepted_v5 and
-            mqtt.maximumPacketSize(options.properties) == null and
-            self.limits.max_packet_size <= std.math.maxInt(u32);
-        const add_topic_alias_maximum = accepted_v5 and
-            options.topic_alias_maximum != 0 and
-            mqtt.topicAliasMaximum(options.properties) == null;
-        const add_server_keep_alive = accepted_v5 and
-            mqtt.serverKeepAlive(options.properties) == null and
-            options.server_keep_alive_seconds != null;
-        const add_maximum_qos = accepted_v5 and
-            mqtt.maximumQoS(options.properties) == null and
-            options.maximum_qos != null and
-            options.maximum_qos.? != .exactly_once;
-        const add_retain_available = accepted_v5 and
-            mqtt.retainAvailable(options.properties) == null and
-            !options.retain_available;
-        const add_wildcard_available = accepted_v5 and
-            mqtt.wildcardSubscriptionAvailable(options.properties) == null and
-            !options.wildcard_subscription_available;
-        const add_subscription_identifier_available = accepted_v5 and
-            mqtt.subscriptionIdentifierAvailable(options.properties) == null and
-            !options.subscription_identifier_available;
-        const add_shared_available = accepted_v5 and
-            mqtt.sharedSubscriptionAvailable(options.properties) == null and
-            !options.shared_subscription_available;
-        const generated_property_count =
-            @as(usize, @intFromBool(add_receive_maximum)) +
-            @intFromBool(add_maximum_packet_size) +
-            @intFromBool(add_topic_alias_maximum) +
-            @intFromBool(add_server_keep_alive) +
-            @intFromBool(add_maximum_qos) +
-            @intFromBool(add_retain_available) +
-            @intFromBool(add_wildcard_available) +
-            @intFromBool(add_subscription_identifier_available) +
-            @intFromBool(add_shared_available);
-        var property_stack: [write_property_staging_capacity]mqtt.Property =
-            undefined;
-        var properties = try self.writePropertyList(
-            &property_stack,
-            std.math.add(
-                usize,
-                options.properties.len,
-                generated_property_count,
-            ) catch
-                return error.OutOfMemory,
-        );
-        properties.appendSliceAssumeCapacity(options.properties);
-        // Negotiated capabilities describe an accepted connection. On a
-        // refusal, preserve only caller-supplied diagnostic properties so a
-        // bare error CONNACK stays byte-compatible with common brokers.
-        if (add_receive_maximum) {
-            properties.appendAssumeCapacity(.{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
-        }
-        if (add_maximum_packet_size) {
-            properties.appendAssumeCapacity(.{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
-        }
-        if (add_topic_alias_maximum) {
-            properties.appendAssumeCapacity(.{ .two_byte = .{
-                .id = .topic_alias_maximum,
-                .value = options.topic_alias_maximum,
-            } });
-        }
-        if (add_server_keep_alive) {
-            properties.appendAssumeCapacity(.{ .two_byte = .{
-                .id = .server_keep_alive,
-                .value = options.server_keep_alive_seconds.?,
-            } });
-        }
-        if (add_maximum_qos) {
-            properties.appendAssumeCapacity(.{ .byte = .{
-                .id = .maximum_qos,
-                .value = @intFromEnum(options.maximum_qos.?),
-            } });
-        }
-        if (add_retain_available) {
-            properties.appendAssumeCapacity(.{ .byte = .{ .id = .retain_available, .value = 0 } });
-        }
-        if (add_wildcard_available) {
-            properties.appendAssumeCapacity(.{ .byte = .{ .id = .wildcard_subscription_available, .value = 0 } });
-        }
-        if (add_subscription_identifier_available) {
-            properties.appendAssumeCapacity(.{ .byte = .{ .id = .subscription_identifier_available, .value = 0 } });
-        }
-        if (add_shared_available) {
-            properties.appendAssumeCapacity(.{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
-        }
-        var fixed_storage: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
-        self.write_scratch.clearRetainingCapacity();
-        const bytes = if (self.protocol == .v3_1 and
-            options.v3_1_connack_mode == .mosquitto)
-            try mqtt.ConnAck.writeMosquittoV31Into(
-                &fixed_storage,
-                options.session_present,
-                options.reason_code,
-            )
-        else if (properties.items.len == 0)
-            try mqtt.ConnAck.writeNoPropertiesInto(
-                &fixed_storage,
-                self.protocol,
-                options.session_present,
-                options.reason_code,
-            )
-        else blk: {
-            try mqtt.ConnAck.write(
-                &self.write_scratch,
-                self.allocator,
-                self.protocol,
-                options.session_present,
-                options.reason_code,
-                properties.items,
-            );
-            break :blk self.write_scratch.items;
-        };
-        if (deadline) |absolute|
-            try self.writeGeneratedPacketWithDeadline(
-                bytes,
-                .connack,
-                absolute,
-            )
-        else
-            try self.writeGeneratedPacket(bytes, .connack);
-        if (accepted) {
-            // This is the Server's own inbound QoS 1/2 limit. MQTT 5 also
-            // advertises it as Receive Maximum; MQTT 3.1.1 has no property,
-            // but the configured resource bound must still be enforced.
-            self.max_incoming_inflight = mqtt.receiveMaximum(
-                properties.items,
-            ) orelse options.max_outgoing_inflight;
-        }
-        self.capabilities.local_maximum_qos =
-            options.maximum_qos orelse .exactly_once;
-        self.capabilities.local_retain_available = options.retain_available;
-        if (self.protocol == .v5) {
-            // Server Keep Alive replaces the CONNECT value for both peers.
-            // Updating the accepting endpoint here is essential now that the
-            // broker enforces inactivity rather than merely advertising the
-            // value to the client.
-            self.keep_alive_seconds = mqtt.serverKeepAlive(
-                properties.items,
-            ) orelse self.keep_alive_seconds;
-            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(
-                properties.items,
-            ) orelse options.topic_alias_maximum;
-            self.capabilities.local_maximum_qos = mqtt.maximumQoS(
-                properties.items,
-            ) orelse self.capabilities.local_maximum_qos;
-            self.capabilities.local_retain_available = mqtt.retainAvailable(
-                properties.items,
-            ) orelse self.capabilities.local_retain_available;
-            self.capabilities.local_wildcard_subscription_available =
-                mqtt.wildcardSubscriptionAvailable(
-                    properties.items,
-                ) orelse options.wildcard_subscription_available;
-            self.capabilities.local_subscription_identifier_available =
-                mqtt.subscriptionIdentifierAvailable(
-                    properties.items,
-                ) orelse options.subscription_identifier_available;
-            self.capabilities.local_shared_subscription_available =
-                mqtt.sharedSubscriptionAvailable(
-                    properties.items,
-                ) orelse options.shared_subscription_available;
-        }
+        var prepared = try self.prepareConnAckMode(options, true);
+        defer prepared.deinit();
+        defer prepared.returnScratch(self);
+        try self.writePreparedConnAckMaybeBefore(&prepared, deadline);
     }
 
     pub fn readConnAck(self: *Connection) Error!OwnedConnAck {
@@ -11731,4 +11658,8 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
         @as(usize, 1),
         shared.observer.count.load(.acquire),
     );
+}
+
+test {
+    _ = @import("runtime/acceptance_tests.zig");
 }

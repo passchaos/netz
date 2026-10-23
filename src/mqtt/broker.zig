@@ -17,6 +17,7 @@ const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const session_subscriptions = @import("broker/session_subscriptions.zig");
 const connection_storage = @import("broker/connection_storage.zig");
+const acceptance_mod = @import("broker/acceptance.zig");
 const load_metrics = @import("broker/load_metrics.zig");
 const local_consumer_mod = @import("broker/local_consumer.zig");
 const publish_counters = @import("broker/publish_counters.zig");
@@ -650,6 +651,9 @@ const RegistrationProgress = struct {
     /// New provisional Session/Will objects do not count because abort removes
     /// them; expiry pruning and replacement of prior durable state do.
     rollback_changed: bool = false,
+    /// Optional packet/runtime preparation for full CONNECT admission. Direct
+    /// state-only callers retain the same register interface without a peer.
+    acceptance: ?*acceptance_mod.Preparation = null,
 };
 
 const DetachedSessionPacket = struct {
@@ -4579,8 +4583,7 @@ pub const Broker = struct {
     noinline fn finishRegistration(
         self: *Broker,
         index: usize,
-        pending: *runtime.PendingAcceptedClient,
-        accept_options: runtime.AcceptOptions,
+        acceptance: *acceptance_mod.Preparation,
         registration: Registration,
         registration_progress: RegistrationProgress,
         storage: *connection_storage.Storage,
@@ -4603,7 +4606,7 @@ pub const Broker = struct {
                 true,
             );
         };
-        var accepted = try pending.finish(accept_options);
+        var accepted = try acceptance.finish();
         pending_owned.* = false;
         var accepted_owns_connection = true;
         errdefer if (accepted_owns_connection) {
@@ -4677,7 +4680,7 @@ pub const Broker = struct {
             }
         }
 
-        var accept_options = try pending.resolvedOptions(listener_accept);
+        const accept_options = try pending.resolvedOptions(listener_accept);
         if (accept_options.reason_code != 0) {
             try self.refuseResolvedConnect(
                 pending,
@@ -4816,9 +4819,12 @@ pub const Broker = struct {
         // Reserve the eventual slot-owned connection before Session/Will/route
         // admission can change an existing owner's state. Policy refusals above
         // need no such storage; later failures release this uninitialized value.
+        try pending.validateAdmissionDeadline();
         var storage = try connection_storage.Storage.init(self.allocator);
         defer storage.deinit();
-        var registration_progress: RegistrationProgress = .{};
+        var acceptance = acceptance_mod.Preparation{ .pending = pending, .options = accept_options };
+        defer acceptance.deinit();
+        var registration_progress: RegistrationProgress = .{ .acceptance = &acceptance };
         const registration = self.register(
             index,
             effective_connect,
@@ -4868,10 +4874,8 @@ pub const Broker = struct {
             mapped.deinit();
             mapped_will = null;
         }
-        accept_options.session_present = self.slots[index].state.session_present;
         if (self.slots[index].assignedClientId()) |assigned_client_id| {
             effective_connect.client_id = assigned_client_id;
-            accept_options.assigned_client_identifier = assigned_client_id;
         }
         // OwnedConnect keeps all original packet storage alive; changing this
         // borrowed view makes downstream ACLs, retained-source tracking, and
@@ -4897,8 +4901,7 @@ pub const Broker = struct {
         };
         return @as(?ClientTask, try self.finishRegistration(
             index,
-            pending,
-            accept_options,
+            &acceptance,
             registration,
             registration_progress,
             &storage,
@@ -5064,12 +5067,21 @@ pub const Broker = struct {
             effective_connect.clean_start,
         );
         defer prepared_subscriptions.deinit();
-        const opened_session = try self.sessions.open(
+        var prepared_session = try self.sessions.prepareOpen(
             effective_connect.client_id,
             effective_connect.clean_start,
             self.sessionExpiryForConnectLocked(effective_connect),
             now,
         );
+        defer prepared_session.deinit();
+        if (progress.acceptance) |acceptance| {
+            try acceptance.prepare(prepared_session.session_present, slot.assignedClientId());
+            // This is the final fallible admission step. Session resources and
+            // the exact response are ready; expired budgets cannot replace an
+            // owner while waiting for the later CONNACK write.
+            try acceptance.validateDeadline();
+        }
+        const opened_session = self.sessions.commitOpen(&prepared_session);
         // A rejected Session admission preserves the old state. Once its
         // replacement commits, later CONNACK failures still need
         // to carry that durable transition to persistence.

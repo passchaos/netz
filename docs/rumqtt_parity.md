@@ -3083,7 +3083,10 @@ or disk I/O.
 ## Will Delay scheduler
 
 Session Store replacement prepares the new owned ClientID, slot, and indexes
-before retiring the prior Session. Clean Start, transient takeover, and expired
+through `prepareOpen` before retiring the prior Session; `commitOpen` applies
+the generation, lifetime, route, and retransmission changes without allocation.
+Dropping the preparation preserves old state and releases any reserved empty
+slot. Clean Start, transient takeover, and expired
 Session replacement use the final Session count and byte total for admission,
 including credit for the state being replaced. An allocation or limit failure
 therefore preserves the old handle, subscriptions, queued/inflight QoS state,
@@ -3125,6 +3128,28 @@ quota refusal still sends the expected CONNACK while cleaning the reservation.
 The focused lifecycle, routing, admission, listener/deadline, protocol, and
 persistence gate passes 306/306 tests in Debug and ReleaseFast; public-module
 package checks pass 2/2.
+
+Successful CONNECT responses are also prepared before the Session commit.
+`PendingAcceptedClient.prepareFinish` owns the exact CONNACK bytes and scalar
+negotiation for the prospective Session Present and assigned ClientID. Property
+validation, response allocation, and peer Maximum Packet Size checks therefore
+finish before takeover. CONNECT policy completion and the final prepared
+admission both recheck the original absolute deadline; timeout/deadline variants
+retain its earlier bound. `finishPrepared` writes those prepared bytes and
+applies negotiated aliases, limits, capabilities, Keep Alive, and authentication
+only after successful transmission. Existing synchronous finish APIs use the
+same path. Known preparation failures preserve the old Session/owner/Will and
+in-flight acknowledgement capability for continued and Clean Start connects.
+Network or journal failures after the actual Session commit still follow the
+documented provisional rollback/persistence boundary. Tests cover abort and
+allocation-free commit, copied response properties, exact versus one-byte-short
+packet limits, and rejected oversized, expired, or allocation-failed responses.
+Synchronous CONNACK writes continue to borrow and return the connection's
+existing control-packet scratch buffer, retaining allocation-free writes after
+warm-up; independently prepared acceptance responses keep their own bytes.
+The focused runtime, Session/Will/router, broker admission/lifecycle, listener,
+protocol, deadline, and persistence gate passes 546/546 tests in Debug and
+ReleaseFast; public-module package checks pass 2/2.
 
 Broker CONNECT admission now prepares the Will before Session replacement and
 old-owner detachment. `prepareConnectWithSource` owns the new message and

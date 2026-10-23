@@ -2302,6 +2302,7 @@ test "broker rejects zero persistent Session expiry cap" {
 test {
     _ = @import("broker/admission_deadline_tests.zig");
     _ = @import("broker/connect_admission_tests.zig");
+    _ = @import("broker/connack_admission_tests.zig");
     _ = @import("broker/subscription_admission_tests.zig");
     _ = @import("broker/registration_persistence_tests.zig");
     _ = @import("broker/listener_tests.zig");

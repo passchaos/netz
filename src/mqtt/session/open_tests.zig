@@ -1,6 +1,50 @@
 const std = @import("std");
 const session = @import("mod.zig");
 
+test "session prepared open abort preserves old state and reserved slot accounting" {
+    const allocator = std.testing.allocator;
+    for (0..4) |mode| {
+        var store = session.Store.init(allocator, .{ .max_sessions = 2 });
+        defer store.deinit();
+        const old = try store.open("prepared-client", false, if (mode == 2) 0 else 60, .zero);
+        _ = try store.setSubscription(old.handle, .{ .topic_filter = "prepared/+", .qos = .at_least_once }, 7);
+        _ = try store.enqueuePublish(old.handle, "prepared/one", "keep", .{ .qos = .at_least_once, .now = .zero });
+        const before = try store.stats(old.handle);
+        const bytes = store.totalBytes();
+        const slots = store.sessions.items.len;
+        const generation = store.next_generation;
+        const route = store.next_route_id;
+        var prepared = try store.prepareOpen(if (mode == 3) "another-client" else "prepared-client", mode == 0 or mode == 3, 0, .zero);
+        try std.testing.expectEqualDeep(before, try store.stats(old.handle));
+        prepared.deinit();
+        try std.testing.expectEqualDeep(before, try store.stats(old.handle));
+        try std.testing.expectEqual(bytes, store.totalBytes());
+        try std.testing.expectEqual(slots, store.sessions.items.len);
+        try std.testing.expectEqual(generation, store.next_generation);
+        try std.testing.expectEqual(route, store.next_route_id);
+    }
+}
+
+test "session prepared open commit advances capability without allocating" {
+    for ([_]bool{ false, true }) |clean_start| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var store = session.Store.init(failing.allocator(), .{ .max_sessions = 1 });
+        defer store.deinit();
+        const old = try store.open("commit-client", false, 60, .zero);
+        _ = try store.setSubscription(old.handle, .{ .topic_filter = "prepared/+", .qos = .at_least_once }, 7);
+        var prepared = try store.prepareOpen("commit-client", clean_start, 0, .zero);
+        defer prepared.deinit();
+        failing.fail_index = failing.alloc_index;
+        const current = store.commitOpen(&prepared);
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expectEqual(!clean_start, current.session_present);
+        try std.testing.expect(current.replaced_connection);
+        try std.testing.expectError(error.SessionNotFound, store.stats(old.handle));
+        try std.testing.expectEqual(@as(usize, @intFromBool(!clean_start)), (try store.stats(current.handle)).subscription_count);
+        try std.testing.expectEqual(@as(u32, 0), (try store.stats(current.handle)).expiry_interval);
+    }
+}
+
 test "session failed replacement allocation preserves prior subscriptions and QoS state" {
     for (0..3) |mode| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
