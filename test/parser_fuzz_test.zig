@@ -36,6 +36,10 @@ const http2_headers_seed = smithSliceSeed(&.{
     0x82, 0x84,
 });
 const hpack_seed = smithSliceSeed(&.{ 0x82, 0x84, 0x87 });
+const hpack_huffman_field_seed = smithSliceSeed(
+    "\x40\x8c\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff" ++
+        "\x8c\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff\xbe",
+);
 const http3_settings_seed = smithSliceSeed(&.{
     0x00, 0x04, 0x02, 0x01, 0x00,
 });
@@ -63,6 +67,7 @@ test "fuzz bounded cross-protocol parsers" {
         &http2_settings_seed,
         &http2_headers_seed,
         &hpack_seed,
+        &hpack_huffman_field_seed,
         &http3_settings_seed,
         &http3_headers_seed,
         &qpack_encoder_seed,
@@ -98,6 +103,7 @@ test "bounded deterministic parser mutation smoke" {
         http2_settings_seed[4..],
         http2_headers_seed[4..],
         hpack_seed[4..],
+        hpack_huffman_field_seed[4..],
         http3_settings_seed[4..],
         http3_headers_seed[4..],
         qpack_encoder_seed[4..],
@@ -269,6 +275,20 @@ fn exerciseHttp2(bytes: []const u8) !void {
     )) |fields| {
         defer netz.http2.Hpack.freeOwnedFields(allocator, fields);
         try std.testing.expect(fields.len <= 128);
+    } else |_| {}
+    // These public entry points have no output limits. Bound their wire
+    // input separately so repeated dynamic indexes cannot grow the fuzzer's
+    // independent per-field copies without a known resource ceiling.
+    const field_block = bytes[0..@min(bytes.len, 4096)];
+    var field_decoder = netz.http2.Hpack.Decoder{};
+    defer field_decoder.deinit(allocator);
+    if (field_decoder.decodeBlock(allocator, field_block)) |fields| {
+        defer netz.http2.Hpack.freeDecodedFields(allocator, fields);
+        try std.testing.expect(fields.len <= field_block.len);
+    } else |_| {}
+    if (netz.http2.Hpack.decodeLiteralBlock(allocator, field_block)) |fields| {
+        defer netz.http2.Hpack.freeDecodedFields(allocator, fields);
+        try std.testing.expect(fields.len <= field_block.len);
     } else |_| {}
     if (netz.http2.Hpack.decodeHuffman(allocator, bytes)) |decoded| {
         defer allocator.free(decoded);

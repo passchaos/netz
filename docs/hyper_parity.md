@@ -2304,6 +2304,17 @@ pointer-layout assertions exercise the combined ownership contract; an
 integration regression swaps in allocation-tracking allocators around the
 second aggregate request and response read and requires exactly one HPACK
 allocation on each side.
+The public per-field `Hpack.Decoder.decodeBlock` and `decodeLiteralBlock`
+entry points now retain each materialized field locally until its output-array
+append succeeds. Truncated or malformed values, failed dynamic-table insertion,
+and failed array growth release Huffman strings and dynamic-index copies as
+well as earlier output fields. Compression-table entries keep their separate
+ownership. The implementation lives in `http2/hpack/decode_fields.zig`, with
+adjacent allocation-failure, all-prefix truncation, and table-lifetime tests
+using an independent RFC 7541 Huffman vector. Parser fuzzing now covers these
+two public entry points alongside the bounded contiguous-ownership decoder.
+The focused HPACK suite passes 110 tests in Debug and ReleaseFast; both parser
+seed/mutation tests pass in each build mode, and package reachability passes.
 Known-length aggregate request bodies now reserve their validated
 `Content-Length` exactly and transfer that buffer directly into `OwnedRequest`.
 Previously a 10-byte POST grew to a 143-byte `ArrayList` allocation and then

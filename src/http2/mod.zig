@@ -1806,67 +1806,24 @@ pub const Hpack = struct {
         return huffman_codec.decodedLen(encoded);
     }
 
+    const FieldDecoder = @import("hpack/decode_fields.zig").Decoder(struct {
+        pub const Header = HeaderField;
+        pub const Table = DynamicTable;
+        pub const Cursor = wire.Cursor;
+        pub const integer = decodeInteger;
+        pub const string = decodeString;
+        pub const copyField = indexedHeaderOwned;
+        pub const copyName = indexedNameOwned;
+        pub const freeFields = freeFieldStorages;
+    });
+
     fn decodeBlockWithDynamicTable(
         allocator: std.mem.Allocator,
         block: []const u8,
         dynamic_table: *DynamicTable,
         max_dynamic_table_size: usize,
     ) ![]HeaderField {
-        var cursor = wire.Cursor.init(block);
-        var fields: std.ArrayList(HeaderField) = .empty;
-        errdefer {
-            freeFieldStorages(allocator, fields.items);
-            fields.deinit(allocator);
-        }
-        var saw_header = false;
-        while (!cursor.eof()) {
-            const first = try cursor.readByte();
-            if ((first & 0x80) != 0) {
-                saw_header = true;
-                try fields.append(allocator, try indexedHeaderOwned(allocator, dynamic_table, try decodeInteger(first, &cursor, 7)));
-                continue;
-            }
-
-            if ((first & 0xe0) == 0x20) {
-                if (saw_header) return error.InvalidEncoding;
-                const new_size = std.math.cast(usize, try decodeInteger(first, &cursor, 5)) orelse return error.IntegerOverflow;
-                if (new_size > max_dynamic_table_size) return error.InvalidEncoding;
-                dynamic_table.setLimit(allocator, new_size);
-                continue;
-            }
-
-            saw_header = true;
-            const indexed_literal = (first & 0x40) != 0;
-            const name_index = if (indexed_literal)
-                try decodeInteger(first, &cursor, 6)
-            else
-                try decodeInteger(first, &cursor, 4);
-            // The 0x10 bit belongs to the 6-bit name index in an incremental
-            // literal (01xxxxxx). It is the Never Indexed marker only for the
-            // 0001xxxx representation.
-            const never_index = !indexed_literal and (first & 0x10) != 0;
-
-            var field = HeaderField{
-                .name = undefined,
-                .value = undefined,
-                .never_index = never_index,
-            };
-            if (name_index == 0) {
-                const name = try decodeString(allocator, &cursor);
-                field.name = name.value;
-                field.name_storage = name.storage;
-            } else {
-                const name = try indexedNameOwned(allocator, dynamic_table, name_index);
-                field.name = name.value;
-                field.name_storage = name.storage;
-            }
-            const value = try decodeString(allocator, &cursor);
-            field.value = value.value;
-            field.value_storage = value.storage;
-            if (indexed_literal) try dynamic_table.add(allocator, field.name, field.value);
-            try fields.append(allocator, field);
-        }
-        return fields.toOwnedSlice(allocator);
+        return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
     }
 
     fn decodeBlockIntoWithDynamicTable(
@@ -4060,6 +4017,7 @@ test "HTTP/2 HPACK accepts legal size updates and rejects bad dynamic use" {
 }
 
 test {
+    _ = @import("hpack/tests/decoded_fields.zig");
     _ = @import("runtime/client_pool_tests.zig");
     _ = @import("runtime/shared_client_pool_tests.zig");
     _ = runtime;
