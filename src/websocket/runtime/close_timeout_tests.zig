@@ -891,12 +891,15 @@ test "HTTP1 context takeover commits only after bounded send completes" {
     connection.compression_threshold = 0;
 
     var progress: runtime.MessageWriteProgress = .{};
+    // Allow the Debug compressor to prepare this 512-KiB representation. The
+    // unread peer then forces a partial socket write, which is the transaction
+    // boundary this test exercises.
     try std.testing.expectError(
         error.Timeout,
         connection.sendBinaryWithTimeout(
             payload,
             &progress,
-            .fromMilliseconds(30),
+            .fromSeconds(1),
         ),
     );
     try std.testing.expect(progress.committed_bytes > 0);

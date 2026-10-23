@@ -3,6 +3,10 @@ const builtin = @import("builtin");
 
 const net = std.Io.net;
 
+test {
+    _ = @import("stream_io_deadline_tests.zig");
+}
+
 pub const TimedReadError = net.Stream.Reader.Error ||
     std.Io.Operation.FileReadStreaming.UnendingError ||
     std.Io.Operation.NetReceive.Error || std.Io.Timeout.Error ||
@@ -56,13 +60,10 @@ pub fn readSomeWithDeadline(
     };
 }
 
-/// Submit one non-empty connected-stream prefix under an absolute deadline.
-///
-/// `std.Io` currently exposes timed writes through the streaming-file
-/// operation rather than `netWrite`. Stream sockets are file handles on the
-/// supported backends; marking the temporary view nonblocking lets the I/O
-/// implementation wait for writability without changing the socket itself.
-/// The returned count is the only prefix the caller may consider committed.
+/// Submit a connected-stream prefix through the socket writer. File writes
+/// deliberately exclude socket errno values such as ECONNRESET on std.Io's
+/// POSIX backend. Cancellation joins the writer before reading its result, so
+/// a completion racing the deadline still reports its known committed prefix.
 pub fn writeSomeWithDeadline(
     io: std.Io,
     stream: net.Stream,
@@ -70,86 +71,70 @@ pub fn writeSomeWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimedWriteError!usize {
     if (bytes.len == 0) return 0;
-    if (builtin.os.tag == .windows) {
-        return writeSomeWithDeadlineWindows(
-            io,
-            stream,
-            bytes,
-            deadline,
-        );
-    }
-    while (true) {
-        const result = try io.operateTimeout(
-            .{ .file_write_streaming = .{
-                .file = .{
-                    .handle = stream.socket.handle,
-                    .flags = .{ .nonblocking = true },
-                },
-                .data = &.{bytes},
-            } },
-            .{ .deadline = deadline },
-        );
-        const count = result.file_write_streaming catch |err| switch (err) {
-            // Writability can race another writer. Keep the original absolute
-            // deadline rather than turning a transient EAGAIN into failure.
-            error.WouldBlock => continue,
-            error.BrokenPipe => return error.SocketUnconnected,
-            error.SystemResources => return error.SystemResources,
-            else => return error.Unexpected,
-        };
-        if (count == 0) return error.SocketUnconnected;
-        return count;
-    }
-}
-
-fn writeSomeWithDeadlineWindows(
-    io: std.Io,
-    stream: net.Stream,
-    bytes: []const u8,
-    deadline: std.Io.Clock.Timestamp,
-) TimedWriteError!usize {
-    const WriteResult = net.Stream.Writer.Error!usize;
-    const Wake = union(enum) {
-        write: WriteResult,
-        timeout: std.Io.Cancelable!void,
-    };
+    _ = try @import("deadline.zig").usableAwake(io, deadline);
+    const WriteResult = TimedWriteError!usize;
     const Task = struct {
-        fn write(
-            task_io: std.Io,
-            task_stream: net.Stream,
-            task_bytes: []const u8,
-        ) WriteResult {
-            const count = try task_io.vtable.netWrite(
-                task_io.userdata,
-                task_stream.socket.handle,
-                task_bytes,
+        io: std.Io,
+        stream: net.Stream,
+        bytes: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        result: ?WriteResult = null,
+
+        fn write(self: *@This()) void {
+            _ = @import("deadline.zig").usableAwake(self.io, self.deadline) catch |err| {
+                self.result = err;
+                return;
+            };
+            const count = self.io.vtable.netWrite(
+                self.io.userdata,
+                self.stream.socket.handle,
+                self.bytes,
                 &.{""},
                 0,
-            );
-            if (count == 0) return error.SocketUnconnected;
-            return count;
+            ) catch |err| {
+                self.result = err;
+                return;
+            };
+            self.result = if (count == 0) error.SocketUnconnected else count;
         }
 
-        fn waitUntil(
-            task_io: std.Io,
-            task_deadline: std.Io.Clock.Timestamp,
-        ) std.Io.Cancelable!void {
+        fn waitUntil(task_io: std.Io, task_deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
             try task_deadline.wait(task_io);
         }
     };
-
+    const Wake = union(enum) { write: void, timeout: std.Io.Cancelable!void };
+    var task = Task{ .io = io, .stream = stream, .bytes = bytes, .deadline = deadline };
     var wake_buffer: [2]Wake = undefined;
     var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
     defer select.cancelDiscard();
-    try select.concurrent(.write, Task.write, .{ io, stream, bytes });
-    try select.concurrent(.timeout, Task.waitUntil, .{ io, deadline });
-    return switch (try select.await()) {
-        .write => |result| result,
+    try select.concurrent(.write, Task.write, .{&task});
+    select.concurrent(.timeout, Task.waitUntil, .{ io, deadline }) catch |err| {
+        select.cancelDiscard();
+        if (task.result) |result| {
+            if (result) |count| return count else |_| {}
+        }
+        return err;
+    };
+    const wake = select.await() catch |err| {
+        select.cancelDiscard();
+        if (task.result) |result| {
+            if (result) |count| return count else |_| {}
+        }
+        return err;
+    };
+    switch (wake) {
+        .write => return task.result.?,
         .timeout => |result| {
             try result;
+            select.cancelDiscard();
+            if (task.result) |written| {
+                if (written) |count| return count else |err| {
+                    if (err != error.Canceled) return err;
+                }
+            }
             return error.Timeout;
         },
-    };
+    }
 }
 
 /// Write one borrowed slice under an absolute deadline while preserving the
