@@ -3631,6 +3631,18 @@ const ReceivedDataPayload = struct {
 };
 
 pub const Connection = struct {
+    const DataReceiver = @import("runtime/flow/data.zig").Receiver(.{
+        .ErrorType = Error,
+        .ResultType = ReceivedDataPayload,
+        .recvWindow = recvStreamWindow,
+        .clockNs = awakeNowNanos,
+        .writeControl = writeControlFrameUntil,
+        .grantAdaptive = sendQueuedAdaptiveWindowUpdate,
+        .budgetMaximum = dataFrameBudgetMaximum,
+        .lastProcessed = lastPeerProcessedStreamId,
+        .sendGoAway = sendGoAwayUntil,
+        .endStreamFlag = flag_end_stream,
+    });
     const PushLifecycle = @import("runtime/push/connection.zig").Lifecycle(.{
         .Error = Error,
         .Response = OwnedResponse,
@@ -14707,60 +14719,7 @@ pub const Connection = struct {
     }
 
     fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!ReceivedDataPayload {
-        const data = try http2.DataPayload.parse(frame);
-        // HTTP/2 flow control charges the whole DATA frame payload, not just
-        // the bytes exposed to the application.  PADDED DATA therefore consumes
-        // credit for the Pad Length byte and padding octets as well.
-        const charged_len = frame.payload.len;
-        try self.recv_connection_window.receive(charged_len);
-        errdefer self.recv_connection_window.update(@intCast(charged_len)) catch unreachable;
-        const stream_window = try self.recvStreamWindow(stream_id);
-        try stream_window.receive(charged_len);
-        errdefer stream_window.update(@intCast(charged_len)) catch
-            unreachable;
-        if (self.adaptive_window) |*estimator| {
-            if (estimator.recordData(
-                charged_len,
-                awakeNowNanos(self.io),
-            )) |ping_payload| {
-                self.writeControlFrameUntil(
-                    .ping,
-                    0,
-                    &ping_payload,
-                    null,
-                ) catch |err| {
-                    estimator.cancelProbe(ping_payload);
-                    return err;
-                };
-            }
-        }
-        // A previously queued target can have been deferred because an
-        // existing stream was too close to the protocol maximum. DATA just
-        // reduced that window, so retry before returning it to the caller.
-        if (!self.awaiting_settings_ack and
-            self.adaptive_queued_target != null)
-        {
-            try self.sendQueuedAdaptiveWindowUpdate();
-        }
-        const budget_charge = self.data_frame_budget.record(
-            data.data.len,
-            (frame.header.flags & flag_end_stream) != 0,
-            self.dataFrameBudgetMaximum(),
-        ) catch {
-            self.aggregate_timeout_unusable = true;
-            self.sendGoAwayUntil(
-                self.lastPeerProcessedStreamId(),
-                .enhance_your_calm,
-                "too_many_data_frames",
-                null,
-            ) catch {};
-            return error.ConnectionGoAway;
-        };
-        return .{
-            .data = data.data,
-            .padding_len = data.padding_len,
-            .budget_charge = budget_charge,
-        };
+        return DataReceiver.receive(self, stream_id, frame);
     }
 
     fn releaseDataFrameBudget(
@@ -21625,6 +21584,18 @@ fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField)
 }
 
 pub const testing = struct {
+    pub fn recvStreamWindow(connection: *Connection, stream_id: u31) Error!*FlowWindow {
+        return connection.recvStreamWindow(stream_id);
+    }
+
+    pub fn receiveDataPayload(connection: *Connection, stream_id: u31, frame: http2.Frame) Error!ReceivedDataPayload {
+        return connection.receiveDataPayload(stream_id, frame);
+    }
+
+    pub fn queueAdaptiveWindowTarget(connection: *Connection, target: u32) Error!void {
+        return connection.queueAdaptiveWindowTarget(target);
+    }
+
     pub fn setSendConnectionWindow(
         connection: *Connection,
         value: i64,
@@ -38241,6 +38212,7 @@ test {
     _ = @import("runtime/frame/tests/io.zig");
     _ = @import("runtime/frame/tests/wire.zig");
     _ = @import("runtime/flow/tests/window.zig");
+    _ = @import("runtime/flow/tests/data.zig");
     _ = @import("runtime/headers/tests/message.zig");
     _ = @import("runtime/tls_tests.zig");
     _ = @import("runtime/push_tests.zig");

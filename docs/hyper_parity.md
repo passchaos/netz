@@ -1104,6 +1104,22 @@ serialized: growth measured before the initial or previous SETTINGS ACK is
 max-coalesced, and existing plus future receive-stream windows switch together
 only after the combined wire write succeeds. Stale/unrelated PING ACKs cannot
 mutate the estimator, and public PING APIs reject the internal namespace.
+DATA receive accounting now distinguishes an uncommitted local debit from
+credit already granted by a successful adaptive control write. Once DATA
+creates room for a queued WINDOW_UPDATE/SETTINGS grant, a later frame-budget
+failure must not restore the old debit on top of that peer-visible credit.
+At the 31-bit window maximum, that former rollback overflowed and reached an
+unreachable error path instead of returning the terminal GOAWAY. The shared
+receive transaction in `src/http2/runtime/flow/data.zig` now retains committed
+accounting while ordinary pre-grant errors, deferred grants and partial control
+write failures preserve their previous local-window rollback. Regression cases
+decode the actual WINDOW_UPDATE, SETTINGS and ENHANCE_YOUR_CALM GOAWAY,
+including a deferred grant blocked by a sibling's maximum window and a partial
+wire write. A valid small DATA frame also proves the automatic frame budget
+uses the newly committed adaptive target, so moving this boundary does not
+reject data that became eligible after window growth.
+The focused HTTP/2, HTTP2 and RFC 8441 Debug gate passes 643/643 tests;
+public-module checks pass 2/2.
 
 Both flow harnesses accept `--adaptive` and, like Hyper's public builder,
 override fixed-window arguments with 65,535-byte stream and connection starting
