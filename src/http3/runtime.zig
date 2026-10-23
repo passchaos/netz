@@ -2802,6 +2802,7 @@ pub const Client = struct {
             request_options.method,
             requestHasProtocol(request_options.headers),
         );
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         var send_attempted = false;
         errdefer {
             if (send_attempted) {
@@ -2814,7 +2815,7 @@ pub const Client = struct {
             } else {
                 _ = self.request_lifecycle.finish(stream_id) catch false;
                 _ = self.outbound_bodies.finish(stream_id);
-                self.qpack_encode.abandonStream(stream_id);
+                self.qpack_encode.rollbackAfter(qpack_checkpoint);
             }
         }
         self.stream_send_scratch.reset();
@@ -3466,7 +3467,6 @@ pub const Client = struct {
         if (self.response_streams.takeReset(stream_id)) |code| {
             _ = try self.request_lifecycle.finish(stream_id);
             _ = self.outbound_bodies.finish(stream_id);
-            self.qpack_encode.abandonStream(stream_id);
             self.streaming_responses.remove(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -3487,7 +3487,6 @@ pub const Client = struct {
         if (event == .finished) {
             _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
             _ = self.outbound_bodies.finish(stream_id);
-            self.qpack_encode.abandonStream(stream_id);
             self.streaming_responses.remove(stream_id);
         }
         return event;
@@ -3608,7 +3607,6 @@ pub const Client = struct {
         const send_reset = if (body) |entry| !entry.send.fin_sent else false;
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         try sendRuntimeRequestCancellation(
@@ -3639,7 +3637,6 @@ pub const Client = struct {
         if (!exists) return error.UnexpectedStream;
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
@@ -7020,7 +7017,6 @@ pub const HandshakeServerSession = struct {
             self.streaming_requests.takeFirstReset()) |reset|
         {
             finishServerRequest(&self.control, &self.request_lifecycle, reset.stream_id);
-            self.qpack_encode.abandonStream(reset.stream_id);
             _ = self.outbound_bodies.finish(reset.stream_id);
             return .{ .reset = .{
                 .from = reset.from,
@@ -9154,7 +9150,6 @@ pub const HandshakeServerSession = struct {
                 application_error_code,
             );
         }
-        self.qpack_encode.abandonStream(push_stream_id);
         _ = self.outbound_bodies.finish(push_stream_id);
         _ = try self.established.connection
             .requestCompletedLocalStreamRelease(push_stream_id);
@@ -9470,6 +9465,7 @@ pub const HandshakeServerSession = struct {
         defer prepared.deinit(
             self.established.connection.endpoint.allocator,
         );
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         const streaming = try prepared.value.writeStreamingHeadDynamic(
             &self.stream_send_scratch.encoded,
             self.established.connection.endpoint.allocator,
@@ -9478,7 +9474,7 @@ pub const HandshakeServerSession = struct {
             body_length,
             &self.qpack_encode,
         );
-        errdefer self.qpack_encode.abandonStream(stream_id);
+        errdefer self.qpack_encode.rollbackAfter(qpack_checkpoint);
         if (deadline) |absolute| {
             try sendConnectionStreamingHeadWithDeadline(
                 &self.established.connection,
@@ -10560,7 +10556,6 @@ pub const HandshakeServerSession = struct {
         _ = try self.established.connection.releaseCompletedPeerStream(
             stream_id,
         );
-        self.qpack_encode.abandonStream(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         return .{
@@ -10581,7 +10576,6 @@ pub const HandshakeServerSession = struct {
         _ = try self.established.connection.requestCompletedPeerStreamRelease(
             stream_id,
         );
-        self.qpack_encode.abandonStream(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         finishServerRequest(
             &self.control,
@@ -11200,24 +11194,10 @@ pub const HandshakeServerSession = struct {
         application_error_code: u64,
         decoded_dynamic_section: bool,
     ) Error!void {
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = try self.request_streams.requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
-        if (!cancel_qpack) {
-            cancel_qpack =
-                try self.streaming_requests.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    self.qpack_decode.table,
-                );
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         defer {
             self.request_streams.remove(stream_id);
             self.streaming_requests.remove(stream_id);
-            self.qpack_encode.abandonStream(stream_id);
             finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
             _ = self.outbound_bodies.finish(stream_id);
         }
@@ -11244,20 +11224,7 @@ pub const HandshakeServerSession = struct {
         application_error_code: u64,
         decoded_dynamic_section: bool,
     ) Error!void {
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = try self.request_streams.requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
-        if (!cancel_qpack) {
-            cancel_qpack =
-                try self.streaming_requests.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    self.qpack_decode.table,
-                );
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         if (cancel_qpack) {
             try self.qpack_decode.prepareStreamCancellation();
         }
@@ -11272,7 +11239,6 @@ pub const HandshakeServerSession = struct {
         }
         self.request_streams.remove(stream_id);
         self.streaming_requests.remove(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
@@ -11302,15 +11268,7 @@ pub const HandshakeServerSession = struct {
             self.streaming_requests.contains(stream_id) or
             self.outbound_bodies.find(stream_id) != null;
         if (!exists) return error.UnexpectedStream;
-        var cancel_qpack = try self.request_streams.requiresQpackCancellation(
-            stream_id,
-            self.qpack_decode.table,
-        );
-        cancel_qpack = cancel_qpack or
-            try self.streaming_requests.hasUnacknowledgedDynamicSection(
-                stream_id,
-                self.qpack_decode.table,
-            );
+        const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
         if (self.streaming_requests.find(stream_id)) |entry| {
             try releaseStreamingReaderCapacity(
                 &self.established.connection,
@@ -11346,7 +11304,6 @@ pub const HandshakeServerSession = struct {
         if (!exists) return error.UnexpectedStream;
         self.request_streams.remove(stream_id);
         self.streaming_requests.remove(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
@@ -14750,9 +14707,10 @@ pub const HandshakeClient = struct {
             return error.UnexpectedStream;
         }
         var transport_reserved = lifecycle_exists;
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         var message_sent = false;
         errdefer {
-            if (!message_sent) self.qpack_encode.abandonStream(stream_id);
+            if (!message_sent) self.qpack_encode.rollbackAfter(qpack_checkpoint);
             if (transport_reserved and self.requestStreamSendRetryable(
                 stream_id,
                 next_stream_id,
@@ -15094,13 +15052,14 @@ pub const HandshakeClient = struct {
             return error.UnexpectedStream;
         }
         var transport_reserved = lifecycle_exists;
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         var head_sent = false;
         errdefer {
             if (owner != null and transport_reserved) {
                 owner.?.* = stream_id;
                 self.next_stream_id = next_stream_id;
             } else {
-                if (!head_sent) self.qpack_encode.abandonStream(stream_id);
+                if (!head_sent) self.qpack_encode.rollbackAfter(qpack_checkpoint);
                 if (transport_reserved and self.requestStreamSendRetryable(
                     stream_id,
                     next_stream_id,
@@ -15848,7 +15807,6 @@ pub const HandshakeClient = struct {
             _ = self.response_streams.takeReset(reset.stream_id);
             _ = self.request_lifecycle.finishAssumeCapacity(reset.stream_id);
             _ = self.outbound_bodies.finish(reset.stream_id);
-            self.qpack_encode.abandonStream(reset.stream_id);
             self.sendQpackFeedback() catch {};
             return responseResetError(reset.application_error_code);
         }
@@ -15892,7 +15850,6 @@ pub const HandshakeClient = struct {
         _ = self.response_streams.takeReset(reset.stream_id);
         _ = self.request_lifecycle.finishAssumeCapacity(reset.stream_id);
         _ = self.outbound_bodies.finish(reset.stream_id);
-        self.qpack_encode.abandonStream(reset.stream_id);
         self.sendQpackFeedback() catch {};
         return responseResetError(reset.application_error_code);
     }
@@ -16193,7 +16150,6 @@ pub const HandshakeClient = struct {
                     .requestCompletedLocalStreamRelease(stream_id);
                 _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
-                self.qpack_encode.abandonStream(stream_id);
                 self.sendQpackFeedback() catch {};
                 self.flushFinalResponseAckIfIdle();
                 return err;
@@ -16410,7 +16366,6 @@ pub const HandshakeClient = struct {
                         reset.stream_id,
                     );
                     _ = self.outbound_bodies.finish(reset.stream_id);
-                    self.qpack_encode.abandonStream(reset.stream_id);
                     self.sendQpackFeedback() catch {};
                     self.flushFinalResponseAckIfIdle();
                     return .{ .reset = .{
@@ -18338,11 +18293,7 @@ pub const HandshakeClient = struct {
         ) catch |err| {
             if (self.push_streams.lastErrorStreamId()) |stream_id| {
                 if (messageStreamErrorCode(err)) |code| {
-                    const cancel_qpack = self.push_streams
-                        .hasUnacknowledgedDynamicSection(
-                        stream_id,
-                        self.qpack_decode.table,
-                    ) catch false;
+                    const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
                     if (cancel_qpack) {
                         if (single_attempt)
                             try self.qpack_decode.prepareStreamCancellation()
@@ -19463,23 +19414,9 @@ pub const HandshakeClient = struct {
         application_error_code: u64,
         decoded_dynamic_section: bool,
     ) Error!void {
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = try self.response_streams.requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
-        if (!cancel_qpack) {
-            cancel_qpack =
-                try self.streaming_responses.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    self.qpack_decode.table,
-                );
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         defer {
             self.connect_datagrams.unregister(stream_id);
-            self.qpack_encode.abandonStream(stream_id);
             self.response_streams.remove(stream_id);
             self.streaming_responses.remove(stream_id);
             _ = self.request_lifecycle.finish(stream_id) catch false;
@@ -19511,21 +19448,7 @@ pub const HandshakeClient = struct {
         application_error_code: u64,
         decoded_dynamic_section: bool,
     ) Error!void {
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = try self.response_streams
-                .requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
-        if (!cancel_qpack) {
-            cancel_qpack = try self.streaming_responses
-                .hasUnacknowledgedDynamicSection(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         if (cancel_qpack) {
             try self.qpack_decode.prepareStreamCancellation();
         }
@@ -19539,7 +19462,6 @@ pub const HandshakeClient = struct {
             );
         }
         self.connect_datagrams.unregister(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
@@ -19562,16 +19484,7 @@ pub const HandshakeClient = struct {
             self.abandonExtendedConnectOnce(stream_id);
             return;
         }
-        var cancel_qpack = self.response_streams
-            .requiresQpackCancellation(
-            stream_id,
-            self.qpack_decode.table,
-        ) catch false;
-        cancel_qpack = cancel_qpack or
-            (self.streaming_responses.hasUnacknowledgedDynamicSection(
-                stream_id,
-                self.qpack_decode.table,
-            ) catch false);
+        const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
         cancelConnectionRequest(
             &self.established.connection,
             &self.critical_stream_send_scratch,
@@ -19591,7 +19504,6 @@ pub const HandshakeClient = struct {
         _ = self.established.connection
             .requestCompletedLocalStreamRelease(stream_id) catch false;
         self.connect_datagrams.unregister(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
@@ -19608,16 +19520,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
     ) void {
         if (self.callback_reader_active) return;
-        var cancel_qpack = self.response_streams
-            .requiresQpackCancellation(
-            stream_id,
-            self.qpack_decode.table,
-        ) catch false;
-        cancel_qpack = cancel_qpack or
-            (self.streaming_responses.hasUnacknowledgedDynamicSection(
-                stream_id,
-                self.qpack_decode.table,
-            ) catch false);
+        const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
         const qpack_prepared = !cancel_qpack or blk: {
             self.qpack_decode.prepareStreamCancellation() catch break :blk false;
             break :blk true;
@@ -19644,7 +19547,6 @@ pub const HandshakeClient = struct {
         _ = self.established.connection
             .requestCompletedLocalStreamRelease(stream_id) catch false;
         self.connect_datagrams.unregister(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
@@ -19981,7 +19883,6 @@ pub const HandshakeClient = struct {
             .requestCompletedLocalStreamRelease(stream_id);
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.sendQpackFeedback() catch {};
         return responseResetError(code);
     }
@@ -20055,7 +19956,6 @@ pub const HandshakeClient = struct {
         }
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.streaming_responses.remove(stream_id);
         self.flushFinalResponseAckIfIdle();
     }
@@ -20705,7 +20605,6 @@ pub const ProtectedServer = struct {
             self.streaming_requests.takeFirstReset()) |reset|
         {
             finishServerRequest(&self.control, &self.request_lifecycle, reset.stream_id);
-            self.qpack_encode.abandonStream(reset.stream_id);
             _ = self.outbound_bodies.finish(reset.stream_id);
             return .{ .reset = .{
                 .from = reset.from,
@@ -21379,7 +21278,6 @@ pub const ProtectedServer = struct {
                 &self.protected_send,
             );
         }
-        self.qpack_encode.abandonStream(push_stream_id);
         _ = self.outbound_bodies.finish(push_stream_id);
         self.control.retirePushPriority(
             self.quic_server.endpoint.allocator,
@@ -21676,6 +21574,7 @@ pub const ProtectedServer = struct {
             &response_headers_stack,
         );
         defer prepared.deinit(self.quic_server.endpoint.allocator);
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         const streaming = try prepared.value.writeStreamingHeadDynamic(
             &self.stream_send_scratch.encoded,
             self.quic_server.endpoint.allocator,
@@ -21684,7 +21583,7 @@ pub const ProtectedServer = struct {
             body_length,
             &self.qpack_encode,
         );
-        errdefer self.qpack_encode.abandonStream(stream_id);
+        errdefer self.qpack_encode.rollbackAfter(qpack_checkpoint);
         if (deadline) |absolute| {
             try sendProtectedStreamingHeadWithDeadline(
                 &self.quic_server.endpoint,
@@ -22917,26 +22816,7 @@ pub const ProtectedServer = struct {
         const body = self.outbound_bodies.find(stream_id);
         const local_final_size = if (body) |entry| entry.send.next_offset else 0;
         const send_reset = if (body) |entry| !entry.send.fin_sent else true;
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = self.request_streams.requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            ) catch |err| {
-                self.retireRequestState(stream_id);
-                return err;
-            };
-        }
-        if (!cancel_qpack) {
-            cancel_qpack =
-                self.streaming_requests.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    self.qpack_decode.table,
-                ) catch |err| {
-                    self.retireRequestState(stream_id);
-                    return err;
-                };
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         // Once cancellation is chosen, retain no application/request state
         // even if the best-effort RESET/STOP or QPACK feedback cannot reach
         // the peer. A socket failure cannot make this request usable again.
@@ -22995,7 +22875,6 @@ pub const ProtectedServer = struct {
     ) void {
         self.request_streams.remove(stream_id);
         self.streaming_requests.remove(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
@@ -23464,9 +23343,10 @@ pub const ProtectedClient = struct {
             request_options.method,
             requestHasProtocol(request_options.headers),
         );
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         var message_sent = false;
         errdefer {
-            if (!message_sent) self.qpack_encode.abandonStream(stream_id);
+            if (!message_sent) self.qpack_encode.rollbackAfter(qpack_checkpoint);
             _ = self.request_lifecycle.finish(stream_id) catch false;
             if (!self.protected_send.isUsable()) {
                 self.next_stream_id = next_stream_id;
@@ -23600,9 +23480,10 @@ pub const ProtectedClient = struct {
             request_options.method,
             requestHasProtocol(request_options.headers),
         );
+        const qpack_checkpoint = self.qpack_encode.checkpoint();
         var head_sent = false;
         errdefer {
-            if (!head_sent) self.qpack_encode.abandonStream(stream_id);
+            if (!head_sent) self.qpack_encode.rollbackAfter(qpack_checkpoint);
             _ = self.request_lifecycle.finish(stream_id) catch false;
             _ = self.outbound_bodies.finish(stream_id);
             if (!self.protected_send.isUsable()) {
@@ -24246,7 +24127,6 @@ pub const ProtectedClient = struct {
             error.RequestCancelled, error.RequestRejected => {
                 _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
-                self.qpack_encode.abandonStream(stream_id);
                 self.sendQpackFeedback() catch {};
                 return err;
             },
@@ -24448,7 +24328,6 @@ pub const ProtectedClient = struct {
                         reset.stream_id,
                     );
                     _ = self.outbound_bodies.finish(reset.stream_id);
-                    self.qpack_encode.abandonStream(reset.stream_id);
                     self.sendQpackFeedback() catch {};
                     return .{ .reset = .{
                         .stream_id = reset.stream_id,
@@ -24952,11 +24831,7 @@ pub const ProtectedClient = struct {
                 null;
             if (stream_id) |id| {
                 if (messageStreamErrorCode(err)) |code| {
-                    const cancel_qpack = self.push_streams
-                        .hasUnacknowledgedDynamicSection(
-                        id,
-                        self.qpack_decode.table,
-                    ) catch false;
+                    const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
                     if (cancel_qpack) {
                         self.qpack_decode.recordStreamCancellation(id) catch {};
                     }
@@ -25708,22 +25583,8 @@ pub const ProtectedClient = struct {
         const body = self.outbound_bodies.find(stream_id);
         const local_final_size = if (body) |entry| entry.send.next_offset else 0;
         const send_reset = if (body) |entry| !entry.send.fin_sent else false;
-        var cancel_qpack = decoded_dynamic_section;
-        if (!cancel_qpack) {
-            cancel_qpack = try self.response_streams.requiresQpackCancellation(
-                stream_id,
-                self.qpack_decode.table,
-            );
-        }
-        if (!cancel_qpack) {
-            cancel_qpack =
-                try self.streaming_responses.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    self.qpack_decode.table,
-                );
-        }
+        const cancel_qpack = decoded_dynamic_section or self.qpack_decode.table.max_capacity != 0;
         defer {
-            self.qpack_encode.abandonStream(stream_id);
             self.response_streams.remove(stream_id);
             self.streaming_responses.remove(stream_id);
             _ = self.request_lifecycle.finish(stream_id) catch false;
@@ -26119,7 +25980,6 @@ pub const ProtectedClient = struct {
     ) void {
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        self.qpack_encode.abandonStream(stream_id);
         self.streaming_responses.remove(stream_id);
     }
 
@@ -26145,7 +26005,6 @@ pub const ProtectedClient = struct {
                     code,
                     uses_dynamic,
                 ) catch {
-                    self.qpack_encode.abandonStream(id);
                     self.response_streams.remove(id);
                     self.streaming_responses.remove(id);
                     _ = self.request_lifecycle.finish(id) catch false;
@@ -35937,6 +35796,7 @@ test {
     _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/client/owned_head_tests.zig");
+    _ = @import("runtime/qpack/tests/cancellation.zig");
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_dispatcher_relay_tests.zig");
     _ = @import("runtime/connect_ip_tests.zig");

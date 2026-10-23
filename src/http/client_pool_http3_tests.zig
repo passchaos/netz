@@ -790,9 +790,9 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var connection = try self.server.accept();
+            var connection = try self.server.acceptWithTimeout(.fromSeconds(10));
             defer connection.close();
-            var request = try connection.readRequest(.{});
+            var request = try connection.readRequestWithTimeout(.{}, .fromSeconds(10));
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings(
                 "/discover",
@@ -809,6 +809,7 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
     const H3Worker = struct {
         server: *http3_runtime.HandshakeServer,
         expected_authority: []const u8,
+        release: *std.Io.Event,
         requests: usize = 0,
         err: ?anyerror = null,
 
@@ -819,9 +820,9 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var session = try self.server.accept();
+            var session = try self.server.acceptWithTimeout(.fromSeconds(10));
             defer session.deinit();
-            var request = try session.receiveRequest();
+            var request = try session.receiveRequestWithTimeout(.fromSeconds(10));
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings(
                 self.expected_authority,
@@ -837,6 +838,8 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
                 .body = "migrated",
             });
             self.requests += 1;
+            // Keep the transport alive while its idle-budget state is checked.
+            try self.release.wait(session.established.connection.endpoint.io);
         }
     };
     const ReturnWorker = struct {
@@ -851,9 +854,9 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var connection = try self.server.accept();
+            var connection = try self.server.acceptWithTimeout(.fromSeconds(10));
             defer connection.close();
-            var request = try connection.readRequest(.{});
+            var request = try connection.readRequestWithTimeout(.{}, .fromSeconds(10));
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings(
                 "/returned-tcp",
@@ -887,6 +890,7 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
     var h3_worker = H3Worker{
         .server = &h3_server,
         .expected_authority = authority,
+        .release = &release,
     };
     const h3_thread = try std.Thread.spawn(.{}, H3Worker.run, .{&h3_worker});
     var h3_joined = false;
@@ -899,6 +903,8 @@ test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
     );
     var return_joined = false;
     defer if (!return_joined) return_thread.join();
+    // Error exits release parked workers before joining them.
+    defer release.set(io);
 
     var pool = try http.Pool.init(allocator, io, .{
         .max_total_connections = 1,

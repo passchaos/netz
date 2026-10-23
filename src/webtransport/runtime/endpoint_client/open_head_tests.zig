@@ -256,5 +256,17 @@ test "WebTransport shared client CONNECT head timeout retains QPACK references u
     try std.testing.expect(submitted <= 1);
     connection.pacer.enabled = false;
     try finish(&fixture, submitted);
+    try std.testing.expectEqual(@as(usize, 1), h3.qpack_encode.pending_sections.items.len);
+    var feedback_bytes: std.ArrayList(u8) = .empty;
+    defer feedback_bytes.deinit(std.testing.allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback_bytes, std.testing.allocator);
+    try http3.Qpack.writeDecoderInstruction(&feedback_bytes, std.testing.allocator, .{ .stream_cancellation = 4 });
+    try fixture.peer.send(&.{.{ .stream = .{ .stream_id = 11, .data = feedback_bytes.items } }});
+    const deadline = std.Io.Clock.Timestamp.fromNow(original_io, .{ .clock = .awake, .raw = .fromSeconds(1) });
+    while (h3.qpack_encode.hasPendingSections(4)) {
+        var packet = try connection.receivePacketServicingTimersDeadline(deadline);
+        defer packet.deinit(std.testing.allocator);
+        try h3.processDetachedResponsePacket(0, &packet);
+    }
     try std.testing.expectEqual(@as(usize, 0), h3.qpack_encode.pending_sections.items.len);
 }

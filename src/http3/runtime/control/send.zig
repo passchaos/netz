@@ -1335,7 +1335,9 @@ pub fn trySendConnectionQpackFeedback(
             high = candidate - 1;
         }
     }
-    if (fitting == 0) return error.DatagramTooLarge;
+    // A one-byte STREAM/frame limit may fit only the decoder stream type.
+    // Commit that prefix alone and retain all instructions for the next turn.
+    if (fitting == 0 and prefix_len == 0) return error.DatagramTooLarge;
 
     var staged_send = send_state.*;
     scratch.frames.clearRetainingCapacity();
@@ -1346,6 +1348,8 @@ pub fn trySendConnectionQpackFeedback(
         maxStreamFrameData(options),
         false,
     );
+    if (scratch.frames.items.len > frame_limit or
+        try connection.packetLenForFramesAtOffset(0, scratch.frames.items) > connection.currentSendDatagramSize()) return error.DatagramTooLarge;
     try connection.trySend(scratch.frames.items);
     send_state.* = staged_send;
     prefix_sent.* = true;

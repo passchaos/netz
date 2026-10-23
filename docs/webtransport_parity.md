@@ -858,8 +858,20 @@ and congestion timeout, zero-byte and partial socket failure with exact RESET
 final sizes, and a large CONNECT head that resumes ACK progress and is decoded
 completely by its peer while the first Session remains active.
 An additional dynamic-QPACK case retains the speculative field-section
-references while cancellation is paced, then releases them after the scoped
-cancellation is submitted.
+references across local cancellation until the peer's Section Acknowledgment
+or Stream Cancellation arrives. A local RESET/FIN cannot prove that a field
+section was decoded, so it does not permit early eviction or discard of its
+encoder references. Only unsent sections are rolled back, using immutable
+section-sequence checkpoints that survive earlier peer acknowledgments.
+The encoder bounds pending descriptors plus reference arrays by its configured
+`max_stream_buffer` budget; it uses static/literal representations once that
+budget is exhausted and resumes dynamic references after peer feedback.
+Decoders with a nonzero maximum dynamic-table capacity generate Stream
+Cancellation even when HEADERS has not arrived. One-attempt feedback can submit
+the stream-type prefix alone under one-byte STREAM/frame limits while retaining
+all instruction bytes for the next turn. Protected-UDP tests verify delayed
+acknowledgments, entry pinning until peer cancellation, ordinary completion,
+and exact cancellation/prefix bytes alongside the budget and rollback cases.
 
 Peer `STOP_SENDING` rejection also completes scoped cleanup after QUIC has
 already submitted its matching RESET. QUIC cancellation preserves that

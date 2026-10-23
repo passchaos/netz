@@ -126,6 +126,7 @@ fn sendConnectionMessageUntil(
     qpack_encoder_prefix_sent: *bool,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
+    const qpack_checkpoint = qpack.checkpoint();
     try prepareConnectionMessage(
         connection.endpoint.allocator,
         scratch,
@@ -136,7 +137,7 @@ fn sendConnectionMessageUntil(
         qpack,
     );
     var message_sent = false;
-    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    errdefer if (!message_sent) qpack.rollbackAfter(qpack_checkpoint);
     try sendPreparedConnectionMessageUntil(
         connection,
         scratch,
@@ -162,8 +163,9 @@ pub fn prepareConnectionMessage(
     peer_settings: http3.Settings,
     qpack: *QpackEncodeState,
 ) Error!void {
+    const qpack_checkpoint = qpack.checkpoint();
     scratch.reset();
-    errdefer qpack.abandonStream(stream_id);
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     try request.writeDynamic(
         &scratch.encoded,
         allocator,
@@ -431,9 +433,10 @@ fn sendConnectionResponseSequenceUntil(
     qpack_encoder_prefix_sent: *bool,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
+    const qpack_checkpoint = qpack.checkpoint();
     scratch.reset();
     var message_sent = false;
-    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    errdefer if (!message_sent) qpack.rollbackAfter(qpack_checkpoint);
     try http3.writeResponseSequenceDynamic(
         &scratch.encoded,
         connection.endpoint.allocator,
@@ -667,6 +670,7 @@ fn sendProtectedMessageUntil(
     protected_send: *ProtectedSendState,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
+    const qpack_checkpoint = qpack.checkpoint();
     try prepareConnectionMessage(
         endpoint.allocator,
         scratch,
@@ -677,7 +681,7 @@ fn sendProtectedMessageUntil(
         qpack,
     );
     var message_sent = false;
-    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    errdefer if (!message_sent) qpack.rollbackAfter(qpack_checkpoint);
     try sendPreparedProtectedMessageUntil(
         endpoint,
         to,
@@ -838,12 +842,13 @@ fn sendProtectedResponseSequenceUntil(
     protected_send: *ProtectedSendState,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
+    const qpack_checkpoint = qpack.checkpoint();
     scratch.reset();
     // A field section can acquire dynamic-table references before any network
     // I/O. Release those references when encoder- or response-stream sending
     // fails; unreferenced speculative inserts remain useful for later sends.
     var message_sent = false;
-    errdefer if (!message_sent) qpack.abandonStream(stream_id);
+    errdefer if (!message_sent) qpack.rollbackAfter(qpack_checkpoint);
     try http3.writeResponseSequenceDynamic(
         &scratch.encoded,
         endpoint.allocator,
@@ -1151,8 +1156,8 @@ fn sendConnectionPushStreamingHeadsUntil(
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     const streaming = try encodePushStreamingHeads(
         connection.endpoint.allocator,
         peer_settings,
@@ -1349,8 +1354,8 @@ fn sendProtectedPushStreamingHeadsUntil(
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     const streaming = try encodePushStreamingHeads(
         endpoint.allocator,
         peer_settings,
@@ -1560,8 +1565,8 @@ fn sendConnectionPushUntil(
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     try encodePushMessages(
         connection.endpoint.allocator,
         peer_settings,
@@ -1718,8 +1723,8 @@ fn sendProtectedPushUntil(
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     try encodePushMessages(
         endpoint.allocator,
         peer_settings,
@@ -2030,8 +2035,8 @@ fn sendConnectionTrailersUntil(
     const previous = entry.*;
     errdefer entry.* = previous;
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     try http3.writeTrailersDynamic(
         &scratch.encoded,
         connection.endpoint.allocator,
@@ -2174,8 +2179,8 @@ fn sendProtectedTrailersUntil(
     const previous = entry.*;
     errdefer entry.* = previous;
     scratch.reset();
-    const pending_sections_len = qpack.pending_sections.items.len;
-    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    const qpack_checkpoint = qpack.checkpoint();
+    errdefer qpack.rollbackAfter(qpack_checkpoint);
     try http3.writeTrailersDynamic(
         &scratch.encoded,
         endpoint.allocator,

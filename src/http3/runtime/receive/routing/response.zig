@@ -105,6 +105,12 @@ pub fn routePacket(
             state.qpack_decode.discardPeerUniStream(
                 frame.reset_stream.stream_id,
             );
+            // A push reset may precede its type/ID or field-section prefix.
+            // Decoder abandonment cannot depend on seeing dynamic references.
+            if (!preserve_for_detached and state.qpack_decode.table.max_capacity != 0) {
+                try state.qpack_decode.recordStreamCancellation(frame.reset_stream.stream_id);
+                flush_qpack_feedback = true;
+            }
             var tracked_push = false;
             if ((frame.reset_stream.stream_id & 0x03) == 0x03) {
                 if (state.push_streams) |pushes| {
@@ -112,13 +118,6 @@ pub fn routePacket(
                         frame.reset_stream.stream_id,
                     );
                     tracked_push = pushes.containsStream(stream_id);
-                    if (try pushes.hasUnacknowledgedDynamicSection(
-                        stream_id,
-                        state.qpack_decode.table,
-                    )) {
-                        try state.qpack_decode.recordStreamCancellation(stream_id);
-                        flush_qpack_feedback = true;
-                    }
                     if (tracked_push) {
                         if (state.connection) |connection| {
                             _ = try connection
@@ -426,17 +425,9 @@ pub fn recordClientResponseReset(
         application_error_code,
     )) return false;
 
-    var cancel_qpack = try response_streams.requiresQpackCancellation(
-        stream_id,
-        qpack_decode.table,
-    );
-    if (streaming_responses) |streaming| {
-        cancel_qpack = cancel_qpack or
-            try streaming.hasUnacknowledgedDynamicSection(
-                stream_id,
-                qpack_decode.table,
-            );
-    }
+    // A reset can precede the field-section prefix. With a nonzero maximum
+    // table capacity the decoder still owes Stream Cancellation (RFC 9204).
+    const cancel_qpack = qpack_decode.table.max_capacity != 0;
     if (cancel_qpack) {
         try qpack_decode.recordStreamCancellation(stream_id);
     }

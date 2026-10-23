@@ -407,16 +407,8 @@ fn applyServerRequestReset(
         _ = try request_id_validator.requestCompletedPeerStreamRelease(stream_id);
         return null;
     }
-    var cancel_qpack = try request_streams.requiresQpackCancellation(
-        stream_id,
-        qpack_decode.table,
-    );
+    var cancel_qpack = qpack_decode.table.max_capacity != 0;
     if (streaming_requests) |streaming| {
-        cancel_qpack = cancel_qpack or
-            try streaming.hasUnacknowledgedDynamicSection(
-                stream_id,
-                qpack_decode.table,
-            );
         // Reserve before mutating QPACK or destroying the reader. This makes
         // reset routing transactional under allocator failure.
         const new_reset = try streaming.prepareReset(

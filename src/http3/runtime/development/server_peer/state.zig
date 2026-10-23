@@ -210,7 +210,6 @@ pub const Set = struct {
             };
             self.request_streams.remove(stream_id);
             self.streaming_requests.remove(stream_id);
-            self.qpack_encode.abandonStream(stream_id);
             _ = self.response_send_offsets.remove(stream_id);
             self.lifecycle.markFinished(stream_id);
             _ = self.outbound_bodies.finish(stream_id);
@@ -520,7 +519,6 @@ pub const Set = struct {
                     peer.lifecycle.markFinished(reset.stream_id);
                     _ = peer.outbound_bodies.finish(reset.stream_id);
                     _ = peer.response_send_offsets.remove(reset.stream_id);
-                    peer.qpack_encode.abandonStream(reset.stream_id);
                 }
             } else if (if (stream_id) |target|
                 peer.streaming_requests.takeReset(target)
@@ -530,7 +528,6 @@ pub const Set = struct {
                 peer.lifecycle.markFinished(reset_event.stream_id);
                 _ = peer.outbound_bodies.finish(reset_event.stream_id);
                 _ = peer.response_send_offsets.remove(reset_event.stream_id);
-                peer.qpack_encode.abandonStream(reset_event.stream_id);
                 self.last_peer_index = index;
                 return .{ .reset = .{
                     .from = reset_event.from,
@@ -605,7 +602,6 @@ pub const Set = struct {
         if (!existed) return false;
         peer.request_streams.remove(stream_id);
         peer.streaming_requests.remove(stream_id);
-        peer.qpack_encode.abandonStream(stream_id);
         _ = peer.response_send_offsets.remove(stream_id);
         peer.lifecycle.markFinished(stream_id);
         _ = peer.outbound_bodies.finish(stream_id);
