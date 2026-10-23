@@ -520,6 +520,27 @@ pub const Transport = union(enum) {
         }
     }
 
+    /// Preserve the ordinary transport's atomic prefix/payload framing while
+    /// bounding the complete write. Partial output must retire MQTT ownership.
+    pub fn writePacketPartsWithDeadline(self: *Transport, prefix: []const u8, payload: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
+        return @import("transport/write_parts_deadline.zig").write(Error, self.ioHandle(), self, Transport.writePacketPartsForDeadline, prefix, payload, deadline);
+    }
+
+    fn writePacketPartsForDeadline(self: *Transport, prefix: []const u8, payload: []const u8) Error!void {
+        self.writePacketParts(prefix, payload) catch |err| {
+            // The standard TLS writer wraps socket cancellation and other
+            // network errors in WriteFailed. Restore that actual cause before
+            // the deadline race classifies cancellation versus write failure.
+            if (err == error.WriteFailed and self.* == .tls) {
+                if (self.tls.connection.net_writer.err) |cause| {
+                    self.tls.connection.net_writer.err = null;
+                    return cause;
+                }
+            }
+            return err;
+        };
+    }
+
     pub fn readPacket(
         self: *Transport,
         allocator: std.mem.Allocator,

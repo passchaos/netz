@@ -1656,7 +1656,7 @@ pub const Client = struct {
                 self.outgoing_handle = reopened.handle;
                 self.outgoing_open = true;
             }
-            self.replayPending() catch |err| {
+            self.replayPendingUntil(deadline) catch |err| {
                 // The CONNECT succeeded but replay did not. Preserve every
                 // durable packet and report the transport failure rather than
                 // claiming a usable connection.
@@ -3145,8 +3145,25 @@ pub const Client = struct {
     /// This is useful when `publish` returned `ConnectionUnavailable` after
     /// durably queueing the request.
     pub fn flushPending(self: *Client) Error!void {
+        return self.flushPendingUntil(null);
+    }
+
+    pub fn flushPendingWithTimeout(self: *Client, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.flushPendingWithDeadline(.fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn flushPendingWithDeadline(self: *Client, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.flushPendingUntil(deadline);
+    }
+
+    fn flushPendingUntil(self: *Client, deadline: ?std.Io.Clock.Timestamp) Error!void {
         try self.outgoing.releasePendingPubRels(self.outgoing_handle);
-        try self.replayPending();
+        self.replayPendingUntil(deadline) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
     }
 
@@ -3268,103 +3285,19 @@ pub const Client = struct {
         self.outgoing_open = true;
     }
 
+    const ReplayContext = struct {
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const retryable = retryableConnectError;
+        pub const finishDelivery = Client.finishPublishDelivery;
+    };
+
     fn replayPending(self: *Client) Error!void {
-        const active = self.connection() orelse
-            return error.ConnectionUnavailable;
-        // Select one packet at a time. If its socket write fails, the Session
-        // store can conservatively mark exactly that packet as a retransmit;
-        // later queued packets retain first-delivery DUP semantics.
-        var batch: [1]session.Transmission = undefined;
-        while (true) {
-            const transmissions = try self.outgoing.drainInto(
-                self.outgoing_handle,
-                std.Io.Clock.awake.now(self.io),
-                active.max_outgoing_inflight,
-                &batch,
-            );
-            if (transmissions.len == 0) return;
-            for (transmissions) |transmission| {
-                var wire_transmission = transmission;
-                const qos1_completed_on_write =
-                    self.client_options.outbound_replay_capability_policy ==
-                    .adapt_qos1 and
-                    transmission == .publish and
-                    transmission.publish.qos == .at_least_once and
-                    active.peerMaximumQoS() == .at_most_once;
-                if (self.client_options.outbound_replay_capability_policy ==
-                    .adapt_qos1 and transmission == .publish and
-                    transmission.publish.qos == .at_least_once)
-                {
-                    wire_transmission.publish.qos = @enumFromInt(@min(
-                        @intFromEnum(transmission.publish.qos),
-                        @intFromEnum(active.peerMaximumQoS()),
-                    ));
-                    wire_transmission.publish.retain =
-                        transmission.publish.retain and
-                        active.peerRetainAvailable();
-                }
-                active.writeClientSessionTransmission(
-                    wire_transmission,
-                ) catch |err| {
-                    if (err == error.OutgoingPacketTooLarge and
-                        transmission == .publish)
-                    {
-                        const publish_value = transmission.publish;
-                        const dropped = try self.outgoing.dropOversizedPublish(
-                            self.outgoing_handle,
-                            publish_value.packet_id,
-                        );
-                        if (dropped != .dropped) {
-                            return error.InvalidAcknowledgement;
-                        }
-                        // Maximum Packet Size may shrink across connections.
-                        // Match broker/Mosquitto delivery semantics: retire
-                        // only this destination, keep the transport usable,
-                        // and surface an ACK-compatible terminal reason.
-                        self.finishPublishDelivery(.{
-                            .packet_id = if (publish_value.packet_id == 0)
-                                null
-                            else
-                                publish_value.packet_id,
-                            .qos = publish_value.qos,
-                            .reason_code = 0x97,
-                            .properties = &.{},
-                        });
-                        continue;
-                    }
-                    if (!retryableConnectError(err) and
-                        transmission == .publish)
-                    {
-                        try self.outgoing.retryUnsentPublish(
-                            self.outgoing_handle,
-                            transmission.publish.packet_id,
-                        );
-                    }
-                    self.disconnectTransport();
-                    return err;
-                };
-                if (qos1_completed_on_write) {
-                    // The original Packet Identifier remains the Session key
-                    // until the QoS 0 socket write succeeds. Only then can we
-                    // retire it and report completion of the caller's QoS 1
-                    // contract without risking loss on a failed write.
-                    const packet_id = transmission.publish.packet_id;
-                    const dropped = try self.outgoing.dropOutgoingPublish(
-                        self.outgoing_handle,
-                        packet_id,
-                    );
-                    if (dropped != .dropped) {
-                        return error.InvalidAcknowledgement;
-                    }
-                    self.finishPublishDelivery(.{
-                        .packet_id = packet_id,
-                        .qos = .at_least_once,
-                        .reason_code = 0,
-                        .properties = &.{},
-                    });
-                }
-            }
-        }
+        return self.replayPendingUntil(null);
+    }
+
+    fn replayPendingUntil(self: *Client, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        return @import("reconnect/replay.zig").drain(ReplayContext, self, deadline);
     }
 
     fn replaySubscriptions(self: *Client, deadline: ?std.Io.Clock.Timestamp) Error!void {

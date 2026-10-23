@@ -398,6 +398,27 @@ The focused runtime/client/reconnect, queue, TLS, WebSocket and Unix matrix
 passes 262 tests in Debug and ReleaseFast; package reachability passes two tests,
 and the two-Mosquitto OutboundBridge gate passes its QoS/restart matrix.
 
+The reconnect deadline now also spans recovery of existing QoS 1/2 state after
+CONNACK. PUBLISH prefix/payload output and PUBREL replay receive the same
+absolute timestamp, and each drain checks that budget before selecting the
+next durable transaction. Interrupted writes retire the connection while
+preserving the original Packet Identifier and retransmission state; later
+queued publications retain first-send `DUP=0`. `flushPendingWithTimeout` and
+`flushPendingWithDeadline` expose the same boundary for staged publications
+and deferred QoS 2 release. Recovery scheduling lives in `reconnect/replay.zig`.
+The packet transport's bounded parts writer joins cancellation before borrowed
+packet slices are released, retaining the ordinary TCP/TLS scatter/gather and
+TLS flush policy plus one WebSocket binary message. The standard TLS adapter
+restores the underlying socket error from `WriteFailed`, so deadline
+cancellation returns `Timeout` while actual network failures retain their
+original cause. Adjacent real-connection tests cover three-generation MQTT
+3.1.1/5 recovery for QoS 1, QoS 2 PUBLISH and PUBREL, a later untouched
+publication, staged flush, zero/expired budgets, and complete 48-KiB PUBLISH
+delivery or canceled output through TCP, standard TLS, vail TLS 1.3/1.2 and WS.
+The focused runtime/client/reconnect, queue, TLS, WebSocket and Unix matrix
+passes 267 tests in Debug and ReleaseFast; package reachability passes two tests,
+and the two-Mosquitto OutboundBridge QoS/restart matrix remains green.
+
 After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is

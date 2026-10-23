@@ -4514,6 +4514,15 @@ pub const Connection = struct {
         self: *Connection,
         transmission: @import("session/mod.zig").Transmission,
     ) Error!void {
+        return self.writeClientSessionTransmissionUntil(transmission, null);
+    }
+
+    pub fn writeClientSessionTransmissionWithDeadline(self: *Connection, transmission: @import("session/mod.zig").Transmission, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return self.writeClientSessionTransmissionUntil(transmission, deadline);
+    }
+
+    fn writeClientSessionTransmissionUntil(self: *Connection, transmission: @import("session/mod.zig").Transmission, deadline: ?std.Io.Clock.Timestamp) Error!void {
         return switch (transmission) {
             .publish => |publish_value| {
                 if (@intFromEnum(publish_value.qos) >
@@ -4526,9 +4535,9 @@ pub const Connection = struct {
                 {
                     return error.InvalidProperty;
                 }
-                return self.writeSessionPublish(publish_value);
+                return self.writeSessionPublishUntil(publish_value, deadline);
             },
-            .pubrel => |pubrel| return self.writeSessionPubRel(pubrel),
+            .pubrel => |pubrel| return self.writeSessionPubRelUntil(pubrel, deadline),
         };
     }
 
@@ -4581,6 +4590,11 @@ pub const Connection = struct {
         self: *Connection,
         value: @import("session/mod.zig").PublishTransmission,
     ) Error!void {
+        return self.writeSessionPublishUntil(value, null);
+    }
+
+    fn writeSessionPublishUntil(self: *Connection, value: @import("session/mod.zig").PublishTransmission, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.transport.ioHandle(), absolute);
         if (!self.isUsable()) return error.ConnectionClosed;
         try self.validatePublishPropertyDirection(
             value.properties,
@@ -4639,10 +4653,11 @@ pub const Connection = struct {
             write_options.retain,
             properties.items,
         );
-        self.writeValidatedPublish(
+        self.writeValidatedPublishUntil(
             outgoing_topic,
             value.payload,
             write_options,
+            deadline,
         ) catch |err| {
             if (err != error.OutgoingPacketTooLarge or
                 !automatic_alias_added)
@@ -4667,10 +4682,11 @@ pub const Connection = struct {
                 fallback_options.retain,
                 fallback_options.properties,
             );
-            return self.writeValidatedPublish(
+            return self.writeValidatedPublishUntil(
                 value.topic,
                 value.payload,
                 fallback_options,
+                deadline,
             );
         };
     }
@@ -4701,6 +4717,11 @@ pub const Connection = struct {
         payload: []const u8,
         options: mqtt.PublishWriteOptions,
     ) Error!void {
+        return self.writeValidatedPublishUntil(topic, payload, options, null);
+    }
+
+    fn writeValidatedPublishUntil(self: *Connection, topic: []const u8, payload: []const u8, options: mqtt.PublishWriteOptions, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.transport.ioHandle(), absolute);
         self.write_scratch.clearRetainingCapacity();
         const lengths = try mqtt.writePublishPrefix(
             &self.write_scratch,
@@ -4722,10 +4743,12 @@ pub const Connection = struct {
             topic,
             options.properties,
         );
-        try self.writeTransportPacketParts(
-            self.write_scratch.items,
-            payload,
-        );
+        if (deadline) |absolute| {
+            self.transport.writePacketPartsWithDeadline(self.write_scratch.items, payload, absolute) catch |err| {
+                self.transport_unusable.store(true, .release);
+                return err;
+            };
+        } else try self.writeTransportPacketParts(self.write_scratch.items, payload);
         self.recordPacketSent(lengths.total);
     }
 
@@ -4733,7 +4756,14 @@ pub const Connection = struct {
         self: *Connection,
         pubrel: @import("session/mod.zig").PubRelTransmission,
     ) Error!void {
-        try self.writePubRel(pubrel.packet_id, 0);
+        return self.writeSessionPubRelUntil(pubrel, null);
+    }
+
+    fn writeSessionPubRelUntil(self: *Connection, pubrel: @import("session/mod.zig").PubRelTransmission, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline) |absolute| {
+            var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
+            try self.writeGeneratedPacketWithDeadline(try mqtt.AckPacket.writeNoPropertiesInto(&encoded, self.protocol, .pubrel, pubrel.packet_id, 0), .pubrel, absolute);
+        } else try self.writePubRel(pubrel.packet_id, 0);
     }
 
     pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {
@@ -11602,6 +11632,9 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 }
 
 test {
+    _ = @import("reconnect/replay_deadline_tests.zig");
+    _ = @import("reconnect/flush_deadline_tests.zig");
+    _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_deadline_tests.zig");
