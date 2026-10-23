@@ -5310,10 +5310,11 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writeGeneratedPacket(
-            mqtt.writePingInto(&encoded, false),
-            .pingreq,
-        );
+        const bytes = mqtt.writePingInto(&encoded, false);
+        if (deadline) |absolute|
+            try self.writeGeneratedPacketWithDeadline(bytes, .pingreq, absolute)
+        else
+            try self.writeGeneratedPacket(bytes, .pingreq);
         var packet = try AckReader.read(self, .pingresp, deadline);
         defer packet.deinit(self.allocator);
         try mqtt.validatePing(packet.bytes, true);
@@ -11587,6 +11588,7 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 }
 
 test {
+    _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acknowledgement/byte_limit_tests.zig");

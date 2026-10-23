@@ -372,6 +372,14 @@ connection limits, while its counter adds eight bytes to the on-demand queue.
 The focused queue/client/runtime/reconnect, TLS, WebSocket and Unix matrix
 passes 253 tests in Debug and ReleaseFast; package reachability passes two tests.
 
+Bounded PING now applies its original absolute deadline to PINGREQ output as
+well as PINGRESP input. A blocked socket/TLS/WebSocket write can no longer
+outlive the liveness budget before response waiting begins. Interrupted output
+marks the MQTT connection unusable, matching the existing packet-write failure
+contract. An observed-writer regression cancels a real TCP request write for
+both relative and absolute PING calls; the focused PING, TLS/mTLS/WebSocket,
+clock-domain and reconnect-poll matrix passes 104 tests in Debug and ReleaseFast.
+
 After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is
