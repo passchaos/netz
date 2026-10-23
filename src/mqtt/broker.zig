@@ -89,6 +89,13 @@ const LocalConsumerContext = struct {
     pub const prepareRetainedDeliveryProperties = prepareLocalConsumerProperties;
 };
 
+const registration_persistence = @import("broker/registration_persistence.zig");
+const RegistrationPersistenceContext = struct {
+    pub const BrokerType = Broker;
+    pub const appendCommitIfEnabledLocked = Broker.appendCommitIfEnabledLocked;
+    pub const autosavePersistentChangesIfNeededLocked = Broker.autosavePersistentChangesIfNeededLocked;
+};
+
 const prepareLocalConsumerProperties = prepareRetainedDeliveryProperties;
 
 pub const LocalConsumer = local_consumer_mod.Handle;
@@ -700,7 +707,11 @@ const ClientSlot = struct {
         has_session_handle: bool = false,
         has_retained_source_id: bool = false,
         administrative_disconnect: bool = false,
-        _padding: u2 = 0,
+        /// Rollback cleared all provisional state while the admission caller
+        /// still owns this reserved slot. It may safely participate in a
+        /// checkpoint without making the slot available to another accept.
+        registration_aborted: bool = false,
+        _padding: u1 = 0,
     } = .{},
     /// Allocated only after policy and Session admission, immediately before a
     /// successful CONNACK. Keeping the large transport/session state out of
@@ -2287,6 +2298,9 @@ pub const Broker = struct {
     slots: []ClientSlot,
     session_delivery_writers: session_writer.Pool,
     commit_log: ?commit_log_mod.Log = null,
+    /// A rollback image blocked by another provisional CONNECT or a journal
+    /// failure still needs a final append. Protected by persistence_mutex.
+    registration_rollback_commit_pending: bool = false,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
     /// Monotonic durable-state generations protected by `state_mutex`.
@@ -3489,7 +3503,9 @@ pub const Broker = struct {
             break :blk try self.encodeLiveStateLocked(false);
         };
         defer self.allocator.free(encoded);
-        return log.append(encoded);
+        const sequence = try log.append(encoded);
+        self.registration_rollback_commit_pending = false;
+        return sequence;
     }
 
     /// Replace prior journal history with one synced baseline generation.
@@ -3505,6 +3521,7 @@ pub const Broker = struct {
         };
         defer self.allocator.free(encoded);
         try log.reset(encoded);
+        self.registration_rollback_commit_pending = false;
     }
 
     fn appendCommitIfEnabled(self: *Broker) Error!void {
@@ -3522,6 +3539,7 @@ pub const Broker = struct {
         };
         defer self.allocator.free(encoded);
         _ = try log.append(encoded);
+        self.registration_rollback_commit_pending = false;
     }
 
     fn appendProvisionalCommitIfEnabled(self: *Broker) Error!void {
@@ -3545,6 +3563,7 @@ pub const Broker = struct {
         };
         defer self.allocator.free(encoded);
         _ = try log.append(encoded);
+        if (!allow_provisional_registration) self.registration_rollback_commit_pending = false;
     }
 
     /// Record one externally meaningful persistent transition. Callers group
@@ -3894,7 +3913,8 @@ pub const Broker = struct {
             // transaction is in flight prevents a failed accept from
             // manufacturing Session Present after restart.
             if (!allow_provisional_registration and
-                slot.state.active and slot.connection == null)
+                slot.state.active and slot.connection == null and
+                !slot.state.registration_aborted)
             {
                 return error.SnapshotBusy;
             }
@@ -4454,6 +4474,7 @@ pub const Broker = struct {
         for (self.slots, 0..) |slot, index| {
             if (!slot.state.active) {
                 self.slots[index].state.active = true;
+                self.slots[index].state.registration_aborted = false;
                 self.connections_received +|= 1;
                 return index;
             }
@@ -4467,7 +4488,9 @@ pub const Broker = struct {
         std.debug.assert(slot.state.active);
         std.debug.assert(slot.connection == null);
         slot.state.active = false;
+        slot.state.registration_aborted = false;
         self.state_mutex.unlock(self.io);
+        registration_persistence.settled(RegistrationPersistenceContext, self);
     }
 
     // Certificate parsing has a much larger stack frame than ordinary TCP
@@ -4570,10 +4593,12 @@ pub const Broker = struct {
             );
             // The provisional record was synced before CONNACK. Append the
             // rollback even when it restores the original in-memory state.
-            self.finalizePersistentChange(
-                true,
+            registration_persistence.rollback(
+                RegistrationPersistenceContext,
+                self,
                 registration_progress.rollback_changed,
-            ) catch {};
+                true,
+            );
         };
         // Reserve stable storage before sending a successful CONNACK. An
         // allocation failure can then roll registration back without first
@@ -4610,8 +4635,9 @@ pub const Broker = struct {
         stored_connection_owned = false;
         registration_needs_rollback = false;
         // A threshold reached during the provisional CONNECT window was left
-        // pending by SnapshotBusy. Attachment is the first safe retry point.
-        self.autosavePersistentChangesIfNeeded();
+        // pending by SnapshotBusy. Attachment retries that snapshot and any
+        // journal correction deferred by a concurrent CONNECT rollback.
+        registration_persistence.settled(RegistrationPersistenceContext, self);
         errdefer self.unregister(
             index,
             registration.subscriber_id,
@@ -4807,10 +4833,14 @@ pub const Broker = struct {
             auto_client_id_prefix,
             &registration_progress,
         ) catch |err| {
-            // Registration can delete durable state before a later allocation
-            // fails. `register` records that partial transition; persist it to
-            // both configured backends without replacing the original error.
-            self.finishPartialPersistentChange(
+            // register records any partial durable transition itself. Clear
+            // this slot without counting that change twice, then persist the
+            // rollback while retaining the caller's reservation.
+            self.abortRegistration(index, 0, false);
+            registration_persistence.rollback(
+                RegistrationPersistenceContext,
+                self,
+                registration_progress.rollback_changed,
                 registration_progress.rollback_changed,
             );
             if (err == error.SessionLimitExceeded) {
@@ -4863,10 +4893,12 @@ pub const Broker = struct {
             // The failed append may nevertheless have left a complete record
             // containing provisional state. Always append the rolled-back
             // image; only genuine net changes advance change-count autosave.
-            self.finalizePersistentChange(
-                true,
+            registration_persistence.rollback(
+                RegistrationPersistenceContext,
+                self,
                 registration_progress.rollback_changed,
-            ) catch {};
+                true,
+            );
             return err;
         };
         return @as(?ClientTask, try self.finishRegistration(
@@ -4917,6 +4949,7 @@ pub const Broker = struct {
             slot.state.generation,
         ));
         slot.state.active = true;
+        slot.state.registration_aborted = false;
         slot.connection = null;
         slot.setWillHandle(null);
         slot.setSessionHandle(null);
@@ -5395,6 +5428,7 @@ pub const Broker = struct {
         slot.clearBuffers(self.allocator);
         slot.clearListenerAccessControl(self.allocator);
         slot.clearAssignedClientId(self.allocator);
+        slot.state.registration_aborted = true;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);

@@ -3109,9 +3109,29 @@ owned source/property data, and allocation-free commit. This ordering follows
 Mosquitto's `will__read` before `connect__on_authorised` takeover. Journal
 regressions distinguish rejected preparation from an already-committed
 replacement whose provisional connection is later aborted.
-The focused Session, Will, broker ownership/admission, and persistence gate
-passes 286/286 tests in both Debug and ReleaseFast; the public-module package
-check passes 2/2.
+
+CONNECT rollback also closes the persistence visibility boundary before its
+caller releases the reserved slot. A fully cleaned aborted registration can
+be checkpointed while that slot remains unavailable for reuse; another CONNECT
+still in progress continues to cause `SnapshotBusy`. Failed CONNACK writes and
+failed provisional journal syncs append the corrected image, including when
+rollback removes only newly provisional state and leaves no net durable
+change. If another admission or a journal I/O failure prevents the correction,
+the broker retains pending journal work under its persistence mutex and retries
+it when a connection attaches or a claimed slot is released. A successful
+final append clears that pending work; provisional appends cannot do so.
+Autosave still runs independently after journal failure and retries when an
+admission settles. Real TCP and injected sync failures cover fresh Sessions,
+committed Clean Start replacement, resumed subscription/queue preservation,
+and a parked concurrent CONNECT. Journal and atomic-snapshot restart images
+must both match the fully rolled-back state without reviving a rejected Will.
+A socket-close gate inspects corrected journal and snapshot images while the
+aborted slot is still reserved, before the admission caller can release it.
+
+The combined Session, Will, broker admission/lifecycle/listener, and persistence
+gate passes 313/313 tests in Debug and ReleaseFast. The rollback, reserved-slot,
+and provisional-snapshot gate checks that close boundary and passes 79/79 in both modes;
+the public-module package check passes 2/2.
 
 `mqtt.will_scheduler.Scheduler` deep-owns the Will Message and MQTT 5 Will
 Properties, indexes entries by ClientID, and orders deadlines with an indexed
