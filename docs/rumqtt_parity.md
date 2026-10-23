@@ -3138,6 +3138,20 @@ Properties, indexes entries by ClientID, and orders deadlines with an indexed
 binary min-heap. Accepted CONNECT reserves heap capacity so subsequent network
 close/reconnect/Session-end transitions do not allocate.
 
+Will checkpoint decoding treats an omitted Will Delay as its MQTT default of
+zero, matching entry admission and the reference broker's immediate-Will
+behavior. It retains the original property list: an omitted delay stays absent,
+and absent Message Expiry remains distinct from an explicit zero expiry.
+Consistent previously written records need no format migration. The separate
+Will snapshot codec still rejects mismatches between properties and redundant
+delay/expiry fields, and remaining delay beyond the Session/Will bound.
+Scheduled and live checkpoint cases cover absent, zero, and positive properties;
+TCP restart cases cover MQTT 3.1, 3.1.1, and 5 through both snapshot and journal,
+recover the immediate Will once, and preserve its retained message.
+The focused Will lifecycle, broker Will/restart/persistence, and CONNECT
+rollback gate passes 149/149 tests in Debug and ReleaseFast; the public-module
+package check passes 2/2.
+
 Covered lifecycle rules include:
 
 - normal DISCONNECT 0x00 cancels the Will,
