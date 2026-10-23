@@ -2598,6 +2598,20 @@ zero delivery of rejected content, exact credit accounting, healthy sibling
 completion, and subsequent connection reuse. Direct duplex readers continue
 to leave reset policy to their caller, and CONNECT rejection retains its
 existing cancellation policy.
+Request DATA now uses the same checked content-growth rule before aggregation,
+borrowed callbacks, or duplex events. Both padded and unpadded aggregate paths
+charge flow control before validation and return the rejected frame's complete
+payload credit. Length overruns fail immediately without waiting for
+END_STREAM; short final DATA and configured body-limit overflow are rejected
+before application delivery. Valid content delivered by earlier DATA remains
+observable under the ordinary streaming contract. Connection-owning server
+reads reset size-policy failures with ENHANCE_YOUR_CALM, and streaming request
+batch cleanup resets the invalid DATA member with its precise protocol or
+policy code while cancelling the remaining members. Direct readers retain
+caller-owned reset policy. Real h2c regressions cover aggregation, padded
+fallback, callbacks, batches, duplex events, and serveOne, including cumulative
+overruns, zero invalid-content delivery, exact rejected-DATA credit, no handler
+invocation, and subsequent connection reuse.
 Peer HTTP/3 unidirectional-stream classification also waits when a reordered
 FIN arrives before offset zero instead of treating the temporarily unavailable
 type as malformed. A complete zero-byte stream declares no critical type and

@@ -93,12 +93,22 @@ pub fn checkedResponseBodyLength(
     end_stream: bool,
 ) error{ InvalidContentLength, MessageTooLarge }!usize {
     if (!body_allowed and (current != 0 or additional != 0)) return error.InvalidContentLength;
+    return checkedBodyLength(if (body_allowed) expected else null, current, additional, max_body_bytes, end_stream);
+}
+
+/// Shared request/response content accounting. Validate a DATA frame before
+/// storage or application delivery, excluding its padding from content length.
+pub fn checkedBodyLength(
+    expected: ?usize,
+    current: usize,
+    additional: usize,
+    max_body_bytes: usize,
+    end_stream: bool,
+) error{ InvalidContentLength, MessageTooLarge }!usize {
     const next = std.math.add(usize, current, additional) catch return error.MessageTooLarge;
     if (next > max_body_bytes) return error.MessageTooLarge;
-    if (body_allowed) {
-        if (expected) |length| {
-            if (next > length or (end_stream and next != length)) return error.InvalidContentLength;
-        }
+    if (expected) |length| {
+        if (next > length or (end_stream and next != length)) return error.InvalidContentLength;
     }
     return next;
 }
