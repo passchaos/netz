@@ -86,7 +86,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
         }
 
         fn failPushedReceive(self: anytype, id: u31, err: receive.Error, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
-            const previous = self.push_state.state.?.received.get(id).?;
+            const previous = self.push_state.state.?.received.get(id) orelse return;
             const was_finished = previous.finished and previous.failure == null;
             self.push_state.state.?.received.fail(self.allocator, id, err);
             defer finishPushedReceive(self, id);
@@ -102,6 +102,13 @@ pub fn Lifecycle(comptime hooks: anytype) type {
 
         fn acceptPushedHeaders(self: anytype, id: u31, fields: []http2.Hpack.HeaderField, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
             const received = &self.push_state.state.?.received;
+            // Cancellation may retire the owner while an already-started
+            // HEADERS block is awaiting CONTINUATION. Its HPACK input still
+            // advances the connection dictionary, then its fields are freed.
+            if (received.get(id) == null) {
+                hooks.freeHeaders(self.allocator, fields);
+                return;
+            }
             received.headers(self.allocator, id, fields, end_stream, pushedReceiveLimits(self)) catch |err| {
                 try failPushedReceive(self, id, err, deadline);
                 return;

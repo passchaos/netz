@@ -890,6 +890,11 @@ Reusable implementation changes behind these H2 results:
   those bytes again. `readPushedResponseWithTimeout` and `WithDeadline` retain
   fragmented header/body progress for retry. Completed responses and first
   scoped errors remain observable after later reset or connection termination.
+  Canceling after a fragmented-header timeout retires the response owner while
+  retaining its started HPACK block. Later CONTINUATION bytes still advance the
+  dictionary, and decoded fields are discarded once that canceled block ends.
+  Both ordinary completion and decoded-field-limit rejection preserve a new
+  sibling response that references the canceled block's dictionary entries.
   Malformed HPACK emits COMPRESSION_ERROR, invalid frame interleaving and DATA
   on a reserved push emit connection PROTOCOL_ERROR, and a zero WINDOW_UPDATE
   on an opened push remains a pushed-stream error. The state and orchestration

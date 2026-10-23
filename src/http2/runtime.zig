@@ -3657,6 +3657,7 @@ pub const Connection = struct {
         .returnCredit = releaseConnectionCapacityUntil,
         .credit = maybeReleaseReceivedCapacityUntil,
         .decodeHeaders = decodeOwnedHeaders,
+        .freeHeaders = freeHeaders,
     });
 
     io: std.Io,

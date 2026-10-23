@@ -3,7 +3,7 @@ const http2 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const wire = @import("../frame/wire.zig");
 
-const Mode = enum { bytes, data_bytes, count, reset, cancel, fragment };
+const Mode = enum { bytes, data_bytes, count, reset, cancel, fragment, fragment_cancel, fragment_cancel_limit };
 
 pub fn sendFrame(connection: *runtime.Connection, kind: http2.FrameType, flags: u8, id: u31, payload: []const u8) !void {
     var encoded: std.ArrayList(u8) = .empty;
@@ -48,18 +48,29 @@ fn exercise(mode: Mode) !void {
             var request = try connection.readRequestWithTimeout(.fromSeconds(3));
             defer request.deinit(std.testing.allocator);
             const pushed = try promise(&connection, request.stream_id, "/push");
-            if (self.mode == .fragment) {
+            if (self.mode == .fragment or self.mode == .fragment_cancel or self.mode == .fragment_cancel_limit) {
                 try connection.writeResponse(request.stream_id, .{});
-                const block = try connection.hpack_encoder.encodeBlockRetained(std.testing.allocator, &.{
+                const fields = [_]http2.Hpack.HeaderField{
                     .{ .name = ":status", .value = "200" },
                     .{ .name = "content-length", .value = "0" },
                     .{ .name = "x-retry", .value = "retained" },
-                });
+                    .{ .name = "x-extra-one", .value = "one" },
+                    .{ .name = "x-extra-two", .value = "two" },
+                };
+                const block = try connection.hpack_encoder.encodeBlockRetained(std.testing.allocator, fields[0..if (self.mode == .fragment_cancel_limit) 5 else 3]);
                 try std.testing.expect(block.len > 1);
                 try sendFrame(&connection, .headers, 0x1, pushed, block[0..1]);
                 self.header_sent.set(self.server.io);
                 try self.resume_header.wait(self.server.io);
                 try sendFrame(&connection, .continuation, 0x4, pushed, block[1..]);
+                if (self.mode == .fragment_cancel or self.mode == .fragment_cancel_limit) {
+                    var after = try connection.readRequestWithTimeout(.fromSeconds(3));
+                    defer after.deinit(std.testing.allocator);
+                    try connection.writeResponse(after.stream_id, .{
+                        .headers = &.{.{ .name = "x-retry", .value = "retained" }},
+                        .body = "healthy",
+                    });
+                }
                 return;
             }
             if (self.mode == .reset) {
@@ -102,6 +113,7 @@ fn exercise(mode: Mode) !void {
         .enable_push = true,
         .max_buffered_push_bytes = if (mode == .bytes) 0 else if (mode == .data_bytes) 300 else 4096,
         .max_buffered_pushes = if (mode == .count) 1 else 4,
+        .max_header_fields = if (mode == .fragment_cancel_limit) 4 else 100,
     });
     defer client.close();
     var parent = try client.requestWithTimeout(.{ .path = "/", .authority = "localhost" }, .fromSeconds(3));
@@ -138,12 +150,23 @@ fn exercise(mode: Mode) !void {
             defer after.deinit(std.testing.allocator);
             try std.testing.expectEqualStrings("healthy", after.body);
         },
-        .fragment => {
+        .fragment, .fragment_cancel, .fragment_cancel_limit => fragment: {
             try worker.header_sent.wait(io);
             if (worker.err) |err| return err;
             try std.testing.expectError(error.Timeout, client.readPushedResponseWithTimeout(promise, .fromMilliseconds(10)));
             try std.testing.expect(!client.aggregate_timeout_unusable);
             try std.testing.expect(client.pending_push_header != null);
+            if (mode == .fragment_cancel or mode == .fragment_cancel_limit) {
+                try client.cancelPush(&promise);
+                promise_owned = false;
+                worker.resume_header.set(io);
+                var after = try client.requestWithTimeout(.{ .path = "/after", .authority = "localhost" }, .fromSeconds(3));
+                defer after.deinit(std.testing.allocator);
+                try std.testing.expectEqualStrings("healthy", after.body);
+                try std.testing.expectEqualStrings("retained", runtime.testing.findHeader(after.headers, "x-retry").?);
+                try std.testing.expect(client.pending_push_header == null);
+                break :fragment;
+            }
             worker.resume_header.set(io);
             var pushed = try client.readPushedResponseWithTimeout(promise, .fromSeconds(3));
             defer pushed.deinit(std.testing.allocator);
@@ -176,4 +199,10 @@ test "HTTP/2 push cancellation frees buffered response and keeps connection usab
 }
 test "HTTP/2 push fragmented header timeout retains HPACK prefix for retry" {
     try exercise(.fragment);
+}
+test "HTTP/2 push cancellation after fragmented header timeout drains HPACK for sibling" {
+    try exercise(.fragment_cancel);
+}
+test "HTTP/2 canceled push oversized CONTINUATION still advances HPACK for sibling" {
+    try exercise(.fragment_cancel_limit);
 }
