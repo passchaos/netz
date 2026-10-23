@@ -192,6 +192,13 @@ test "MQTT connection deadlines reject a non-awake clock before state changes" {
         error.Timeout,
         connection.pingWithDeadline(deadline),
     );
+    try std.testing.expectError(error.Timeout, connection.subscribeWithDeadline(&.{.{ .topic_filter = "valid/#" }}, .{}, deadline));
+    try std.testing.expectError(error.Timeout, connection.unsubscribeWithDeadline(&.{"valid/#"}, .{}, deadline));
+    const expired = std.Io.Clock.Timestamp{ .raw = .zero, .clock = .awake };
+    try std.testing.expectError(error.Timeout, connection.subscribeWithDeadline(&.{.{ .topic_filter = "valid/#" }}, .{}, expired));
+    try std.testing.expectError(error.Timeout, connection.unsubscribeWithDeadline(&.{"valid/#"}, .{}, expired));
+    try std.testing.expect(connection.pending_packets == null);
+    try std.testing.expectEqual(@as(u16, 1), connection.next_packet_id);
     try std.testing.expectError(
         error.Timeout,
         connection.readBrokerEventWithDeadline(deadline),

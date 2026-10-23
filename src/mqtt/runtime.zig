@@ -5104,20 +5104,19 @@ pub const Connection = struct {
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
-        try self.validateOutgoingPacketType(.subscribe);
-        try self.validateOutgoingSubscribe(subscriptions, options.properties);
-        try self.ensurePendingPacketQueueAvailable();
-        const packet_id = self.nextPacketId();
-        self.write_scratch.clearRetainingCapacity();
-        try mqtt.Subscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
-        try self.writeGeneratedPacket(self.write_scratch.items, .subscribe);
+        return ControlExchange.subscribe(self, subscriptions, options, null);
+    }
 
-        var suback = try self.finishReadSubAck(try AckReader.read(self, .suback, null));
-        errdefer suback.deinit(self.allocator);
-        if (suback.suback.packet_id != packet_id or suback.suback.reason_codes.len != subscriptions.len) {
-            return error.UnexpectedPacket;
-        }
-        return suback;
+    /// One timeout spans SUBSCRIBE output and SUBACK input, including any
+    /// intervening MQTT traffic retained for later ordinary reads.
+    pub fn subscribeWithTimeout(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions, timeout: std.Io.Duration) Error!OwnedSubAck {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.subscribeWithDeadline(subscriptions, options, self.transport.deadlineFromNow(timeout));
+    }
+
+    pub fn subscribeWithDeadline(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions, deadline: std.Io.Clock.Timestamp) Error!OwnedSubAck {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return ControlExchange.subscribe(self, subscriptions, options, deadline);
     }
 
     pub fn readSubscribe(self: *Connection) Error!OwnedSubscribe {
@@ -5186,22 +5185,18 @@ pub const Connection = struct {
     }
 
     pub fn unsubscribe(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions) Error!OwnedUnsubAck {
-        try self.validateOutgoingPacketType(.unsubscribe);
-        const packet_id = self.nextPacketId();
-        self.write_scratch.clearRetainingCapacity();
-        try mqtt.Unsubscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
-        try self.ensurePendingPacketQueueAvailable();
-        try self.writeGeneratedPacket(self.write_scratch.items, .unsubscribe);
+        return ControlExchange.unsubscribe(self, topic_filters, options, null);
+    }
 
-        var unsuback = try self.finishReadUnsubAck(try AckReader.read(self, .unsuback, null));
-        errdefer unsuback.deinit(self.allocator);
-        try validateUnsubAckResponse(
-            self.protocol,
-            unsuback.unsuback,
-            packet_id,
-            topic_filters.len,
-        );
-        return unsuback;
+    /// One timeout spans UNSUBSCRIBE output and its correlated UNSUBACK.
+    pub fn unsubscribeWithTimeout(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions, timeout: std.Io.Duration) Error!OwnedUnsubAck {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.unsubscribeWithDeadline(topic_filters, options, self.transport.deadlineFromNow(timeout));
+    }
+
+    pub fn unsubscribeWithDeadline(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions, deadline: std.Io.Clock.Timestamp) Error!OwnedUnsubAck {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return ControlExchange.unsubscribe(self, topic_filters, options, deadline);
     }
 
     pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
@@ -6825,6 +6820,25 @@ pub const Connection = struct {
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
         }
+    });
+
+    const ControlExchange = @import("runtime/acknowledgement/exchange.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const SubAckType = OwnedSubAck;
+        pub const UnsubAckType = OwnedUnsubAck;
+        pub const SubscribeOptionsType = SubscribeOptions;
+        pub const UnsubscribeOptionsType = UnsubscribeOptions;
+        pub const validateType = Connection.validateOutgoingPacketType;
+        pub const validateSubscribe = Connection.validateOutgoingSubscribe;
+        pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
+        pub const nextPacketId = Connection.nextPacketId;
+        pub const writePacket = Connection.writeGeneratedPacket;
+        pub const writePacketWithDeadline = Connection.writeGeneratedPacketWithDeadline;
+        pub const readAck = AckReader.read;
+        pub const finishSubAck = Connection.finishReadSubAck;
+        pub const finishUnsubAck = Connection.finishReadUnsubAck;
+        pub const validateUnsubAck = validateUnsubAckResponse;
     });
 
     fn clearPendingPacketState(self: *Connection) void {
@@ -11589,6 +11603,8 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 
 test {
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
+    _ = @import("runtime/acknowledgement/exchange_tests.zig");
+    _ = @import("runtime/acknowledgement/reconnect_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acknowledgement/byte_limit_tests.zig");

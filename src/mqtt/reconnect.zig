@@ -19,6 +19,7 @@ const session_snapshot = @import("reconnect/snapshot.zig");
 const reconnect_target = @import("reconnect/target.zig");
 const backoff = @import("reconnect/backoff.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
+const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 
@@ -1663,7 +1664,7 @@ pub const Client = struct {
                 return err;
             };
             if (!session_present) {
-                self.replaySubscriptions() catch |err| {
+                self.replaySubscriptions(deadline) catch |err| {
                     self.disconnectTransport();
                     return err;
                 };
@@ -2513,6 +2514,20 @@ pub const Client = struct {
         subscriptions: []const mqtt.Subscription,
         options: runtime.SubscribeOptions,
     ) Error!runtime.OwnedSubAck {
+        return self.subscribeUntil(subscriptions, options, null);
+    }
+
+    pub fn subscribeWithTimeout(self: *Client, subscriptions: []const mqtt.Subscription, options: runtime.SubscribeOptions, timeout: std.Io.Duration) Error!runtime.OwnedSubAck {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.subscribeWithDeadline(subscriptions, options, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn subscribeWithDeadline(self: *Client, subscriptions: []const mqtt.Subscription, options: runtime.SubscribeOptions, deadline: std.Io.Clock.Timestamp) Error!runtime.OwnedSubAck {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.subscribeUntil(subscriptions, options, deadline);
+    }
+
+    fn subscribeUntil(self: *Client, subscriptions: []const mqtt.Subscription, options: runtime.SubscribeOptions, deadline: ?std.Io.Clock.Timestamp) Error!runtime.OwnedSubAck {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         var additions: usize = 0;
@@ -2548,7 +2563,10 @@ pub const Client = struct {
             );
         }
         try self.subscriptions.ensureUnusedCapacity(self.allocator, additions);
-        var suback = active.subscribe(subscriptions, options) catch |err| {
+        var suback = (if (deadline) |absolute|
+            active.subscribeWithDeadline(subscriptions, options, absolute)
+        else
+            active.subscribe(subscriptions, options)) catch |err| {
             self.retireConnectionAfterOperationError(err);
             return err;
         };
@@ -2577,9 +2595,26 @@ pub const Client = struct {
         filters: []const []const u8,
         options: runtime.UnsubscribeOptions,
     ) Error!runtime.OwnedUnsubAck {
+        return self.unsubscribeUntil(filters, options, null);
+    }
+
+    pub fn unsubscribeWithTimeout(self: *Client, filters: []const []const u8, options: runtime.UnsubscribeOptions, timeout: std.Io.Duration) Error!runtime.OwnedUnsubAck {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.unsubscribeWithDeadline(filters, options, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    pub fn unsubscribeWithDeadline(self: *Client, filters: []const []const u8, options: runtime.UnsubscribeOptions, deadline: std.Io.Clock.Timestamp) Error!runtime.OwnedUnsubAck {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.unsubscribeUntil(filters, options, deadline);
+    }
+
+    fn unsubscribeUntil(self: *Client, filters: []const []const u8, options: runtime.UnsubscribeOptions, deadline: ?std.Io.Clock.Timestamp) Error!runtime.OwnedUnsubAck {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        var unsuback = active.unsubscribe(filters, options) catch |err| {
+        var unsuback = (if (deadline) |absolute|
+            active.unsubscribeWithDeadline(filters, options, absolute)
+        else
+            active.unsubscribe(filters, options)) catch |err| {
             self.retireConnectionAfterOperationError(err);
             return err;
         };
@@ -3332,7 +3367,7 @@ pub const Client = struct {
         }
     }
 
-    fn replaySubscriptions(self: *Client) Error!void {
+    fn replaySubscriptions(self: *Client, deadline: ?std.Io.Clock.Timestamp) Error!void {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         // MQTT 5 Subscription Identifier/User Properties are scoped to the
@@ -3340,9 +3375,11 @@ pub const Client = struct {
         // properties from the operation that established it.
         for (self.subscriptions.items) |stored| {
             const one = [_]mqtt.Subscription{stored.value()};
-            var suback = try active.subscribe(&one, .{
-                .properties = stored.properties,
-            });
+            const options = runtime.SubscribeOptions{ .properties = stored.properties };
+            var suback = if (deadline) |absolute|
+                try active.subscribeWithDeadline(&one, options, absolute)
+            else
+                try active.subscribe(&one, options);
             defer suback.deinit(self.allocator);
             if (suback.suback.reason_codes[0] >= 0x80) {
                 return error.SubscriptionRefused;

@@ -380,6 +380,24 @@ contract. An observed-writer regression cancels a real TCP request write for
 both relative and absolute PING calls; the focused PING, TLS/mTLS/WebSocket,
 clock-domain and reconnect-poll matrix passes 104 tests in Debug and ReleaseFast.
 
+`Connection` and reconnect `Client` now expose `subscribeWithTimeout`,
+`subscribeWithDeadline`, `unsubscribeWithTimeout` and `unsubscribeWithDeadline`.
+Each call validates its awake-clock budget before state changes and retains one
+absolute timestamp through request output, interleaved packet preservation,
+and the correlated SUBACK/UNSUBACK. The common exchange implementation lives
+in `runtime/acknowledgement/exchange.zig`; existing blocking APIs use that same
+path with no deadline. Reconnect cache updates still commit only after broker
+acknowledgement, while a timeout retires the failed connection and preserves
+the previous subscription cache. Fresh-Session subscription replay also uses
+the original CONNECT deadline rather than starting unbounded SUBACK waits.
+Adjacent wire tests cover successful and stalled responses, write cancellation,
+combined write/read budget consumption, queued PUBLISH ownership, zero/expired
+budgets and foreign clock domains. Reconnect tests cover relative/absolute
+cache updates and fresh-Session replay in MQTT 3.1.1 and MQTT 5.
+The focused runtime/client/reconnect, queue, TLS, WebSocket and Unix matrix
+passes 262 tests in Debug and ReleaseFast; package reachability passes two tests,
+and the two-Mosquitto OutboundBridge gate passes its QoS/restart matrix.
+
 After a successful MQTT 5 target CONNACK, outbound QoS 0/1 PUBLISH packets use
 the lower of the source QoS and the peer's Maximum QoS, and clear RETAIN when
 Retain Available is false. A source QoS 1 delivery lowered to target QoS 0 is

@@ -1,19 +1,20 @@
 const std = @import("std");
 const runtime = @import("../../runtime.zig");
 
-const BlockedWrite = struct {
+pub const BlockedWrite = struct {
     delegate: std.Io,
+    delay: std.Io.Duration = .fromMilliseconds(300),
     armed: std.atomic.Value(bool) = .init(false),
     entered: std.atomic.Value(bool) = .init(false),
     canceled: std.atomic.Value(bool) = .init(false),
 
-    var active: ?*BlockedWrite = null;
+    pub var active: ?*BlockedWrite = null;
 
-    fn netWrite(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+    pub fn netWrite(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self = active.?;
         if (self.armed.load(.acquire)) {
             self.entered.store(true, .release);
-            std.Io.sleep(self.delegate, .fromMilliseconds(300), .awake) catch |err| {
+            std.Io.sleep(self.delegate, self.delay, .awake) catch |err| {
                 if (err == error.Canceled) self.canceled.store(true, .release);
                 return err;
             };
