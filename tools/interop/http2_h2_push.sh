@@ -60,10 +60,15 @@ cargo build --release --offline --locked \
 
 run_netz_client_case() {
   local transport=$1
+  local order=${2:-parent-first}
   local port
   port=$(free_tcp_port)
   local peer_args=(server "$port")
   local client_args=("$port")
+  if [[ "$order" == push-first ]]; then
+    peer_args=(early-push-server "$port")
+    client_args+=(--early-push)
+  fi
   if [[ "$transport" == tls ]]; then
     peer_args+=("$work/cert.pem" "$work/key.pem")
     client_args+=("$work/cert.pem")
@@ -80,6 +85,10 @@ run_netz_client_case() {
     "$work/netz-client-$transport.log"
   grep -Fq "h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio" \
     "$work/h2-server-$transport.log"
+  if [[ "$order" == push-first ]]; then
+    grep -Fq "netz client verified order=push-before-parent shared_dictionary=true" "$work/netz-client-$transport.log"
+    grep -Fq "h2 server verified order=push-before-parent shared_dictionary=true" "$work/h2-server-$transport.log"
+  fi
   cat "$work/netz-client-$transport.log"
   cat "$work/h2-server-$transport.log"
 }
@@ -166,6 +175,8 @@ run_h2_informational_client_case() {
 
 run_netz_client_case h2c
 run_netz_client_case tls
+run_netz_client_case h2c push-first
+run_netz_client_case tls push-first
 run_h2_client_case h2c
 run_h2_client_case tls
 run_netz_informational_client_case h2c

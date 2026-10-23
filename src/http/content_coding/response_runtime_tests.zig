@@ -2,7 +2,7 @@ const std = @import("std");
 const h2 = @import("../../http2/runtime.zig");
 const metadata = @import("response_tests.zig");
 
-const Mode = enum { single, batch, body_batch, streaming, individual_batch, individual_streaming };
+const Mode = enum { single, batch, body_batch, streaming, individual_batch, individual_streaming, duplex };
 
 fn checkResponse(response: h2.OwnedResponse, index: usize) !void {
     if (index < 2) {
@@ -174,6 +174,24 @@ fn exercise(mode: Mode) !void {
             if (observer.err) |err| return err;
             try std.testing.expectEqual(@as(usize, 3), observer.count);
         },
+        .duplex => for (requests, 0..) |request, index| {
+            var writer = try client.startRequest(.{ .method = request.method, .path = request.path, .authority = request.authority });
+            defer writer.deinit();
+            try writer.finish();
+            var stream = try writer.beginDuplex();
+            defer stream.deinit();
+            var event = try stream.readResponseEventWithDeadline(deadline);
+            defer event.deinit(std.testing.allocator);
+            try std.testing.expect(event == .head);
+            try std.testing.expectEqual(index >= 2, event.head.body_allowed);
+            if (index < 2) {
+                try metadata.expectEmptyStream(event.head);
+            } else {
+                var decoder = try event.head.streamContentDecoder(std.testing.allocator, .{ .max_encoded_bytes = 1024, .max_decoded_bytes = 1024 });
+                defer decoder.deinit();
+                try std.testing.expectError(error.InvalidContentEncoding, decoder.finish(&.{}));
+            }
+        },
     }
     thread.join();
     joined = true;
@@ -181,5 +199,5 @@ fn exercise(mode: Mode) !void {
 }
 
 test "HTTP content decoding preserves response metadata across HTTP2 receive APIs" {
-    for ([_]Mode{ .single, .batch, .body_batch, .streaming, .individual_batch, .individual_streaming }) |mode| try exercise(mode);
+    for ([_]Mode{ .single, .batch, .body_batch, .streaming, .individual_batch, .individual_streaming, .duplex }) |mode| try exercise(mode);
 }

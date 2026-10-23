@@ -4,7 +4,7 @@ const connection_headers = @import("connection.zig");
 const http_method = @import("../../../internal/http_method.zig");
 const early_data = @import("../../../http/early_data.zig");
 
-const Error = http2.Error || error{
+pub const Error = http2.Error || error{
     MissingPseudoHeader,
     InvalidStatus,
     InvalidContentLength,

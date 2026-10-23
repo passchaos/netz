@@ -10,9 +10,12 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0) return error.InvalidArgument;
     var certificate_path: ?[]const u8 = null;
     var informational = false;
+    var early_push = false;
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "--informational") and !informational) {
             informational = true;
+        } else if (std.mem.eql(u8, arg, "--early-push") and !early_push) {
+            early_push = true;
         } else if (certificate_path == null and
             std.Io.Dir.path.isAbsolute(arg))
         {
@@ -22,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     const tls_enabled = certificate_path != null;
+    if (early_push and informational) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -87,12 +91,17 @@ pub fn main(init: std.process.Init) !void {
     try expectHeader(promise.headers, ":authority", "localhost");
     try expectHeader(promise.headers, "accept", "text/css");
 
-    var pushed = try connection.readPushedResponse(promise);
+    var pushed = try connection.readPushedResponseWithTimeout(promise, .fromSeconds(5));
     defer pushed.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), pushed.status);
     try std.testing.expectEqualStrings("hyper-pushed-css", pushed.body);
     try expectHeader(pushed.headers, "content-type", "text/css");
     try expectHeader(pushed.headers, "x-hyper-push", "yes");
+    if (early_push) {
+        try expectHeader(parent.headers, "x-shared-dictionary", "shared-h2-push-dictionary-value");
+        try expectHeader(pushed.headers, "x-shared-dictionary", "shared-h2-push-dictionary-value");
+        std.debug.print("netz client verified order=push-before-parent shared_dictionary=true\n", .{});
+    }
 
     std.debug.print(
         "netz HTTP/2 client accepted h2 server push: transport={s} parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio\n",

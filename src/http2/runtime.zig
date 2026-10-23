@@ -108,6 +108,8 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     ResponseAvailable,
     ConnectionGoAway,
     TooManyInformationalResponses,
+    PushBufferFull,
+    PushNotReady,
     UnsupportedScheme,
     PriorityCapacityExceeded,
     InvalidAlpn,
@@ -530,6 +532,11 @@ pub const Limits = struct {
     /// Explicitly opt in to HTTP/2 server push. The client otherwise sends
     /// SETTINGS_ENABLE_PUSH=0 and rejects PUSH_PROMISE.
     enable_push: bool = false,
+    /// Bound retained push notifications and decoded pushed responses even
+    /// when MAX_CONCURRENT_STREAMS is left unadvertised.
+    max_buffered_pushes: usize = 32,
+    /// Connection-wide retained pushed field-section and body byte budget.
+    max_buffered_push_bytes: usize = 32 * 1024 * 1024,
     /// Add an IMF-fixdate `date` field to final server responses that do not
     /// already provide one. This matches Hyper's default server behavior.
     auto_date_header: bool = true,
@@ -3624,6 +3631,34 @@ const ReceivedDataPayload = struct {
 };
 
 pub const Connection = struct {
+    const PushLifecycle = @import("runtime/push/connection.zig").Lifecycle(.{
+        .Error = Error,
+        .Response = OwnedResponse,
+        .Header = DuplexHeaderBlock,
+        .initHeader = DuplexHeaderBlock.init,
+        .resumeHeader = DuplexHeaderBlock.resumeUntil,
+        .deinitHeader = DuplexHeaderBlock.deinit,
+        .prepareQueued = completeDeferredHeadersBeforePushRead,
+        .readRaw = readTransportFrameRawWithDeadline,
+        .handleConnection = handleConnectionFrame,
+        .recordGoAway = recordPeerGoAway,
+        .queueSibling = queueDuplexSiblingFrameUntil,
+        .releasePeer = releasePeerStream,
+        .forgetWindows = forgetStreamWindows,
+        .reset = writeResetStreamFrameUntil,
+        .promise = receivePushPromiseUntil,
+        .wasReset = wasLocallyReset,
+        .discardReset = discardLateFrameForLocallyResetStream,
+        .activate = addActivePeerStream,
+        .goAway = sendGoAwayUntil,
+        .processed = lastPeerProcessedStreamId,
+        .takeData = receiveDataPayload,
+        .releaseData = releaseDataFrameBudget,
+        .returnCredit = releaseConnectionCapacityUntil,
+        .credit = maybeReleaseReceivedCapacityUntil,
+        .decodeHeaders = decodeOwnedHeaders,
+    });
+
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: net.Stream,
@@ -3645,6 +3680,8 @@ pub const Connection = struct {
     active_peer_streams: std.ArrayList(u31) = .empty,
     active_peer_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     push_state: push.LazyState = .{},
+    pending_push_header: ?*DuplexHeaderBlock = null,
+    push_ingress_headers_active: bool = false,
     priority_state: priority_runtime.LazyState = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
@@ -3677,7 +3714,7 @@ pub const Connection = struct {
     /// second time.
     duplex_sibling_headers: std.ArrayList(DeferredHeaderBlock) = .empty,
     duplex_sibling_header_head: usize = 0,
-    pending_duplex_sibling_header: DuplexHeaderBlockSlot = .{},
+    pending_duplex_sibling_header: DeferredPendingHeaderSlot = .{},
     /// New request streams seen by the graceful-shutdown PING pump are
     /// admitted before the final GOAWAY boundary is selected, but their raw
     /// HEADERS remain queued so HPACK is decoded exactly once in wire order.
@@ -3830,6 +3867,10 @@ pub const Connection = struct {
         self.active_peer_streams.deinit(self.allocator);
         self.active_peer_index.deinit(self.allocator);
         self.push_state.deinit(self.allocator);
+        if (self.pending_push_header) |pending| {
+            pending.deinit(self.allocator);
+            self.allocator.destroy(pending);
+        }
         self.priority_state.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
         self.response_semantics_index.deinit(self.allocator);
@@ -8545,30 +8586,21 @@ pub const Connection = struct {
         self: *Connection,
         promise: PromisedRequest,
     ) Error!OwnedResponse {
-        if (self.role != .client) return error.UnexpectedFrame;
-        if (!self.push_state.isRemoteReserved(
-            promise.promised_stream_id,
-        ) or self.push_state.hasPending(promise.promised_stream_id)) {
-            return error.InvalidStreamId;
-        }
-        if (self.limits.max_concurrent_streams) |limit| {
-            const reservations = self.push_state.remoteReservedCount();
-            std.debug.assert(reservations != 0);
-            const used_without_current = self.active_peer_streams.items.len +
-                reservations - 1;
-            if (used_without_current >= limit) {
-                return error.FlowControlViolation;
-            }
-        }
-        try self.addActivePeerStream(promise.promised_stream_id);
-        _ = self.push_state.releaseRemote(
-            promise.promised_stream_id,
-        );
-        defer self.releasePeerStream(promise.promised_stream_id);
-        return self.readResponseOnPeerStream(
-            promise.promised_stream_id,
-            findHeader(promise.headers, ":method") orelse "GET",
-        );
+        return self.readPushedResponseBefore(promise, null);
+    }
+
+    pub fn readPushedResponseWithDeadline(self: *Connection, promise: PromisedRequest, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readPushedResponseBefore(promise, deadline);
+    }
+
+    pub fn readPushedResponseWithTimeout(self: *Connection, promise: PromisedRequest, timeout: std.Io.Duration) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readPushedResponseWithDeadline(promise, .fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
+
+    fn readPushedResponseBefore(self: *Connection, promise: PromisedRequest, deadline: ?std.Io.Clock.Timestamp) Error!OwnedResponse {
+        return PushLifecycle.read(self, promise, deadline);
     }
 
     /// Refuses a server push that was announced by PUSH_PROMISE.
@@ -8599,6 +8631,8 @@ pub const Connection = struct {
             self.allocator,
             promised_stream_id,
         );
+        self.releasePeerStream(promised_stream_id);
+        self.forgetStreamWindows(promised_stream_id);
         promise.deinit(self.allocator);
     }
 
@@ -10895,57 +10929,104 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!frame_io.BorrowedFrame {
-        const borrowed = self.frame_reader.readTransportWithDeadline(
-            self.allocator,
-            self.transportForIo(),
-            @min(
-                self.limits.max_frame_payload,
-                self.limits.max_frame_size,
-            ),
-            deadline,
-        ) catch |err| {
-            if (err == error.InvalidFrame) {
-                if (self.frame_reader.takeEnvelopeViolation()) |violation| {
-                    if (self.last_peer_frame_at != null) {
-                        self.last_peer_frame_at =
-                            std.Io.Clock.awake.now(self.io);
-                    }
-                    if (violation.stream_id) |stream_id| {
-                        if (self.streamIsIdle(stream_id)) {
-                            self.aggregate_timeout_unusable = true;
-                            self.sendGoAwayUntil(
-                                self.lastPeerProcessedStreamId(),
-                                .protocol_error,
-                                "frame-envelope",
-                                deadline,
-                            ) catch {};
-                        } else {
-                            self.writeLocalErrorResetStream(
-                                stream_id,
-                                violation.error_code,
-                            ) catch {};
-                            self.releaseLocalStream(stream_id);
-                            self.releasePeerStream(stream_id);
-                            self.forgetResponseSemantics(stream_id);
-                            self.forgetStreamWindows(stream_id);
-                        }
-                    } else {
+        while (true) {
+            if (!self.push_ingress_headers_active and self.pending_push_header != null) {
+                try self.resumePendingPushHeader(deadline);
+                continue;
+            }
+            const borrowed = try self.readTransportFrameRawWithDeadline(deadline);
+            if (!self.push_ingress_headers_active) {
+                if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+                    if (!pending.header.end_headers and (borrowed.frame.header.frame_type != .continuation or borrowed.frame.header.stream_id != pending.header.stream_id)) {
+                        self.serve_read_connection_error = .frame_sequence;
                         self.aggregate_timeout_unusable = true;
-                        self.sendGoAwayUntil(
-                            self.lastPeerProcessedStreamId(),
-                            violation.error_code,
-                            "frame-envelope",
-                            deadline,
-                        ) catch {};
+                        self.sendGoAwayUntil(self.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline) catch {};
+                        return error.UnexpectedFrame;
                     }
                 }
             }
-            return err;
-        };
-        if (self.last_peer_frame_at != null) {
-            self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
+            if (!self.push_ingress_headers_active and try self.receivePushedFrame(borrowed.frame, deadline)) continue;
+            return borrowed;
         }
-        return borrowed;
+    }
+
+    fn readTransportFrameRawWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!frame_io.BorrowedFrame {
+        while (true) {
+            const borrowed = self.frame_reader.readTransportWithDeadline(
+                self.allocator,
+                self.transportForIo(),
+                @min(
+                    self.limits.max_frame_payload,
+                    self.limits.max_frame_size,
+                ),
+                deadline,
+            ) catch |err| {
+                if (err == error.InvalidFrame) {
+                    if (self.frame_reader.takeEnvelopeViolation()) |violation| {
+                        if (self.last_peer_frame_at != null) {
+                            self.last_peer_frame_at =
+                                std.Io.Clock.awake.now(self.io);
+                        }
+                        if (violation.stream_id) |stream_id| {
+                            var reserved_push = false;
+                            if (!self.push_ingress_headers_active and self.role == .client) {
+                                if (self.push_state.state) |state| {
+                                    if (state.received.get(stream_id)) |entry| {
+                                        reserved_push = !entry.started and !entry.finished;
+                                        if (entry.started) {
+                                            try self.ensureLocalErrorResetBudget();
+                                            state.received.fail(self.allocator, stream_id, error.InvalidFrame);
+                                            self.writeResetStreamFrameUntil(stream_id, violation.error_code, deadline) catch |reset_err| switch (reset_err) {
+                                                error.SocketUnconnected, error.ConnectionResetByPeer => {},
+                                                else => return reset_err,
+                                            };
+                                            self.local_error_reset_streams +|= 1;
+                                            self.releasePeerStream(stream_id);
+                                            self.forgetStreamWindows(stream_id);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            if (self.push_ingress_headers_active or reserved_push or self.streamIsIdle(stream_id)) {
+                                self.aggregate_timeout_unusable = true;
+                                self.sendGoAwayUntil(
+                                    self.lastPeerProcessedStreamId(),
+                                    .protocol_error,
+                                    "frame-envelope",
+                                    deadline,
+                                ) catch {};
+                            } else {
+                                self.writeLocalErrorResetStream(
+                                    stream_id,
+                                    violation.error_code,
+                                ) catch {};
+                                self.releaseLocalStream(stream_id);
+                                self.releasePeerStream(stream_id);
+                                self.forgetResponseSemantics(stream_id);
+                                self.forgetStreamWindows(stream_id);
+                            }
+                        } else {
+                            self.aggregate_timeout_unusable = true;
+                            self.sendGoAwayUntil(
+                                self.lastPeerProcessedStreamId(),
+                                violation.error_code,
+                                "frame-envelope",
+                                deadline,
+                            ) catch {};
+                        }
+                    }
+                }
+                return err;
+            };
+            if (self.last_peer_frame_at != null) {
+                self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
+            }
+            return borrowed;
+        }
     }
 
     fn readOwnedFrame(self: *Connection) Error!OwnedFrame {
@@ -11038,19 +11119,25 @@ pub const Connection = struct {
         self: *Connection,
         frame: OwnedFrame,
     ) Error!void {
-        return self.queuePendingApplicationFrame(frame);
+        return self.queueApplicationFrameRaw(frame);
     }
 
     fn takeDeferredHeaderBlock(
         self: *Connection,
-        stream_id: u31,
+        first: http2.Frame,
+        raw_continuations: bool,
     ) Error!?[]http2.Hpack.HeaderField {
-        if (self.duplex_sibling_header_head >=
-            self.duplex_sibling_headers.items.len) return null;
-        const entry = self.duplex_sibling_headers.items[
-            self.duplex_sibling_header_head
-        ];
-        if (entry.stream_id != stream_id) return null;
+        var selected: ?usize = null;
+        for (self.duplex_sibling_headers.items[self.duplex_sibling_header_head..], self.duplex_sibling_header_head..) |entry, index| {
+            if (entry.stream_id != first.header.stream_id) continue;
+            if (entry.payload_key != 0) {
+                if (entry.payload_key != @intFromPtr(first.payload.ptr)) continue;
+            } else if (raw_continuations) continue;
+            selected = index;
+            break;
+        }
+        const index = selected orelse return null;
+        const entry = self.duplex_sibling_headers.items[index];
         for (0..entry.continuation_count) |_| {
             var continuation = self.popQueuedApplicationFrame() orelse {
                 self.aggregate_timeout_unusable = true;
@@ -11058,87 +11145,97 @@ pub const Connection = struct {
             };
             defer continuation.deinit(self.allocator);
             if (continuation.frame.header.frame_type != .continuation or
-                continuation.frame.header.stream_id != stream_id)
+                continuation.frame.header.stream_id != first.header.stream_id)
             {
                 self.aggregate_timeout_unusable = true;
                 return error.UnexpectedFrame;
             }
         }
-        self.duplex_sibling_header_head += 1;
-        if (self.duplex_sibling_header_head ==
-            self.duplex_sibling_headers.items.len)
-        {
+        _ = self.duplex_sibling_headers.orderedRemove(index);
+        if (self.duplex_sibling_header_head == self.duplex_sibling_headers.items.len) {
             self.duplex_sibling_headers.clearRetainingCapacity();
             self.duplex_sibling_header_head = 0;
         }
         return entry.headers;
     }
 
-    fn queueDuplexSiblingFrameUntil(
-        self: *Connection,
-        frame_value: OwnedFrame,
-    ) Error!void {
-        var frame = frame_value;
-        var frame_owned = true;
-        defer if (frame_owned) frame.deinit(self.allocator);
-        try self.queueDuplexSiblingFrame(frame);
-        frame_owned = false;
+    /// Queue ownership transfers only on success. Reserve both raw-frame and
+    /// deferred-header storage before changing connection-wide HPACK state.
+    fn queueDuplexSiblingFrameUntil(self: *Connection, frame: OwnedFrame) Error!void {
+        try self.ensurePendingApplicationFrameCapacity();
+        self.predecodeSiblingFrame(frame.frame) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.pending_application_frames.appendAssumeCapacity(frame);
+    }
 
-        if (!self.pending_duplex_sibling_header.hasValue() and
-            frame.frame.header.frame_type == .headers)
-        {
-            self.pending_duplex_sibling_header.put(
-                try DuplexHeaderBlock.init(self, frame.frame),
-            );
-        } else if (!self.pending_duplex_sibling_header.hasValue()) {
-            return;
-        } else if (frame.frame.header.frame_type != .continuation or
-            frame.frame.header.stream_id !=
-                self.pending_duplex_sibling_header.getPtr().?.stream_id)
-        {
-            return error.UnexpectedFrame;
+    fn predecodeSiblingFrame(self: *Connection, frame: http2.Frame) Error!void {
+        if (frame.header.frame_type == .headers and self.deferredHeaderIsDecoded(frame)) return;
+        if (!self.pending_duplex_sibling_header.hasValue()) {
+            if (frame.header.frame_type != .headers) return;
+            try self.pending_duplex_sibling_header.init(self, frame);
+        } else {
+            const pending = self.pending_duplex_sibling_header.getPtr().?;
+            if (frame.header.frame_type != .continuation or frame.header.stream_id != pending.header.stream_id) return error.UnexpectedFrame;
+            pending.header.continuation_count += 1;
+            pending.queued_continuation_count += 1;
+            if (pending.header.continuation_count > self.maxContinuationFrames()) return error.MessageTooLarge;
+            try pending.header.bytes.appendSlice(self.allocator, frame.payload);
+            try pending.header.validateSize(self);
+            pending.header.end_headers = (frame.header.flags & flag_end_headers) != 0;
         }
-
+        if (!self.pending_duplex_sibling_header.getPtr().?.header.end_headers) return;
+        try self.duplex_sibling_headers.ensureUnusedCapacity(self.allocator, 1);
         const pending = self.pending_duplex_sibling_header.getPtr().?;
-        // The continuation frame is already queued. Resume against transport
-        // only when more fragments are required; the just-read bytes are first
-        // incorporated directly to avoid consuming the sibling queue.
-        if (frame.frame.header.frame_type == .continuation) {
-            pending.continuation_count += 1;
-            if (pending.continuation_count > self.maxContinuationFrames()) {
-                return error.MessageTooLarge;
-            }
-            try pending.bytes.appendSlice(
-                self.allocator,
-                frame.frame.payload,
-            );
-            try pending.validateSize(self);
-            pending.end_headers =
-                (frame.frame.header.flags & flag_end_headers) != 0;
-        }
-        if (!pending.end_headers) return;
-        const stream_id = pending.stream_id;
-        const headers = decodeOwnedHeaders(
-            self.allocator,
-            pending.bytes.items,
-            self.limits,
-            &self.hpack_decoder,
-        ) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
-        errdefer freeHeaders(self.allocator, headers);
-        self.duplex_sibling_headers.append(self.allocator, .{
-            .stream_id = stream_id,
-            .headers = headers,
-            .continuation_count = pending.continuation_count,
-        }) catch |err| {
-            // HPACK has advanced, so replaying the retained raw block after a
-            // failed deferred-value allocation would decode it twice.
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        const fields = try decodeOwnedHeaders(self.allocator, pending.header.bytes.items, self.limits, &self.hpack_decoder);
+        self.duplex_sibling_headers.appendAssumeCapacity(.{
+            .stream_id = pending.header.stream_id,
+            .headers = fields,
+            .continuation_count = pending.queued_continuation_count,
+            .payload_key = pending.payload_key,
+        });
         self.pending_duplex_sibling_header.deinit(self.allocator);
+    }
+
+    /// A PING wait may stop after retaining a partial normal HEADERS block.
+    /// Finish that older HPACK input before reading any later pushed header.
+    fn completeDeferredHeadersBeforePushRead(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (self.pending_application_overflow.getPtr()) |overflow| {
+            if (!self.pending_duplex_sibling_header.hasValue() and overflow.frame.header.frame_type == .headers and !self.deferredHeaderIsDecoded(overflow.frame)) {
+                try self.pending_duplex_sibling_header.init(self, overflow.frame);
+            } else if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+                if (!pending.overflow_included and overflow.frame.header.frame_type == .continuation) {
+                    if (overflow.frame.header.stream_id != pending.header.stream_id) return error.UnexpectedFrame;
+                    pending.header.continuation_count += 1;
+                    pending.queued_continuation_count += 1;
+                    pending.overflow_included = true;
+                    if (pending.header.continuation_count > self.maxContinuationFrames()) return error.MessageTooLarge;
+                    try pending.header.bytes.appendSlice(self.allocator, overflow.frame.payload);
+                    try pending.header.validateSize(self);
+                    pending.header.end_headers = (overflow.frame.header.flags & flag_end_headers) != 0;
+                }
+            }
+        }
+        const pending = self.pending_duplex_sibling_header.getPtr() orelse return;
+        try self.duplex_sibling_headers.ensureUnusedCapacity(self.allocator, 1);
+        self.push_ingress_headers_active = true;
+        defer self.push_ingress_headers_active = false;
+        const fields = (try pending.header.resumeUntil(self, deadline)) orelse return error.UnexpectedFrame;
+        self.duplex_sibling_headers.appendAssumeCapacity(.{
+            .stream_id = pending.header.stream_id,
+            .headers = fields,
+            .continuation_count = pending.queued_continuation_count,
+            .payload_key = pending.payload_key,
+        });
+        self.pending_duplex_sibling_header.deinit(self.allocator);
+    }
+
+    fn deferredHeaderIsDecoded(self: *const Connection, frame: http2.Frame) bool {
+        for (self.duplex_sibling_headers.items[self.duplex_sibling_header_head..]) |entry| {
+            if (entry.stream_id == frame.header.stream_id and entry.payload_key == @intFromPtr(frame.payload.ptr)) return true;
+        }
+        return false;
     }
 
     fn compactPendingApplicationFramesIfSparse(self: *Connection) void {
@@ -11176,6 +11273,11 @@ pub const Connection = struct {
         self: *Connection,
         frame: OwnedFrame,
     ) Error!void {
+        if (self.role == .client and self.limits.enable_push) return self.queueDuplexSiblingFrameUntil(frame);
+        return self.queueApplicationFrameRaw(frame);
+    }
+
+    fn queueApplicationFrameRaw(self: *Connection, frame: OwnedFrame) Error!void {
         if (self.pendingApplicationFrameCount() >=
             self.limits.max_pending_ping_frames)
         {
@@ -13428,6 +13530,14 @@ pub const Connection = struct {
                 frame_owned = false;
                 return err;
             };
+            if (self.role == .client and self.limits.enable_push) {
+                self.predecodeSiblingFrame(frame.frame) catch |err| {
+                    self.aggregate_timeout_unusable = true;
+                    self.recoverPendingApplicationFrameAfterQueueFailure(frame);
+                    frame_owned = false;
+                    return err;
+                };
+            }
             // Capacity was secured before mutating stream admission, so this
             // append cannot strand a preadmitted stream on allocation error.
             self.pending_application_frames.appendAssumeCapacity(frame);
@@ -14260,13 +14370,17 @@ pub const Connection = struct {
         self: *Connection,
         amount: usize,
     ) Error!void {
+        return self.releaseConnectionCapacityUntil(amount, null);
+    }
+
+    fn releaseConnectionCapacityUntil(self: *Connection, amount: usize, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (amount == 0) return;
         var remaining = amount;
         while (remaining != 0) {
             const increment: u31 = @intCast(
                 @min(remaining, std.math.maxInt(u31)),
             );
-            try self.sendWindowUpdates(null, increment, null);
+            try self.sendWindowUpdatesUntil(null, increment, null, deadline);
             remaining -= increment;
         }
     }
@@ -14302,6 +14416,16 @@ pub const Connection = struct {
         stream_id: ?u31,
         connection_increment: ?u31,
         stream_increment: ?u31,
+    ) Error!void {
+        return self.sendWindowUpdatesUntil(stream_id, connection_increment, stream_increment, null);
+    }
+
+    fn sendWindowUpdatesUntil(
+        self: *Connection,
+        stream_id: ?u31,
+        connection_increment: ?u31,
+        stream_increment: ?u31,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         if (connection_increment == null and stream_increment == null) return;
         if (stream_increment != null) {
@@ -14355,7 +14479,13 @@ pub const Connection = struct {
             );
             encoded_len += http2.FrameHeader.encoded_len + 4;
         }
-        self.transportForIo().writeAll(encoded[0..encoded_len]) catch |err| {
+        if (deadline) |absolute| {
+            var committed: usize = 0;
+            self.transportForIo().writeAllWithDeadline(encoded[0..encoded_len], &committed, absolute) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+        } else self.transportForIo().writeAll(encoded[0..encoded_len]) catch |err| {
             self.aggregate_timeout_unusable = true;
             return err;
         };
@@ -14651,6 +14781,10 @@ pub const Connection = struct {
         stream_id: u31,
         end_stream: bool,
     ) Error!void {
+        return self.maybeReleaseReceivedCapacityUntil(stream_id, end_stream, null);
+    }
+
+    fn maybeReleaseReceivedCapacityUntil(self: *Connection, stream_id: u31, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
         const connection_target: usize =
             self.receiveConnectionWindowTarget();
         const connection_low_watermark = connection_target / 2;
@@ -14672,10 +14806,11 @@ pub const Connection = struct {
                 @intCast(stream_target - stream_available)
             else
                 null;
-        try self.sendWindowUpdates(
+        try self.sendWindowUpdatesUntil(
             stream_id,
             connection_increment,
             stream_increment,
+            deadline,
         );
     }
 
@@ -15448,6 +15583,18 @@ pub const Connection = struct {
         };
     }
 
+    fn occupiedPushSlots(self: *const Connection) usize {
+        return PushLifecycle.occupiedPushSlots(self);
+    }
+
+    fn resumePendingPushHeader(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        return PushLifecycle.resumePendingPushHeader(self, deadline);
+    }
+
+    fn receivePushedFrame(self: *Connection, frame: http2.Frame, deadline: ?std.Io.Clock.Timestamp) Error!bool {
+        return PushLifecycle.receivePushedFrame(self, frame, deadline);
+    }
+
     fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
         var attempt = self.readExtendedConnectAttemptUntil(
             stream_id,
@@ -15730,9 +15877,10 @@ pub const Connection = struct {
             var continuation_count: usize = 0;
             const max_continuations = self.maxContinuationFrames();
             while ((flags & flag_end_headers) == 0) {
-                var continuation = try self.readOwnedFrameWithDeadline(
-                    deadline,
-                );
+                var continuation = if (self.push_ingress_headers_active)
+                    try self.readOwnedTransportFrameWithDeadline(deadline)
+                else
+                    try self.readOwnedFrameWithDeadline(deadline);
                 defer continuation.deinit(self.allocator);
                 if (continuation.frame.header.frame_type != .continuation or
                     continuation.frame.header.stream_id != promise.stream_id)
@@ -15760,8 +15908,7 @@ pub const Connection = struct {
         errdefer freeHeaders(self.allocator, headers);
         try validateHeaderBlock(headers, .request);
         if (self.limits.max_concurrent_streams) |limit| {
-            const used = self.active_peer_streams.items.len +
-                self.push_state.remoteReservedCount();
+            const used = self.occupiedPushSlots();
             if (used >= limit) {
                 try self.push_state.notePeerStreamId(
                     self.allocator,
@@ -15774,6 +15921,12 @@ pub const Connection = struct {
                 freeHeaders(self.allocator, headers);
                 return;
             }
+        }
+        if (self.push_state.remoteReservedCount() >= self.limits.max_buffered_pushes) {
+            try self.push_state.notePeerStreamId(self.allocator, promise.promised_stream_id);
+            try self.writeResetStreamFrameUntil(promise.promised_stream_id, .cancel, deadline);
+            freeHeaders(self.allocator, headers);
+            return;
         }
         try self.push_state.queue(self.allocator, .{
             .parent_stream_id = promise.stream_id,
@@ -16288,9 +16441,22 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         raw_continuations: bool,
     ) Error![]http2.Hpack.HeaderField {
+        if (try self.takeDeferredHeaderBlock(first, raw_continuations)) |headers| return headers;
         if (!raw_continuations) {
-            if (try self.takeDeferredHeaderBlock(first.header.stream_id)) |headers| {
-                return headers;
+            if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+                if (pending.payload_key == @intFromPtr(first.payload.ptr)) {
+                    for (0..pending.queued_continuation_count) |_| {
+                        var continuation = self.popQueuedApplicationFrame() orelse return error.UnexpectedFrame;
+                        defer continuation.deinit(self.allocator);
+                        if (continuation.frame.header.frame_type != .continuation or continuation.frame.header.stream_id != first.header.stream_id) return error.UnexpectedFrame;
+                    }
+                    pending.queued_continuation_count = 0;
+                    self.push_ingress_headers_active = true;
+                    defer self.push_ingress_headers_active = false;
+                    const fields = (try pending.header.resumeUntil(self, deadline)) orelse return error.UnexpectedFrame;
+                    self.pending_duplex_sibling_header.deinit(self.allocator);
+                    return fields;
+                }
             }
         }
         const block = try self.collectHeaderBlockUntil(
@@ -16326,6 +16492,9 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         raw_continuations: bool,
     ) Error![]const u8 {
+        const header_mode = self.push_ingress_headers_active;
+        self.push_ingress_headers_active = true;
+        defer self.push_ingress_headers_active = header_mode;
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
         const first_headers = try http2.HeadersPayload.parse(first);
         if (first_headers.priority) |priority| {
@@ -18682,6 +18851,11 @@ pub const RequestWriter = struct {
 pub const DuplexResponseHead = struct {
     headers: []http2.Hpack.HeaderField,
     status: u16,
+    body_allowed: bool = true,
+
+    pub fn streamContentDecoder(self: DuplexResponseHead, allocator: std.mem.Allocator, options: content_coding.StreamOptions) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.responseDecodingChain(self.headers, self.status, self.body_allowed)).streamDecoder(allocator, options);
+    }
 
     pub fn deinit(self: *DuplexResponseHead, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);
@@ -18700,6 +18874,7 @@ pub const DuplexData = struct {
 };
 
 const DeferredHeaderBlock = struct {
+    payload_key: usize = 0,
     stream_id: u31,
     headers: []http2.Hpack.HeaderField,
     continuation_count: usize,
@@ -18741,6 +18916,9 @@ const DuplexHeaderBlock = struct {
         connection: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?[]http2.Hpack.HeaderField {
+        const header_mode = connection.push_ingress_headers_active;
+        connection.push_ingress_headers_active = true;
+        defer connection.push_ingress_headers_active = header_mode;
         while (!self.end_headers) {
             var continuation = try connection.readOwnedFrameForDuplexWithDeadline(
                 deadline,
@@ -18749,6 +18927,9 @@ const DuplexHeaderBlock = struct {
             if (continuation.frame.header.frame_type != .continuation or
                 continuation.frame.header.stream_id != self.stream_id)
             {
+                connection.serve_read_connection_error = .frame_sequence;
+                connection.aggregate_timeout_unusable = true;
+                connection.sendGoAwayUntil(connection.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline) catch {};
                 return error.UnexpectedFrame;
             }
             self.continuation_count = std.math.add(
@@ -18790,6 +18971,43 @@ const DuplexHeaderBlock = struct {
     fn deinit(self: *DuplexHeaderBlock, allocator: std.mem.Allocator) void {
         self.bytes.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+const DeferredPendingHeaderSlot = struct {
+    const Pending = struct {
+        header: DuplexHeaderBlock,
+        payload_key: usize,
+        queued_continuation_count: usize = 0,
+        overflow_included: bool = false,
+    };
+
+    value: ?*Pending = null,
+
+    fn hasValue(self: *const DeferredPendingHeaderSlot) bool {
+        return self.value != null;
+    }
+
+    fn getPtr(self: *DeferredPendingHeaderSlot) ?*Pending {
+        return self.value;
+    }
+
+    fn init(self: *DeferredPendingHeaderSlot, connection: *Connection, first: http2.Frame) Error!void {
+        std.debug.assert(self.value == null);
+        const pending = try connection.allocator.create(Pending);
+        errdefer connection.allocator.destroy(pending);
+        pending.* = .{
+            .header = try DuplexHeaderBlock.init(connection, first),
+            .payload_key = @intFromPtr(first.payload.ptr),
+        };
+        self.value = pending;
+    }
+
+    fn deinit(self: *DeferredPendingHeaderSlot, allocator: std.mem.Allocator) void {
+        const pending = self.value orelse return;
+        pending.header.deinit(allocator);
+        allocator.destroy(pending);
+        self.value = null;
     }
 };
 
@@ -38040,4 +38258,12 @@ test {
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/unix_tests.zig");
+}
+
+test {
+    _ = @import("runtime/push/receive_tests.zig");
+    _ = @import("runtime/push/receive_order_tests.zig");
+    _ = @import("runtime/push/receive_lifecycle_tests.zig");
+    _ = @import("runtime/push/receive_error_tests.zig");
+    _ = @import("runtime/push/receive_store_tests.zig");
 }

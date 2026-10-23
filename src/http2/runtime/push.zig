@@ -6,6 +6,7 @@
 //! receive limit so a peer cannot grow reservations without opening streams.
 
 const std = @import("std");
+pub const receive = @import("push/receive.zig");
 const http2 = @import("../mod.zig");
 
 pub const PromisedRequest = struct {
@@ -33,6 +34,7 @@ const LocalReservation = struct {
 };
 
 pub const State = struct {
+    received: receive.Store = .{},
     /// Client-side notifications whose header ownership is still queued.
     pending: std.ArrayList(PromisedRequest) = .empty,
     pending_head: usize = 0,
@@ -47,6 +49,7 @@ pub const State = struct {
     last_peer_stream_id: ?u31 = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.received.deinit(allocator);
         for (self.pending.items[self.pending_head..]) |*promise| {
             promise.deinit(allocator);
         }
@@ -127,6 +130,11 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         promise: PromisedRequest,
     ) std.mem.Allocator.Error!void {
+        const head_request = for (promise.headers) |field| {
+            if (std.mem.eql(u8, field.name, ":method")) break std.mem.eql(u8, field.value, "HEAD");
+        } else false;
+        try self.received.reserve(allocator, promise.promised_stream_id, head_request);
+        errdefer self.received.remove(allocator, promise.promised_stream_id);
         // Keep reservation identity separate from notification ownership.
         // `take` transfers the request headers to the caller, while the stream
         // must remain reserved until that caller reads or cancels the push.
@@ -194,11 +202,12 @@ pub const State = struct {
         self.last_peer_stream_id = stream_id;
     }
 
-    pub fn releaseRemote(self: *State, stream_id: u31) bool {
+    pub fn releaseRemote(self: *State, allocator: std.mem.Allocator, stream_id: u31) bool {
         if (self.remote_index.count() == 0) return false;
         const index = self.remote_index.get(stream_id) orelse return false;
         _ = self.remote.swapRemove(index);
         _ = self.remote_index.remove(stream_id);
+        self.received.remove(allocator, stream_id);
         if (index < self.remote.items.len) {
             const moved = self.remote.items[index];
             self.remote_index.getPtr(moved).?.* = index;
@@ -213,7 +222,7 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         stream_id: u31,
     ) bool {
-        if (!self.releaseRemote(stream_id)) return false;
+        if (!self.releaseRemote(allocator, stream_id)) return false;
         if (self.pending_index.count() == 0) return true;
         if (self.pending_index.get(stream_id)) |index| {
             const removed_head = index == self.pending_head;
@@ -340,9 +349,9 @@ pub const LazyState = struct {
         self.state = state;
     }
 
-    pub fn releaseRemote(self: *LazyState, stream_id: u31) bool {
+    pub fn releaseRemote(self: *LazyState, allocator: std.mem.Allocator, stream_id: u31) bool {
         const state = self.state orelse return false;
-        return state.releaseRemote(stream_id);
+        return state.releaseRemote(allocator, stream_id);
     }
 
     pub fn cancelRemote(
@@ -589,8 +598,8 @@ test "push reservation indexes track local remote and pending lifecycles" {
     defer remaining.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 6), remaining.promised_stream_id);
     try std.testing.expectEqual(@as(usize, 0), state.pending_index.count());
-    try std.testing.expect(state.releaseRemote(2));
-    try std.testing.expect(state.releaseRemote(6));
+    try std.testing.expect(state.releaseRemote(allocator, 2));
+    try std.testing.expect(state.releaseRemote(allocator, 6));
     try std.testing.expectEqual(@as(usize, 0), state.remote_index.count());
 }
 

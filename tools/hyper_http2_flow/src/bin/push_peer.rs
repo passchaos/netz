@@ -48,7 +48,8 @@ fn main() {
         .build()
         .expect("build Tokio runtime");
     match mode.as_str() {
-        "server" => runtime.block_on(run_push_server(port, tls_paths)),
+        "server" => runtime.block_on(run_push_server(port, tls_paths, false)),
+        "early-push-server" => runtime.block_on(run_push_server(port, tls_paths, true)),
         "client" => runtime.block_on(run_push_disabled_client(port, tls_paths)),
         "informational-server" => runtime.block_on(run_informational_server(port, tls_paths)),
         "informational-client" => runtime.block_on(run_informational_client(port, tls_paths)),
@@ -189,7 +190,7 @@ async fn run_informational_client(port: u16, ca_path: Option<(String, String)>) 
     println!("h2 client received netz informational responses: statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io");
 }
 
-async fn run_push_server(port: u16, tls_paths: Option<(String, String)>) {
+async fn run_push_server(port: u16, tls_paths: Option<(String, String)>, early: bool) {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .expect("bind h2 push server");
@@ -227,45 +228,64 @@ async fn run_push_server(port: u16, tls_paths: Option<(String, String)>) {
     let mut push = respond
         .push_request(push_request)
         .expect("client enabled push");
-    let parent_response = Response::builder()
-        .status(StatusCode::OK)
-        .header("x-hyper-parent", "yes")
-        .body(())
-        .expect("parent response");
-    let mut parent_body = respond
-        .send_response(parent_response, false)
-        .expect("send parent response headers");
-    parent_body
-        .send_data(Bytes::from_static(PARENT_BODY), true)
-        .expect("send parent response body");
-
-    // Netz intentionally finishes the parent response before the application
-    // accepts its queued promise. Preserve that deterministic consumption
-    // order while still emitting PUSH_PROMISE before the parent response.
-    // `SendResponse` only queues frames; drive the connection until the
-    // already queued PUSH_PROMISE and parent response reach the netz client.
-    // No second request is expected, so this bounded accept must time out.
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), connection.accept(),)
-            .await
-            .is_err(),
-        "unexpected second request while flushing parent response",
-    );
     let push_response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/css")
         .header("x-hyper-push", "yes")
+        .header("x-shared-dictionary", "shared-h2-push-dictionary-value")
         .body(())
         .expect("push response");
-    let mut push_body = push
-        .send_response(push_response, false)
-        .expect("send pushed response headers");
-    push_body
-        .send_data(Bytes::from_static(PUSH_BODY), true)
-        .expect("send pushed response body");
-
+    let parent_response = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-hyper-parent", "yes")
+        .header("x-shared-dictionary", "shared-h2-push-dictionary-value")
+        .body(())
+        .expect("parent response");
+    if early {
+        let mut push_body = push
+            .send_response(push_response, false)
+            .expect("send early pushed response headers");
+        push_body
+            .send_data(Bytes::from_static(PUSH_BODY), true)
+            .expect("send early pushed response body");
+        // Drive only the promise and push before queuing any parent response.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), connection.accept())
+                .await
+                .is_err(),
+            "unexpected second request while flushing early push"
+        );
+        let mut parent_body = respond
+            .send_response(parent_response, false)
+            .expect("send parent response headers");
+        parent_body
+            .send_data(Bytes::from_static(PARENT_BODY), true)
+            .expect("send parent response body");
+    } else {
+        let mut parent_body = respond
+            .send_response(parent_response, false)
+            .expect("send parent response headers");
+        parent_body
+            .send_data(Bytes::from_static(PARENT_BODY), true)
+            .expect("send parent response body");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), connection.accept())
+                .await
+                .is_err(),
+            "unexpected second request while flushing parent response"
+        );
+        let mut push_body = push
+            .send_response(push_response, false)
+            .expect("send pushed response headers");
+        push_body
+            .send_data(Bytes::from_static(PUSH_BODY), true)
+            .expect("send pushed response body");
+    }
     while connection.accept().await.is_some() {}
     println!("h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio");
+    if early {
+        println!("h2 server verified order=push-before-parent shared_dictionary=true");
+    }
 }
 
 async fn run_push_disabled_client(port: u16, ca_path: Option<(String, String)>) {

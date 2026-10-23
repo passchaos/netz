@@ -875,6 +875,27 @@ Reusable implementation changes behind these H2 results:
   consume the existing peer-caused reset budget, so a promise churn attack
   eventually receives `GOAWAY(ENHANCE_YOUR_CALM)`; releasing an accepted
   reservation immediately restores capacity for a later monotonic push ID;
+- pushed responses can arrive before the parent response completes. Client
+  frame ingress decodes PUSH_PROMISE and pushed HEADERS in wire order, retains
+  independent owned responses, and keeps normal headers deferred by PING in
+  the same HPACK order. Applications may consume accepted pushes in a different
+  order from their promise notifications. `Limits.max_buffered_pushes` defaults
+  to 32 and `max_buffered_push_bytes` to 32 MiB across decoded field-section
+  sizes and retained DATA. Count pressure refuses the excess push with CANCEL;
+  byte pressure cancels only the affected push and preserves its typed
+  `PushBufferFull` result. Per-response body limits remain independent, including
+  HEAD/304 representation-length metadata. Buffered DATA advances connection and
+  stream receive credit once, allowing a large push to finish before its parent
+  under constrained windows; taking or canceling the response does not credit
+  those bytes again. `readPushedResponseWithTimeout` and `WithDeadline` retain
+  fragmented header/body progress for retry. Completed responses and first
+  scoped errors remain observable after later reset or connection termination.
+  Malformed HPACK emits COMPRESSION_ERROR, invalid frame interleaving and DATA
+  on a reserved push emit connection PROTOCOL_ERROR, and a zero WINDOW_UPDATE
+  on an opened push remains a pushed-stream error. The state and orchestration
+  live under `runtime/push/` with nearby allocation-failure and socket tests.
+  The Rust h2 process gate additionally flushes a complete push before queuing
+  its parent, checks a shared HPACK field, and passes over h2c and verified TLS;
 - Hyper's `max_send_buffer_size` bounds DATA retained by its asynchronous
   per-stream send queue. Netz's blocking writers do not own such a queue: they
   borrow caller slices only until each flow-controlled transport write returns,
@@ -1151,7 +1172,7 @@ empty gzip GET representations still fail the normal truncation checks.
 HTTP/2's aggregate, body-bearing and independently-deadlined batch completion
 paths also validate the actual empty body separately from a HEAD/304
 Content-Length, and omit representation-only lengths from body-size limits.
-Regressions retain Content-Length 123 under a one-byte body budget across six
+Regressions retain Content-Length 123 under a one-byte body budget across seven
 live HTTP/2 receive shapes, check H1 pipeline boundaries and H1/H3 response-head
 decoder factories, and preserve the encoded GET failure control. The same
 request semantics move with HTTP/3 shared-pool/redirect and push aggregation.
