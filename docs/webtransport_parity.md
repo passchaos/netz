@@ -861,6 +861,15 @@ An additional dynamic-QPACK case retains the speculative field-section
 references while cancellation is paced, then releases them after the scoped
 cancellation is submitted.
 
+Peer `STOP_SENDING` rejection also completes scoped cleanup after QUIC has
+already submitted its matching RESET. QUIC cancellation preserves that
+RESET's original error code and final size while using the caller's requested
+code for the receive half. Reliable-reset downgrades preserve the same reset
+identity, and pacing/congestion failures leave received bytes owned for retry.
+A protected-UDP rejection case verifies both cancellation codes on the wire,
+continued sibling DATAGRAM delivery in both directions, and renewed CONNECT
+admission after the rejected attempt is retired.
+
 `HandshakeClientSession` and `AcceptedHandshakeSession` expose `readStream`,
 `writeStream`, `writeStreams`, `finishStream`, `resetStream`, and `stopStream`.
 `readStream`

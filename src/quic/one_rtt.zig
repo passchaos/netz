@@ -7744,6 +7744,8 @@ pub const Connection = struct {
     /// Atomically submit any still-needed RESET_STREAM and STOP_SENDING for
     /// one bidirectional stream. State is committed only after the combined
     /// packet reaches the socket.
+    /// An existing reset retains its error code and final size; the requested
+    /// code applies to STOP_SENDING and a reset that has not been sent yet.
     pub fn cancelStream(
         self: *Connection,
         stream_id: u64,
@@ -7807,23 +7809,17 @@ pub const Connection = struct {
         const send_stream = try self.sendStreamEntry(stream_id);
         const recv_stream = try self.recvStreamFlow(stream_id);
         const minimum: u64 = if (send_stream.required_reset_prefix) |prefix| prefix.len else 0;
-        const reset_info: StreamResetInfo = .{
-            .application_error_code = application_error_code,
-            .final_size = @max(send_stream.highest_sent_end, minimum),
-            .reliable_size = minimum,
-        };
+        const reset_info = try stream_cancel.resetInfo(
+            send_stream.reset_sent,
+            send_stream.highest_sent_end,
+            minimum,
+            application_error_code,
+        );
         const needs_reset = send_stream.final_size == null and
             (send_stream.reset_sent == null or
                 send_stream.reset_sent.?.reliable_size > minimum);
         const satisfies_pending_stop = send_stream.stopped != null and
             send_stream.reset_sent == null and needs_reset;
-        if (send_stream.reset_sent) |existing| {
-            if (existing.application_error_code != application_error_code or
-                existing.final_size != reset_info.final_size)
-            {
-                return error.FinalSizeMismatch;
-            }
-        }
         const needs_stop = if (recv_stream.stop_sending_sent) |existing|
             existing.application_error_code != application_error_code
         else
@@ -7841,14 +7837,14 @@ pub const Connection = struct {
                 }
                 frames[count] = .{ .reset_stream_at = .{
                     .stream_id = stream_id,
-                    .application_error_code = application_error_code,
+                    .application_error_code = reset_info.application_error_code,
                     .final_size = reset_info.final_size,
                     .reliable_size = minimum,
                 } };
             } else {
                 frames[count] = .{ .reset_stream = .{
                     .stream_id = stream_id,
-                    .application_error_code = application_error_code,
+                    .application_error_code = reset_info.application_error_code,
                     .final_size = reset_info.final_size,
                 } };
             }

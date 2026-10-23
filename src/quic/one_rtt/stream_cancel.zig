@@ -1,7 +1,27 @@
-//! Deadline-bounded atomic stream cancellation with transport progress.
+//! Atomic stream cancellation, reset identity, and deadline-bounded progress.
 
 const std = @import("std");
 const deadline_policy = @import("../../internal/deadline.zig");
+
+/// A committed RESET has its own immutable error identity. Canceling the
+/// receive half may use another code, and a reliable-prefix downgrade must
+/// preserve the reset's original code when it is retransmitted.
+pub fn resetInfo(
+    existing: anytype,
+    highest_sent: u64,
+    required_prefix: u64,
+    requested_error: u64,
+) error{FinalSizeMismatch}!@TypeOf(existing.?) {
+    const final_size = @max(highest_sent, required_prefix);
+    if (existing) |reset| {
+        if (reset.final_size != final_size) return error.FinalSizeMismatch;
+    }
+    return .{
+        .application_error_code = if (existing) |reset| reset.application_error_code else requested_error,
+        .final_size = final_size,
+        .reliable_size = required_prefix,
+    };
+}
 
 pub fn withDeadline(
     connection: anytype,

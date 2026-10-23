@@ -196,3 +196,97 @@ test "QUIC stream cancel deadline preserves an already committed FIN" {
     try std.testing.expect(fixture.connection.sendStreamStats(0).?.reset == null);
     try std.testing.expectEqual(@as(?u64, 8), fixture.connection.sendStreamStats(0).?.final_size);
 }
+
+test "QUIC stream cancel preserves a committed reset while canceling the other half" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for (0..3) |mode| {
+        var fixture: Fixture = undefined;
+        try fixture.init(threaded.io());
+        defer fixture.deinit();
+        try fixture.prepare();
+        try fixture.connection.resetStream(0, 19);
+        var reset = try fixture.peer.receivePacketTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        defer reset.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 19), fixture.peer.recvStreamStats(0).?.reset.?.application_error_code);
+        switch (mode) {
+            0 => try fixture.connection.cancelStream(0, 71),
+            1 => try fixture.connection.tryCancelStream(0, 71),
+            2 => try fixture.connection.cancelStreamWithTimeout(0, 71, .fromSeconds(1)),
+            else => unreachable,
+        }
+        try fixture.expectWire(false);
+        try std.testing.expectEqual(@as(u64, 19), fixture.connection.sendStreamStats(0).?.reset.?.application_error_code);
+        try std.testing.expectEqual(@as(u64, 8), fixture.connection.sendStreamStats(0).?.reset.?.final_size);
+        try std.testing.expectEqual(@as(usize, 0), fixture.connection.availableReceivedStream(0).?.len);
+        const packet_number = fixture.connection.next_packet_number;
+        try fixture.connection.tryCancelStream(0, 71);
+        try std.testing.expectEqual(packet_number, fixture.connection.next_packet_number);
+    }
+}
+
+test "QUIC stream cancel reliable downgrade retains the committed reset error code" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    fixture.connection.config.reliable_reset.peer = true;
+    fixture.peer.config.reliable_reset.local = true;
+    try fixture.prepare();
+    try fixture.connection.resetStreamReliably(0, 19, 8);
+    var initial = try fixture.peer.receivePacketTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    defer initial.deinit(std.testing.allocator);
+    try fixture.connection.tryCancelStream(0, 71);
+    var canceled = try fixture.peer.receivePacketTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    defer canceled.deinit(std.testing.allocator);
+    var reset = false;
+    var stop = false;
+    for (canceled.frames) |frame| switch (frame) {
+        .reset_stream => |value| {
+            try std.testing.expectEqual(@as(u64, 19), value.application_error_code);
+            try std.testing.expectEqual(@as(u64, 8), value.final_size);
+            reset = true;
+        },
+        .stop_sending => |value| {
+            try std.testing.expectEqual(@as(u64, 71), value.application_error_code);
+            stop = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(reset and stop);
+    try std.testing.expectEqual(@as(u64, 19), fixture.peer.recvStreamStats(0).?.reset.?.application_error_code);
+    try std.testing.expectEqual(@as(u64, 0), fixture.peer.recvStreamStats(0).?.reset.?.reliable_size);
+    try std.testing.expect(!fixture.peer.closed());
+}
+
+test "QUIC stream cancel after a committed reset preserves receive ownership on backpressure" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for ([_]bool{ false, true }) |paced| {
+        var fixture: Fixture = undefined;
+        try fixture.init(threaded.io());
+        defer fixture.deinit();
+        try fixture.prepare();
+        try fixture.connection.resetStream(0, 19);
+        var reset = try fixture.peer.receivePacketTimeout(.{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        defer reset.deinit(std.testing.allocator);
+        if (paced) {
+            fixture.connection.pacer = .initWithRateLimit(true, 1200, 1, 0);
+            fixture.connection.pacer.budget = 0;
+            fixture.connection.pacer.setLastSentTimeNs(@intCast(std.Io.Clock.awake.now(threaded.io()).nanoseconds));
+        } else {
+            one_rtt.testing.clampCongestionWindowToBytesInFlight(&fixture.connection);
+        }
+        const packet_number = fixture.connection.next_packet_number;
+        if (paced) try std.testing.expectError(error.PacingLimited, fixture.connection.tryCancelStream(0, 71)) else try std.testing.expectError(error.CongestionLimited, fixture.connection.tryCancelStream(0, 71));
+        try std.testing.expectEqual(@as(u64, 19), fixture.connection.sendStreamStats(0).?.reset.?.application_error_code);
+        try std.testing.expect(fixture.connection.recvStreamStats(0).?.stop_sending_sent == null);
+        try std.testing.expectEqualStrings("inbound", fixture.connection.availableReceivedStream(0).?);
+        try std.testing.expectEqual(packet_number, fixture.connection.next_packet_number);
+        fixture.connection.pacer.enabled = false;
+        fixture.connection.congestion.congestion_window = 64 * 1024;
+        try fixture.connection.tryCancelStream(0, 71);
+        try fixture.expectWire(false);
+    }
+}
