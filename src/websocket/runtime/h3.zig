@@ -192,52 +192,6 @@ const MessageFrameReceiveState = struct {
     }
 };
 
-fn finishIncomingMessageForConnection(
-    connection: anytype,
-    message: websocket.MessageAssembler.Message,
-) Error!common.OwnedMessage {
-    if (!message.compressed or
-        !connection.compression_receive_context_takeover)
-    {
-        return message_state.finishIncomingMessage(
-            connection.allocator,
-            message,
-            connection.limits.max_message_bytes,
-        );
-    }
-    const compressed_payload = message.payload;
-    const payload = connection.compression_receive.previewContextOwned(
-        connection.allocator,
-        compressed_payload,
-        connection.limits.max_message_bytes,
-        connection.compression_receive_max_window_bits,
-    ) catch |err| {
-        connection.allocator.free(compressed_payload);
-        return switch (err) {
-            error.PreviewPending => error.InvalidFrame,
-            error.OutOfMemory => blk: {
-                _ = connection.failReceive();
-                break :blk error.OutOfMemory;
-            },
-            else => |other| @errorCast(other),
-        };
-    };
-    connection.allocator.free(compressed_payload);
-    errdefer connection.allocator.free(payload);
-    if (message.opcode == .text and
-        !std.unicode.utf8ValidateSlice(payload))
-    {
-        connection.compression_receive.discardContextPreview();
-        return error.InvalidUtf8;
-    }
-    connection.compression_receive.commitContextPreview();
-    return .{
-        .opcode = message.opcode,
-        .payload = payload,
-        .was_compressed = true,
-    };
-}
-
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const Message = common.Message;
@@ -2252,95 +2206,25 @@ pub fn Connection(comptime role: common.Role) type {
             return self.receiveMessageInternal(deadline);
         }
 
+        const AllocatingMessageReceiver = @import("message/receive.zig").Controller(struct {
+            pub const ConnectionType = Self;
+            pub const ErrorType = Error;
+            pub const receiveFailed = Self.receiveFailed;
+            pub const checkWrites = Self.ensureNoPendingWrites;
+            pub const pendingControl = Self.pendingAutomaticControlOpcode;
+            pub const resumeControl = Self.resumeAutomaticControl;
+            pub const beginControl = Self.beginAutomaticControl;
+            pub const discard = Self.discardBuffered;
+            pub const readFrame = Self.receiveMessageFrameBorrowed;
+            pub const afterError = Self.closeAfterReceiveError;
+            pub const onClose = Self.flushTerminalReceiveAck;
+        });
+
         fn receiveMessageInternal(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!common.OwnedMessage {
-            if (self.receiveFailed()) return error.ConnectionClosed;
-            if (self.message_into.active()) return error.InvalidFrame;
-            if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
-                std.debug.assert(
-                    (try self.resumeAutomaticControl(deadline)) == null,
-                );
-                if (opcode == .close) return error.ConnectionClosed;
-            }
-            try self.ensureNoPendingWrites();
-            errdefer |err| self.closeAfterReceiveError(err, deadline);
-            if (self.message_assembler == null) {
-                self.message_assembler = websocket.MessageAssembler.initLimited(
-                    self.allocator,
-                    self.limits.max_message_bytes,
-                );
-            }
-            while (true) {
-                const frame = try self.receiveMessageFrameBorrowed(deadline);
-                switch (frame.header.opcode) {
-                    .ping => {
-                        if (!self.closeSent()) {
-                            try self.beginAutomaticControl(
-                                .pong,
-                                frame.payload,
-                                .message,
-                                null,
-                            );
-                        }
-                        self.discardBuffered(frame.consumed);
-                        if (self.pending_auto_control != null) {
-                            std.debug.assert(
-                                (try self.resumeAutomaticControl(deadline)) == null,
-                            );
-                        }
-                        continue;
-                    },
-                    .pong => {
-                        self.discardBuffered(frame.consumed);
-                        continue;
-                    },
-                    .close => {
-                        self.close_received.store(true, .release);
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        if (!self.closeSent()) {
-                            try self.beginAutomaticControl(
-                                .close,
-                                frame.payload,
-                                .message,
-                                null,
-                            );
-                        }
-                        self.discardBuffered(frame.consumed);
-                        if (self.pending_auto_control != null) {
-                            std.debug.assert(
-                                (try self.resumeAutomaticControl(deadline)) == null,
-                            );
-                        }
-                        self.flushTerminalReceiveAck();
-                        return error.ConnectionClosed;
-                    },
-                    else => {
-                        const maybe_assembled = self.message_assembler.?.feedUtf8Validated(
-                            frame,
-                            self.incoming_text_utf8,
-                        ) catch |err| {
-                            self.discardBuffered(frame.consumed);
-                            self.message_assembler.?.deinit();
-                            self.message_assembler = null;
-                            return @errorCast(err);
-                        };
-                        const assembled = maybe_assembled orelse {
-                            self.discardBuffered(frame.consumed);
-                            continue;
-                        };
-                        self.discardBuffered(frame.consumed);
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        return finishIncomingMessageForConnection(
-                            self,
-                            assembled,
-                        );
-                    },
-                }
-            }
+            return AllocatingMessageReceiver.receive(self, deadline);
         }
 
         fn receiveMessageFrameBorrowed(

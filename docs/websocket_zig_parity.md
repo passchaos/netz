@@ -540,6 +540,28 @@ only the assembler's internal proof for uncompressed text. Compressed text and
 externally constructed messages retain the final validation pass. Thus ordinary
 complete text is validated once while fragmented text still rejects a malformed
 sequence at the decisive byte.
+Allocating message receives now also retain their accepted fragment prefix
+after a local allocation failure. `message/assembler.zig` checkpoints opcode,
+compression and UTF-8 state without restoring a stale buffer pointer after
+growth; append and final owned-slice failures roll back to the accepted prefix.
+The shared `runtime/message/receive.zig` loop keeps the current wire frame until
+assembly and final decompression both succeed. An OOM restores an in-place
+unmasked frame to its original masked wire bytes, restores the frame validator,
+and retains the assembler for the next `receiveMessage` call. Compressed input
+whose final inflate could not allocate is adopted back into assembler storage;
+RFC 7692 takeover history commits only after complete decode and text validation.
+The same transaction covers HTTP/1, RFC 8441 and RFC 9220, both masking roles,
+first/middle/final fragments, final owned slices, and continuous compression.
+Adjacent failing-allocator tests retry each allocation boundary and verify a
+following independent or history-dependent message, plus a real TCP case that
+first times out on a masked UTF-8 prefix. Receive-mode changes remain local
+errors while a message is retained; malformed input still follows the existing
+Close/error path.
+Validation passes the complete Debug WebSocket matrix, focused ReleaseFast
+assembly/Close tests, package reachability, real H1 WS/WSS receive smokes,
+Hyper h2c/TLS RFC 8441 interoperability, quic-go RFC 9220 in both directions
+over QUIC v1/v2 using Go 1.24.13, and the deterministic H1/H2/H3 compression
+context fuzz targets.
 Their owning-message loops also decode complete frames in place in the
 connection buffer and copy payload bytes only once into `MessageAssembler`. The
 public frame API keeps its independent owned payload, while aggregate receives

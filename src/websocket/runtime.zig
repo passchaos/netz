@@ -7244,91 +7244,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
-        if (self.receiveFailed()) return error.ConnectionClosed;
-        if (self.message_into.active()) return error.InvalidFrame;
-        if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
-            std.debug.assert((try self.resumeAutomaticControl(deadline)) == null);
-            if (opcode == .close) return error.ConnectionClosed;
-        }
-        try self.ensureNoPendingWrites();
-        errdefer |err| closeAfterReceiveError(self, err, deadline);
-        if (self.message_assembler == null) {
-            self.message_assembler = websocket.MessageAssembler.initLimited(
-                self.allocator,
-                self.limits.max_message_bytes,
-            );
-        }
-
-        while (true) {
-            const frame = try receiveMessageFrameBorrowed(self, deadline);
-            switch (frame.header.opcode) {
-                .ping => {
-                    if (canSendOpcode(
-                        .pong,
-                        self.closeSent(),
-                        self.closeReceived(),
-                    )) {
-                        try self.beginAutomaticControl(
-                            .pong,
-                            frame.payload,
-                            .message,
-                            null,
-                        );
-                    }
-                    self.discardBuffered(frame.consumed);
-                    if (self.pending_auto_control != null) {
-                        std.debug.assert(
-                            (try self.resumeAutomaticControl(deadline)) == null,
-                        );
-                    }
-                    continue;
-                },
-                .pong => {
-                    self.discardBuffered(frame.consumed);
-                    continue;
-                },
-                .close => {
-                    self.close_received.store(true, .release);
-                    self.message_assembler.?.deinit();
-                    self.message_assembler = null;
-                    if (!self.closeSent()) {
-                        try self.beginAutomaticControl(
-                            .close,
-                            frame.payload,
-                            .message,
-                            null,
-                        );
-                    }
-                    self.discardBuffered(frame.consumed);
-                    if (self.pending_auto_control != null) {
-                        std.debug.assert(
-                            (try self.resumeAutomaticControl(deadline)) == null,
-                        );
-                    }
-                    return error.ConnectionClosed;
-                },
-                else => {
-                    const maybe_message = self.message_assembler.?.feedUtf8Validated(
-                        frame,
-                        self.incoming_text_utf8,
-                    ) catch |err| {
-                        self.discardBuffered(frame.consumed);
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        return @errorCast(err);
-                    };
-                    self.discardBuffered(frame.consumed);
-                    if (maybe_message) |message| {
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        return finishIncomingMessageForConnection(
-                            self,
-                            message,
-                        );
-                    }
-                },
-            }
-        }
+        return AllocatingMessageReceiver(Connection).receive(self, deadline);
     }
 
     /// Receive one complete message into caller-owned storage.
@@ -10195,91 +10111,7 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedMessage {
-        if (self.receiveFailed()) return error.ConnectionClosed;
-        if (self.message_into.active()) return error.InvalidFrame;
-        if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
-            std.debug.assert((try self.resumeAutomaticControl(deadline)) == null);
-            if (opcode == .close) return error.ConnectionClosed;
-        }
-        try self.ensureNoPendingWrites();
-        errdefer |err| closeAfterReceiveError(self, err, deadline);
-        if (self.message_assembler == null) {
-            self.message_assembler = websocket.MessageAssembler.initLimited(
-                self.allocator,
-                self.limits.max_message_bytes,
-            );
-        }
-
-        while (true) {
-            const frame = try receiveMessageFrameBorrowed(self, deadline);
-            switch (frame.header.opcode) {
-                .ping => {
-                    if (canSendOpcode(
-                        .pong,
-                        self.closeSent(),
-                        self.closeReceived(),
-                    )) {
-                        try self.beginAutomaticControl(
-                            .pong,
-                            frame.payload,
-                            .message,
-                            null,
-                        );
-                    }
-                    self.discardBuffered(frame.consumed);
-                    if (self.pending_auto_control != null) {
-                        std.debug.assert(
-                            (try self.resumeAutomaticControl(deadline)) == null,
-                        );
-                    }
-                    continue;
-                },
-                .pong => {
-                    self.discardBuffered(frame.consumed);
-                    continue;
-                },
-                .close => {
-                    self.close_received.store(true, .release);
-                    self.message_assembler.?.deinit();
-                    self.message_assembler = null;
-                    if (!self.closeSent()) {
-                        try self.beginAutomaticControl(
-                            .close,
-                            frame.payload,
-                            .message,
-                            null,
-                        );
-                    }
-                    self.discardBuffered(frame.consumed);
-                    if (self.pending_auto_control != null) {
-                        std.debug.assert(
-                            (try self.resumeAutomaticControl(deadline)) == null,
-                        );
-                    }
-                    return error.ConnectionClosed;
-                },
-                else => {
-                    const maybe_message = self.message_assembler.?.feedUtf8Validated(
-                        frame,
-                        self.incoming_text_utf8,
-                    ) catch |err| {
-                        self.discardBuffered(frame.consumed);
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        return @errorCast(err);
-                    };
-                    self.discardBuffered(frame.consumed);
-                    if (maybe_message) |message| {
-                        self.message_assembler.?.deinit();
-                        self.message_assembler = null;
-                        return finishIncomingMessageForConnection(
-                            self,
-                            message,
-                        );
-                    }
-                },
-            }
-        }
+        return AllocatingMessageReceiver(H2Connection).receive(self, deadline);
     }
 
     /// Receive one complete message into caller-owned storage.
@@ -12979,52 +12811,20 @@ fn validateBufferedTextRange(
     validated.* = available_end;
 }
 
-const finishIncomingMessage = message_state.finishIncomingMessage;
-
-fn finishIncomingMessageForConnection(
-    connection: anytype,
-    message: websocket.MessageAssembler.Message,
-) Error!OwnedMessage {
-    if (!message.compressed or
-        !connection.compression_receive_context_takeover)
-    {
-        return finishIncomingMessage(
-            connection.allocator,
-            message,
-            connection.limits.max_message_bytes,
-        );
-    }
-    const compressed_payload = message.payload;
-    const payload = connection.compression_receive.previewContextOwned(
-        connection.allocator,
-        compressed_payload,
-        connection.limits.max_message_bytes,
-        connection.compression_receive_max_window_bits,
-    ) catch |err| {
-        connection.allocator.free(compressed_payload);
-        return switch (err) {
-            error.PreviewPending => error.InvalidFrame,
-            error.OutOfMemory => blk: {
-                _ = failReceive(connection);
-                break :blk error.OutOfMemory;
-            },
-            else => |other| @errorCast(other),
-        };
-    };
-    connection.allocator.free(compressed_payload);
-    errdefer connection.allocator.free(payload);
-    if (message.opcode == .text and
-        !std.unicode.utf8ValidateSlice(payload))
-    {
-        connection.compression_receive.discardContextPreview();
-        return error.InvalidUtf8;
-    }
-    connection.compression_receive.commitContextPreview();
-    return .{
-        .opcode = message.opcode,
-        .payload = payload,
-        .was_compressed = true,
-    };
+fn AllocatingMessageReceiver(comptime TransportConnection: type) type {
+    return @import("runtime/message/receive.zig").Controller(struct {
+        pub const ConnectionType = TransportConnection;
+        pub const ErrorType = Error;
+        pub const receiveFailed = ConnectionType.receiveFailed;
+        pub const checkWrites = ConnectionType.ensureNoPendingWrites;
+        pub const pendingControl = ConnectionType.pendingAutomaticControlOpcode;
+        pub const resumeControl = ConnectionType.resumeAutomaticControl;
+        pub const beginControl = ConnectionType.beginAutomaticControl;
+        pub const discard = ConnectionType.discardBuffered;
+        pub const readFrame = receiveMessageFrameBorrowed;
+        pub const afterError = closeAfterReceiveError;
+        pub fn onClose(_: *ConnectionType) void {}
+    });
 }
 
 const compressedFragmentRange = message_state.compressedFragmentRange;
@@ -17607,6 +17407,7 @@ test {
     _ = handshake_acceptance;
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/message/tests/frame_allocation.zig");
+    _ = @import("runtime/message/tests/assembly_allocation.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");

@@ -25,6 +25,12 @@ pub const Checkpoint = struct {
         };
     }
 
+    pub fn restore(self: Checkpoint, connection: anytype) void {
+        connection.incoming_data_kind = self.kind;
+        connection.incoming_text_utf8 = self.text_utf8;
+        connection.incoming_frame_validated = self.validated;
+    }
+
     pub fn parseOwned(
         self: Checkpoint,
         connection: anytype,
@@ -38,9 +44,7 @@ pub const Checkpoint = struct {
             header,
             options,
         ) catch |err| {
-            connection.incoming_data_kind = self.kind;
-            connection.incoming_text_utf8 = self.text_utf8;
-            connection.incoming_frame_validated = self.validated;
+            self.restore(connection);
             return err;
         };
     }
