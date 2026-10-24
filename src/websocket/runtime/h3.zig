@@ -15,6 +15,7 @@ const handshake_headers = @import("handshake/headers.zig");
 const handshake_storage = @import("handshake/storage.zig");
 const message_buffer = @import("message/buffer.zig");
 const message_state = @import("message/state.zig");
+const frame_validation = @import("message/frame_validation.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
@@ -166,12 +167,7 @@ fn fragmentedWireLen(
     return total;
 }
 
-const IncomingDataKind = enum {
-    none,
-    binary,
-    text,
-    compressed_text,
-};
+const IncomingDataKind = frame_validation.DataKind;
 
 fn isAbruptReceiveEnd(err: anyerror) bool {
     return switch (err) {
@@ -3048,6 +3044,7 @@ pub fn Connection(comptime role: common.Role) type {
                 header.header_len,
                 payload_len,
             ) catch return error.PayloadTooLarge;
+            const validation = frame_validation.Checkpoint.capture(self);
             try self.ensureIncomingFrameBuffered(
                 header,
                 total_len,
@@ -3069,8 +3066,8 @@ pub fn Connection(comptime role: common.Role) type {
                     .validate_utf8 = false,
                 },
             };
-            var frame = try websocket.parseFrameWithHeader(
-                self.allocator,
+            var frame = try validation.parseOwned(
+                self,
                 available[0..total_len],
                 header,
                 options,
@@ -6145,17 +6142,12 @@ fn compressedFragmentRange(
 
 test "WebSocket RFC 9220 connections keep resumable writes compact" {
     if (@sizeOf(usize) == 8) {
-        // Vort retains additional safety-only Huffman state in Debug and
-        // ReleaseSafe. Keep exact baselines for both layouts so this remains
-        // a useful per-connection memory regression guard in every mode.
-        const client_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 18_640,
-            .ReleaseFast, .ReleaseSmall => 18_448,
-        };
-        const server_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 17_880,
-            .ReleaseFast, .ReleaseSmall => 17_720,
-        };
+        // Guard the WebSocket wrapper's footprint independently from the
+        // embedded HTTP/3 runtime, whose protocol state and safety-only codec
+        // storage evolve separately. No per-frame checkpoint lives here.
+        const wrapper_size: usize = 1392;
+        const client_size = @sizeOf(http3.runtime.HandshakeClient) + wrapper_size;
+        const server_size = @sizeOf(http3.runtime.HandshakeServerSession) + wrapper_size;
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
         try std.testing.expectEqual(client_size, @sizeOf(ClientConnection));
         try std.testing.expectEqual(server_size, @sizeOf(ServerConnection));

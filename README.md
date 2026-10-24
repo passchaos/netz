@@ -1233,7 +1233,10 @@ Current protocol coverage includes:
   plus quoted/quoted-pair window-bit parsing and rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses,
   compressed fragmented sends that stream discontiguous plaintext directly
-  into DEFLATE with constant-space cross-fragment UTF-8 validation, plus
+  into DEFLATE with constant-space cross-fragment UTF-8 validation,
+  owned frame allocation retries that preserve buffered wire bytes and the
+  prior fragment/UTF-8 cursor across HTTP/1, HTTP/2, and HTTP/3, including a
+  partially validated frame retained by an earlier receive timeout, plus
   batched secure-random fills that retain a fresh mask key per frame without a
   CSPRNG backend call per fragment; bounded H1 masked and unmasked fragment
   sequences also share one transport submission instead of one write per

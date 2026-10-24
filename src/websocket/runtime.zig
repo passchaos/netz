@@ -20,6 +20,7 @@ const cookie_handshake = @import("runtime/cookies.zig");
 const message_buffer = @import("runtime/message/buffer.zig");
 pub const ReceiveBuffer = message_buffer;
 const message_state = @import("runtime/message/state.zig");
+const frame_validation = @import("runtime/message/frame_validation.zig");
 const handshake_headers = @import("runtime/handshake/headers.zig");
 const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
@@ -82,12 +83,7 @@ pub const Limits = common.Limits;
 pub const TcpKeepAlive = socket_options.TcpKeepAlive;
 pub const Role = common.Role;
 
-const IncomingDataKind = enum {
-    none,
-    binary,
-    text,
-    compressed_text,
-};
+const IncomingDataKind = frame_validation.DataKind;
 
 const MessageFrameReceiveState = struct {
     header: ?websocket.FrameHeader = null,
@@ -7069,6 +7065,7 @@ pub const Connection = struct {
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = try header.wireLen();
+        const validation = frame_validation.Checkpoint.capture(self);
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
         available = message_buffer.unread(
             &self.inbuf,
@@ -7087,8 +7084,8 @@ pub const Connection = struct {
                 .validate_utf8 = false,
             },
         };
-        var frame = try websocket.parseFrameWithHeader(
-            self.allocator,
+        var frame = try validation.parseOwned(
+            self,
             available[0..total_len],
             header,
             parse_options,
@@ -10023,6 +10020,7 @@ pub const H2Connection = struct {
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = try header.wireLen();
+        const validation = frame_validation.Checkpoint.capture(self);
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
         available = message_buffer.unread(
             &self.inbuf,
@@ -10041,8 +10039,8 @@ pub const H2Connection = struct {
                 .validate_utf8 = false,
             },
         };
-        var frame = try websocket.parseFrameWithHeader(
-            self.allocator,
+        var frame = try validation.parseOwned(
+            self,
             available[0..total_len],
             header,
             parse_options,
@@ -17608,6 +17606,7 @@ test {
     _ = @import("runtime/handshake/head_budget_tests.zig");
     _ = handshake_acceptance;
     _ = @import("runtime/message_io_tests.zig");
+    _ = @import("runtime/message/tests/frame_allocation.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
