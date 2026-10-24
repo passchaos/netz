@@ -498,6 +498,10 @@ through the one owning HTTP/3 reader, preserving sibling DATAGRAMs while
 congestion delays submission. Invalid ownership, unnegotiated reliable reset,
 unsent prefixes, and active callback readers fail before cancellation changes
 stream state. Timeout and socket submission failure leave RESET/STOP retryable.
+If progress receives a QUIC connection close or a connection-scoped HTTP/3
+protocol failure, cancellation updates every shared Session and discards all
+their DATAGRAM queues before returning. A Session CLOSE remains isolated and
+its exact code/reason event stays readable while siblings continue operating.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

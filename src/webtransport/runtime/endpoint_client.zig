@@ -361,6 +361,7 @@ pub const Session = struct {
         pub const TimeoutErrorType = TimeoutError;
         pub const validateOwner = Session.validateOwner;
         pub const ensureConnectionOpen = Client.ensureConnectionOpen;
+        pub const observeConnection = Client.observeConnection;
     });
 
     pub const resetStreamWithTimeout = StreamControl.resetStreamWithTimeout;

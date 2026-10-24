@@ -17,7 +17,7 @@ pub fn Controller(comptime Context: type) type {
         /// association prefix is added internally and never charged as data.
         pub fn resetStreamReliably(session: *Session, client: *Client, stream_id: u62, code: u32, reliable_size: u64) Error!void {
             try prepare(session, client);
-            defer _ = lifecycle.observe(&session.control, &client.h3, &session.streams);
+            defer observe(session, client);
             try streams.resetReliably(&client.h3.established.connection, &session.streams, stream_id, code, reliable_size);
         }
 
@@ -51,6 +51,15 @@ pub fn Controller(comptime Context: type) type {
             try lifecycle.ensureOpen(&session.control, &client.h3, &session.streams);
         }
 
+        fn observe(session: *Session, client: *Client) void {
+            // Any owning operation can receive connection termination while
+            // waiting for progress. Publish it to every shared Session before
+            // returning; scoped Session CLOSE still affects only this owner.
+            if (!Context.observeConnection(client)) {
+                _ = lifecycle.observe(&session.control, &client.h3, &session.streams);
+            }
+        }
+
         fn deadline(client: *Client, timeout: std.Io.Duration) TimeoutError!std.Io.Clock.Timestamp {
             if (timeout.nanoseconds <= 0) return error.Timeout;
             return .fromNow(client.h3.established.connection.endpoint.io, .{ .raw = timeout, .clock = .awake });
@@ -64,7 +73,7 @@ pub fn Controller(comptime Context: type) type {
             if (client.h3.dispatcherBound()) return error.InvalidDispatcherState;
             if (client.h3.callback_reader_active) return error.ConcurrentRead;
             try prepare(session, client);
-            defer _ = lifecycle.observe(&session.control, &client.h3, &session.streams);
+            defer observe(session, client);
             const connection = &client.h3.established.connection;
             while (true) {
                 _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
