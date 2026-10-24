@@ -611,6 +611,8 @@ Current protocol coverage includes:
   cancellation across socket failures, backpressure and receive deadlines,
   healthy sibling response progress, and explicit `ResponseEventResult` failure
   ownership transfer through `pollNextResponseEventOnceWithFailure`,
+  suspended readers after explicit request/response failure transfer and
+  server cancellation credit reclamation across RESET ACK and late upload FIN,
   shared handshake request/response DATA access with retained Content-Length
   cancellation, scoped truncated-frame errors and consumed-byte counts that
   survive receive-credit socket failures,

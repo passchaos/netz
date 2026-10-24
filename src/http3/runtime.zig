@@ -239,6 +239,7 @@ test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/response_failure_retry_tests.zig");
     _ = @import("runtime/receive/message_data_tests.zig");
+    _ = @import("runtime/receive/failure_ownership_tests.zig");
     _ = @import("runtime/stream/push/failure_tests.zig");
 }
 pub const StreamingResponseEvent = stream_events.Response;
@@ -7209,7 +7210,7 @@ pub const HandshakeServerSession = struct {
             false,
         ) catch |err| {
             const stream_id = self.streaming_requests.lastErrorStreamId();
-            if (request_failure.capture(failure_out, stream_id, err)) return err;
+            if (request_failure.capture(failure_out, stream_id, err, &self.streaming_requests)) return err;
             if (RequestFailure.fromError(stream_id, err)) |failure| {
                 self.pending_request_failures.append(failure);
                 self.streaming_requests.suspendFailedMessage(failure.stream_id);
@@ -7238,7 +7239,7 @@ pub const HandshakeServerSession = struct {
                 value.event,
                 single_attempt,
             ) catch |err| {
-                if (request_failure.capture(failure_out, value.entry.reader.streamId(), err)) return err;
+                if (request_failure.capture(failure_out, value.entry.reader.streamId(), err, &self.streaming_requests)) return err;
                 if (RequestFailure.fromError(value.entry.reader.streamId(), err)) |failure| {
                     self.pending_request_failures.append(failure);
                     self.streaming_requests.suspendFailedMessage(failure.stream_id);
@@ -7288,7 +7289,7 @@ pub const HandshakeServerSession = struct {
 
     fn retainRequestDataFailure(self: *HandshakeServerSession, stream_id: ?u62, err: Error, failure_out: ?*?RequestFailure) Error!void {
         if (RequestFailure.fromError(stream_id, err)) |failure| {
-            if (request_failure.capture(failure_out, stream_id, err)) return;
+            if (request_failure.capture(failure_out, stream_id, err, &self.streaming_requests)) return;
             self.pending_request_failures.append(failure);
             self.streaming_requests.suspendFailedMessage(failure.stream_id);
             try self.progressRequestPollFailures(failure.stream_id, null);
@@ -11359,7 +11360,10 @@ pub const HandshakeServerSession = struct {
         application_error_code: u64,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        defer if (!self.request_lifecycle.contains(stream_id)) {
+        defer if (!self.request_lifecycle.contains(stream_id) and
+            !self.request_streams.contains(stream_id) and
+            !self.streaming_requests.contains(stream_id))
+        {
             _ = self.pending_request_failures.take(stream_id);
         };
         return self.cancelRequestInternal(
@@ -11377,7 +11381,10 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
-        defer if (!self.request_lifecycle.contains(stream_id)) {
+        defer if (!self.request_lifecycle.contains(stream_id) and
+            !self.request_streams.contains(stream_id) and
+            !self.streaming_requests.contains(stream_id))
+        {
             _ = self.pending_request_failures.take(stream_id);
         };
         return self.cancelRequestInternalOnce(
@@ -11415,6 +11422,7 @@ pub const HandshakeServerSession = struct {
             application_error_code,
             cancel_qpack,
         );
+        _ = try self.established.connection.requestCompletedPeerStreamRelease(stream_id);
     }
 
     fn cancelRequestInternalOnce(
@@ -11440,6 +11448,7 @@ pub const HandshakeServerSession = struct {
         self.streaming_requests.remove(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
+        _ = try self.established.connection.requestCompletedPeerStreamRelease(stream_id);
     }
 
     pub fn rejectRequest(
@@ -20121,12 +20130,12 @@ pub const HandshakeClient = struct {
 
     fn retainResponsePollFailure(self: *HandshakeClient, id: ?u62, err: Error, failure_out: ?*?ResponseFailure) Error!void {
         if (ResponseFailure.fromError(id, err)) |failure| {
+            self.streaming_responses.suspendFailedMessage(failure.stream_id);
             if (failure_out) |output| {
                 output.* = failure;
                 return;
             }
             self.pending_response_failures.append(failure);
-            self.streaming_responses.suspendFailedMessage(failure.stream_id);
             try self.progressResponsePollFailures(failure.stream_id, null);
             return;
         }

@@ -1621,6 +1621,17 @@ deadline. The explicit `pollRequestEventOnceWithFailure` API can also take
 ownership of a failure previously retained by default polling. This state
 remains bounded by the existing live request limit.
 
+Fresh request and response failures transferred by explicit polling also
+suspend their readers until caller-owned cancellation completes. Further
+poll/read calls cannot rediscover the same parser failure, and other streams
+remain selectable. Server-side cancellation now registers completed receive
+halves for QUIC reclamation: RESET acknowledgment returns MAX_STREAMS credit,
+while a late FIN completes an initially unfinished upload's retirement. Failed
+application cancellation preserves pending rejection even when malformed
+HEADERS prevented the request from entering the application lifecycle. Real
+QUIC tests constrain the connection to one concurrent stream and verify a new
+request can proceed after ordinary or malformed-request cancellation.
+
 The handshake client's incremental response event polls retain the same
 cancellation ownership. A malformed response suspends only its reader, while
 healthy response streams can continue under cancellation backpressure. Socket

@@ -34,9 +34,12 @@ pub const Result = union(enum) {
     }
 };
 
-pub fn capture(output: ?*?Failure, stream_id: ?u62, err: anyerror) bool {
+/// Transferring rejection ownership also removes the failed reader from event
+/// selection. Routing remains alive until the caller submits cancellation.
+pub fn capture(output: ?*?Failure, stream_id: ?u62, err: anyerror, streams: *@import("../stream/set.zig").Set) bool {
     const sink = output orelse return false;
     sink.* = Failure.fromError(stream_id, err) orelse return false;
+    streams.suspendFailedMessage(sink.*.?.stream_id);
     return true;
 }
 
