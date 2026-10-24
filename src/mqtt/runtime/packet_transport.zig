@@ -578,7 +578,8 @@ pub const Transport = union(enum) {
     /// Read a packet while allowing a complete TCP read-ahead packet to use
     /// caller-owned storage. Other transports, TCP packets not complete in
     /// read-ahead once their length is known, and packets larger than `storage`
-    /// retain the ordinary owned-allocation behavior.
+    /// retain the ordinary owned-allocation behavior. DISCONNECT always owns
+    /// its bytes so event decoding can retain it across local failures.
     pub fn readPacketInto(
         self: *Transport,
         allocator: std.mem.Allocator,
@@ -602,8 +603,8 @@ pub const Transport = union(enum) {
     /// Broker-oriented variant of `readPacketInto` that reserves an aligned
     /// prefix on an owned TCP fallback. A returned packet exposes that backing
     /// allocation so a longer-lived representation can adopt it. Short TCP
-    /// packets still borrow `storage`; other transports keep their existing
-    /// ownership behavior.
+    /// packets other than DISCONNECT still borrow `storage`; other transports
+    /// keep their existing ownership behavior.
     pub fn readPacketIntoWithPrefix(
         self: *Transport,
         allocator: std.mem.Allocator,
@@ -1224,7 +1225,10 @@ fn readTcpPacketWithPolicy(
         const packet_len = frame.packet_len;
         if (packet_len > max_packet_size) return error.PacketTooLarge;
         if (caller_storage) |storage| {
-            if (packet_len <= storage.len and
+            // Terminal diagnostics can be retained after a decoder's local
+            // allocation failure. Own their bytes before consuming read-ahead
+            // so they never outlive a caller's temporary storage.
+            if (frame.fixed.packet_type != .disconnect and packet_len <= storage.len and
                 packet_len <= tcp.input.len)
             {
                 if (packet_len > buffered.len) {

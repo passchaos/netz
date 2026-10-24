@@ -5592,17 +5592,16 @@ pub const Broker = struct {
         slot.setUsername(null);
         slot.state.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
-        self.state_mutex.unlock(self.io);
-        state_locked = false;
-        self.deadline_driver.notify(self.io);
-        // The broker slot is now reusable and no code can observe this
-        // connection as active. Publish the listener capacity before closing
-        // the detached socket so a peer that observes EOF/reset can reconnect
-        // immediately without racing a stale capacity count.
+        // Publish broker-slot and listener-capacity availability together.
+        // Observers of active_connections == 0 must not race a listener cap
+        // still held by the detached transport generation.
         if (listener_capacity) |capacity| {
             capacity.release(self.io);
             capacity_claimed = false;
         }
+        self.state_mutex.unlock(self.io);
+        state_locked = false;
+        self.deadline_driver.notify(self.io);
         defer if (assigned_client_id) |client_id| {
             self.allocator.free(client_id);
         };

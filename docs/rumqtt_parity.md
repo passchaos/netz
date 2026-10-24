@@ -2623,6 +2623,18 @@ only as raw AUTH packet helpers:
   discard that diagnostic or read beyond it. Direct `readDisconnect` decoding
   retains the exact complete packet on local allocation failure and releases
   post-terminal queued data only after successful validation and consumption.
+- Client and broker event readers retain the same complete DISCONNECT packet
+  across local property-decoding allocation failures, including timeout,
+  Keep Alive, caller-storage and reserved-prefix variants. Short TCP terminal
+  packets own their bytes before read-ahead is consumed, so retries never
+  depend on a caller's temporary storage. The reserved-prefix broker path now
+  consumes pending packets before transport read-ahead and obeys both local
+  and peer termination. Caller-output events remain untouched on failure;
+  complete packet traffic counters are charged once across decode retries.
+  A connection-owned terminal slot preserves these retries without allocating
+  pending queue state for ordinary borrowed TCP acknowledgements. Broker slot
+  and listener capacity availability are published together during cleanup;
+  local socket shutdown is not an acknowledgement of server-side cleanup.
 - A live broker policy can reject re-authentication with a validated
   DISCONNECT reason and optional properties. A successful write atomically
   retires the connection, stops its event loop and prevents any later MQTT

@@ -8,6 +8,16 @@ const runtime = context.TestContext.runtime_mod;
 const disconnectAll = context.TestContext.disconnectAllFn;
 const waitForPeerClose = context.TestContext.waitForPeerCloseFn;
 
+fn waitForNoConnections(broker: *Broker) !void {
+    // Local DISCONNECT now shuts down the client socket immediately. Its EOF
+    // does not acknowledge the server's Session/Will/capacity cleanup.
+    for (0..2000) |_| {
+        if (broker.stats().active_connections == 0) return;
+        try std.Io.sleep(broker.io, .fromMilliseconds(1), .awake);
+    }
+    return error.Timeout;
+}
+
 const session_expiry = [_]mqtt.Property{
     .{ .four_byte = .{
         .id = .session_expiry_interval,
@@ -1769,6 +1779,7 @@ test "finite listeners share global admitted connection capacity" {
 
     try held.disconnect(0);
     try waitForPeerClose(&held);
+    try waitForNoConnections(&broker);
     var replacement = try runtime.Client.connect(
         allocator,
         io,
@@ -1932,6 +1943,7 @@ test "listener supervisor rejects over-capacity peer and reuses slot" {
     try first.ping();
     try first.disconnect(0);
     try waitForPeerClose(&first);
+    try waitForNoConnections(&broker);
 
     // Accept-worker concurrency is independent from the admitted connection
     // limit. A worker must accept again after the live slot is released.
@@ -2042,6 +2054,7 @@ test "listener supervisor shares capacity across one logical listener group" {
     );
     try held.disconnect(0);
     try waitForPeerClose(&held);
+    try waitForNoConnections(&broker);
 
     var replacement = try runtime.Client.connect(
         allocator,
