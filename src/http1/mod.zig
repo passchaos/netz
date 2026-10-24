@@ -3,6 +3,7 @@ const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
 const early_data = @import("../http/early_data.zig");
 const chunk_extension = @import("chunk_extension.zig");
+const response_framing = @import("response_framing.zig");
 pub const content_coding = @import("../http/content_coding.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -15,6 +16,7 @@ pub const Header = wire.Header;
 
 test {
     _ = @import("runtime/client_pool_tests.zig");
+    _ = @import("head/body_framing_tests.zig");
 }
 
 pub const Error = wire.Error || error{
@@ -710,24 +712,11 @@ fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!Resp
     const version = try Version.parse(status_line.version);
     const status = try parseStatusCode(status_line.status_code);
     try validateReasonPhrase(status_line.reason);
-    try validateTransferEncodingForVersion(version, parsed.headers);
+    const metadata = try response_framing.inspect(version, status, context.request_method, parsed.headers);
     early_data.validateForbiddenFields(parsed.headers) catch
         return error.InvalidResponse;
-    const saw_transfer_encoding = wire.findHeader(
-        parsed.headers,
-        "transfer-encoding",
-    ) != null;
-    const saw_content_length = wire.findHeader(
-        parsed.headers,
-        "content-length",
-    ) != null;
-    const declared_content_length = if (saw_transfer_encoding)
-        null
-    else
-        try contentLength(parsed.headers);
-
-    const forbidden = responseForbidsBody(status, context.request_method);
-    const framing: BodyFraming = if (forbidden) .none else switch (bodyFraming(parsed.headers) catch |err| switch (err) {
+    const declared_content_length = try metadata.contentLength(parsed.headers);
+    const framing: BodyFraming = if (!metadata.body_allowed) .none else switch (bodyFraming(parsed.headers) catch |err| switch (err) {
         error.InvalidTransferEncoding => if (try responseTransferEncodingIsCloseDelimited(parsed.headers))
             .close_delimited
         else
@@ -741,7 +730,7 @@ fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!Resp
         .none => .close_delimited,
         else => |value| value,
     };
-    const exposed_headers = if (saw_transfer_encoding)
+    const exposed_headers = if (metadata.has_transfer_encoding)
         stripHeaderInPlace(parsed.headers, "content-length")
     else
         parsed.headers;
@@ -751,10 +740,10 @@ fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!Resp
         .reason = status_line.reason,
         .headers = exposed_headers,
         .body_framing = framing,
-        .body_allowed = !forbidden,
+        .body_allowed = metadata.body_allowed,
         .content_length = declared_content_length,
         .head_len = parsed.head_len,
-        .must_close = saw_transfer_encoding and saw_content_length,
+        .must_close = metadata.must_close,
     };
 }
 
@@ -1159,19 +1148,11 @@ pub fn parseResponseWithContext(
         },
     );
     errdefer parsed_headers.deinit(allocator);
-    try validateTransferEncodingForVersion(version, parsed_headers.headers);
+    const metadata = try response_framing.inspect(version, status, context.request_method, parsed_headers.headers);
     early_data.validateForbiddenFields(parsed_headers.headers) catch
         return error.InvalidResponse;
-    const saw_transfer_encoding = wire.findHeader(
-        parsed_headers.headers,
-        "transfer-encoding",
-    ) != null;
-    const saw_content_length = wire.findHeader(
-        parsed_headers.headers,
-        "content-length",
-    ) != null;
     const consumed_head = head_end + 4;
-    const parsed_body = if (responseForbidsBody(status, context.request_method))
+    const parsed_body = if (!metadata.body_allowed)
         ParsedBody{
             .framing = .none,
             .body = bytes[consumed_head..consumed_head],
@@ -1180,7 +1161,7 @@ pub fn parseResponseWithContext(
     else
         try parseResponseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
-    if (saw_transfer_encoding) {
+    if (metadata.has_transfer_encoding) {
         try parsed_headers.stripContentLength(allocator);
     }
     early_data.validateForbiddenFields(parsed_body.trailers) catch
@@ -1193,13 +1174,13 @@ pub fn parseResponseWithContext(
         .headers = parsed_headers.headers,
         .body = parsed_body.body,
         .body_framing = parsed_body.framing,
-        .body_allowed = !responseForbidsBody(status, context.request_method),
+        .body_allowed = metadata.body_allowed,
         .trailers = parsed_body.trailers,
         .body_storage = parsed_body.body_storage,
         .header_value_storage = parsed_headers.value_storage,
         .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
-        .must_close = saw_transfer_encoding and saw_content_length,
+        .must_close = metadata.must_close,
     };
 }
 
@@ -2146,20 +2127,7 @@ pub fn validateOutgoingRequestFramingForMethod(
     }
 }
 
-fn responseForbidsBody(status: u16, request_method: ?Method) bool {
-    if (statusCodeForbidsBody(status)) return true;
-    return switch (request_method orelse return false) {
-        // RFC 9110: HEAD responses have the same headers as GET but never carry
-        // content.  Hyper applies the request method when deciding response body
-        // length; doing the same prevents a HEAD Content-Length from consuming
-        // the next pipelined response as body bytes.
-        .HEAD => true,
-        // A successful CONNECT switches the connection to a tunnel after the
-        // header section.  From HTTP's perspective there is no response body.
-        .CONNECT => status >= 200 and status < 300,
-        else => false,
-    };
-}
+const responseForbidsBody = response_framing.forbidsBody;
 
 pub fn writeRequest(
     list: *std.ArrayList(u8),

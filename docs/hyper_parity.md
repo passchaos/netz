@@ -1252,6 +1252,14 @@ Regressions retain Content-Length 123 under a one-byte body budget across seven
 live HTTP/2 receive shapes, check H1 pipeline boundaries and H1/H3 response-head
 decoder factories, and preserve the encoded GET failure control. The same
 request semantics move with HTTP/3 shared-pool/redirect and push aggregation.
+HTTP/1 response-head parsing now applies RFC 9112 section 6.3's bodyless
+precedence before interpreting Content-Length or transfer-coding metadata.
+Invalid, overflowing or conflicting lengths cannot move the known head-only
+boundary; a valid representation length remains available to callers.
+Streaming HEAD/204/304 responses preserve subsequent pipelined responses under
+both one-byte and coalesced reads. Successful CONNECT leaves its first tunnel
+bytes intact even with unusable framing fields, including HTTP/1.0 responses.
+Ordinary GET and unsuccessful CONNECT retain strict body-framing validation.
 
 The same response surface now exposes zero-allocation `headers()` and
 `trailers()` iterators, plus case-insensitive `headerValues()` and
