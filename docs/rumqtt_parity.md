@@ -398,6 +398,26 @@ The focused runtime/client/reconnect, queue, TLS, WebSocket and Unix matrix
 passes 262 tests in Debug and ReleaseFast; package reachability passes two tests,
 and the two-Mosquitto OutboundBridge gate passes its QoS/restart matrix.
 
+Outgoing PUBLISH, SUBSCRIBE and UNSUBSCRIBE now reserve identifiers from the
+same connection-local sender space, as required by MQTT 5 section 2.2.1
+(`MQTT-2.2.1-3`). A subscription command keeps its identifier after a successful
+write followed by timeout or pending-queue failure. It releases that identifier
+only after a parsed, property-validated SUBACK/UNSUBACK with the expected reason
+count; legacy UNSUBACK remains identifier-only. Ordinary typed readers also
+settle late responses. A later exchange queues earlier known subscription ACKs
+in wire order while waiting for its own identifier. Wrong-stage, malformed and
+wrong-count acknowledgements cannot release an active command, and PUBLISH
+completion rejects publication ACKs addressed to a subscription command.
+Reservation, encoding and packet-size preflight failures roll back command
+ownership and the allocation cursor. These control commands do not consume
+the QoS PUBLISH Receive Maximum window. Shared allocation and sparse/dense
+storage live under `runtime/packet_identifiers/`, with adjacent tests for the
+complete 1..65,535 shared space, wraparound, independent incoming ownership,
+allocation rollback and MQTT 3.1/3.1.1/5 late-ACK recovery.
+Validation covers the Debug MQTT/session matrix, focused Debug/ReleaseFast
+identifier and subscription tests, package reachability, and real Mosquitto
+publish, Mosquitto CLI client and rumqttc 0.25.1 interoperability gates.
+
 The reconnect deadline now also spans recovery of existing QoS 1/2 state after
 CONNACK. PUBLISH prefix/payload output and PUBREL replay receive the same
 absolute timestamp, and each drain checks that budget before selecting the
@@ -4819,9 +4839,12 @@ proxy evidence for the entire suite.
    The connection-local Packet Identifier tracker now replaces five embedded
    65,536-bit tables (40 KiB in every connection, even before QoS traffic)
    with independent incoming/outgoing sparse stage maps. Each direction
-   promotes transactionally after 1,024 live identifiers to a bounded 16-KiB
-   two-bit table, retaining the complete 1..65,535 identifier space without
-   allowing hash overhead to grow without bound. Incoming and outgoing maps
+   promotes transactionally after 1,024 live identifiers to bounded packed
+   tables, retaining the complete 1..65,535 identifier space without allowing
+   stage-map hash overhead to grow without bound. Incoming stages use 16 KiB;
+   outgoing stages now use 32 KiB to cover subscription commands as well as
+   QoS PUBLISH, with expected control-response counts allocated only when
+   needed. Incoming and outgoing maps
    remain physically separate for the runtime's concurrent reader and
    serialized writer, while QoS 2 stage transitions are allocation-free. A
    five-pair, CPU-0/1, fixed-binary 32-publisher/32-subscriber comparison
@@ -4864,11 +4887,11 @@ proxy evidence for the entire suite.
    and WSS connections retain only an optional pointer. The 88-byte queue,
    cursor, and overflow record used by blocking `ping*` calls is likewise
    allocated before the first PINGREQ, so broker connections and event-loop
-   clients do not reserve it. The two 32-byte Packet Identifier direction
+   clients do not reserve it. The incoming/outgoing Packet Identifier
    descriptors and the two 32-byte Topic Alias tables also keep independent
    lazy pointers, matching the runtime's concurrent-reader/serialized-writer
-   ownership while avoiding each structure until its direction first sees QoS
-   1/2 traffic or an alias mapping. Finally, each established connection keeps
+   ownership while avoiding each structure until its direction first needs a
+   Packet Identifier or an alias mapping. Finally, each established connection keeps
    a 16-byte projection of the 64-byte public `Limits`: socket tuning, PROXY
    parsing policy, and admission timeout remain in listener/connector state,
    while packet size and blocking-PING queue size survive in that projection;

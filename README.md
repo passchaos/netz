@@ -1506,7 +1506,10 @@ Current protocol coverage includes:
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   adaptive connection-local Packet Identifier tracking with independent
   incoming/outgoing sparse maps and bounded dense fallback for unusually large
-  inflight windows, plus a single-owner reconnect command/event driver whose
+  inflight windows, a shared outgoing PUBLISH/SUBSCRIBE/UNSUBSCRIBE identifier
+  space that retains timed-out control exchanges until their validated ACKs,
+  late subscription ACK preservation, and transactional local-failure rollback,
+  plus a single-owner reconnect command/event driver whose
   managed network worker can run on a dedicated OS thread or the caller's
   existing `std.Io` executor with the same stop, bounded-wait, terminal-error,
   and deinit contract, plus reconnecting one-attempt publishes whose returned

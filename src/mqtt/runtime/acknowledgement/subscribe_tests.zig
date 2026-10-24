@@ -113,6 +113,7 @@ fn receive(protocol: mqtt.ProtocolVersion, mode: Mode) !void {
         .normal, .earlier_ping => suback = try attempt,
         .overflow, .byte_overflow => {
             try std.testing.expectError(error.TooManyPendingPackets, attempt);
+            try std.testing.expect(client.hasOutgoingPacketIdentifier(1));
             // A second operation cannot write while emergency storage is full.
             try std.testing.expectError(error.TooManyPendingPackets, client.subscribe(&.{.{ .topic_filter = "subscribe/#" }}, .{}));
         },
@@ -135,7 +136,9 @@ fn receive(protocol: mqtt.ProtocolVersion, mode: Mode) !void {
     if (suback) |owned| {
         try std.testing.expectEqual(@as(u16, 1), owned.suback.packet_id);
         try std.testing.expectEqualSlices(u8, &.{0}, owned.suback.reason_codes);
+        try std.testing.expect(!client.hasOutgoingPacketIdentifier(1));
     }
+    if (mode == .wrong_id or mode == .wrong_count) try std.testing.expect(client.hasOutgoingPacketIdentifier(1));
     var after = try client.readPublish();
     defer after.deinit(allocator);
     try std.testing.expectEqualStrings("subscribe/after", after.publish.topic);

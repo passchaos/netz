@@ -1,4 +1,15 @@
 const std = @import("std");
+const Storage = @import("packet_identifiers/storage.zig").Storage;
+const Incoming = Storage(u2);
+const Outgoing = struct {
+    stages: Storage(u3) = .{},
+    filter_counts: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+
+    fn deinit(self: *Outgoing, allocator: std.mem.Allocator) void {
+        self.stages.deinit(allocator);
+        self.filter_counts.deinit(allocator);
+    }
+};
 
 /// Sparse connection-local MQTT Packet Identifier ownership.
 ///
@@ -13,14 +24,16 @@ pub const State = struct {
         outgoing_qos1,
         outgoing_qos2,
         outgoing_qos2_pubrel,
+        outgoing_subscribe,
+        outgoing_unsubscribe,
     };
 
     // Keep the two MQTT Packet Identifier spaces physically separate and
-    // allocate each only when its direction first sees QoS 1/2 traffic. A
+    // allocate each only when its direction first needs a Packet Identifier. A
     // connection may have one receive owner and one serialized writer active
     // concurrently; neither direction initializes or mutates the other's map.
-    incoming: ?*DirectionState = null,
-    outgoing: ?*DirectionState = null,
+    incoming: ?*Incoming = null,
+    outgoing: ?*Outgoing = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.incoming) |entries| {
@@ -35,16 +48,21 @@ pub const State = struct {
     }
 
     pub fn contains(self: *const State, packet_id: u16, stage: Stage) bool {
-        const entries = self.entriesForConst(stage) orelse return false;
-        return entries.contains(
-            packet_id,
-            code(stage),
-        );
+        return switch (direction(stage)) {
+            .incoming => if (self.incoming) |entries| entries.contains(packet_id, @intCast(code(stage))) else false,
+            .outgoing => if (self.outgoing) |entries| entries.stages.contains(packet_id, code(stage)) else false,
+        };
     }
 
     pub fn containsOutgoing(self: *const State, packet_id: u16) bool {
         const outgoing = self.outgoing orelse return false;
-        return outgoing.value(packet_id) != 0;
+        return outgoing.stages.value(packet_id) != 0;
+    }
+
+    pub fn containsOutgoingPublish(self: *const State, packet_id: u16) bool {
+        const outgoing = self.outgoing orelse return false;
+        const stage_code = outgoing.stages.value(packet_id);
+        return stage_code >= 1 and stage_code <= 3;
     }
 
     /// Add one stage, returning false when it was already present.
@@ -55,22 +73,55 @@ pub const State = struct {
         stage: Stage,
     ) std.mem.Allocator.Error!bool {
         std.debug.assert(packet_id != 0);
-        if (self.entriesFor(stage)) |entries| {
-            return entries.add(allocator, packet_id, code(stage));
+        switch (direction(stage)) {
+            .incoming => {
+                if (self.incoming) |entries| return entries.add(allocator, packet_id, @intCast(code(stage)));
+                const entries = try allocator.create(Incoming);
+                entries.* = .{};
+                errdefer allocator.destroy(entries);
+                errdefer entries.deinit(allocator);
+                const added = try entries.add(allocator, packet_id, @intCast(code(stage)));
+                self.incoming = entries;
+                return added;
+            },
+            .outgoing => {
+                if (self.outgoing) |entries| return entries.stages.add(allocator, packet_id, code(stage));
+                const entries = try allocator.create(Outgoing);
+                entries.* = .{};
+                errdefer allocator.destroy(entries);
+                errdefer entries.deinit(allocator);
+                const added = try entries.stages.add(allocator, packet_id, code(stage));
+                self.outgoing = entries;
+                return added;
+            },
         }
-        const entries = try allocator.create(DirectionState);
-        entries.* = .{};
-        errdefer allocator.destroy(entries);
-        errdefer entries.deinit(allocator);
-        const added = try entries.add(allocator, packet_id, code(stage));
-        self.setEntriesFor(stage, entries);
-        return added;
     }
 
-    /// Remove one stage and retire an entry once neither direction owns it.
+    /// Reserve a control exchange's stage and expected response count before
+    /// writing. Either both pieces commit or the identifier remains unused.
+    pub fn addControl(self: *State, allocator: std.mem.Allocator, packet_id: u16, stage: Stage, filter_count: usize) std.mem.Allocator.Error!void {
+        std.debug.assert(stage == .outgoing_subscribe or stage == .outgoing_unsubscribe);
+        std.debug.assert(!self.containsOutgoing(packet_id));
+        _ = try self.add(allocator, packet_id, stage);
+        errdefer _ = self.remove(packet_id, stage);
+        try self.outgoing.?.filter_counts.putNoClobber(allocator, packet_id, filter_count);
+    }
+
+    pub fn controlFilterCount(self: *const State, packet_id: u16, stage: Stage) ?usize {
+        if (!self.contains(packet_id, stage)) return null;
+        return self.outgoing.?.filter_counts.get(packet_id);
+    }
+
+    /// Remove the matching stage in its own direction, including control data.
     pub fn remove(self: *State, packet_id: u16, stage: Stage) bool {
-        const entries = self.entriesFor(stage) orelse return false;
-        return entries.remove(packet_id, code(stage));
+        const removed = switch (direction(stage)) {
+            .incoming => if (self.incoming) |entries| entries.remove(packet_id, @intCast(code(stage))) else false,
+            .outgoing => if (self.outgoing) |entries| entries.stages.remove(packet_id, code(stage)) else false,
+        };
+        if (removed and (stage == .outgoing_subscribe or stage == .outgoing_unsubscribe)) {
+            _ = self.outgoing.?.filter_counts.remove(packet_id);
+        }
+        return removed;
     }
 
     /// Move an existing identifier between QoS stages without allocation.
@@ -81,56 +132,25 @@ pub const State = struct {
         to: Stage,
     ) bool {
         std.debug.assert(direction(from) == direction(to));
-        const entries = self.entriesFor(from) orelse return false;
-        return entries.transition(
-            packet_id,
-            code(from),
-            code(to),
-        );
+        return switch (direction(from)) {
+            .incoming => if (self.incoming) |entries| entries.transition(packet_id, @intCast(code(from)), @intCast(code(to))) else false,
+            .outgoing => if (self.outgoing) |entries| entries.stages.transition(packet_id, code(from), code(to)) else false,
+        };
     }
 
     pub fn clearRetainingCapacity(self: *State) void {
         if (self.incoming) |entries| entries.clearRetainingCapacity();
-        if (self.outgoing) |entries| entries.clearRetainingCapacity();
+        if (self.outgoing) |entries| {
+            entries.stages.clearRetainingCapacity();
+            entries.filter_counts.clearRetainingCapacity();
+        }
     }
 
     pub fn count(self: *const State, stage: Stage) usize {
-        const entries = self.entriesForConst(stage) orelse return 0;
-        return entries.count(code(stage));
-    }
-
-    fn entriesFor(self: *State, stage: Stage) ?*DirectionState {
         return switch (direction(stage)) {
-            .incoming => self.incoming,
-            .outgoing => self.outgoing,
+            .incoming => if (self.incoming) |entries| entries.count(@intCast(code(stage))) else 0,
+            .outgoing => if (self.outgoing) |entries| entries.stages.count(code(stage)) else 0,
         };
-    }
-
-    fn entriesForConst(
-        self: *const State,
-        stage: Stage,
-    ) ?*const DirectionState {
-        return switch (direction(stage)) {
-            .incoming => self.incoming,
-            .outgoing => self.outgoing,
-        };
-    }
-
-    fn setEntriesFor(
-        self: *State,
-        stage: Stage,
-        entries: *DirectionState,
-    ) void {
-        switch (direction(stage)) {
-            .incoming => {
-                std.debug.assert(self.incoming == null);
-                self.incoming = entries;
-            },
-            .outgoing => {
-                std.debug.assert(self.outgoing == null);
-                self.outgoing = entries;
-            },
-        }
     }
 
     const Direction = enum { incoming, outgoing };
@@ -141,163 +161,20 @@ pub const State = struct {
             .outgoing_qos1,
             .outgoing_qos2,
             .outgoing_qos2_pubrel,
+            .outgoing_subscribe,
+            .outgoing_unsubscribe,
             => .outgoing,
         };
     }
 
-    fn code(stage: Stage) u2 {
+    fn code(stage: Stage) u3 {
         return switch (stage) {
             .incoming_qos1, .outgoing_qos1 => 1,
             .incoming_qos2, .outgoing_qos2 => 2,
             .outgoing_qos2_pubrel => 3,
+            .outgoing_subscribe => 4,
+            .outgoing_unsubscribe => 5,
         };
-    }
-};
-
-const DirectionState = struct {
-    const packet_identifier_slots =
-        @as(usize, std.math.maxInt(u16)) + 1;
-    const identifiers_per_byte = 4;
-    const Dense = [packet_identifier_slots / identifiers_per_byte]u8;
-    const sparse_limit = 1024;
-    const Map = std.AutoHashMapUnmanaged(u16, u2);
-
-    sparse: Map = .empty,
-    dense: ?*Dense = null,
-
-    fn deinit(self: *DirectionState, allocator: std.mem.Allocator) void {
-        self.sparse.deinit(allocator);
-        if (self.dense) |dense| allocator.destroy(dense);
-        self.* = .{};
-    }
-
-    fn value(self: *const DirectionState, packet_id: u16) u2 {
-        return if (self.dense) |dense|
-            denseValue(dense, packet_id)
-        else
-            self.sparse.get(packet_id) orelse 0;
-    }
-
-    fn contains(
-        self: *const DirectionState,
-        packet_id: u16,
-        expected: u2,
-    ) bool {
-        return self.value(packet_id) == expected;
-    }
-
-    fn add(
-        self: *DirectionState,
-        allocator: std.mem.Allocator,
-        packet_id: u16,
-        new_value: u2,
-    ) std.mem.Allocator.Error!bool {
-        std.debug.assert(new_value != 0);
-        const current = self.value(packet_id);
-        if (current != 0) {
-            std.debug.assert(current == new_value);
-            return false;
-        }
-        if (self.dense) |dense| {
-            setDenseValue(dense, packet_id, new_value);
-            return true;
-        }
-        if (self.sparse.count() >= sparse_limit) {
-            try self.promoteToDense(allocator);
-            setDenseValue(self.dense.?, packet_id, new_value);
-            return true;
-        }
-        try self.sparse.putNoClobber(allocator, packet_id, new_value);
-        return true;
-    }
-
-    fn remove(
-        self: *DirectionState,
-        packet_id: u16,
-        expected: u2,
-    ) bool {
-        if (!self.contains(packet_id, expected)) return false;
-        if (self.dense) |dense| {
-            setDenseValue(dense, packet_id, 0);
-        } else {
-            const removed = self.sparse.remove(packet_id);
-            std.debug.assert(removed);
-        }
-        return true;
-    }
-
-    fn transition(
-        self: *DirectionState,
-        packet_id: u16,
-        from: u2,
-        to: u2,
-    ) bool {
-        if (!self.contains(packet_id, from)) return false;
-        if (self.dense) |dense| {
-            setDenseValue(dense, packet_id, to);
-        } else {
-            self.sparse.getPtr(packet_id).?.* = to;
-        }
-        return true;
-    }
-
-    fn clearRetainingCapacity(self: *DirectionState) void {
-        if (self.dense) |dense| {
-            @memset(dense, 0);
-        } else {
-            self.sparse.clearRetainingCapacity();
-        }
-    }
-
-    fn count(self: *const DirectionState, expected: u2) usize {
-        var result: usize = 0;
-        if (self.dense) |dense| {
-            for (1..packet_identifier_slots) |packet_id| {
-                result += @intFromBool(denseValue(
-                    dense,
-                    @intCast(packet_id),
-                ) == expected);
-            }
-            return result;
-        }
-        var values = self.sparse.valueIterator();
-        while (values.next()) |entry| {
-            result += @intFromBool(entry.* == expected);
-        }
-        return result;
-    }
-
-    fn promoteToDense(
-        self: *DirectionState,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error!void {
-        const dense = try allocator.create(Dense);
-        @memset(dense, 0);
-        var entries = self.sparse.iterator();
-        while (entries.next()) |entry| {
-            setDenseValue(dense, entry.key_ptr.*, entry.value_ptr.*);
-        }
-        self.sparse.deinit(allocator);
-        self.sparse = .empty;
-        self.dense = dense;
-    }
-
-    fn denseValue(dense: *const Dense, packet_id: u16) u2 {
-        const index = @as(usize, packet_id) / identifiers_per_byte;
-        const shift: u3 = @intCast(
-            (@as(usize, packet_id) % identifiers_per_byte) * 2,
-        );
-        return @truncate(dense[index] >> shift);
-    }
-
-    fn setDenseValue(dense: *Dense, packet_id: u16, new_value: u2) void {
-        const index = @as(usize, packet_id) / identifiers_per_byte;
-        const shift: u3 = @intCast(
-            (@as(usize, packet_id) % identifiers_per_byte) * 2,
-        );
-        const clear_mask = ~(@as(u8, 0b11) << shift);
-        dense[index] = (dense[index] & clear_mask) |
-            (@as(u8, new_value) << shift);
     }
 };
 
@@ -341,7 +218,7 @@ test "MQTT packet identifier state is sparse and direction independent" {
     try std.testing.expect(state.contains(65_535, .incoming_qos2));
     try std.testing.expect(state.remove(65_535, .incoming_qos2));
     try std.testing.expectEqual(@as(usize, 0), state.incoming.?.sparse.count());
-    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.sparse.count());
+    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.stages.sparse.count());
 }
 
 test "MQTT packet identifier QoS 2 transition retains allocation" {
@@ -374,7 +251,7 @@ test "MQTT packet identifier QoS 2 transition retains allocation" {
     try std.testing.expect(state.contains(42, .outgoing_qos2_pubrel));
     state.clearRetainingCapacity();
     try std.testing.expect(state.incoming == null);
-    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.sparse.count());
+    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.stages.sparse.count());
 }
 
 test "MQTT packet identifier allocation failure changes no state" {
@@ -407,7 +284,7 @@ test "MQTT packet identifier state promotes to bounded dense storage" {
     var state: State = .{};
     defer state.deinit(std.testing.allocator);
 
-    for (1..DirectionState.sparse_limit + 2) |packet_id| {
+    for (1..Incoming.sparse_limit + 2) |packet_id| {
         try std.testing.expect(try state.add(
             std.testing.allocator,
             @intCast(packet_id),
@@ -416,13 +293,13 @@ test "MQTT packet identifier state promotes to bounded dense storage" {
     }
     try std.testing.expect(state.incoming.?.dense != null);
     try std.testing.expectEqual(
-        @as(usize, DirectionState.sparse_limit + 1),
+        @as(usize, Incoming.sparse_limit + 1),
         state.count(.incoming_qos1),
     );
     try std.testing.expect(state.remove(1, .incoming_qos1));
     try std.testing.expect(!state.contains(1, .incoming_qos1));
     try std.testing.expect(state.contains(
-        @intCast(DirectionState.sparse_limit + 1),
+        @intCast(Incoming.sparse_limit + 1),
         .incoming_qos1,
     ));
     try std.testing.expect(try state.add(
@@ -443,32 +320,60 @@ test "MQTT packet identifier dense promotion failure preserves sparse state" {
     var state: State = .{};
     defer state.deinit(failing.allocator());
 
-    for (1..DirectionState.sparse_limit + 1) |packet_id| {
+    for (1..Incoming.sparse_limit + 1) |packet_id| {
         try std.testing.expect(try state.add(
             failing.allocator(),
             @intCast(packet_id),
             .outgoing_qos1,
         ));
     }
-    try std.testing.expect(state.outgoing.?.dense == null);
+    try std.testing.expect(state.outgoing.?.stages.dense == null);
     const allocations = failing.allocations;
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
         state.add(
             failing.allocator(),
-            @intCast(DirectionState.sparse_limit + 1),
+            @intCast(Incoming.sparse_limit + 1),
             .outgoing_qos1,
         ),
     );
     try std.testing.expectEqual(allocations, failing.allocations);
-    try std.testing.expect(state.outgoing.?.dense == null);
+    try std.testing.expect(state.outgoing.?.stages.dense == null);
     try std.testing.expectEqual(
-        @as(usize, DirectionState.sparse_limit),
+        @as(usize, Incoming.sparse_limit),
         state.count(.outgoing_qos1),
     );
     try std.testing.expect(!state.contains(
-        @intCast(DirectionState.sparse_limit + 1),
+        @intCast(Incoming.sparse_limit + 1),
         .outgoing_qos1,
     ));
+}
+
+test "MQTT packet identifier control metadata rolls back on allocation failure" {
+    var succeeded = false;
+    for (0..16) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var state: State = .{};
+        defer state.deinit(failing.allocator());
+        state.addControl(failing.allocator(), 42, .outgoing_subscribe, 3) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(!state.containsOutgoing(42));
+            try std.testing.expectEqual(@as(?usize, null), state.controlFilterCount(42, .outgoing_subscribe));
+            continue;
+        };
+        succeeded = true;
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectEqual(@as(?usize, 3), state.controlFilterCount(42, .outgoing_subscribe));
+        try std.testing.expect(!state.remove(42, .outgoing_unsubscribe));
+        try std.testing.expectEqual(@as(?usize, 3), state.controlFilterCount(42, .outgoing_subscribe));
+        try std.testing.expect(state.remove(42, .outgoing_subscribe));
+        try std.testing.expectEqual(@as(?usize, null), state.controlFilterCount(42, .outgoing_subscribe));
+        try state.addControl(failing.allocator(), 42, .outgoing_unsubscribe, 2);
+        state.clearRetainingCapacity();
+        try std.testing.expectEqual(@as(?usize, null), state.controlFilterCount(42, .outgoing_unsubscribe));
+        try std.testing.expect(!state.containsOutgoing(42));
+        break;
+    }
+    try std.testing.expect(succeeded);
 }

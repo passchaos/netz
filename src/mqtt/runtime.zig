@@ -4867,8 +4867,8 @@ pub const Connection = struct {
         };
     }
 
-    /// Whether this Network Connection currently owns an outbound QoS
-    /// transaction with the supplied Packet Identifier, at any stage. Broker
+    /// Whether this Network Connection currently owns an outbound PUBLISH,
+    /// SUBSCRIBE or UNSUBSCRIBE transaction with this Packet Identifier. Broker
     /// event loops use this before applying an acknowledgement so an unknown
     /// identifier can be ignored without weakening wrong-stage validation.
     pub fn hasOutgoingPacketIdentifier(
@@ -5211,6 +5211,7 @@ pub const Connection = struct {
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer suback.deinit(self.allocator);
         try self.validateIncomingProperties(suback.properties);
+        try ControlExchange.finish(self, .suback, suback.packet_id, suback.reason_codes.len);
         return .{ .packet = packet, .suback = suback };
     }
 
@@ -5293,6 +5294,7 @@ pub const Connection = struct {
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsuback.deinit(self.allocator);
         try self.validateIncomingProperties(unsuback.properties);
+        try ControlExchange.finish(self, .unsuback, unsuback.packet_id, unsuback.reason_codes.len);
         return .{ .packet = packet, .unsuback = unsuback };
     }
 
@@ -6850,6 +6852,15 @@ pub const Connection = struct {
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
         }
+
+        pub fn hasControl(connection: *const Connection, packet_type: mqtt.PacketType, packet_id: u16) bool {
+            const stage: packet_identifiers.State.Stage = switch (packet_type) {
+                .suback => .outgoing_subscribe,
+                .unsuback => .outgoing_unsubscribe,
+                else => return false,
+            };
+            return connection.packet_identifiers.controlFilterCount(packet_id, stage) != null;
+        }
     });
 
     const PublishCompletion = @import("runtime/acknowledgement/publish.zig").Controller(struct {
@@ -6862,13 +6873,16 @@ pub const Connection = struct {
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
         pub const parseAck = Connection.parseReadAck;
-        pub const hasOutgoing = Connection.hasOutgoingPacketIdentifier;
         pub const applyPubAck = Connection.applyPubAck;
         pub const applyPubRec = Connection.applyPubRecUntil;
         pub const applyPubComp = Connection.applyPubComp;
 
         pub fn contains(connection: *const Connection, packet_id: u16, stage: packet_identifiers.State.Stage) bool {
             return connection.packet_identifiers.contains(packet_id, stage);
+        }
+
+        pub fn hasOutgoing(connection: *const Connection, packet_id: u16) bool {
+            return connection.packet_identifiers.containsOutgoingPublish(packet_id);
         }
     });
 
@@ -6894,10 +6908,10 @@ pub const Connection = struct {
         pub const validateType = Connection.validateOutgoingPacketType;
         pub const validateSubscribe = Connection.validateOutgoingSubscribe;
         pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
-        pub const nextPacketId = Connection.nextPacketId;
+        pub const reserve = OutgoingIdentifiers.reserve;
         pub const writePacket = Connection.writeGeneratedPacket;
         pub const writePacketWithDeadline = Connection.writeGeneratedPacketWithDeadline;
-        pub const readAck = AckReader.read;
+        pub const readAck = AckReader.readForIdentifier;
         pub const finishSubAck = Connection.finishReadSubAck;
         pub const finishUnsubAck = Connection.finishReadUnsubAck;
         pub const validateUnsubAck = validateUnsubAckResponse;
@@ -7019,41 +7033,22 @@ pub const Connection = struct {
         return .{ .packet = packet, .ack = ack };
     }
 
-    fn nextPacketId(self: *Connection) u16 {
-        const id = self.next_packet_id;
-        self.next_packet_id +%= 1;
-        if (self.next_packet_id == 0) self.next_packet_id = 1;
-        return id;
-    }
+    const OutgoingIdentifiers = @import("runtime/packet_identifiers/reservation.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+    });
 
     fn reserveOutgoingPublish(self: *Connection, qos: mqtt.QoS) Error!u16 {
         if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
 
-        const initial_packet_id = self.next_packet_id;
-        errdefer self.next_packet_id = initial_packet_id;
-        var attempts: usize = 0;
-        while (attempts < std.math.maxInt(u16)) : (attempts += 1) {
-            const packet_id = self.next_packet_id;
-            if (self.packet_identifiers.containsOutgoing(packet_id)) {
-                _ = self.nextPacketId();
-                continue;
-            }
-
-            const stage: packet_identifiers.State.Stage = switch (qos) {
-                .at_most_once => unreachable,
-                .at_least_once => .outgoing_qos1,
-                .exactly_once => .outgoing_qos2,
-            };
-            _ = try self.packet_identifiers.add(
-                self.allocator,
-                packet_id,
-                stage,
-            );
-            _ = self.nextPacketId();
-            self.outgoing_inflight += 1;
-            return packet_id;
-        }
-        return error.InflightFull;
+        const stage: packet_identifiers.State.Stage = switch (qos) {
+            .at_most_once => unreachable,
+            .at_least_once => .outgoing_qos1,
+            .exactly_once => .outgoing_qos2,
+        };
+        const packet_id = try OutgoingIdentifiers.reserve(self, stage, null);
+        self.outgoing_inflight += 1;
+        return packet_id;
     }
 
     fn releaseOutgoingPublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) void {
@@ -11682,6 +11677,7 @@ test {
     _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
+    _ = @import("runtime/acknowledgement/identifier_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
