@@ -226,6 +226,9 @@ pub const StreamingHead = stream_reader.Head;
 pub const StreamingEvent = stream_reader.Event;
 pub const StreamingMessageReader = stream_reader.Reader;
 pub const StreamingRequestEvent = stream_events.Request;
+const request_failure = @import("runtime/receive/request_failure.zig");
+pub const RequestFailure = request_failure.Failure;
+pub const RequestEventResult = request_failure.Result;
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
 pub const SessionTicketStats = ticket_receiver.Stats;
@@ -7062,7 +7065,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
     ) Error!?StreamingRequestEvent {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        return self.pollRequestEventMatchingInternal(null, false);
+        return self.pollRequestEventMatchingInternal(null, false, null);
     }
 
     /// Poll buffered request state without sleeping on receive-credit or QPACK
@@ -7070,7 +7073,20 @@ pub const HandshakeServerSession = struct {
     pub fn pollRequestEventOnce(
         self: *HandshakeServerSession,
     ) Error!?StreamingRequestEvent {
-        return self.pollRequestEventMatchingInternal(null, true);
+        return self.pollRequestEventMatchingInternal(null, true, null);
+    }
+
+    /// Poll once while transferring stream-scoped message failures to the
+    /// caller. A failure result has not been canceled: its owner must submit
+    /// and retain RESET_STREAM/STOP_SENDING until socket submission succeeds.
+    /// Connection protocol and local operation errors still propagate normally.
+    pub fn pollRequestEventOnceWithFailure(self: *HandshakeServerSession) Error!?RequestEventResult {
+        var failure: ?RequestFailure = null;
+        const event = self.pollRequestEventMatchingInternal(null, true, &failure) catch |err| {
+            if (failure) |owned| return .{ .failure = owned };
+            return err;
+        } orelse return null;
+        return .{ .event = event };
     }
 
     /// Return an already-buffered event for one request stream without
@@ -7080,7 +7096,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
     ) Error!?StreamingRequestEvent {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        return self.pollRequestEventMatchingInternal(stream_id, false);
+        return self.pollRequestEventMatchingInternal(stream_id, false, null);
     }
 
     /// Poll one buffered event for a specific request stream without waiting
@@ -7091,14 +7107,16 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?StreamingRequestEvent {
-        return self.pollRequestEventMatchingInternal(stream_id, true);
+        return self.pollRequestEventMatchingInternal(stream_id, true, null);
     }
 
     fn pollRequestEventMatchingInternal(
         self: *HandshakeServerSession,
         target_stream_id: ?u62,
         single_attempt: bool,
+        failure_out: ?*?RequestFailure,
     ) Error!?StreamingRequestEvent {
+        if (failure_out) |output| output.* = null;
         _ = self.routePreexistingRequestStreams(true) catch |err| {
             closeConnectionForHttp3Error(
                 &self.established.connection,
@@ -7146,6 +7164,7 @@ pub const HandshakeServerSession = struct {
             false,
         ) catch |err| {
             const stream_id = self.streaming_requests.lastErrorStreamId();
+            if (request_failure.capture(failure_out, stream_id, err)) return err;
             if (single_attempt)
                 self.failReceivedRequestOnce(
                     stream_id,
@@ -7168,6 +7187,7 @@ pub const HandshakeServerSession = struct {
                 value.event,
                 single_attempt,
             ) catch |err| {
+                if (request_failure.capture(failure_out, value.entry.reader.streamId(), err)) return err;
                 if (single_attempt)
                     self.failReceivedRequestOnce(
                         value.entry.reader.streamId(),

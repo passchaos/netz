@@ -8,6 +8,7 @@ const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 const connect_headers = @import("runtime/connect/headers.zig");
+const connect_request_head = @import("runtime/connect/request_head.zig");
 const connect_negotiation = @import("runtime/connect/negotiation.zig");
 const connect_rejection = @import("runtime/connect/rejection.zig");
 const connect_configuration = @import("runtime/connect/options.zig");
@@ -95,6 +96,7 @@ test {
     _ = @import("runtime/connect/required_endpoint_tests.zig");
     _ = @import("runtime/connect/endpoint_rejection_tests.zig");
     _ = @import("runtime/connect/endpoint_buffered_admission_tests.zig");
+    _ = @import("runtime/connect/message_failure_tests.zig");
     _ = @import("runtime/endpoint_server/serve_tests.zig");
     _ = @import("runtime/endpoint_server/serve_failure_tests.zig");
     _ = @import("runtime/endpoint_server/serve_connection_tests.zig");
@@ -3515,8 +3517,15 @@ pub const EndpointServer = struct {
         if (self.pending.contains(handle)) return null;
         if (!try Rejections.retryOne(self, handle, h3)) return null;
         try Rejections.reserve(self, handle);
-        const request = (try pollEndpointConnectHead(h3)) orelse
-            return null;
+        const result = (try connect_request_head.poll(h3)) orelse return null;
+        const request = switch (result) {
+            .failure => |failure| {
+                Rejections.retain(self, handle, connect_rejection.Pending.forRequestFailure(failure));
+                _ = try Rejections.retryOne(self, handle, h3);
+                return null;
+            },
+            .head => |head| head,
+        };
         var owned_request = request.request;
         var transferred = false;
         defer if (!transferred) owned_request.deinit(self.allocator);
@@ -3872,46 +3881,6 @@ fn rejectAdditionalHandshakeRequestsOnce(
         if (ids.len == 0 or ids.len < stream_ids.len) return true;
         after = ids[ids.len - 1];
     }
-}
-
-const EndpointConnectHead = struct {
-    request: OwnedHandshakeConnectRequest,
-    session_id: webtransport.SessionId,
-};
-
-fn pollEndpointConnectHead(
-    h3: *http3.runtime.HandshakeServerSession,
-) Error!?EndpointConnectHead {
-    if (!h3.control.settings.received) return null;
-    while (try h3.pollRequestEventOnce()) |event_value| {
-        var event = event_value;
-        defer event.deinit(h3.established.connection.endpoint.allocator);
-        switch (event) {
-            .reset => return error.InvalidConnect,
-            .message => |*message| switch (message.value) {
-                .head => |*head| {
-                    if (head.* != .request) return error.InvalidConnect;
-                    const session_id = webtransport.SessionId.init(
-                        message.stream_id,
-                    );
-                    if (!session_id.isClientInitiatedBidirectional()) {
-                        return error.InvalidConnect;
-                    }
-                    const request = head.request;
-                    message.value = .finished;
-                    return .{
-                        .request = .{
-                            .stream_id = message.stream_id,
-                            .request = request,
-                        },
-                        .session_id = session_id,
-                    };
-                },
-                else => return error.InvalidConnect,
-            },
-        }
-    }
-    return null;
 }
 
 fn finishEndpointSessionEvent(

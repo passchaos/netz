@@ -49,6 +49,7 @@ pub fn For(comptime Server: type, comptime rejectEarly: anytype) type {
             _ = server.request_rejection_pending.remove(handle);
             if (serve.noteConnect(server, handle, pending)) return error.RequestRejected;
             if (pending.failure) |failure| return failure.cause();
+            if (pending.request_failure) |failure| return failure.err;
             return true;
         }
 

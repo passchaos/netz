@@ -43,9 +43,14 @@ pub const Pending = struct {
     stream_id: u62,
     application_error_code: u64 = http3.ApplicationErrorCode.message_error,
     failure: ?Failure = null,
+    request_failure: ?http3.runtime.RequestFailure = null,
 
     pub fn forFailure(stream_id: u62, failure: Failure) Pending {
         return .{ .stream_id = stream_id, .failure = failure, .application_error_code = failure.applicationErrorCode() };
+    }
+
+    pub fn forRequestFailure(failure: http3.runtime.RequestFailure) Pending {
+        return .{ .stream_id = failure.stream_id, .application_error_code = failure.application_error_code, .request_failure = failure };
     }
 
     pub fn submit(self: Pending, h3: *http3.runtime.HandshakeServerSession) http3.runtime.Error!void {

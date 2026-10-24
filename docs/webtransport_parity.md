@@ -1593,6 +1593,22 @@ Capsule and flow rejection, post-close data, a closed critical stream, failed
 ALPN negotiation, continued sibling traffic, and independent socket/callback
 error propagation.
 
+HTTP/3 parsing failures before a valid CONNECT head also retain their request
+scope. `HandshakeServerSession.pollRequestEventOnceWithFailure` returns a
+`RequestEventResult` containing a normal event or an identified `RequestFailure`.
+The failure carries its stream ID, finite parser error, and cancellation code;
+its caller owns `tryCancelRequest` submission and any needed retry. Local
+operation failures and QPACK/connection errors propagate as errors. The shared
+WebTransport admission reader transfers these failures into its reserved
+CONNECT rejection owner before attempting cancellation, so a failed socket
+submission cannot lose the cause or the stream. Completed failures reach
+`ServeEvent.connect_rejected` with `ConnectRejectionReason.http3_request_error`
+and the optional `ServeConnectRejection.http3_error` payload. Buffered valid
+sibling requests remain eligible for admission after rejection. Adjacent real
+QUIC tests cover missing or duplicate pseudo-headers, socket-failure retry,
+coalesced sibling admission, explicit rejection ownership, allocation errors,
+and QPACK connection scope.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

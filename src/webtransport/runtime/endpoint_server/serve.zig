@@ -16,8 +16,10 @@ pub const ConnectRejectionReason = enum {
     reliable_reset_not_negotiated,
     session_flow_control_required,
     session_limit_exceeded,
+    http3_request_error,
 
     fn fromPending(pending: rejection.Pending) ConnectRejectionReason {
+        if (pending.request_failure != null) return .http3_request_error;
         const failure = pending.failure orelse return .session_limit_exceeded;
         return switch (failure) {
             .invalid_connect => .invalid_connect,
@@ -34,6 +36,9 @@ pub const ConnectRejection = struct {
     session_id: webtransport.SessionId,
     reason: ConnectRejectionReason,
     application_error_code: u64,
+    /// Present for errors produced by HTTP/3 message parsing before CONNECT
+    /// negotiation, such as a missing pseudo-header or truncated request.
+    http3_error: ?http3.runtime.Error = null,
 };
 
 pub const ConnectionFailure = struct {
@@ -76,6 +81,7 @@ pub fn noteConnect(server: *runtime.EndpointServer, handle: quic.endpoint_dispat
         .session_id = .init(pending.stream_id),
         .reason = .fromPending(pending),
         .application_error_code = pending.application_error_code,
+        .http3_error = if (pending.request_failure) |failure| failure.err else null,
     } });
 }
 
