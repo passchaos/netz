@@ -5201,17 +5201,16 @@ pub const Connection = struct {
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
-        return self.finishReadSubAck(try self.readPacket());
+        return ControlCompletion.readSubAck(self);
     }
 
-    fn finishReadSubAck(self: *Connection, packet_value: OwnedPacket) Error!OwnedSubAck {
-        var packet = packet_value;
-        errdefer packet.deinit(self.allocator);
+    /// Borrow complete packet storage until the control reader commits it.
+    fn parseReadSubAck(self: *Connection, packet: OwnedPacket) Error!OwnedSubAck {
         if (packet.fixed.packet_type != .suback) return error.UnexpectedPacket;
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer suback.deinit(self.allocator);
         try self.validateIncomingProperties(suback.properties);
-        try ControlExchange.finish(self, .suback, suback.packet_id, suback.reason_codes.len);
+        try ControlCompletion.finish(self, .suback, suback.packet_id, suback.reason_codes.len);
         return .{ .packet = packet, .suback = suback };
     }
 
@@ -5281,20 +5280,18 @@ pub const Connection = struct {
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
-        return self.finishReadUnsubAck(try self.readPacket());
+        return ControlCompletion.readUnsubAck(self);
     }
 
-    fn finishReadUnsubAck(
+    fn parseReadUnsubAck(
         self: *Connection,
-        packet_value: OwnedPacket,
+        packet: OwnedPacket,
     ) Error!OwnedUnsubAck {
-        var packet = packet_value;
-        errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .unsuback) return error.UnexpectedPacket;
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsuback.deinit(self.allocator);
         try self.validateIncomingProperties(unsuback.properties);
-        try ControlExchange.finish(self, .unsuback, unsuback.packet_id, unsuback.reason_codes.len);
+        try ControlCompletion.finish(self, .unsuback, unsuback.packet_id, unsuback.reason_codes.len);
         return .{ .packet = packet, .unsuback = unsuback };
     }
 
@@ -6836,6 +6833,11 @@ pub const Connection = struct {
         if (self.pending_packets) |pending| {
             return pending.ensureAvailable(self.limits.max_pending_ping_packets, self.limits.max_pending_packet_bytes);
         }
+        try self.ensurePendingPacketStorage();
+    }
+
+    fn ensurePendingPacketStorage(self: *Connection) Error!void {
+        if (self.pending_packets != null) return;
         const pending = try self.allocator.create(PendingPacketState);
         pending.* = .{};
         self.pending_packets = pending;
@@ -6851,15 +6853,6 @@ pub const Connection = struct {
 
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
-        }
-
-        pub fn hasControl(connection: *const Connection, packet_type: mqtt.PacketType, packet_id: u16) bool {
-            const stage: packet_identifiers.State.Stage = switch (packet_type) {
-                .suback => .outgoing_subscribe,
-                .unsuback => .outgoing_unsubscribe,
-                else => return false,
-            };
-            return connection.packet_identifiers.controlFilterCount(packet_id, stage) != null;
         }
     });
 
@@ -6911,11 +6904,50 @@ pub const Connection = struct {
         pub const reserve = OutgoingIdentifiers.reserve;
         pub const writePacket = Connection.writeGeneratedPacket;
         pub const writePacketWithDeadline = Connection.writeGeneratedPacketWithDeadline;
-        pub const readAck = AckReader.readForIdentifier;
-        pub const finishSubAck = Connection.finishReadSubAck;
-        pub const finishUnsubAck = Connection.finishReadUnsubAck;
-        pub const validateUnsubAck = validateUnsubAckResponse;
+        pub const completeSubscribe = ControlCompletion.suback;
+        pub const completeUnsubscribe = ControlCompletion.unsuback;
     });
+
+    const ControlCompletion = @import("runtime/acknowledgement/control/mod.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const PacketType = OwnedPacket;
+        pub const ErrorType = Error;
+        pub const SubAckType = OwnedSubAck;
+        pub const UnsubAckType = OwnedUnsubAck;
+        pub const readPacket = Connection.readTransportPacket;
+        pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
+        pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
+        pub const prepareStorage = Connection.ensurePendingPacketStorage;
+        pub const queuePacket = Connection.queuePendingPacket;
+        pub const parseSubAck = Connection.parseReadSubAck;
+        pub const parseUnsubAck = Connection.parseReadUnsubAck;
+    });
+
+    const ControlApi = @import("runtime/acknowledgement/control/api.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const SubAckType = OwnedSubAck;
+        pub const UnsubAckType = OwnedUnsubAck;
+        pub const SubscribeOptionsType = SubscribeOptions;
+        pub const UnsubscribeOptionsType = UnsubscribeOptions;
+        pub const writeSubscribe = ControlExchange.writeSubscribe;
+        pub const writeUnsubscribe = ControlExchange.writeUnsubscribe;
+        pub const completeSubscribe = ControlCompletion.suback;
+        pub const completeUnsubscribe = ControlCompletion.unsuback;
+    });
+
+    pub const writeSubscribe = ControlApi.writeSubscribe;
+    pub const writeSubscribeWithTimeout = ControlApi.writeSubscribeWithTimeout;
+    pub const writeSubscribeWithDeadline = ControlApi.writeSubscribeWithDeadline;
+    pub const completeSubscribe = ControlApi.completeSubscribe;
+    pub const completeSubscribeWithTimeout = ControlApi.completeSubscribeWithTimeout;
+    pub const completeSubscribeWithDeadline = ControlApi.completeSubscribeWithDeadline;
+    pub const writeUnsubscribe = ControlApi.writeUnsubscribe;
+    pub const writeUnsubscribeWithTimeout = ControlApi.writeUnsubscribeWithTimeout;
+    pub const writeUnsubscribeWithDeadline = ControlApi.writeUnsubscribeWithDeadline;
+    pub const completeUnsubscribe = ControlApi.completeUnsubscribe;
+    pub const completeUnsubscribeWithTimeout = ControlApi.completeUnsubscribeWithTimeout;
+    pub const completeUnsubscribeWithDeadline = ControlApi.completeUnsubscribeWithDeadline;
 
     fn clearPendingPacketState(self: *Connection) void {
         const pending = self.pending_packets orelse return;
@@ -7095,18 +7127,6 @@ test "MQTT Keep Alive timeout preserves half-second precision" {
         @as(i96, 98_302_500 * std.time.ns_per_ms),
         keepAliveTimeout(std.math.maxInt(u16)).?.raw.nanoseconds,
     );
-}
-
-fn validateUnsubAckResponse(protocol: mqtt.ProtocolVersion, unsuback: mqtt.UnsubAck, packet_id: u16, topic_filter_count: usize) Error!void {
-    if (unsuback.packet_id != packet_id) return error.UnexpectedPacket;
-    switch (protocol) {
-        .v5 => if (unsuback.reason_codes.len != topic_filter_count) return error.UnexpectedPacket,
-        // Pre-v5 UNSUBACK acknowledges only the Packet Identifier. Unlike
-        // MQTT 5, it has no per-topic reason-code vector, so a single v3
-        // UNSUBACK can validly confirm an UNSUBSCRIBE that contained multiple
-        // topic filters.  Keep this aligned with rumqtt's v4 UnsubAck model.
-        .v3_1, .v3_1_1 => {},
-    }
 }
 
 pub const PublishOptions = struct {
@@ -9453,26 +9473,6 @@ test "MQTT client Receive Maximum has an independent compatibility fallback" {
     );
 }
 
-test "MQTT v3 UNSUBACK validates packet id without per-filter reasons" {
-    var v3_reasons = [_]u8{0x00};
-    const v3_ack = mqtt.UnsubAck{
-        .packet_id = 12,
-        .properties = &.{},
-        .reason_codes = &v3_reasons,
-    };
-    try validateUnsubAckResponse(.v3_1_1, v3_ack, 12, 2);
-    try std.testing.expectError(error.UnexpectedPacket, validateUnsubAckResponse(.v3_1_1, v3_ack, 13, 2));
-
-    var v5_reasons = [_]u8{ 0x00, 0x11 };
-    const v5_ack = mqtt.UnsubAck{
-        .packet_id = 12,
-        .properties = &.{},
-        .reason_codes = &v5_reasons,
-    };
-    try validateUnsubAckResponse(.v5, v5_ack, 12, 2);
-    try std.testing.expectError(error.UnexpectedPacket, validateUnsubAckResponse(.v5, v5_ack, 12, 1));
-}
-
 test "MQTT connection enforces negotiated maximum packet size" {
     var connection = Connection{
         .allocator = std.testing.allocator,
@@ -11677,6 +11677,8 @@ test {
     _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
+    _ = @import("runtime/acknowledgement/control/tests.zig");
+    _ = @import("runtime/acknowledgement/control/exchange_tests.zig");
     _ = @import("runtime/acknowledgement/identifier_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");

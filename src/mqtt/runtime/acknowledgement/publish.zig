@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const mqtt = @import("../../mod.zig");
-const deadline_policy = @import("../../../internal/deadline.zig");
 
 pub fn Controller(comptime Context: type) type {
     return struct {
@@ -10,6 +9,7 @@ pub fn Controller(comptime Context: type) type {
         const Error = Context.ErrorType;
         const Packet = Context.PacketType;
         const Ready = struct { ack: Context.AckType, index: usize };
+        const Packets = @import("retained.zig").Reader(Context);
         const Match = struct {
             connection: *Connection,
             packet_type: mqtt.PacketType,
@@ -71,45 +71,10 @@ pub fn Controller(comptime Context: type) type {
         }
 
         fn read(connection: *Connection, packet_type: mqtt.PacketType, packet_id: u16, deadline: ?std.Io.Clock.Timestamp) Error!Ready {
-            if (!connection.isUsable()) return error.ConnectionClosed;
-            if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
             const match: Match = .{ .connection = connection, .packet_type = packet_type, .packet_id = packet_id };
-            if (connection.pending_packets) |pending| {
-                if (pending.findFirstMatching(match, matches)) |queued| {
-                    const ack = try Context.parseAck(connection, queued.packet);
-                    return .{ .ack = ack, .index = queued.index };
-                }
-            }
-            try Context.prepareQueue(connection);
-            while (true) {
-                // A transport can return already-buffered packets without a
-                // blocking read. They still consume the same application
-                // budget as socket waits and cannot renew it per packet.
-                if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
-                var packet = if (deadline) |absolute| try Context.readPacketWithDeadline(connection, absolute) else try Context.readPacket(connection);
-                var owned = true;
-                defer if (owned) packet.deinit(connection.allocator);
-                if (matches(match, packet)) {
-                    // Keep the packet in its original queue position until
-                    // decoding and any PUBREL write have both committed. A
-                    // deadline expiring before the write may then retry the
-                    // same ACK without losing the accepted QoS transition.
-                    const pending = connection.pending_packets.?;
-                    pending.retainOverflow(packet);
-                    owned = false;
-                    const ack = try Context.parseAck(connection, packet);
-                    return .{ .ack = ack, .index = pending.packets.items.len };
-                }
-                Context.queuePacket(connection, packet) catch |err| {
-                    // This complete packet has already left the transport.
-                    // Preserve it in the same emergency slot used by PING
-                    // and subscription waits so the caller can drain/retry.
-                    connection.pending_packets.?.retainOverflow(packet);
-                    owned = false;
-                    return err;
-                };
-                owned = false;
-            }
+            const ready = try Packets.matching(connection, match, matches, deadline);
+            const ack = try Context.parseAck(connection, ready.packet);
+            return .{ .ack = ack, .index = ready.index };
         }
 
         fn finish(connection: *Connection, ready: *Ready, retain: bool) void {

@@ -50,3 +50,4 @@ PY
 timeout 30s "$client" "$port" >"$work/client.log" 2>&1
 cat "$work/client.log"
 grep -Fq 'netz synchronous publish interop passed:' "$work/client.log"
+grep -Fq 'split-subscriptions=true reverse-control-completion=true' "$work/client.log"

@@ -342,9 +342,10 @@ Synchronous SUBSCRIBE now also retains PUBLISH packets received before SUBACK,
 as permitted by MQTT's section 3.8.4. Earlier queued packets keep their original
 position, the complete SUBACK still validates Packet Identifier and reason
 count, and later typed reads deliver the preserved messages. SUBSCRIBE,
-UNSUBSCRIBE and PING share `runtime/acknowledgement/wait.zig`, including the
-configured pending-packet bound, emergency overflow retention, and the original
-PING deadline. Queue refusal occurs before a SUBSCRIBE write or Packet
+UNSUBSCRIBE use `runtime/acknowledgement/retained.zig` for recoverable responses;
+PING uses `runtime/acknowledgement/wait.zig`. Both paths share the configured
+pending-packet bound and emergency overflow retention, and preserve the
+original deadline. Queue refusal occurs before a SUBSCRIBE write or Packet
 Identifier mutation. Adjacent MQTT 3.1/3.1.1/5 wire tests cover early retained
 traffic, older pending traffic, overflow recovery, and mismatched SUBACKs. A
 two-connection MQTT 3.1.1/5 reconnect test proves fresh-Session subscription
@@ -417,6 +418,42 @@ allocation rollback and MQTT 3.1/3.1.1/5 late-ACK recovery.
 Validation covers the Debug MQTT/session matrix, focused Debug/ReleaseFast
 identifier and subscription tests, package reachability, and real Mosquitto
 publish, Mosquitto CLI client and rumqttc 0.25.1 interoperability gates.
+
+Subscription requests can now be submitted separately with `writeSubscribe`
+or `writeUnsubscribe`, retaining their returned identifiers for later
+`completeSubscribe`/`completeUnsubscribe`. Each API has timeout and absolute
+deadline variants. Several commands can remain in flight together; completion
+can select any active identifier and extracts its ACK from the pending queue
+without reordering other ACKs or application packets. Pending ACKs can complete
+even when the ordinary queue is full or its count/byte quota is zero. A receive
+timeout leaves the submitted command available for completion under a new
+budget on the same usable Network Connection, with no extra request write.
+An interrupted request write still retires the connection because its wire
+prefix is ambiguous.
+
+Both correlated completion and ordinary typed SUBACK/UNSUBACK readers now
+retain complete raw packets until decoding succeeds. Property/reason allocation
+failure preserves the original packet position, byte accounting and command
+identifier; a later call retries that same ACK. This includes an ACK read
+directly from TCP into the emergency slot. Non-allocation syntax/state failures
+consume the invalid ACK while leaving command ownership intact. The PUBLISH
+completion path shares the same retained-packet reader, preserving its
+allocation and deadline recovery behavior. The implementation lives in
+`runtime/acknowledgement/control/` and `retained.zig`, with
+adjacent allocation, reverse-order, quota, expired/foreign-budget and timeout
+regressions. The real Mosquitto publish gate now also submits two subscription
+commands at a time and completes them in reverse order for MQTT 3.1/3.1.1/5
+under ordinary, relative-timeout and absolute-deadline APIs.
+
+```zig
+const packet_id = try connection.writeSubscribeWithTimeout(
+    &.{.{ .topic_filter = "events/#" }}, .{}, .fromSeconds(1),
+);
+// If this wait times out or returns OutOfMemory, retain packet_id and call
+// completeSubscribe again under a new budget on the same usable connection.
+var suback = try connection.completeSubscribeWithTimeout(packet_id, .fromSeconds(1));
+defer suback.deinit(allocator);
+```
 
 The reconnect deadline now also spans recovery of existing QoS 1/2 state after
 CONNACK. PUBLISH prefix/payload output and PUBREL replay receive the same

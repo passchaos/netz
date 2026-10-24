@@ -13,6 +13,17 @@ test "public MQTT publish budgets reject zero timeout without emitting or reserv
     try std.testing.expectEqual(@as(u16, 1), connection.next_packet_id);
 }
 
+test "public MQTT subscription split budgets reject zero timeout before I/O" {
+    var connection = netz.mqtt.runtime.Connection{ .allocator = std.testing.allocator, .transport = undefined };
+    try std.testing.expectError(error.Timeout, connection.writeSubscribeWithTimeout(&.{.{ .topic_filter = "budget/#" }}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, connection.writeUnsubscribeWithTimeout(&.{"budget/#"}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, connection.completeSubscribeWithTimeout(1, .zero));
+    try std.testing.expectError(error.Timeout, connection.completeUnsubscribeWithTimeout(1, .zero));
+    try std.testing.expect(connection.pending_packets == null);
+    try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
+    try std.testing.expectEqual(@as(u16, 1), connection.next_packet_id);
+}
+
 test "public WebTransport flow-control model consumes encoded peer grants" {
     const initial = netz.http3.Settings{
         .webtransport_initial_max_data = 8,

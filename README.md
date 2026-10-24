@@ -1509,6 +1509,9 @@ Current protocol coverage includes:
   inflight windows, a shared outgoing PUBLISH/SUBSCRIBE/UNSUBSCRIBE identifier
   space that retains timed-out control exchanges until their validated ACKs,
   late subscription ACK preservation, and transactional local-failure rollback,
+  split `writeSubscribe`/`completeSubscribe` and
+  `writeUnsubscribe`/`completeUnsubscribe` APIs with timeout/deadline variants,
+  reverse-order completion and retained ACK decoding after allocation failure,
   plus a single-owner reconnect command/event driver whose
   managed network worker can run on a dedicated OS thread or the caller's
   existing `std.Io` executor with the same stop, bounded-wait, terminal-error,

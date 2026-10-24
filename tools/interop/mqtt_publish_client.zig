@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
         try std.testing.expectEqualSlices(u8, &.{0}, suback.suback.reason_codes);
 
         for (std.enums.values(Mode)) |mode| {
+            try exerciseSubscriptions(&client, mode);
             for ([_]mqtt.QoS{ .at_least_once, .exactly_once }) |qos| {
                 const first = (try write(&client, mode, "first", qos)).?;
                 const second = (try write(&client, mode, "second", qos)).?;
@@ -57,7 +58,63 @@ pub fn main(init: std.process.Init) !void {
         try client.pingWithTimeout(.fromSeconds(3));
         try client.disconnect(0);
     }
-    std.debug.print("netz synchronous publish interop passed: protocols=mqtt31,mqtt311,mqtt5 qos=1,2 reverse-completion=true self-delivery=true wire-order=true budgets=ordinary,timeout,deadline client_io=zio-std-io server_io=mosquitto\n", .{});
+    std.debug.print("netz synchronous publish interop passed: protocols=mqtt31,mqtt311,mqtt5 qos=1,2 reverse-completion=true self-delivery=true wire-order=true split-subscriptions=true reverse-control-completion=true budgets=ordinary,timeout,deadline client_io=zio-std-io server_io=mosquitto\n", .{});
+}
+
+fn exerciseSubscriptions(client: *mqtt.runtime.Connection, mode: Mode) !void {
+    for ([_]bool{ false, true }) |unsubscribe| {
+        const first = try writeControl(client, mode, unsubscribe, "completion/split-a");
+        const second = try writeControl(client, mode, unsubscribe, "completion/split-b");
+        try std.testing.expect(first != second);
+        if (unsubscribe)
+            try std.testing.expectError(error.Timeout, client.completeUnsubscribeWithTimeout(second, .zero))
+        else
+            try std.testing.expectError(error.Timeout, client.completeSubscribeWithTimeout(second, .zero));
+        try std.testing.expect(client.hasOutgoingPacketIdentifier(second));
+        // The external broker sends the first ACK first. Complete the second
+        // request, then recover the first ACK from retained queue storage.
+        try completeControl(client, mode, unsubscribe, second);
+        try std.testing.expect(client.hasOutgoingPacketIdentifier(first));
+        try completeControl(client, mode, unsubscribe, first);
+        try std.testing.expect(!client.hasOutgoingPacketIdentifier(first));
+        try std.testing.expect(!client.hasOutgoingPacketIdentifier(second));
+        try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
+    }
+}
+
+fn writeControl(client: *mqtt.runtime.Connection, mode: Mode, unsubscribe: bool, filter: []const u8) !u16 {
+    if (unsubscribe) return switch (mode) {
+        .ordinary => client.writeUnsubscribe(&.{filter}, .{}),
+        .timeout => client.writeUnsubscribeWithTimeout(&.{filter}, .{}, .fromSeconds(3)),
+        .deadline => client.writeUnsubscribeWithDeadline(&.{filter}, .{}, client.transport.deadlineFromNow(.fromSeconds(3))),
+    };
+    return switch (mode) {
+        .ordinary => client.writeSubscribe(&.{.{ .topic_filter = filter }}, .{}),
+        .timeout => client.writeSubscribeWithTimeout(&.{.{ .topic_filter = filter }}, .{}, .fromSeconds(3)),
+        .deadline => client.writeSubscribeWithDeadline(&.{.{ .topic_filter = filter }}, .{}, client.transport.deadlineFromNow(.fromSeconds(3))),
+    };
+}
+
+fn completeControl(client: *mqtt.runtime.Connection, mode: Mode, unsubscribe: bool, id: u16) !void {
+    if (unsubscribe) {
+        var ack = switch (mode) {
+            .ordinary => try client.completeUnsubscribe(id),
+            .timeout => try client.completeUnsubscribeWithTimeout(id, .fromSeconds(3)),
+            .deadline => try client.completeUnsubscribeWithDeadline(id, client.transport.deadlineFromNow(.fromSeconds(3))),
+        };
+        defer ack.deinit(client.allocator);
+        try std.testing.expectEqual(id, ack.unsuback.packet_id);
+        try std.testing.expectEqualSlices(u8, &.{0}, ack.unsuback.reason_codes);
+    } else {
+        var ack = switch (mode) {
+            .ordinary => try client.completeSubscribe(id),
+            .timeout => try client.completeSubscribeWithTimeout(id, .fromSeconds(3)),
+            .deadline => try client.completeSubscribeWithDeadline(id, client.transport.deadlineFromNow(.fromSeconds(3))),
+        };
+        defer ack.deinit(client.allocator);
+        try std.testing.expectEqual(id, ack.suback.packet_id);
+        try std.testing.expectEqualSlices(u8, &.{0}, ack.suback.reason_codes);
+    }
 }
 
 fn write(client: *mqtt.runtime.Connection, mode: Mode, payload: []const u8, qos: mqtt.QoS) !?u16 {
