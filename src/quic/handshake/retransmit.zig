@@ -505,6 +505,7 @@ pub const InitialFlight = struct {
     peer: net.IpAddress,
     keys: quic.protection.PacketProtectionKeys,
     options: quic.initial_exchange.SendInitialFlightOptions,
+    next_packet_number: ?u64 = null,
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *InitialFlight = @ptrCast(@alignCast(context));
@@ -521,6 +522,10 @@ pub const InitialFlight = struct {
             self.keys,
             options,
         );
+        self.next_packet_number = if (progress.last_packet_number < quic.protection.max_packet_number)
+            progress.last_packet_number + 1
+        else
+            null;
         // Once protection has completed, the whole packet-number range is
         // retired. A socket-rejected suffix behaves like packet loss: let the
         // PTO loop wait and retry the CRYPTO data under the next fresh range.

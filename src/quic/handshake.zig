@@ -1,4 +1,5 @@
 const std = @import("std");
+const failure = @import("handshake/failure.zig");
 const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
 const retransmit = @import("handshake/retransmit.zig");
@@ -1086,10 +1087,7 @@ fn isDiscardableLongHeaderParseError(err: anyerror) bool {
     };
 }
 
-const HandshakeClosePacketType = enum {
-    initial,
-    handshake,
-};
+const HandshakeClosePacketType = failure.PacketType;
 
 fn sendHandshakeProtocolViolation(
     endpoint: *quic.runtime.Endpoint,
@@ -1103,41 +1101,19 @@ fn sendHandshakeProtocolViolation(
     reason_phrase: []const u8,
     anti_amplification: ?*retransmit.AntiAmplificationBudget,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    try (quic.Frame{ .connection_close = .{
-        .error_code = @intFromEnum(quic.TransportErrorCode.protocol_violation),
-        .frame_type = 0,
-        .reason_phrase = reason_phrase,
-    } }).write(&payload, endpoint.allocator);
-
-    const packet = switch (packet_type) {
-        .initial => try quic.protection.sealInitialPacket(
-            endpoint.allocator,
-            keys,
-            .{
-                .version = version,
-                .destination_connection_id = destination_connection_id,
-                .source_connection_id = source_connection_id,
-                .packet_number = packet_number,
-                .payload = payload.items,
-            },
-        ),
-        .handshake => try quic.protection.sealHandshakePacket(
-            endpoint.allocator,
-            keys,
-            .{
-                .version = version,
-                .destination_connection_id = destination_connection_id,
-                .source_connection_id = source_connection_id,
-                .packet_number = packet_number,
-                .payload = payload.items,
-            },
-        ),
+    var state: failure.State = .{
+        .endpoint = endpoint,
+        .peer = peer,
+        .packet_type = packet_type,
+        .keys = keys,
+        .version = version,
+        .destination_connection_id = destination_connection_id,
+        .source_connection_id = source_connection_id,
+        .next_packet_number = packet_number,
+        .client = anti_amplification == null,
+        .anti_amplification = anti_amplification,
     };
-    defer endpoint.allocator.free(packet);
-    if (anti_amplification) |budget| try budget.reserve(packet.len);
-    try endpoint.sendBytes(peer, packet);
+    try state.send(@intFromEnum(quic.TransportErrorCode.protocol_violation), reason_phrase);
 }
 
 test "QUIC handshake protocol violations use the available encryption level" {
@@ -1212,7 +1188,8 @@ test "QUIC handshake protocol violations use the available encryption level" {
         };
         defer allocator.free(payload);
         const parsed = try quic.parseFrame(payload);
-        try std.testing.expectEqual(payload.len, parsed.consumed);
+        try std.testing.expect(std.mem.allEqual(u8, payload[parsed.consumed..], 0));
+        if (case.packet_type == .initial) try std.testing.expect(datagram.bytes.len >= 1200);
         try std.testing.expect(parsed.frame == .connection_close);
         try std.testing.expectEqual(
             @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
@@ -1328,6 +1305,7 @@ const EarlyDataFlight = struct {
     zero_rtt_keys: quic.protection.PacketProtectionKeys,
     zero_rtt_options: quic.zero_rtt.SendOptions,
     protected_packet_count: u64 = 0,
+    next_initial_packet_number: ?u64 = null,
     sent_packet_numbers: [256]u64 = undefined,
     sent_packet_count: usize = 0,
     sent_packet_len: usize = 0,
@@ -1371,6 +1349,10 @@ const EarlyDataFlight = struct {
             self.initial_keys,
             initial_options,
         );
+        self.next_initial_packet_number = if (initial_progress.last_packet_number < quic.protection.max_packet_number)
+            initial_progress.last_packet_number + 1
+        else
+            null;
         if (initial_progress.sent_count < initial_progress.protected_count) {
             return;
         }
@@ -1692,6 +1674,7 @@ fn connectAttempt(
     var retry_processed = options.retry_source_connection_id.len != 0;
     var active_destination_connection_id = initial_destination_connection_id;
     var active_token = options.address_validation_token;
+    var next_initial_packet_number: ?u64 = null;
     var active_initial_secrets = initial_secrets;
     var active_initial_packet_number = options.client_initial_packet_number;
     var send_early_data = options.early_data != null;
@@ -1769,6 +1752,7 @@ fn connectAttempt(
                     }
                     return err;
                 };
+            next_initial_packet_number = send_context.next_initial_packet_number;
             protected_early_data_packet_count =
                 send_context.protected_packet_count;
             sent_early_data_packet_count = send_context.sent_packet_count;
@@ -1814,6 +1798,7 @@ fn connectAttempt(
                     &response_filter,
                     retry.InitialResponseFilter.accept,
                 );
+            next_initial_packet_number = send_context.next_packet_number;
         }
 
         _ = quic.retry_flow.validateClientPacket(
@@ -1961,18 +1946,29 @@ fn connectAttempt(
         .packet = server_initial_flight.first_packet,
         .crypto_data = server_initial_flight.crypto_data,
     };
-    const parsed_server = try quic.tls_client_hello.parseServerHello(
+    var peer_failure: failure.State = .{
+        .endpoint = endpoint,
+        .peer = server_initial.from,
+        .packet_type = .initial,
+        .keys = active_initial_secrets.client,
+        .version = options.version.wireValue(),
+        .destination_connection_id = server_initial.packet.source_connection_id,
+        .source_connection_id = options.local_connection_id,
+        .next_packet_number = next_initial_packet_number,
+        .client = true,
+    };
+    const parsed_server = try peer_failure.guardTls(quic.tls_client_hello.parseServerHello(
         server_initial.crypto_data,
-    );
+    ));
     if (!cipherSuiteEnabled(
         options.cipher_suites,
         parsed_server.cipher_suite,
     )) {
-        return error.InvalidCipherSuite;
+        return peer_failure.rejectTls(error.InvalidCipherSuite);
     }
     const offered_psk = resumption_session != null;
     const resumed = if (parsed_server.selected_psk_identity) |identity| blk: {
-        if (!offered_psk or identity != 0) return error.InvalidServerHello;
+        if (!offered_psk or identity != 0) return peer_failure.rejectTls(error.InvalidServerHello);
         break :blk true;
     } else false;
     const selected_psk: ?quic.tls.secret.Secret = if (resumed)
@@ -1986,11 +1982,11 @@ fn connectAttempt(
             break;
         }
     }
-    if (!offered_selected_group) return error.InvalidServerHello;
-    var shared = try client_key_shares.clientSharedSecret(
+    if (!offered_selected_group) return peer_failure.rejectTls(error.InvalidServerHello);
+    var shared = try peer_failure.guardTls(client_key_shares.clientSharedSecret(
         parsed_server.selected_group,
         parsed_server.keyShare(),
-    );
+    ));
     defer shared.wipe();
     var transcript = handshake_transcript.Flow.init(
         parsed_server.cipher_suite.hash(),
@@ -2007,6 +2003,9 @@ fn connectAttempt(
             hs_hash,
             selected_psk,
         );
+    peer_failure.packet_type = .handshake;
+    peer_failure.keys = handshake.client_quic;
+    peer_failure.next_packet_number = options.client_handshake_packet_number;
     if (options.keylog) |keylog| {
         try keylog.writeHandshakeSecrets(
             client_random,
@@ -2057,18 +2056,18 @@ fn connectAttempt(
         server_datagram_owned = false;
     }
     defer server_handshake.deinit(endpoint.allocator);
-    const server_flight = try splitServerFlight(
+    const server_flight = try peer_failure.guardTls(splitServerFlight(
         server_handshake.crypto_data,
         !resumed and options.server_auth != null,
-    );
-    const encrypted_extensions = try quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions);
-    try ensureOfferedAlpn(options.alpn_protocols, encrypted_extensions.alpn);
-    const peer_transport_parameters = try quic.parseTransportParametersTyped(
+    ));
+    const encrypted_extensions = try peer_failure.guardTls(quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions));
+    try peer_failure.guardTls(ensureOfferedAlpn(options.alpn_protocols, encrypted_extensions.alpn));
+    const peer_transport_parameters = try peer_failure.guardTransport(quic.parseTransportParametersTyped(
         endpoint.allocator,
         encrypted_extensions.transport_parameters,
         .server,
-    );
-    try validateServerTransportParameters(
+    ));
+    try peer_failure.guardTransport(validateServerTransportParameters(
         peer_transport_parameters,
         server_initial.packet.source_connection_id,
         options.original_destination_connection_id,
@@ -2079,7 +2078,7 @@ fn connectAttempt(
         options.version,
         options.available_versions,
         version_negotiation_processed,
-    );
+    ));
     const attempt_early_data_status = if (offer_early_data and retry_processed)
         quic.zero_rtt.handshake.Status.rejected
     else
@@ -2106,48 +2105,48 @@ fn connectAttempt(
         if (server_flight.certificate != null or
             server_flight.certificate_verify != null)
         {
-            return error.InvalidHandshakeFlight;
+            return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         }
     } else if (options.server_auth) |verifier| {
         const certificate_bytes = server_flight.certificate orelse
-            return error.InvalidHandshakeFlight;
+            return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         const certificate_verify_bytes =
             server_flight.certificate_verify orelse
-            return error.InvalidHandshakeFlight;
-        peer_certificate = try quic.tls.auth.parseCertificate(
+            return peer_failure.rejectTls(error.InvalidHandshakeFlight);
+        peer_certificate = try peer_failure.guardTls(quic.tls.auth.parseCertificate(
             endpoint.allocator,
             certificate_bytes,
-        );
-        try verifier.verifyTrust(
+        ));
+        try peer_failure.guardTls(verifier.verifyTrust(
             options.server_name,
             peer_certificate.?.entries,
-        );
+        ));
         const certificate_verify =
-            try quic.tls.auth.parseCertificateVerify(
+            try peer_failure.guardTls(quic.tls.auth.parseCertificateVerify(
                 certificate_verify_bytes,
-            );
+            ));
         const certificate_transcript_hash = transcript.digestAfter(
             server_flight.through_certificate orelse
                 return error.InvalidHandshakeFlight,
         );
-        try verifier.verifyPeerCertificateVerify(
+        try peer_failure.guardTls(verifier.verifyPeerCertificateVerify(
             peer_certificate.?.entries[0],
             certificate_verify,
             certificate_transcript_hash.bytes(),
             .server,
-        );
+        ));
     }
-    const server_finished = try quic.tls_client_hello.parseFinishedForHash(
+    const server_finished = try peer_failure.guardTls(quic.tls_client_hello.parseFinishedForHash(
         server_flight.finished,
         parsed_server.cipher_suite.hash(),
-    );
+    ));
     transcript.append(server_flight.before_finished);
     const server_finished_hash = transcript.digest();
-    try quic.tls_client_hello.verifyFinishedForHash(
+    try peer_failure.guardTls(quic.tls_client_hello.verifyFinishedForHash(
         handshake.server_handshake_traffic_secret,
         server_finished_hash,
         server_finished,
-    );
+    ));
     transcript.append(server_flight.finished);
     const application_transcript_hash = transcript.digest();
     const application =
@@ -2164,16 +2163,16 @@ fn connectAttempt(
     var client_certificate_verify: std.ArrayList(u8) = .empty;
     defer client_certificate_verify.deinit(endpoint.allocator);
     if (server_flight.certificate_request) |request_bytes| {
-        const request = try quic.tls.client_auth.parseRequest(request_bytes);
+        const request = try peer_failure.guardTls(quic.tls.client_auth.parseRequest(request_bytes));
         const identity = options.client_identity orelse
-            return error.ClientCertificateRequired;
+            return peer_failure.rejectTls(error.ClientCertificateRequired);
         const signer_supported = switch (identity.signer.scheme()) {
             quic.tls.auth.signature_scheme_ed25519 => request.supports_ed25519,
             quic.tls.auth.signature_scheme_ecdsa_secp256r1_sha256 => request.supports_ecdsa_p256_sha256,
             quic.tls.auth.signature_scheme_ecdsa_secp384r1_sha384 => request.supports_ecdsa_p384_sha384,
             else => false,
         };
-        if (!signer_supported) return error.UnsupportedSignatureScheme;
+        if (!signer_supported) return peer_failure.rejectTls(error.UnsupportedSignatureScheme);
         try identity.validate();
         try quic.tls.auth.writeClientCertificateWithContext(
             &client_certificate,
@@ -2693,22 +2692,33 @@ fn acceptInternal(
     };
     anti_amplification.recordReceived(client_initial.bytes_received);
 
-    var parsed_client = try quic.tls_client_hello.parseClientHello(
+    var peer_failure: failure.State = .{
+        .endpoint = endpoint,
+        .peer = client_initial.from,
+        .packet_type = .initial,
+        .keys = client_initial.initial_secrets.server,
+        .version = options.version.wireValue(),
+        .destination_connection_id = client_initial.packet.source_connection_id,
+        .source_connection_id = options.local_connection_id,
+        .next_packet_number = options.server_initial_packet_number,
+        .anti_amplification = &anti_amplification,
+    };
+    var parsed_client = try peer_failure.guardTls(quic.tls_client_hello.parseClientHello(
         client_initial.crypto_data,
-    );
+    ));
     defer parsed_client.deinit(endpoint.allocator);
     var automatic_psk_lease: ?quic.resumption.ticket.store.Lease = null;
     defer if (automatic_psk_lease) |*lease| lease.deinit();
     var effective_psk = options.psk;
-    const alpn = try chooseAlpn(
+    const alpn = try peer_failure.guardTls(chooseAlpn(
         options.alpn_protocol,
         parsed_client.alpnProtocols(),
-    );
-    const cipher_suite = try quic.tls_client_hello.selectCipherSuite(
+    ));
+    const cipher_suite = try peer_failure.guardTls(quic.tls_client_hello.selectCipherSuite(
         parsed_client.cipher_suites,
         options.cipher_suites,
         options.cipher_suite_policy,
-    );
+    ));
     if (effective_psk == null) {
         if (options.auto_resumption) |automatic| {
             if (parsed_client.psk_offer != null) {
@@ -2742,26 +2752,26 @@ fn acceptInternal(
                 quic.tls.auth.signature_scheme_ecdsa_secp384r1_sha384 => parsed_client.supports_ecdsa_p384_sha384,
                 else => false,
             };
-            if (!supported) return error.UnsupportedSignatureScheme;
+            if (!supported) return peer_failure.rejectTls(error.UnsupportedSignatureScheme);
         }
     }
-    const peer_transport_parameters = try quic.parseTransportParametersTyped(
+    const peer_transport_parameters = try peer_failure.guardTransport(quic.parseTransportParametersTyped(
         endpoint.allocator,
         parsed_client.transport_parameters,
         .client,
-    );
-    try validateClientTransportParameters(
+    ));
+    try peer_failure.guardTransport(validateClientTransportParameters(
         peer_transport_parameters,
         client_initial.packet.source_connection_id,
         options.version,
         options.available_versions,
-    );
+    ));
 
-    const selected_group = try quic.tls_client_hello.selectKeyShare(
+    const selected_group = try peer_failure.guardTls(quic.tls_client_hello.selectKeyShare(
         parsed_client,
         options.key_exchange_groups,
-    );
-    const server_key_exchange = try key_exchange.serverRespond(
+    ));
+    const server_key_exchange = try peer_failure.guardTls(key_exchange.serverRespond(
         endpoint.io,
         selected_group,
         parsed_client.keyShare(selected_group).?,
@@ -2773,7 +2783,7 @@ fn acceptInternal(
             .x25519_hybrid_encaps_seed = options.x25519_mlkem768_encaps_seed,
             .nist_hybrid = options.nist_hybrid_key_material,
         },
-    );
+    ));
     const selected_server_share = server_key_exchange.share;
     const legacy_server_public = if (selected_group == .x25519)
         selected_server_share.x25519
@@ -2791,7 +2801,7 @@ fn acceptInternal(
             client_initial.crypto_data,
         );
     if (client_offered_early_data and parsed_client.psk_offer == null) {
-        return error.UnexpectedEarlyData;
+        return peer_failure.rejectTls(error.UnexpectedEarlyData);
     }
     if (parsed_client.psk_offer != null) {
         if (effective_psk) |configured_psk| {
@@ -3100,6 +3110,10 @@ fn acceptInternal(
     defer if (client_handshake_datagram_owned) {
         client_handshake_datagram.deinit(endpoint.allocator);
     };
+    peer_failure.packet_type = .handshake;
+    peer_failure.keys = handshake.server_quic;
+    peer_failure.next_packet_number = send_context.next_handshake_packet_number;
+    peer_failure.anti_amplification = &send_context.anti_amplification;
     var client_handshake = receiveClientHandshakeCryptoFromDatagram(
         endpoint,
         source,
@@ -3136,48 +3150,48 @@ fn acceptInternal(
     client_handshake_datagram.deinit(endpoint.allocator);
     client_handshake_datagram_owned = false;
     defer client_handshake.deinit(endpoint.allocator);
-    const client_flight = try splitClientFlight(
+    const client_flight = try peer_failure.guardTls(splitClientFlight(
         client_handshake.crypto_data,
         options.client_auth != null,
-    );
+    ));
     var peer_certificate: ?quic.tls.auth.ParsedCertificate = null;
     defer if (peer_certificate) |*certificate| {
         certificate.deinit(endpoint.allocator);
     };
     if (options.client_auth) |client_auth| {
-        peer_certificate = try quic.tls.auth.parseCertificateWithContext(
+        peer_certificate = try peer_failure.guardTls(quic.tls.auth.parseCertificateWithContext(
             endpoint.allocator,
             client_flight.certificate.?,
             &.{},
-        );
-        try client_auth.verifier.verifyTrust(
+        ));
+        try peer_failure.guardTls(client_auth.verifier.verifyTrust(
             null,
             peer_certificate.?.entries,
-        );
+        ));
         const certificate_verify =
-            try quic.tls.auth.parseCertificateVerify(
+            try peer_failure.guardTls(quic.tls.auth.parseCertificateVerify(
                 client_flight.certificate_verify.?,
-            );
+            ));
         const client_certificate_transcript_hash =
             transcript.digestAfter(client_flight.certificate.?);
-        try quic.tls.auth.verifyCertificateVerifyForRole(
+        try peer_failure.guardTls(quic.tls.auth.verifyCertificateVerifyForRole(
             peer_certificate.?.entries[0],
             certificate_verify,
             client_certificate_transcript_hash.bytes(),
             .client,
-        );
+        ));
     }
-    const client_verify = try quic.tls_client_hello.parseFinishedForHash(
+    const client_verify = try peer_failure.guardTls(quic.tls_client_hello.parseFinishedForHash(
         client_flight.finished,
         cipher_suite.hash(),
-    );
+    ));
     transcript.append(client_flight.before_finished);
     const client_finished_hash = transcript.digest();
-    try quic.tls_client_hello.verifyFinishedForHash(
+    try peer_failure.guardTls(quic.tls_client_hello.verifyFinishedForHash(
         handshake.client_handshake_traffic_secret,
         client_finished_hash,
         client_verify,
-    );
+    ));
     transcript.append(client_flight.finished);
     const complete_transcript_hash = transcript.digest();
 
@@ -5576,6 +5590,7 @@ test "QUIC handshake one-RTT config propagates spin-bit policy" {
 }
 
 test {
+    _ = @import("handshake/failure_tests.zig");
     _ = @import("handshake/tests.zig");
     _ = @import("handshake/key_exchange_tests.zig");
     _ = @import("handshake/prepared_verifier_tests.zig");

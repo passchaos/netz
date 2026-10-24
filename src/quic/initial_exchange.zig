@@ -6,6 +6,7 @@ const net = std.Io.net;
 
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.zero_rtt.Error || error{
     MissingCryptoFrame,
+    ConnectionClosed,
 };
 
 pub const min_initial_udp_datagram_size =

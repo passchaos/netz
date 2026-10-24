@@ -136,7 +136,7 @@ fn expectPreparedP256Handshake(mode: PreparedP256Mode) !void {
             );
             try std.testing.expect(established == null);
             try std.testing.expectEqual(
-                @as(?anyerror, error.HandshakeTimeout),
+                @as(?anyerror, error.ConnectionClosed),
                 shared.err,
             );
         },

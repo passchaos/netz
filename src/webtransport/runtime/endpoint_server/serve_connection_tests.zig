@@ -53,7 +53,7 @@ fn peerFailureScenario(handshake: bool) !void {
                     var unexpected = value;
                     unexpected.deinit();
                     return error.TestUnexpectedResult;
-                } else |_| {}
+                } else |err| try std.testing.expectEqual(error.ConnectionClosed, err);
             }
             const id = try self.good.connect(true);
             var response = (try self.good.client.receiveResponseEventWithTimeout(id, .fromSeconds(2))) orelse return error.TestUnexpectedResult;

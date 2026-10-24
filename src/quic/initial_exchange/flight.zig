@@ -14,7 +14,7 @@ pub const Error = quic.runtime.Error ||
     quic.protection.Error ||
     quic.crypto_stream.Error ||
     quic.Error ||
-    error{MissingCryptoFrame};
+    error{ MissingCryptoFrame, ConnectionClosed };
 pub const ReceiveError = Error || error{
     HandshakeTimeout,
     DiscardedInitialPacket,
@@ -947,7 +947,7 @@ fn insertInitialHandshakeCryptoPayload(
             _ = try quic.varint.decode(&cursor);
             const reason_len = try usizeFromVarint(try quic.varint.decode(&cursor));
             try cursor.skip(reason_len);
-            continue;
+            return error.ConnectionClosed;
         }
         if (!quic.FrameType.known(frame_type)) return error.UnsupportedFrameType;
         return error.InvalidFrame;

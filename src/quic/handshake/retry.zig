@@ -100,6 +100,10 @@ pub const InitialResponseFilter = struct {
                 packet.payload[offset..],
             ) catch return false;
             defer parsed.deinitOwned(self.allocator);
+            // A valid Initial close terminates the attempt even though it
+            // carries no CRYPTO offset zero. Authentication failures still
+            // remain inside the PTO loop above.
+            if (parsed.frame == .connection_close) return true;
             if (parsed.frame == .crypto and
                 parsed.frame.crypto.offset == 0 and
                 parsed.frame.crypto.data.len != 0)

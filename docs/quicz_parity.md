@@ -1580,6 +1580,21 @@ packet-number/MTU range and reserves all storage before its first in-place AEAD
 operation. Batch sends retain both protected and socket-sent counts: zero or
 partial socket progress leaves PN gaps and PTO retransmits under a fresh range,
 while server anti-amplification accounting keeps only the submitted prefix.
+Peer TLS validation failures now emit transport `CONNECTION_CLOSE` with the
+RFC 9001 `0x100 + AlertDescription` code at the available Initial or Handshake
+encryption level. Both roles use `0x178` for failed ALPN; cipher/key-share
+selection, malformed TLS messages, certificate validation and Finished checks
+retain their local error while submitting the corresponding fatal alert.
+Peer transport-parameter errors use `TRANSPORT_PARAMETER_ERROR`. Close
+construction uses bounded stack storage, consumes its packet number once,
+pads client Initial datagrams to 1200 bytes and honors server anti-amplification
+accounting. Local resource failures do not become peer alerts, and failed close
+socket writes cannot replace the original validation error. Initial response
+filtering accepts authenticated close-only packets, and Initial/Handshake
+CRYPTO extraction terminates on a validated close instead of waiting for TLS
+bytes or accepting CRYPTO from the same packet. Protected QUIC v1/v2 regressions
+check both roles, exact wire codes, fresh packet numbers, local and socket
+failure boundaries, and forged-close discard followed by valid-close receipt.
 Established 1-RTT PTO probe batches follow the same rule: only the socket-sent
 prefix remains in congestion, sent-packet, and recovery state, but every sealed
 probe advances the packet-number space so an unsent suffix can never reuse an
@@ -1748,6 +1763,13 @@ payload and stream state intact; only ACKing the FIN packet releases recovery
 and completes the retained retirement request.
 
 ## Known blockers before declaring the goal complete
+
+TLS rejection now sends and recognizes fatal QUIC closes, but failed endpoint
+handshake admissions still remove their Initial CID routes immediately. A
+delayed Initial retransmission can therefore create another admission after
+the failed owner is released. Retaining bounded closing routes and servicing
+their retransmissions through the shared socket owner remains required before
+claiming complete handshake lifecycle parity.
 
 HTTP/3's shared-endpoint handshake admission now uses the exact absolute
 deadline recorded when the Initial was registered, rather than relying only on
