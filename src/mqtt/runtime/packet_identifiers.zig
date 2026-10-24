@@ -1,9 +1,11 @@
 const std = @import("std");
 const Storage = @import("packet_identifiers/storage.zig").Storage;
 const Incoming = Storage(u2);
+pub const Ownership = @import("../identifier/ownership.zig").Ownership;
 const Outgoing = struct {
     stages: Storage(u3) = .{},
     filter_counts: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+    external: ?Ownership = null,
 
     fn deinit(self: *Outgoing, allocator: std.mem.Allocator) void {
         self.stages.deinit(allocator);
@@ -56,7 +58,31 @@ pub const State = struct {
 
     pub fn containsOutgoing(self: *const State, packet_id: u16) bool {
         const outgoing = self.outgoing orelse return false;
-        return outgoing.stages.value(packet_id) != 0;
+        return outgoing.stages.value(packet_id) != 0 or
+            if (outgoing.external) |owner| owner.contains(packet_id) else false;
+    }
+
+    /// The owner must remain live until detached/reset/deinit. Its lookup is
+    /// borrowed and follows Session mutations without duplicating all IDs.
+    pub fn setExternalOutgoing(self: *State, allocator: std.mem.Allocator, owner: ?Ownership) std.mem.Allocator.Error!void {
+        if (self.outgoing == null) {
+            if (owner == null) return;
+            const outgoing = try allocator.create(Outgoing);
+            outgoing.* = .{};
+            self.outgoing = outgoing;
+        }
+        self.outgoing.?.external = owner;
+    }
+
+    /// Short-lived reservation view, usable while this State remains at its
+    /// current address. Session allocation passes it only for the active call.
+    pub fn ownership(self: *const State) Ownership {
+        return .{ .context = self, .containsFn = containsBorrowed };
+    }
+
+    fn containsBorrowed(context: *const anyopaque, packet_id: u16) bool {
+        const self: *const State = @ptrCast(@alignCast(context));
+        return self.containsOutgoing(packet_id);
     }
 
     pub fn containsOutgoingPublish(self: *const State, packet_id: u16) bool {
@@ -143,6 +169,7 @@ pub const State = struct {
         if (self.outgoing) |entries| {
             entries.stages.clearRetainingCapacity();
             entries.filter_counts.clearRetainingCapacity();
+            entries.external = null;
         }
     }
 
@@ -376,4 +403,29 @@ test "MQTT packet identifier control metadata rolls back on allocation failure" 
         break;
     }
     try std.testing.expect(succeeded);
+}
+
+test "MQTT packet identifier external sender ownership follows live mutations without copying" {
+    var external: State = .{};
+    defer external.deinit(std.testing.allocator);
+    var state: State = .{};
+    defer state.deinit(std.testing.allocator);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, state.setExternalOutgoing(failing.allocator(), external.ownership()));
+    try std.testing.expect(state.outgoing == null);
+    try state.setExternalOutgoing(std.testing.allocator, external.ownership());
+    _ = try external.add(std.testing.allocator, 65_535, .outgoing_qos2);
+    try std.testing.expect(state.containsOutgoing(65_535));
+    try std.testing.expect(!state.containsOutgoingPublish(65_535));
+    try std.testing.expectEqual(@as(usize, 0), state.count(.outgoing_qos2));
+    _ = try state.add(std.testing.allocator, 65_535, .incoming_qos2);
+    try std.testing.expect(external.remove(65_535, .outgoing_qos2));
+    try std.testing.expect(!state.containsOutgoing(65_535));
+    try std.testing.expect(state.contains(65_535, .incoming_qos2));
+    try state.addControl(std.testing.allocator, 42, .outgoing_subscribe, 1);
+    _ = try external.add(std.testing.allocator, 43, .outgoing_qos1);
+    state.clearRetainingCapacity();
+    try std.testing.expect(!state.containsOutgoing(42));
+    try std.testing.expect(!state.containsOutgoing(43));
+    try std.testing.expect(external.containsOutgoing(43));
 }

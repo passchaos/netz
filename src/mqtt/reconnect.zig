@@ -1656,6 +1656,14 @@ pub const Client = struct {
                 self.outgoing_handle = reopened.handle;
                 self.outgoing_open = true;
             }
+            const ownership = self.outgoing.packetIdentifierOwnership(self.outgoing_handle) catch |err| {
+                self.disconnectTransport();
+                return err;
+            };
+            self.connection_state.?.setOutgoingPacketIdentifierOwner(ownership) catch |err| {
+                self.disconnectTransport();
+                return err;
+            };
             self.replayPendingUntil(deadline) catch |err| {
                 // The CONNECT succeeded but replay did not. Preserve every
                 // durable packet and report the transport failure rather than
@@ -2658,7 +2666,7 @@ pub const Client = struct {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         try active.validateClientSessionPublish(topic, payload, options);
-        return self.outgoing.stageImmediatePublish(
+        return self.outgoing.stageImmediatePublishAvoiding(
             self.outgoing_handle,
             topic,
             payload,
@@ -2669,6 +2677,7 @@ pub const Client = struct {
                 .now = std.Io.Clock.awake.now(self.io),
             },
             active.max_outgoing_inflight,
+            active.packet_identifiers.ownership(),
         );
     }
 
@@ -2728,7 +2737,7 @@ pub const Client = struct {
         // This either reserves the exact submitted message or leaves it
         // unowned. Existing replay/queue work must be driven explicitly, so a
         // one-attempt call can never send an older packet and return its ID.
-        const transmission = try self.outgoing.beginImmediatePublish(
+        const transmission = try self.outgoing.beginImmediatePublishAvoiding(
             self.outgoing_handle,
             topic,
             payload,
@@ -2739,6 +2748,7 @@ pub const Client = struct {
                 .now = std.Io.Clock.awake.now(self.io),
             },
             active.max_outgoing_inflight,
+            active.packet_identifiers.ownership(),
         );
         const publish_value = transmission;
         active.writeClientSessionTransmission(.{ .publish = transmission }) catch |err| {

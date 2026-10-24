@@ -58,7 +58,41 @@ pub fn main(init: std.process.Init) !void {
         try client.pingWithTimeout(.fromSeconds(3));
         try client.disconnect(0);
     }
+    try exerciseDurableSubscriptions(init.gpa, backend.io(), port);
     std.debug.print("netz synchronous publish interop passed: protocols=mqtt31,mqtt311,mqtt5 qos=1,2 reverse-completion=true self-delivery=true wire-order=true split-subscriptions=true reverse-control-completion=true budgets=ordinary,timeout,deadline client_io=zio-std-io server_io=mosquitto\n", .{});
+}
+
+fn exerciseDurableSubscriptions(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        const properties: []const mqtt.Property = if (protocol == .v5) &.{.{ .four_byte = .{ .id = .session_expiry_interval, .value = 60 } }} else &.{};
+        var shutdown: std.Io.Event = .unset;
+        var client = try mqtt.reconnect.Client.init(allocator, io, .{ .ip4 = .loopback(port) }, .{ .protocol = protocol, .client_id = "netz-durable-identifier-interop", .clean_start = false, .properties = properties }, .{}, &shutdown);
+        defer client.deinit();
+        _ = try client.connectWithTimeout(.fromSeconds(3));
+        const staged = try client.stagePublish("completion/durable", "staged", .{ .qos = .at_least_once });
+        const active = client.connection().?;
+        var suback = try client.subscribeWithTimeout(&.{.{ .topic_filter = "completion/unused" }}, .{}, .fromSeconds(3));
+        defer suback.deinit(allocator);
+        try std.testing.expect(suback.suback.packet_id != staged);
+        const unsubscription = try active.writeUnsubscribe(&.{"completion/unused"}, .{});
+        try std.testing.expect(unsubscription != staged);
+        try client.flushPendingWithTimeout(.fromSeconds(3));
+        var unsuback = try active.completeUnsubscribeWithTimeout(unsubscription, .fromSeconds(3));
+        defer unsuback.deinit(allocator);
+        try std.testing.expectEqual(staged, try client.completeNextPublish());
+        try std.testing.expect(!active.hasOutgoingPacketIdentifier(staged));
+        const publication = (try client.publishOneAttempt("completion/durable", "unconfirmed", .{ .qos = .at_least_once })).packet_id.?;
+        client.disconnectTransport();
+        const resumed = try client.connectWithTimeout(.fromSeconds(3));
+        try std.testing.expect(resumed.session_present);
+        var resumed_suback = try client.subscribeWithTimeout(&.{.{ .topic_filter = "completion/unused" }}, .{}, .fromSeconds(3));
+        defer resumed_suback.deinit(allocator);
+        try std.testing.expect(resumed_suback.suback.packet_id != publication);
+        try std.testing.expectEqual(publication, try client.completeNextPublish());
+        try std.testing.expectEqual(@as(u16, 0), client.connection().?.outgoing_inflight);
+        try client.connection().?.disconnect(0);
+    }
+    std.debug.print("netz durable identifier interop passed: protocols=mqtt311,mqtt5 staged=true mixed-controls=true session-resume=true\n", .{});
 }
 
 fn exerciseSubscriptions(client: *mqtt.runtime.Connection, mode: Mode) !void {

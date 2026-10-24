@@ -419,6 +419,35 @@ Validation covers the Debug MQTT/session matrix, focused Debug/ReleaseFast
 identifier and subscription tests, package reachability, and real Mosquitto
 publish, Mosquitto CLI client and rumqttc 0.25.1 interoperability gates.
 
+Reconnect clients now connect the durable Session sender index to the
+Connection's allocation space through a live borrowed ownership view. New
+SUBSCRIBE/UNSUBSCRIBE and direct PUBLISH reservations avoid durable staged,
+inflight and PUBREL identifiers, including Session Present recovery. Durable
+immediate/staged publications and queue drains likewise avoid connection-owned
+commands. `Session.Store.packetIdentifierOwnership` lazily promotes only the
+hash-map descriptor into stable storage, retaining its existing entries and
+keeping the view valid across Store/Client moves, Session table growth and
+rehashing. `beginImmediatePublishAvoiding`, `stageImmediatePublishAvoiding` and
+`drainIntoAvoiding` borrow connection reservations only for their call, so no
+Network Connection pointer is persisted in a Session snapshot. The live view
+must be detached before its Session is deleted or replaced; the reconnect
+owner installs it after Session recovery and closes the Connection before
+retiring that Session.
+
+Wire QoS counters and ACK processing retain their existing owners: the durable
+Store handles durable publication ACKs, while the Connection handles its own
+publications and subscription commands. The shared reservation view does not
+double-charge Receive Maximum or copy the durable identifier set. Identifier
+exhaustion restores the allocation cursor, keeps an unselected queued message
+owned, and returns any already-selected drain prefix instead of losing it
+behind later identifier exhaustion. Adjacent tests cover both directions of
+subscription/PUBLISH collisions, staged and queued work, PUBREL, live deletion,
+OOM during descriptor promotion, complete identifier exhaustion, Store/Client
+moves and Session Present across MQTT 3.1.1/5. MQTT 3.1 direct interleaving is
+also covered, while its CONNACK has no Session Present flag. The real Mosquitto
+publish gate additionally verifies staged PUBLISH mixed with controls and
+unconfirmed QoS 1 recovery followed by a new subscription.
+
 Subscription requests can now be submitted separately with `writeSubscribe`
 or `writeUnsubscribe`, retaining their returned identifiers for later
 `completeSubscribe`/`completeUnsubscribe`. Each API has timeout and absolute

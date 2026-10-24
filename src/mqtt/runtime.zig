@@ -4879,6 +4879,12 @@ pub const Connection = struct {
             self.packet_identifiers.containsOutgoing(packet_id);
     }
 
+    /// Share a live durable sender index without copying it into wire QoS
+    /// counters. The caller detaches it before replacing the owning Session.
+    pub fn setOutgoingPacketIdentifierOwner(self: *Connection, owner: ?packet_identifiers.Ownership) Error!void {
+        return self.packet_identifiers.setExternalOutgoing(self.allocator, owner);
+    }
+
     pub fn readPubAck(self: *Connection) Error!OwnedAck {
         return self.readAck(.puback);
     }
@@ -11674,6 +11680,9 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 test {
     _ = @import("reconnect/replay_deadline_tests.zig");
     _ = @import("reconnect/flush_deadline_tests.zig");
+    _ = @import("reconnect/identifier_tests.zig");
+    _ = @import("reconnect/identifier_resume_tests.zig");
+    _ = @import("session/identifier_tests.zig");
     _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");

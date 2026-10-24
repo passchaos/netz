@@ -13,6 +13,8 @@ const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
 const StorageCache = @import("../storage_cache.zig").Cache;
 const open_admission = @import("open.zig");
+const identifiers = @import("identifiers.zig");
+pub const PacketIdentifierOwnership = identifiers.Ownership;
 pub const SharedPublication = @import("../broker/publication.zig").Publication;
 const shared_publication_wire = std.math.maxInt(usize);
 
@@ -377,7 +379,7 @@ const Session = struct {
     /// so this transient slot keeps borrowed transmission slices valid and
     /// lets a failed write return the message to the durable queue.
     pending_qos0: ?PendingQoS0 = null,
-    packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+    packet_index: identifiers.Index = .{},
     incoming_qos2: std.AutoHashMapUnmanaged(u16, IncomingQoS2) = .empty,
     next_packet_id: u16 = 1,
     /// Sent PUBLISH packets that still consume the peer's Receive Maximum.
@@ -1872,6 +1874,14 @@ pub const Store = struct {
         return session.packet_index.contains(packet_id);
     }
 
+    /// Borrow the live sender index with a lazy stable descriptor so the view
+    /// survives Store moves, table growth and rehashing. Detach before the
+    /// Session is deleted or replaced.
+    pub fn packetIdentifierOwnership(self: *Store, handle: Handle) Error!PacketIdentifierOwnership {
+        const target = try self.getSession(handle);
+        return target.packet_index.borrow(self.allocator);
+    }
+
     /// Return a currently usable handle for a known ClientID.
     ///
     /// Offline routing uses this to enqueue publications without opening a
@@ -2131,7 +2141,13 @@ pub const Store = struct {
             options,
             receive_maximum,
             false,
+            null,
         );
+    }
+
+    /// Allocate around both durable IDs and borrowed connection commands.
+    pub fn beginImmediatePublishAvoiding(self: *Store, handle: Handle, topic: []const u8, payload: []const u8, options: EnqueueOptions, receive_maximum: u16, reserved: PacketIdentifierOwnership) Error!PublishTransmission {
+        return self.addImmediatePublish(handle, topic, payload, options, receive_maximum, false, reserved);
     }
 
     /// Own one QoS 1/2 Application Message and reserve its Packet Identifier
@@ -2152,7 +2168,12 @@ pub const Store = struct {
             options,
             receive_maximum,
             true,
+            null,
         )).packet_id;
+    }
+
+    pub fn stageImmediatePublishAvoiding(self: *Store, handle: Handle, topic: []const u8, payload: []const u8, options: EnqueueOptions, receive_maximum: u16, reserved: PacketIdentifierOwnership) Error!u16 {
+        return (try self.addImmediatePublish(handle, topic, payload, options, receive_maximum, true, reserved)).packet_id;
     }
 
     fn addImmediatePublish(
@@ -2163,6 +2184,7 @@ pub const Store = struct {
         options: EnqueueOptions,
         receive_maximum: u16,
         needs_send: bool,
+        reserved: ?PacketIdentifierOwnership,
     ) Error!PublishTransmission {
         if (options.qos == .at_most_once or receive_maximum == 0) {
             return error.InvalidProperty;
@@ -2210,7 +2232,7 @@ pub const Store = struct {
             append_needed,
         );
 
-        const packet_id = try reservePacketId(session);
+        const packet_id = try identifiers.reserve(session, reserved);
         const inflight_index = appendInflightAssumeCapacity(
             session,
             .{
@@ -2311,6 +2333,17 @@ pub const Store = struct {
         out: []Transmission,
         snapshot_changed: *bool,
     ) Error![]Transmission {
+        return self.drainIntoInternal(handle, now, receive_maximum, out, snapshot_changed, null);
+    }
+
+    /// Borrow reservations only for this call; queued messages do not retain
+    /// pointers into a Network Connection and snapshots remain Session-only.
+    pub fn drainIntoAvoiding(self: *Store, handle: Handle, now: std.Io.Timestamp, receive_maximum: u16, out: []Transmission, reserved: PacketIdentifierOwnership) Error![]Transmission {
+        var ignored_snapshot_change = false;
+        return self.drainIntoInternal(handle, now, receive_maximum, out, &ignored_snapshot_change, reserved);
+    }
+
+    fn drainIntoInternal(self: *Store, handle: Handle, now: std.Io.Timestamp, receive_maximum: u16, out: []Transmission, snapshot_changed: *bool, reserved: ?PacketIdentifierOwnership) Error![]Transmission {
         snapshot_changed.* = false;
         if (receive_maximum == 0) return error.InvalidProperty;
         const session = try self.getSession(handle);
@@ -2469,7 +2502,13 @@ pub const Store = struct {
                     blocked_qos_publish = true;
                     break;
                 }
-                const packet_id = try reservePacketId(session);
+                const packet_id = identifiers.reserve(session, reserved) catch |err| {
+                    // Earlier members have already been selected. Return that
+                    // committed prefix while the blocked queued item remains
+                    // owned; no transmission may disappear behind an error.
+                    if (written != 0 and err == error.InflightFull) break;
+                    return err;
+                };
                 const state: InflightState = switch (publish.qos) {
                     .at_least_once => .await_puback,
                     .exactly_once => .await_pubrec,
@@ -3639,17 +3678,6 @@ fn publishTransmission(
             now_ns,
         ),
     };
-}
-
-fn reservePacketId(session: *Session) Error!u16 {
-    var attempts: usize = 0;
-    while (attempts < std.math.maxInt(u16)) : (attempts += 1) {
-        const packet_id = session.next_packet_id;
-        session.next_packet_id +%= 1;
-        if (session.next_packet_id == 0) session.next_packet_id = 1;
-        if (!session.packet_index.contains(packet_id)) return packet_id;
-    }
-    return error.InflightFull;
 }
 
 fn appendOrReuse(

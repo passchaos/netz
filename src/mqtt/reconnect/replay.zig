@@ -13,11 +13,12 @@ pub fn drain(comptime Context: type, self: *Context.ClientType, deadline: ?std.I
     var batch: [1]session.Transmission = undefined;
     while (true) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
-        const transmissions = try self.outgoing.drainInto(
+        const transmissions = try self.outgoing.drainIntoAvoiding(
             self.outgoing_handle,
             std.Io.Clock.awake.now(self.io),
             active.max_outgoing_inflight,
             &batch,
+            active.packet_identifiers.ownership(),
         );
         if (transmissions.len == 0) return;
         for (transmissions) |transmission| {

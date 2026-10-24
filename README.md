@@ -1510,6 +1510,8 @@ Current protocol coverage includes:
   incoming/outgoing sparse maps and bounded dense fallback for unusually large
   inflight windows, a shared outgoing PUBLISH/SUBSCRIBE/UNSUBSCRIBE identifier
   space that retains timed-out control exchanges until their validated ACKs,
+  live durable-Session reservations shared with reconnect PUBLISH/PUBREL
+  ownership across staged sends, queue drains and Session Present recovery,
   late subscription ACK preservation, and transactional local-failure rollback,
   split `writeSubscribe`/`completeSubscribe` and
   `writeUnsubscribe`/`completeUnsubscribe` APIs with timeout/deadline variants,
