@@ -1,7 +1,7 @@
 const std = @import("std");
 const http1 = @import("../../mod.zig");
 const wire = @import("../../../internal/wire.zig");
-const chunk_extension = @import("../../chunk_extension.zig");
+const chunk_size = @import("../../chunk_size.zig");
 
 pub const Error = http1.Error || error{
     HeadersTooLarge,
@@ -249,14 +249,11 @@ pub fn chunkedBodyLayout(
     );
     var pos: usize = 0;
     var decoded_total: usize = 0;
-    var extension_bytes: usize = 0;
-    var line_overhead_bytes: usize = 0;
+    var metadata: chunk_size.State = .{};
     while (true) {
         const remaining = body[pos..];
         const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse {
-            if (remaining.len >= http1.max_chunk_size_line_bytes) {
-                return error.ChunkExtensionTooLarge;
-            }
+            try chunk_size.validateIncomplete(remaining);
             return error.BufferTooShort;
         };
         if (line_end >= http1.max_chunk_size_line_bytes) {
@@ -268,27 +265,10 @@ pub fn chunkedBodyLayout(
         const next_pos = std.math.add(usize, pos, line_wire_len) catch
             return error.ChunkSizeOverflow;
         if (next_pos > max_wire_bytes) return error.BodyTooLarge;
-        const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-        if (semi != line.len) {
-            extension_bytes = std.math.add(
-                usize,
-                extension_bytes,
-                line.len - semi,
-            ) catch return error.ChunkExtensionTooLarge;
-            if (extension_bytes > http1.max_chunk_extension_bytes) {
-                return error.ChunkExtensionTooLarge;
-            }
-            try chunk_extension.validate(line[semi + 1 ..]);
-        }
-        const size = try http1.parseChunkSize(try chunkSizePart(line[0..semi]));
-        line_overhead_bytes = std.math.add(
-            usize,
-            line_overhead_bytes,
-            line.len - 1,
-        ) catch return error.BodyTooLarge;
-        if (line_overhead_bytes > http1.max_chunk_size_line_bytes) {
-            return error.BodyTooLarge;
-        }
+        const size = metadata.feed(line) catch |err| switch (err) {
+            error.ChunkSizeOverheadTooLarge => return error.BodyTooLarge,
+            else => |other| return @errorCast(other),
+        };
         decoded_total = std.math.add(usize, decoded_total, size) catch
             return error.BodyTooLarge;
         if (decoded_total > max_body_bytes) return error.BodyTooLarge;
@@ -352,16 +332,7 @@ pub fn copyChunkedPayloadForwards(
     }
 }
 
-fn chunkSizePart(raw_size: []const u8) Error![]const u8 {
-    if (raw_size.len == 0) return error.InvalidChunk;
-    var end: usize = 0;
-    while (end < raw_size.len and std.ascii.isHex(raw_size[end])) : (end += 1) {}
-    if (end == 0) return error.InvalidChunk;
-    for (raw_size[end..]) |byte| {
-        if (byte != ' ' and byte != '\t') return error.InvalidChunk;
-    }
-    return raw_size[0..end];
-}
+const chunkSizePart = chunk_size.sizePart;
 
 const ChunkedTrailerLayout = struct {
     wire_len: usize,

@@ -1,6 +1,6 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
-const chunk_extension = @import("../chunk_extension.zig");
+const chunk_size = @import("../chunk_size.zig");
 
 const direct_body_read_bytes: usize = 64 * 1024;
 // Four 16-KiB chunks fit in one read for the common streaming shape while the
@@ -686,12 +686,9 @@ pub fn Reader(comptime RuntimeError: type) type {
             comptime consume: anytype,
         ) !BodyResult {
             var total: usize = 0;
-            var extension_bytes: usize = 0;
+            var metadata: chunk_size.State = .{};
             while (true) {
-                const size = try self.readChunkSize(
-                    &extension_bytes,
-                    http1.max_chunk_size_line_bytes,
-                );
+                const size = try self.readChunkSize(&metadata);
                 if (size == 0) {
                     const trailers = try self.readTrailers();
                     return .{
@@ -781,49 +778,19 @@ pub fn Reader(comptime RuntimeError: type) type {
             };
         }
 
-        fn readChunkSize(
-            self: *Self,
-            extension_bytes: *usize,
-            max_bytes: usize,
-        ) RuntimeError!usize {
+        fn readChunkSize(self: *Self, metadata: *chunk_size.State) RuntimeError!usize {
             while (true) {
-                if (std.mem.indexOf(
-                    u8,
-                    self.buffered(),
-                    "\r\n",
-                )) |end| {
-                    if (end >= max_bytes) {
-                        return error.ChunkExtensionTooLarge;
-                    }
-                    const line = self.buffered()[0..end];
-                    const semi = std.mem.indexOfScalar(
-                        u8,
-                        line,
-                        ';',
-                    ) orelse line.len;
-                    if (semi != line.len) {
-                        extension_bytes.* = std.math.add(
-                            usize,
-                            extension_bytes.*,
-                            line.len - semi,
-                        ) catch return error.ChunkExtensionTooLarge;
-                        if (extension_bytes.* >
-                            http1.max_chunk_extension_bytes)
-                        {
-                            return error.ChunkExtensionTooLarge;
-                        }
-                        try chunk_extension.validate(line[semi + 1 ..]);
-                    }
-                    const size = try http1.parseChunkSize(
-                        try chunkSizePart(line[0..semi]),
-                    );
+                if (std.mem.indexOf(u8, self.buffered(), "\r\n")) |end| {
+                    const size = metadata.feed(self.buffered()[0..end]) catch |err| switch (err) {
+                        error.ChunkSizeOverheadTooLarge => return error.BodyTooLarge,
+                        else => |other| return @errorCast(other),
+                    };
                     self.consumePrefix(end + 2);
                     return size;
                 }
-                if (self.buffered().len >= max_bytes) {
-                    return error.ChunkExtensionTooLarge;
-                }
-                try self.readMore(max_bytes);
+                try chunk_size.validateIncomplete(self.buffered());
+                // Reserve both delimiter bytes even when CR and LF split.
+                try self.readMore(http1.max_chunk_size_line_bytes + 1);
             }
         }
 
@@ -914,22 +881,6 @@ fn findHeadEnd(
     }
     if (bytes.len >= max_head_bytes) return error.HeadersTooLarge;
     return null;
-}
-
-fn chunkSizePart(raw_size: []const u8) ![]const u8 {
-    if (raw_size.len == 0) return error.InvalidChunk;
-    var end: usize = 0;
-    while (end < raw_size.len and
-        std.ascii.isHex(raw_size[end])) : (end += 1)
-    {}
-    if (end == 0) return error.InvalidChunk;
-    for (raw_size[end..]) |byte| {
-        switch (byte) {
-            ' ', '\t' => {},
-            else => return error.InvalidChunk,
-        }
-    }
-    return raw_size[0..end];
 }
 
 fn parseTrailerBlock(

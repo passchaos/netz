@@ -2,7 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
 const early_data = @import("../http/early_data.zig");
-const chunk_extension = @import("chunk_extension.zig");
+const chunk_size = @import("chunk_size.zig");
 const response_framing = @import("response_framing.zig");
 pub const content_coding = @import("../http/content_coding.zig");
 
@@ -17,6 +17,7 @@ pub const Header = wire.Header;
 test {
     _ = @import("runtime/client_pool_tests.zig");
     _ = @import("head/body_framing_tests.zig");
+    _ = @import("chunk_size_tests.zig");
 }
 
 pub const Error = wire.Error || error{
@@ -2718,12 +2719,7 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
     try list.appendSlice(allocator, "\r\n");
 }
 
-fn hexDigitLen(value: usize) usize {
-    var digits: usize = 1;
-    var remaining = value;
-    while (remaining >= 16) : (remaining >>= 4) digits += 1;
-    return digits;
-}
+const hexDigitLen = chunk_size.hexDigitLen;
 
 pub const DecodedChunked = struct {
     body: []u8,
@@ -2753,24 +2749,19 @@ const ChunkedWireLayout = struct {
 
 fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
     var pos: usize = 0;
-    var extension_bytes: usize = 0;
+    var metadata: chunk_size.State = .{};
     var body_len: usize = 0;
-
     while (true) {
-        const line_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse return error.BufferTooShort;
-        if (line_end_rel >= max_chunk_size_line_bytes) {
-            return error.ChunkExtensionTooLarge;
-        }
+        const line_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse {
+            try chunk_size.validateIncomplete(bytes[pos..]);
+            return error.BufferTooShort;
+        };
         const line = bytes[pos .. pos + line_end_rel];
         pos += line_end_rel + 2;
-        const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-        if (semi != line.len) {
-            extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
-            if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
-            try chunk_extension.validate(line[semi + 1 ..]);
-        }
-        const size_part = try chunkSizePart(line[0..semi]);
-        const size = try parseChunkSize(size_part);
+        const size = metadata.feed(line) catch |err| switch (err) {
+            error.ChunkSizeOverheadTooLarge => return error.ChunkExtensionTooLarge,
+            else => |other| return @errorCast(other),
+        };
         const data_end = std.math.add(usize, pos, size) catch return error.ChunkSizeOverflow;
         const required_end = std.math.add(usize, data_end, 2) catch return error.ChunkSizeOverflow;
         if (bytes.len < required_end) return error.BufferTooShort;
@@ -2953,25 +2944,7 @@ fn trailerNameDeclared(
     return false;
 }
 
-fn chunkSizePart(raw_size: []const u8) Error![]const u8 {
-    if (raw_size.len == 0) return error.InvalidChunk;
-
-    var end: usize = 0;
-    while (end < raw_size.len and std.ascii.isHex(raw_size[end])) : (end += 1) {}
-    if (end == 0) return error.InvalidChunk;
-
-    for (raw_size[end..]) |byte| {
-        switch (byte) {
-            ' ', 0x09 => {},
-            else => return error.InvalidChunk,
-        }
-    }
-    // Hyper's decoder permits LWS only after at least one chunk-size digit and
-    // never allows more digits afterward.  Splitting this before parseInt keeps
-    // the public size parser on the exact RFC `1*HEXDIG` grammar while still
-    // accepting the same post-size tolerance as mature HTTP/1 parsers.
-    return raw_size[0..end];
-}
+const chunkSizePart = chunk_size.sizePart;
 
 pub fn parseChunkSize(raw_size: []const u8) Error!usize {
     if (raw_size.len == 0) return error.InvalidChunk;

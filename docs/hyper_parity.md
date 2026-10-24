@@ -471,6 +471,15 @@ not CRLF is already buffered, so one oversized complete line cannot bypass the
 incremental check; the unbuffered adapter retains one-byte reads until it
 discovers the exact message boundary. Pure decoding, aggregate framing, and
 streaming-reader regressions cover the complete-line case.
+All three paths now share a per-message budget for size-line padding and
+extensions, including the final zero chunk. Repeated leading zeroes or
+whitespace cannot bypass the aggregate allowance through streaming or pure
+decoding. Canonical hexadecimal digits are required framing and do not consume
+that padding budget, so many ordinary chunks remain valid. The per-line bound
+excludes CRLF even when CR and LF arrive separately. Exact-budget pipelines,
+large canonical-chunk bodies, independent trailers and rejected TCP streaming
+connections have dedicated regressions; streaming rejects an over-budget size
+line before delivering that chunk's payload and retires the connection.
 
 The batch read path uses the same chunk wire scanner as aggregate reads, then
 decodes only after every requested message and trailer block validates. Mixed
