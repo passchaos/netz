@@ -67,10 +67,15 @@ test "WebTransport required Session flow control serve loop survives refused pee
         io: std.Io,
         shutdown: *std.Io.Event,
         accepted: usize = 0,
+        refused: usize = 0,
         received: bool = false,
 
         fn handle(self: *@This(), endpoint_server: *runtime.EndpointServer, event: runtime.ServeEvent) !void {
             switch (event) {
+                .connect_rejected => |failure| {
+                    try std.testing.expectEqual(runtime.ConnectRejectionReason.session_flow_control_required, failure.reason);
+                    self.refused += 1;
+                },
                 .session_request => |pending| {
                     _ = try endpoint_server.accept(pending.handle);
                     self.accepted += 1;
@@ -95,5 +100,6 @@ test "WebTransport required Session flow control serve loop survives refused pee
     if (worker.err) |err| return err;
     try std.testing.expect(worker.refused);
     try std.testing.expectEqual(@as(usize, 1), handler.accepted);
+    try std.testing.expectEqual(@as(usize, 1), handler.refused);
     try std.testing.expect(handler.received);
 }

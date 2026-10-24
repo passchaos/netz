@@ -1608,6 +1608,9 @@ Current protocol coverage includes:
   whose SETTINGS do not enable those quotas before a Session is established.
   Retained CONNECT refusals advance on endpoint polls without another UDP
   packet, while accepted Sessions and buffered sibling requests keep progressing.
+  The `serveUntil` callback observes request, Session, connection and handshake
+  failures with their scope and continues serving peers; callback and endpoint
+  operation errors return to the caller.
   Session maintenance settles abandoned RESET/STOP receive data even while
   applications only receive DATAGRAMs or write sibling streams, allowing
   WT_MAX_DATA to advance without consuming the pending RESET notification;

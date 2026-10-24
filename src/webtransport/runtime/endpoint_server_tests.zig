@@ -1827,6 +1827,7 @@ test "WebTransport endpoint serve loop shuts down from a session event" {
         ) !void {
             switch (event) {
                 .connected => {},
+                .handshake_failed, .connect_rejected, .connection_failed, .session_failed => return error.TestUnexpectedResult,
                 .closed => return error.TestUnexpectedResult,
                 .session_request => |pending| {
                     _ = try endpoint_server.accept(pending.handle);

@@ -5,6 +5,7 @@ const quic = @import("../../../quic/mod.zig");
 const webtransport = @import("../../mod.zig");
 const rejection = @import("rejection.zig");
 const connection_lifecycle = @import("../connection_lifecycle.zig");
+const serve = @import("../endpoint_server/serve.zig");
 
 pub fn For(comptime Server: type, comptime rejectEarly: anytype) type {
     return struct {
@@ -46,6 +47,7 @@ pub fn For(comptime Server: type, comptime rejectEarly: anytype) type {
                 else => return err,
             };
             _ = server.request_rejection_pending.remove(handle);
+            if (serve.noteConnect(server, handle, pending)) return error.RequestRejected;
             if (pending.failure) |failure| return failure.cause();
             return true;
         }

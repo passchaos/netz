@@ -11,6 +11,7 @@ const connect_headers = @import("runtime/connect/headers.zig");
 const connect_negotiation = @import("runtime/connect/negotiation.zig");
 const connect_rejection = @import("runtime/connect/rejection.zig");
 const connect_configuration = @import("runtime/connect/options.zig");
+const endpoint_serve = @import("runtime/endpoint_server/serve.zig");
 const application_protocol = webtransport.application_protocol;
 const protocol_negotiation = @import("runtime/connect/application_protocol.zig");
 const pending_connect_request = @import("runtime/connect/pending_request.zig");
@@ -94,6 +95,9 @@ test {
     _ = @import("runtime/connect/required_endpoint_tests.zig");
     _ = @import("runtime/connect/endpoint_rejection_tests.zig");
     _ = @import("runtime/connect/endpoint_buffered_admission_tests.zig");
+    _ = @import("runtime/endpoint_server/serve_tests.zig");
+    _ = @import("runtime/endpoint_server/serve_failure_tests.zig");
+    _ = @import("runtime/endpoint_server/serve_connection_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_client_tests.zig");
@@ -118,6 +122,10 @@ pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 pub const EndpointServerError = Error ||
     http3.runtime.HandshakeAdmissionError;
 pub const HandshakeFailure = http3.runtime.HandshakeFailure;
+pub const ConnectRejectionReason = endpoint_serve.ConnectRejectionReason;
+pub const ServeConnectRejection = endpoint_serve.ConnectRejection;
+pub const ServeConnectionFailure = endpoint_serve.ConnectionFailure;
+pub const ServeSessionFailure = endpoint_serve.SessionFailure;
 pub const OriginPolicy = connect_headers.OriginPolicy;
 pub const EarlyDatagramLimits = http3.runtime.EarlyConnectDatagramLimits;
 pub const EarlyStreamLimits = early_streams.Limits;
@@ -2851,6 +2859,12 @@ pub const EndpointServerEvent = union(enum) {
 };
 
 pub const ServeEvent = union(enum) {
+    /// Peer failures are notifications. Returning an error from the callback
+    /// still stops the endpoint loop.
+    handshake_failed: HandshakeFailure,
+    connect_rejected: ServeConnectRejection,
+    connection_failed: ServeConnectionFailure,
+    session_failed: ServeSessionFailure,
     connected: quic.endpoint_dispatcher.ConnectionHandle,
     closed: struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -2887,6 +2901,9 @@ pub const ServeOptions = struct {
 pub const EndpointServer = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
+    /// Stack-owned only during serveUntil's synchronous receive, never during
+    /// the application callback or a caller's ordinary receive operation.
+    serve_failure_sink: ?*?endpoint_serve.Capture = null,
     h3: http3.runtime.EndpointServer,
     early: std.AutoHashMapUnmanaged(quic.endpoint_dispatcher.ConnectionHandle, early_streams.State) = .empty,
     pending: std.AutoHashMapUnmanaged(
@@ -3259,70 +3276,7 @@ pub const EndpointServer = struct {
         ) anyerror!void,
         options: ServeOptions,
     ) anyerror!void {
-        if (options.supported_versions.len == 0 or
-            options.poll_interval.raw.nanoseconds <= 0 or
-            options.stream_buffer_size == 0)
-        {
-            return error.InvalidSessionState;
-        }
-        const stream_buffer = try self.allocator.alloc(
-            u8,
-            options.stream_buffer_size,
-        );
-        defer self.allocator.free(stream_buffer);
-        while (!options.shutdown.isSet()) {
-            const event_value = self.receiveOnce(
-                options.supported_versions,
-                options.poll_interval,
-                stream_buffer,
-            ) catch |err| switch (err) {
-                error.Canceled => if (options.shutdown.isSet()) return else return err,
-                error.SessionFlowControlRequired => continue,
-                else => |other| return other,
-            } orelse continue;
-            var event = event_value;
-            defer event.deinit(self.allocator);
-            switch (event) {
-                .connected => |handle| try handler(
-                    context,
-                    self,
-                    .{ .connected = handle },
-                ),
-                .closed => |closed| try handler(
-                    context,
-                    self,
-                    .{ .closed = .{
-                        .handle = closed.handle,
-                        .timer = closed.timer,
-                    } },
-                ),
-                .session_request => |handle| {
-                    const pending = self.pendingSession(handle) orelse
-                        return error.InvalidSessionState;
-                    try handler(
-                        context,
-                        self,
-                        .{ .session_request = pending },
-                    );
-                },
-                .session_event => |*value| {
-                    const active = self.sessionById(
-                        value.handle,
-                        value.session_id,
-                    ) orelse
-                        return error.InvalidSessionState;
-                    try handler(context, self, .{ .session_event = .{
-                        .session = active,
-                        .event = &value.event,
-                    } });
-                },
-                // Unknown datagrams are already classified and owned. A
-                // high-level server has no safe default response other than
-                // the Version Negotiation handled below the event boundary.
-                .unrouted => {},
-                .handshake_failed => |failure| return failure.err,
-            }
-        }
+        return endpoint_serve.run(self, Context, context, handler, options, receiveOnceInternal);
     }
 
     pub fn receive(
@@ -3366,6 +3320,16 @@ pub const EndpointServer = struct {
         poll_interval: std.Io.Clock.Duration,
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointServerEvent {
+        if (self.serve_failure_sink != null) return error.ConcurrentRead;
+        return self.receiveOnceInternal(supported_versions, poll_interval, stream_buffer);
+    }
+
+    fn receiveOnceInternal(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+        stream_buffer: []u8,
+    ) EndpointServerError!?EndpointServerEvent {
         if (stream_buffer.len == 0) return error.BufferTooShort;
         try self.maintainEarlyStreams();
         if (try self.pollBufferedSessionRequest()) |event| return event;
@@ -3400,6 +3364,7 @@ pub const EndpointServer = struct {
             self.h3.server.quic_server.endpoint.io,
             deadline,
         );
+        if (self.serve_failure_sink != null) return error.ConcurrentRead;
         try self.maintainEarlyStreams();
         if (try self.pollBufferedSessionRequest()) |event| return event;
         if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
@@ -3483,6 +3448,7 @@ pub const EndpointServer = struct {
                     // dispatcher refreshed before handing out this packet, so
                     // mirror the complete adapter result before returning it.
                     try self.h3.dispatcher.refreshConnectionTimer(handle);
+                    endpoint_serve.noteConnection(self, handle, err);
                     return err;
                 };
                 errdefer if (result) |*owned| owned.deinit(self.allocator);
@@ -3647,6 +3613,8 @@ pub const EndpointServer = struct {
             // close frames. Preserve its error while ensuring the shared
             // endpoint observes the resulting recovery deadline.
             try accepted.refreshTimer();
+            endpoint_serve.noteSession(server, accepted, err);
+            endpoint_serve.noteConnection(server, accepted.handle, err);
             return err;
         };
         errdefer if (event) |*owned| {

@@ -1570,6 +1570,29 @@ ownership and admission reservations are grouped in
 tests cover no-new-packet retry, pacing isolation, recovery timer replacement,
 expired deadlines, and coalesced sibling admission.
 
+`serveUntil` reports peer failures through `ServeEvent.handshake_failed`,
+`connect_rejected`, `connection_failed`, and `session_failed`, then continues
+serving the endpoint. CONNECT refusals expose the connection handle, Session
+ID, finite `ConnectRejectionReason`, and HTTP/3 cancellation code, including
+otherwise-silent Session capacity refusals. A Session failure is reported after
+its CONNECT reset has been submitted; the notification consumes the terminal
+error report while endpoint maintenance continues associated-stream cleanup.
+Connection failures require a peer protocol error and a matching local HTTP/3
+application close, preserving the dispatcher's close/recovery lifecycle.
+Handshake failures retain the supervisor's finite worker error and pending
+handshake handle. Application callback errors and endpoint I/O/resource errors
+return from `serveUntil` to the caller.
+
+Failure capture lives only for one synchronous endpoint receive and is cleared
+before the callback. Ordinary `receive*` APIs retain their existing error
+results, including calls made inside a callback. Peer failure notifications
+carry copied metadata and require no queue allocation. The service loop and
+failure boundary live under `webtransport/runtime/endpoint_server/serve.zig`.
+Real QUIC/TLS regressions exercise malformed and excess CONNECT, malformed
+Capsule and flow rejection, post-close data, a closed critical stream, failed
+ALPN negotiation, continued sibling traffic, and independent socket/callback
+error propagation.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

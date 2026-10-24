@@ -9814,6 +9814,10 @@ test "public modules are reachable" {
         netz.webtransport.runtime.EndpointServer,
         "serveUntil",
     ));
+    inline for (.{ "ConnectRejectionReason", "ServeConnectRejection", "ServeConnectionFailure", "ServeSessionFailure" }) |decl|
+        try std.testing.expect(@hasDecl(netz.webtransport.runtime, decl));
+    inline for (.{ "handshake_failed", "connect_rejected", "connection_failed", "session_failed" }) |field|
+        try std.testing.expect(@hasField(netz.webtransport.runtime.ServeEvent, field));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointServer,
         "receiveWithDeadline",

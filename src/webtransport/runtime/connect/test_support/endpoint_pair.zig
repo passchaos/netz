@@ -76,7 +76,6 @@ pub const Fixture = struct {
         });
         errdefer server.deinit();
         client.control.settings.markSent(settings);
-        client.control.settings.markReceived(settings);
         server.control.settings.markReceived(settings);
         try server.ensureSettingsSent();
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) });
@@ -88,6 +87,7 @@ pub const Fixture = struct {
             const received_decoder = if (client.established.connection.recvStreamStats(11)) |stats| stats.highest_received_offset else 0;
             if (received_control >= server.control_send.next_offset and received_encoder >= server.qpack_encoder_send.next_offset and received_decoder >= server.qpack_decoder_send.next_offset) break;
             var prefix = try client.established.connection.receivePacketServicingTimersDeadline(deadline);
+            try client.processResponsePacket(&prefix);
             prefix.deinit(allocator);
         }
         // Raw Connection receives do not run HTTP/3's ACK scheduling hook.
