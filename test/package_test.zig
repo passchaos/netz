@@ -7242,6 +7242,10 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Connection,
         "receiveReauthentication",
     ));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "receiveReauthenticationWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "receiveReauthenticationWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "acceptReauthenticationWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "acceptReauthenticationWithDeadline"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "acceptReauthentication",

@@ -60,10 +60,9 @@ test "MQTT auth state rejects mismatched methods and traffic" {
         .id = .authentication_method,
         .value = "mirror",
     } }});
-    try std.testing.expectError(
-        error.AuthenticationInProgress,
-        state.ensurePacketAllowed(.pingreq),
-    );
+    try state.ensurePacketAllowed(.pingreq);
+    try state.ensurePacketAllowed(.publish);
+    try state.ensurePacketAllowed(.puback);
     try std.testing.expect(try state.receiveReauth(.{
         .reason_code = 0,
         .properties = @constCast(&[_]mqtt.Property{.{ .utf8 = .{
@@ -240,13 +239,11 @@ pub const State = struct {
         packet_type: mqtt.PacketType,
     ) Error!void {
         switch (self.phase) {
-            .inactive, .active => return,
+            // MQTT 5 4.12.1 permits normal packet flow using the previous
+            // authentication while a new exchange is still in progress.
+            .inactive, .active, .reauthenticating => return,
             .authenticating => switch (packet_type) {
                 .connect, .connack, .auth, .disconnect => return,
-                else => return error.AuthenticationInProgress,
-            },
-            .reauthenticating => switch (packet_type) {
-                .auth, .disconnect => return,
                 else => return error.AuthenticationInProgress,
             },
         }

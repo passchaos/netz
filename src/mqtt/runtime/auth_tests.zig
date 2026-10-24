@@ -10,6 +10,12 @@ const Error = runtime.Error;
 const Server = runtime.Server;
 const Client = runtime.Client;
 
+test {
+    _ = @import("reauth_traffic_tests.zig");
+    _ = @import("reauth_receive_tests.zig");
+    _ = @import("../broker/reauth_traffic_tests.zig");
+}
+
 test "MQTT enhanced authentication connects and reauthenticates" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -102,6 +108,8 @@ test "MQTT enhanced authentication connects and reauthenticates" {
                 0x18,
                 "1pets",
             );
+            try accepted.connection.readPingReq();
+            try accepted.connection.writePingResp();
             var client_response =
                 try accepted.connection.receiveReauthentication();
             defer client_response.auth.deinit(server_ptr.allocator);
@@ -190,10 +198,7 @@ test "MQTT enhanced authentication connects and reauthenticates" {
     );
 
     try result.connection.beginReauthentication("step1");
-    try std.testing.expectError(
-        error.AuthenticationInProgress,
-        result.connection.ping(),
-    );
+    try result.connection.pingWithTimeout(.fromSeconds(1));
     var challenge = try result.connection.receiveReauthentication();
     defer challenge.auth.deinit(allocator);
     try std.testing.expect(!challenge.complete);
@@ -839,7 +844,7 @@ test "MQTT client rejects an Authentication Method omitted from CONNECT" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT broker event exposes and gates reauthentication" {
+test "MQTT broker event interleaves PING with reauthentication" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -879,10 +884,11 @@ test "MQTT broker event exposes and gates reauthentication" {
             try std.testing.expectEqual(@as(u8, 0x19), event.auth.auth.reason_code);
             try std.testing.expect(!(try accepted.connection
                 .applyAuthenticationEvent(event.auth.auth)));
-            try std.testing.expectError(
-                error.AuthenticationInProgress,
-                accepted.connection.readBrokerEvent(),
-            );
+            var ping = try accepted.connection.readBrokerEvent();
+            defer ping.deinit(server_ptr.allocator);
+            try std.testing.expect(ping == .pingreq);
+            try accepted.connection.writePingResp();
+            try accepted.connection.continueReauthentication(0, "done");
         }
     };
 
@@ -916,18 +922,10 @@ test "MQTT broker event exposes and gates reauthentication" {
     );
     defer connection.close();
     try connection.beginReauthentication("client-step");
-    // Deliberately bypass the typed gate to prove the broker rejects ordinary
-    // traffic before parsing/dispatching it while re-authentication is active.
-    var ping_bytes: std.ArrayList(u8) = .empty;
-    defer ping_bytes.deinit(allocator);
-    try mqtt.writePing(&ping_bytes, allocator, false);
-    try connection.transport.writePacket(ping_bytes.items);
-    var disconnect = try connection.readDisconnect();
-    defer disconnect.deinit(allocator);
-    try std.testing.expectEqual(
-        @as(u8, 0x82),
-        disconnect.disconnect.reason_code,
-    );
+    try connection.pingWithTimeout(.fromSeconds(1));
+    var complete = try connection.receiveReauthenticationWithTimeout(.fromSeconds(1));
+    defer complete.auth.deinit(allocator);
+    try std.testing.expect(complete.complete);
 
     thread.join();
     if (shared.err) |err| return err;

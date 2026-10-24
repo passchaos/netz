@@ -2524,6 +2524,15 @@ test "MQTT reconnect poll completes client initiated reauthentication" {
                 "kept",
                 initial.auth.properties[2].utf8_pair.value,
             );
+            var traffic = try accepted.connection.readPublish();
+            defer traffic.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("during-reauth", traffic.publish.payload);
+            try accepted.connection.writePubAck(traffic.publish.packet_id.?, 0);
+            const delivery_id = (try accepted.connection.writePublish("auth/peer", "peer-traffic", .{ .qos = .at_least_once })).?;
+            var ack = try accepted.connection.readPubAck();
+            defer ack.deinit(self.server.allocator);
+            try std.testing.expectEqual(delivery_id, ack.ack.packet_id);
+            try accepted.connection.applyPubAck(ack.ack);
             try accepted.connection.continueReauthentication(
                 0x18,
                 "server-step",
@@ -2619,6 +2628,16 @@ test "MQTT reconnect poll completes client initiated reauthentication" {
             .value = "kept",
         } },
     });
+    const traffic_id = try client.publish("auth/client", "during-reauth", .{ .qos = .at_least_once });
+    var confirmed = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer confirmed.deinit(allocator);
+    try std.testing.expect(confirmed == .puback and confirmed.puback.ack.packet_id == traffic_id);
+    try std.testing.expectEqual(@as(u16, 0), client.connection().?.outgoing_inflight);
+    var delivery = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer delivery.deinit(allocator);
+    try std.testing.expect(delivery == .publish);
+    try std.testing.expectEqualStrings("peer-traffic", delivery.publish.publish.payload);
+    try std.testing.expectEqual(@import("auth.zig").Phase.reauthenticating, client.connection().?.authentication.phase);
     var challenge = (try client.pollWithTimeout(.fromSeconds(1))).?;
     defer challenge.deinit(allocator);
     try std.testing.expect(challenge == .auth);

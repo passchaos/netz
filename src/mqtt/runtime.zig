@@ -5679,7 +5679,8 @@ pub const Connection = struct {
 
     /// Start client-initiated MQTT 5 re-authentication with a complete AUTH
     /// property set. The negotiated Authentication Method is mandatory and is
-    /// validated before the connection enters its traffic gate.
+    /// validated before the exchange starts. The previous authenticated
+    /// session continues carrying ordinary MQTT traffic during this exchange.
     pub fn beginReauthenticationWithProperties(
         self: *Connection,
         properties: []const mqtt.Property,
@@ -5693,14 +5694,30 @@ pub const Connection = struct {
         };
     }
 
+    pub const ReauthenticationStep = struct { auth: OwnedAuth, complete: bool };
+
     /// Receive one re-authentication continuation/completion packet.
     pub fn receiveReauthentication(
         self: *Connection,
-    ) Error!struct {
-        auth: OwnedAuth,
-        complete: bool,
-    } {
-        var auth = try self.readAuth();
+    ) Error!ReauthenticationStep {
+        return self.receiveReauthenticationUntil(null);
+    }
+
+    /// Wait for the next reauthentication step within one absolute budget.
+    /// Other packets remain available in wire order to normal event readers.
+    pub fn receiveReauthenticationWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!ReauthenticationStep {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return self.receiveReauthenticationUntil(deadline);
+    }
+
+    pub fn receiveReauthenticationWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!ReauthenticationStep {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveReauthenticationWithDeadline(self.transport.deadlineFromNow(timeout));
+    }
+
+    fn receiveReauthenticationUntil(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!ReauthenticationStep {
+        if (self.authentication.phase != .reauthenticating) return error.InvalidAuthenticationState;
+        var auth = try ReauthenticationReader.read(self, deadline);
         errdefer auth.deinit(self.allocator);
         const complete = try self.authentication.receiveReauth(
             auth.auth,
@@ -5842,11 +5859,27 @@ pub const Connection = struct {
         });
     }
 
-    /// Accept a peer's Re-authenticate request and enter the traffic gate.
+    /// Accept a peer's Re-authenticate request while retaining ordinary traffic
+    /// under the existing authenticated identity.
     pub fn acceptReauthentication(
         self: *Connection,
     ) Error!OwnedAuth {
-        var auth = try self.readAuth();
+        return self.acceptReauthenticationUntil(null);
+    }
+
+    pub fn acceptReauthenticationWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!OwnedAuth {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return self.acceptReauthenticationUntil(deadline);
+    }
+
+    pub fn acceptReauthenticationWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!OwnedAuth {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptReauthenticationWithDeadline(self.transport.deadlineFromNow(timeout));
+    }
+
+    fn acceptReauthenticationUntil(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!OwnedAuth {
+        if (self.authentication.phase != .active) return error.InvalidAuthenticationState;
+        var auth = try ReauthenticationReader.read(self, deadline);
         errdefer auth.deinit(self.allocator);
         if (auth.auth.reason_code != 0x19) {
             self.sendAuthenticationProtocolError();
@@ -5895,6 +5928,10 @@ pub const Connection = struct {
         else
             try self.readPacket();
         errdefer packet.deinit(self.allocator);
+        return self.parseReadAuth(packet);
+    }
+
+    fn parseReadAuth(self: *Connection, packet: OwnedPacket) Error!OwnedAuth {
         if (packet.fixed.packet_type != .auth) return error.UnexpectedPacket;
         const auth_packet = try self.parseIncomingAuth(packet.bytes);
         return .{ .packet = packet, .auth = auth_packet };
@@ -6857,6 +6894,25 @@ pub const Connection = struct {
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
 
+        pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
+            connection.pending_packets.?.retainOverflow(packet);
+        }
+    });
+
+    const ReauthenticationReader = @import("runtime/auth_receive.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const PacketType = OwnedPacket;
+        pub const AuthType = OwnedAuth;
+        pub const ErrorType = Error;
+        pub const prepare = Connection.ensurePendingPacketQueueAvailable;
+        pub const parse = Connection.parseReadAuth;
+        pub const readPacket = Connection.readTransportPacket;
+        pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
+        pub const queuePacket = Connection.queuePendingPacket;
+        pub fn validateDisconnect(connection: *Connection, bytes: []const u8) Error!void {
+            var packet = try connection.parseIncomingDisconnect(bytes);
+            packet.deinit(connection.allocator);
+        }
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
         }
@@ -9530,7 +9586,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         &alias_property,
     );
     connection.peer_max_packet_size = std.math.maxInt(usize);
-    connection.authentication.phase = .reauthenticating;
+    connection.authentication.phase = .authenticating;
     try std.testing.expectError(
         error.AuthenticationInProgress,
         connection.writePublish("auth/blocked", "payload", .{
