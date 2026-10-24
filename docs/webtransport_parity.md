@@ -1566,6 +1566,15 @@ It also verifies bounded STOP_SENDING first rejects a zero budget without
 committing registry state, then delivers application code 92 on retry. The
 recovery case passed five consecutive focused runs.
 
+The legacy adapter also preserves CONNECT RESET_STREAM events in both roles:
+targeted client H3 polling retains the raw code before its generic
+RequestCancelled/RequestRejected result consumes it, while server polling
+forwards its structured reset. The shared Capsule control closes the Session
+and releases any partially decoded CLOSE reason without requiring a clean
+Capsule boundary. An already-decoded CLOSE retains its borrowed metadata.
+Real protected-UDP regressions verify that Session application sends stop
+and ordinary HTTP sibling requests continue on the same connection.
+
 All client attempt types retain the non-2xx body and trailers under
 `Limits.max_rejection_body_bytes`; declared-length and unknown-length overflow
 cancel the incomplete CONNECT, while a complete entity needs no contradictory

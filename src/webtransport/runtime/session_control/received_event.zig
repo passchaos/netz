@@ -17,16 +17,26 @@ pub fn receive(h3: anytype, reader: *reader_mod.Reader, session_id: u62, deadlin
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(endpoint.io, absolute);
         reader.control.observeGoAway(h3.control.peer_goaway_id);
         if (try reader.pollPending()) |event| return event;
+        // The targeted H3 response API consumes RESET metadata before
+        // returning RequestCancelled/RequestRejected. Keep the exact code
+        // across that transaction rather than mapping its generic error.
+        const reset_code: ?u64 = if (server) null else h3.response_streams.resetFor(session_id);
+        if (reset_code != null and !reader.control.state.closed) reader.control.state.close(0);
         var event = (if (server)
             try h3.pollRequestEventFor(session_id)
         else
-            try h3.pollResponseEvent(session_id)) orelse {
+            h3.pollResponseEvent(session_id) catch |err| {
+                if (reset_code) |code| {
+                    if (err == error.RequestCancelled or err == error.RequestRejected) return reader.control.resetCapsulePayload(code) orelse error.InvalidSessionState;
+                }
+                return err;
+            }) orelse {
             if (deadline) |absolute| try h3.pollControlWithDeadline(absolute) else try h3.pollControl();
             continue;
         };
         defer event.deinit(allocator);
         const message = if (server) switch (event) {
-            .reset => return error.InvalidSessionState,
+            .reset => |reset| return reader.control.resetCapsulePayload(reset.application_error_code) orelse error.InvalidSessionState,
             .message => |value| value.value,
         } else event;
         switch (message) {

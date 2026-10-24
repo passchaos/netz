@@ -461,13 +461,7 @@ pub const Control = struct {
 
         if (connection.recvStreamStats(self.session_id.value)) |stats| {
             if (stats.reset) |reset| {
-                if (self.terminal_reported) return null;
-                self.send_termination = .none;
-                self.terminal_reported = true;
-                self.state.close(0);
-                return .{ .reset = .fromHttp3(
-                    reset.application_error_code,
-                ) };
+                return self.resetCapsulePayload(reset.application_error_code);
             }
             if (stats.final_size != null and
                 stats.bytes_read == stats.final_size.? and
@@ -760,6 +754,18 @@ pub const Control = struct {
             .code = 0,
             .reason = &.{},
         } };
+    }
+
+    /// An abrupt CONNECT reset may end a partial Capsule. Preserve an
+    /// already-decoded CLOSE, otherwise release partial reason storage and
+    /// surface the transport error once without requiring a message boundary.
+    pub fn resetCapsulePayload(self: *Control, code: u64) ?Event {
+        if (self.terminal_reported) return null;
+        self.clearCloseReason();
+        self.send_termination = .none;
+        self.terminal_reported = true;
+        self.state.close(0);
+        return .{ .reset = .fromHttp3(code) };
     }
 
     fn finishH3Frame(self: *Control) void {
