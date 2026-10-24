@@ -16,13 +16,17 @@ pub const Fixture = struct {
     handle: quic.endpoint_dispatcher.ConnectionHandle = 71,
 
     pub fn init(self: *Fixture, io: std.Io) !void {
+        return self.initWithCapacity(io, 4, null);
+    }
+
+    pub fn initWithCapacity(self: *Fixture, io: std.Io, concurrent: usize, retained: ?usize) !void {
         const allocator = std.testing.allocator;
         self.endpoint_owned = true;
-        self.server = try runtime.HandshakeServer.bindForEndpoint(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_sessions_per_connection = 4 }, .{ .handshake = .{ .local_connection_id = "wt-remove-server" } });
+        self.server = try runtime.HandshakeServer.bindForEndpoint(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_sessions_per_connection = concurrent, .max_retained_sessions_per_connection = retained }, .{ .handshake = .{ .local_connection_id = "wt-remove-server" } });
         errdefer self.server.deinit();
         self.endpoint = try runtime.EndpointServer.init(&self.server, .{});
         errdefer self.endpoint.deinit();
-        const settings = try webtransport.settingsWithSessionCapacity(.{}, 4);
+        const settings = try webtransport.settingsWithSessionCapacity(.{}, concurrent);
         const keys = quic.protection.deriveAes128Keys([_]u8{0x73} ** quic.protection.secret_len);
         var parameters = quic.practical_transport_parameters;
         parameters.max_datagram_frame_size = 1200;

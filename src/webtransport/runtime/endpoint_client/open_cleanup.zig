@@ -37,6 +37,15 @@ pub const Pending = struct {
         return self.attempts.items.len;
     }
 
+    /// Only an unsubmitted CONNECT cancellation can still represent a live
+    /// peer Session. Associated-stream cleanup retains its memory owner after
+    /// that protocol slot has been released.
+    pub fn liveCount(self: *const Pending) usize {
+        var live: usize = 0;
+        for (self.attempts.items) |attempt| live += @intFromBool(!attempt.connect_cancelled);
+        return live;
+    }
+
     pub fn contains(self: *const Pending, session_id: u62) bool {
         for (self.attempts.items) |attempt| if (attempt.stream_id == session_id) return true;
         return false;

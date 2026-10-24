@@ -101,6 +101,7 @@ test {
     _ = @import("runtime/endpoint_server/serve_failure_tests.zig");
     _ = @import("runtime/endpoint_server/serve_connection_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
+    _ = @import("runtime/connect/session_capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_client_tests.zig");
     _ = @import("runtime/endpoint_client/stream_control_tests.zig");
@@ -149,6 +150,11 @@ pub const Limits = struct {
     /// `EndpointServer`. Standalone owning Session adapters remain limited to
     /// one and reject larger values during construction.
     max_sessions_per_connection: usize = 1,
+    /// Total Session owners retained by EndpointServer on one connection,
+    /// including closed Sessions whose metadata the application still owns.
+    /// Null uses max(16, max_sessions_per_connection); an explicit bound must
+    /// be non-zero. Remove closed owners to reclaim this local memory quota.
+    max_retained_sessions_per_connection: ?usize = null,
     /// Browser-origin admission. By default, absent Origin is accepted for
     /// native clients and an explicit Origin must match the CONNECT target.
     origin_policy: OriginPolicy = .same_origin_or_absent,
@@ -1822,6 +1828,7 @@ pub const HandshakeServer = struct {
         capacity: u64,
     ) Error!HandshakeServer {
         try application_protocol.validateValues(limits.application_protocols.values);
+        try @import("runtime/connect/session_capacity.zig").validateServerLimits(limits);
         return .{
             .h3 = try .bind(
                 allocator,
@@ -3018,6 +3025,8 @@ pub const EndpointServer = struct {
         });
     }
 
+    /// Retained accepted Session owners, including closed handles. Concurrent
+    /// admission counts only live Sessions.
     pub fn sessionCountForConnection(
         self: *const EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -3029,6 +3038,8 @@ pub const EndpointServer = struct {
         }
         return count;
     }
+
+    const canAdmitSession = @import("runtime/connect/session_capacity.zig").serverCanAdmit;
 
     pub fn accept(
         self: *EndpointServer,
@@ -3049,9 +3060,7 @@ pub const EndpointServer = struct {
             source.request.request,
             source.limits.origin_policy,
         );
-        if (self.sessionCountForConnection(handle) >=
-            self.limits.max_sessions_per_connection)
-        {
+        if (!try self.canAdmitSession(handle, source.h3)) {
             return error.InvalidSessionState;
         }
         // Reserve every allocation before emitting status 200. Once the peer
@@ -3540,9 +3549,7 @@ pub const EndpointServer = struct {
             _ = try Rejections.retryOne(self, handle, h3);
             return null;
         };
-        if (self.sessionCountForConnection(handle) >=
-            self.limits.max_sessions_per_connection)
-        {
+        if (!try self.canAdmitSession(handle, h3)) {
             Rejections.retain(self, handle, .{ .stream_id = request.session_id.value, .application_error_code = http3.ApplicationErrorCode.request_rejected });
             _ = try Rejections.retryOne(self, handle, h3);
             return null;

@@ -481,7 +481,28 @@ attempt retains status/custom headers/bounded entity state, then two accepted
 Sessions exchange independent DATAGRAMs and associated streams, send distinct
 CLOSE metadata, and are removed separately without destroying H3. Its third
 open is rejected locally from the peer SETTINGS/local-cap minimum before a
-request stream is consumed. Targeted receive remains available, while
+request stream is consumed. Draft-16 admission also enforces section 5.1:
+without Session flow-control intent from both endpoints, only one simultaneous
+Session is allowed even if the advertised and configured capacities are larger.
+The client rejects a second CONNECT with `SessionLimitExceeded` before stream-ID
+or wire mutation; the server submits H3_REQUEST_REJECTED instead of admitting
+that CONNECT, leaving the original Session usable. Closed Session owners keep
+their metadata and still count against local object limits, but release the
+protocol's simultaneous-session slot. The client's `max_sessions` bounds all
+retained owners, while the server's SETTINGS limit applies only to live
+Sessions. The server likewise applies `max_sessions_per_connection` to live
+Sessions and separately bounds retained owners with
+`max_retained_sessions_per_connection`; its default is
+`max(16, max_sessions_per_connection)`, and an explicit zero fails before bind
+or allocation. Capacity-one regressions keep old close metadata while reusing
+the same connection, then fill the independent object quota and verify refusal.
+An abandoned CONNECT keeps the simultaneous-session slot
+until cancellation is submitted, while remaining associated-stream cleanup
+continues to own its memory. The shared policy lives in
+`runtime/connect/session_capacity.zig`; protected-UDP regressions cover both
+flow-intent directions, exact RESET/STOP codes, cancellation backpressure and
+sequential reuse without removing old close metadata. Targeted receive remains
+available, while
 `pollAny`/`receiveAny*` use a stable Session-ID round-robin cursor so a busy
 Session cannot starve another; deterministic readiness tests cover wraparound
 and stale-cursor removal, and the real TLS test receives both DATAGRAM and

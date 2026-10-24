@@ -12,6 +12,7 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
 const connect_negotiation = @import("connect/negotiation.zig");
+const session_capacity = @import("connect/session_capacity.zig");
 const application_protocol = webtransport.application_protocol;
 const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
@@ -455,6 +456,13 @@ pub const Client = struct {
         try self.pending_open_cleanup.advance(&self.h3);
     }
 
+    fn liveSessionCount(self: *const Client) usize {
+        var count: usize = 0;
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |session_ptr| count += @intFromBool(!session_ptr.*.control.state.closed);
+        return count;
+    }
+
     pub fn connect(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -818,10 +826,12 @@ pub const Client = struct {
         const version = try connect_negotiation.prepareClient(&self.h3, deadline);
         try connect_negotiation.requireFlowControl(self.h3.options.local_settings, self.h3.control.settings.peer, self.require_session_flow_control);
         const peer = self.h3.control.settings.peer;
-        if (self.sessions.count() + self.pending_open_cleanup.count() >= sessionCapacity(
-            self.max_sessions,
-            peer.webtransport_max_sessions,
-        )) {
+        const retained = self.sessions.count() + self.pending_open_cleanup.count();
+        const live = self.liveSessionCount() + self.pending_open_cleanup.liveCount();
+        if (retained >= self.max_sessions or
+            live >= session_capacity.clientConcurrentLimit(self.max_sessions, peer.webtransport_max_sessions) or
+            !session_capacity.permitsAdditional(version, self.h3.options.local_settings, peer, live))
+        {
             return error.SessionLimitExceeded;
         }
 
@@ -1356,21 +1366,6 @@ test "WebTransport endpoint URI routes through configured SOCKS5" {
                 .socks5_proxy = .{ .host = "127.0.0.1", .port = 0 },
             },
         ),
-    );
-}
-
-fn sessionCapacity(local: usize, peer: u64) usize {
-    const peer_capacity = std.math.cast(usize, peer) orelse
-        std.math.maxInt(usize);
-    return @min(local, peer_capacity);
-}
-
-test "WebTransport endpoint client uses local and peer Session minimum" {
-    try std.testing.expectEqual(@as(usize, 2), sessionCapacity(2, 3));
-    try std.testing.expectEqual(@as(usize, 2), sessionCapacity(3, 2));
-    try std.testing.expectEqual(
-        @as(usize, 4),
-        sessionCapacity(4, quic.varint.max_value),
     );
 }
 

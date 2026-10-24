@@ -237,6 +237,7 @@ test "WebTransport shared client CONNECT timeout cleans early streams while pres
     try std.testing.expectEqualStrings("alive", buffer[0..event.stream.data.bytes]);
     try std.testing.expect(connection.recvStreamStats(1).?.stop_sending_sent == null);
     try std.testing.expectEqual(@as(usize, 1), fixture.client.pending_open_cleanup.count());
+    try std.testing.expectEqual(@as(usize, @intFromBool(connection.sendStreamStats(4).?.reset == null)), fixture.client.pending_open_cleanup.liveCount());
 
     connection.pacer.enabled = false;
     try finishCancellation(&fixture);
