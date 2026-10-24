@@ -374,10 +374,12 @@ pub const Message = struct {
 
 /// Resumable caller-buffer message state shared by every stream transport.
 /// Once a fragmented message starts, retries must provide the same output
-/// slice so already-consumed wire bytes cannot be redirected or lost.
+/// slice so already-consumed wire bytes cannot be redirected or lost. Complete
+/// compressed input releases that output reference before decoder completion.
 pub const MessageIntoReceiveState = struct {
     opcode: ?websocket.Opcode = null,
     compressed: bool = false,
+    complete: bool = false,
     text_utf8: websocket.Utf8Validator = .{},
     written: usize = 0,
     output_address: usize = 0,
@@ -406,6 +408,9 @@ pub const MessageIntoReceiveState = struct {
         out: []u8,
     ) websocket.Error!void {
         if (!self.active()) return;
+        // Complete compressed input is connection-owned. Its decoder may be
+        // retried with a new destination after a local allocation failure.
+        if (self.complete and self.compressed) return;
         if (self.output_address != @intFromPtr(out.ptr) or
             self.output_len != out.len)
         {
@@ -415,6 +420,19 @@ pub const MessageIntoReceiveState = struct {
 
     pub fn reset(self: *MessageIntoReceiveState) void {
         self.* = .{};
+    }
+
+    pub fn markComplete(self: *MessageIntoReceiveState) void {
+        std.debug.assert(self.active());
+        self.complete = true;
+        if (self.compressed) {
+            self.output_address = 0;
+            self.output_len = 0;
+        }
+    }
+
+    pub fn canRetryCompletion(self: MessageIntoReceiveState, err: anyerror) bool {
+        return err == error.OutOfMemory and self.complete and self.compressed;
     }
 
     pub fn validateFramePayload(

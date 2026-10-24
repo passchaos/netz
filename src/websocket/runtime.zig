@@ -7244,6 +7244,8 @@ pub const Connection = struct {
     /// from the transport buffer. Control frames retain the same automatic
     /// Pong/Close behavior as `receiveMessage`. Negotiated compressed messages
     /// use reusable connection scratch and inflate directly into `out`.
+    /// A final compressed decode OOM retains its owned input and permits a
+    /// later retry with a new output slice.
     pub fn receiveMessageInto(
         self: *Connection,
         out: []u8,
@@ -12165,7 +12167,8 @@ fn receiveMessageIntoDirectConnection(
     }
     try connection.message_into.validateOutput(out);
     errdefer |err| if (err != error.Timeout and
-        err != error.ResponseAvailable)
+        err != error.ResponseAvailable and
+        !connection.message_into.canRetryCompletion(err))
     {
         connection.message_into.reset();
         connection.message_frame_receive.reset();
@@ -12177,6 +12180,7 @@ fn receiveMessageIntoDirectConnection(
         if (opcode == .close) return error.ConnectionClosed;
     }
     try connection.ensureNoPendingWrites();
+    if (connection.message_into.complete) return @import("runtime/message/complete_into.zig").finish(connection, out);
 
     var control_storage: [125]u8 = undefined;
     while (true) {
@@ -12228,51 +12232,8 @@ fn receiveMessageIntoDirectConnection(
         }
         if (!frame.header.fin) continue;
 
-        const message_opcode = connection.message_into.opcode orelse
-            return error.InvalidFrame;
-        const was_compressed = connection.message_into.compressed;
-        const payload = if (was_compressed)
-            if (connection.compression_receive_context_takeover)
-                connection.compression_receive.previewContextInto(
-                    connection.allocator,
-                    out[0..connection.limits.max_message_bytes],
-                    connection.compression_receive.payload.items[0..connection.message_into.written],
-                    connection.compression_receive_max_window_bits,
-                ) catch |err| switch (err) {
-                    error.PreviewPending => return error.InvalidFrame,
-                    error.OutOfMemory => {
-                        _ = failReceive(connection);
-                        return error.OutOfMemory;
-                    },
-                    else => |other| return @errorCast(other),
-                }
-            else
-                try websocket.decompressMessageVortInto(
-                    out[0..connection.limits.max_message_bytes],
-                    connection.compression_receive.payload.items[0..connection.message_into.written],
-                    connection.compression_receive.payload.allocatedSlice(),
-                )
-        else
-            out[0..connection.message_into.written];
-        if (connection.message_into.payloadNeedsFinalUtf8Validation() and
-            !std.unicode.utf8ValidateSlice(payload))
-        {
-            if (connection.compression_receive_context_takeover) {
-                connection.compression_receive.discardContextPreview();
-            }
-            return error.InvalidUtf8;
-        }
-        if (was_compressed and
-            connection.compression_receive_context_takeover)
-        {
-            connection.compression_receive.commitContextPreview();
-        }
-        connection.message_into.reset();
-        return .{
-            .opcode = message_opcode,
-            .payload = payload,
-            .was_compressed = was_compressed,
-        };
+        connection.message_into.markComplete();
+        return @import("runtime/message/complete_into.zig").finish(connection, out);
     }
 }
 
@@ -17345,6 +17306,7 @@ test {
     _ = @import("runtime/message_io_tests.zig");
     _ = @import("runtime/message/tests/frame_allocation.zig");
     _ = @import("runtime/message/tests/assembly_allocation.zig");
+    _ = @import("runtime/message/tests/caller_completion.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/compression/directional_tests.zig");

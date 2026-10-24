@@ -557,6 +557,18 @@ following independent or history-dependent message, plus a real TCP case that
 first times out on a masked UTF-8 prefix. Receive-mode changes remain local
 errors while a message is retained; malformed input still follows the existing
 Close/error path.
+Caller-buffer context decoding now also retains complete compressed input
+after a final decoder allocation failure. The shared
+`runtime/message/complete_into.zig` finalizer owns decoding, text validation
+and history commit for HTTP/1, RFC 8441 and RFC 9220. Its completion marker
+prevents a retry from reading the following message, and complete compressed
+input releases the old output address so the caller may supply new storage.
+Partial-message timeouts still require the same destination. Repeated OOM,
+undersized output and receive-mode misuse preserve the pending message; a
+successful retry commits history once. Tests cover both masking roles,
+fragmented messages, every decoder allocation, an established dictionary and
+real TCP timeout/OOM recovery. Invalid deflate or decoded UTF-8 still follows
+the protocol Close path after memory becomes available.
 Validation passes the complete Debug WebSocket matrix, focused ReleaseFast
 assembly/Close tests, package reachability, real H1 WS/WSS receive smokes,
 Hyper h2c/TLS RFC 8441 interoperability, quic-go RFC 9220 in both directions

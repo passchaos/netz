@@ -2290,11 +2290,11 @@ pub fn Connection(comptime role: common.Role) type {
 
         fn resetMessageIntoAfterError(self: *Self, err: anyerror) void {
             // Timeout is resumable because `inbuf`, the completed-fragment
-            // offset, and compressed bytes are connection-owned. All other
-            // failures terminate this caller-buffer operation; retaining its
-            // borrowed pointer would make a later receive spuriously require
-            // memory that the caller no longer promised to keep alive.
-            if (err != error.Timeout) {
+            // offset, and compressed bytes are connection-owned. Decoder OOM
+            // after a complete compressed message also retains owned input,
+            // having already released the caller's output reference. Other
+            // failures terminate this caller-buffer operation.
+            if (err != error.Timeout and !self.message_into.canRetryCompletion(err)) {
                 self.message_into.reset();
                 self.message_frame_receive.reset();
             }
@@ -2304,6 +2304,7 @@ pub fn Connection(comptime role: common.Role) type {
         /// The output must cover `limits.max_message_bytes`, allowing timeout
         /// recovery to retain only offsets and compressed scratch rather than
         /// allocating an intermediate uncompressed message.
+        /// A final compressed decode OOM may be retried with a new output.
         pub fn receiveMessageInto(
             self: *Self,
             out: []u8,
@@ -2354,6 +2355,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (opcode == .close) return error.ConnectionClosed;
             }
             try self.ensureNoPendingWrites();
+            if (self.message_into.complete) return @import("message/complete_into.zig").finish(self, out);
 
             var control_storage: [125]u8 = undefined;
             while (true) {
@@ -2404,53 +2406,8 @@ pub fn Connection(comptime role: common.Role) type {
 
                 if (!frame.header.fin) continue;
 
-                const message_opcode = self.message_into.opcode orelse
-                    return error.InvalidFrame;
-                const was_compressed = self.message_into.compressed;
-                const payload = if (was_compressed)
-                    if (self.compression_receive_context_takeover)
-                        self.compression_receive.previewContextInto(
-                            self.allocator,
-                            out[0..self.limits.max_message_bytes],
-                            self.compression_receive
-                                .payload.items[0..self.message_into.written],
-                            self.compression_receive_max_window_bits,
-                        ) catch |err| switch (err) {
-                            error.PreviewPending => return error.InvalidFrame,
-                            error.OutOfMemory => {
-                                _ = self.failReceive();
-                                return error.OutOfMemory;
-                            },
-                            else => |other| return @errorCast(other),
-                        }
-                    else
-                        try websocket.decompressMessageVortInto(
-                            out[0..self.limits.max_message_bytes],
-                            self.compression_receive
-                                .payload.items[0..self.message_into.written],
-                            self.compression_receive.payload.allocatedSlice(),
-                        )
-                else
-                    out[0..self.message_into.written];
-                if (self.message_into.payloadNeedsFinalUtf8Validation() and
-                    !std.unicode.utf8ValidateSlice(payload))
-                {
-                    if (self.compression_receive_context_takeover) {
-                        self.compression_receive.discardContextPreview();
-                    }
-                    return error.InvalidUtf8;
-                }
-                if (was_compressed and
-                    self.compression_receive_context_takeover)
-                {
-                    self.compression_receive.commitContextPreview();
-                }
-                self.message_into.reset();
-                return .{
-                    .opcode = message_opcode,
-                    .payload = payload,
-                    .was_compressed = was_compressed,
-                };
+                self.message_into.markComplete();
+                return @import("message/complete_into.zig").finish(self, out);
             }
         }
 
