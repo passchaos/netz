@@ -92,6 +92,8 @@ test {
     _ = @import("runtime/connect/admission_tests.zig");
     _ = @import("runtime/connect/required_flow_tests.zig");
     _ = @import("runtime/connect/required_endpoint_tests.zig");
+    _ = @import("runtime/connect/endpoint_rejection_tests.zig");
+    _ = @import("runtime/connect/endpoint_buffered_admission_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_client_tests.zig");
@@ -3240,6 +3242,7 @@ pub const EndpointServer = struct {
     const maintainEarlyStreams = Early.maintainAll;
     const noteEarlyRejection = Early.reject;
     const earlyDeadline = Early.boundedDeadline;
+    const Rejections = @import("runtime/connect/endpoint_rejection.zig").For(@This(), noteEarlyRejection);
 
     /// Run the endpoint-owned receive loop until `shutdown` is set. The
     /// callback executes synchronously on the sole owner so it may accept or
@@ -3512,8 +3515,10 @@ pub const EndpointServer = struct {
     fn pollBufferedSessionRequest(
         self: *EndpointServer,
     ) EndpointServerError!?EndpointServerEvent {
+        try Rejections.retryBuffered(self);
         var session_keys = self.sessions.keyIterator();
         while (session_keys.next()) |key| {
+            if (self.request_rejection_pending.contains(key.handle)) continue;
             const h3 = self.h3.session(key.handle) orelse
                 return error.InvalidSessionState;
             if (try self.pollNewSessionRequest(key.handle, h3)) |event| {
@@ -3522,6 +3527,7 @@ pub const EndpointServer = struct {
         }
         var idle = self.idle_connections.keyIterator();
         while (idle.next()) |handle| {
+            if (self.request_rejection_pending.contains(handle.*)) continue;
             const h3 = self.h3.session(handle.*) orelse
                 return error.InvalidSessionState;
             if (try self.pollNewSessionRequest(handle.*, h3)) |event| {
@@ -3541,19 +3547,8 @@ pub const EndpointServer = struct {
             return null;
         }
         if (self.pending.contains(handle)) return null;
-        if (self.request_rejection_pending.get(handle)) |rejection| {
-            try self.noteEarlyRejection(handle, h3, rejection.stream_id);
-            rejection.submit(h3) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                else => return err,
-            };
-            _ = self.request_rejection_pending.remove(handle);
-            if (rejection.failure) |failure| return failure.cause();
-        }
-        try self.request_rejection_pending.ensureUnusedCapacity(self.allocator, 1);
+        if (!try Rejections.retryOne(self, handle, h3)) return null;
+        try Rejections.reserve(self, handle);
         const request = (try pollEndpointConnectHead(h3)) orelse
             return null;
         var owned_request = request.request;
@@ -3562,38 +3557,15 @@ pub const EndpointServer = struct {
         connect_negotiation.validateRequestWithPolicy(h3, owned_request.request, self.limits.require_session_flow_control) catch |err| {
             const failure = connect_rejection.Failure.fromError(err) orelse return err;
             const rejection = connect_rejection.Pending.forFailure(request.session_id.value, failure);
-            try self.noteEarlyRejection(handle, h3, request.session_id.value);
-            self.request_rejection_pending.putAssumeCapacity(handle, rejection);
-            rejection.submit(h3) catch |submission_error| switch (submission_error) {
-                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
-                else => return submission_error,
-            };
-            _ = self.request_rejection_pending.remove(handle);
-            return failure.cause();
+            Rejections.retain(self, handle, rejection);
+            _ = try Rejections.retryOne(self, handle, h3);
+            return null;
         };
         if (self.sessionCountForConnection(handle) >=
             self.limits.max_sessions_per_connection)
         {
-            try self.noteEarlyRejection(handle, h3, request.session_id.value);
-            try self.request_rejection_pending.ensureUnusedCapacity(
-                self.allocator,
-                1,
-            );
-            self.request_rejection_pending.putAssumeCapacity(
-                handle,
-                .{ .stream_id = request.session_id.value, .application_error_code = http3.ApplicationErrorCode.request_rejected },
-            );
-            h3.tryCancelRequest(
-                request.session_id.value,
-                http3.ApplicationErrorCode.request_rejected,
-            ) catch |err| switch (err) {
-                error.PacingLimited,
-                error.CongestionLimited,
-                error.FlowControlBlocked,
-                => return null,
-                else => return err,
-            };
-            _ = self.request_rejection_pending.remove(handle);
+            Rejections.retain(self, handle, .{ .stream_id = request.session_id.value, .application_error_code = http3.ApplicationErrorCode.request_rejected });
+            _ = try Rejections.retryOne(self, handle, h3);
             return null;
         }
         const pending = try self.allocator.create(EndpointPendingSession);

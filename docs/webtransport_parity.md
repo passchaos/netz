@@ -1556,6 +1556,20 @@ cannot enforce it. Real protected-QUIC and TLS/shared-endpoint regressions
 exercise required-policy rejection, retained cancellation, and accepted quota
 grants. Legacy wtransport interoperability continues with the default policy.
 
+Shared endpoints schedule retained CONNECT refusals as connection work even
+when the peer has no accepted Session. Each buffered poll retries cancellation
+before waiting for UDP traffic; pacing or congestion on one connection leaves
+other connections and accepted Sessions eligible for progress. Early-stream
+termination and CONNECT cancellation refresh the dispatcher timer after both
+successful and failed submissions. The original scoped rejection cause is
+reported only after its cancellation reaches the socket. Refused connections
+also remain eligible for later buffered CONNECT requests, including a valid
+request coalesced in the same QUIC packet as a malformed sibling. Cancellation
+ownership and admission reservations are grouped in
+`webtransport/runtime/connect/endpoint_rejection.zig`. Adjacent protected-QUIC
+tests cover no-new-packet retry, pacing isolation, recovery timer replacement,
+expired deadlines, and coalesced sibling admission.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
