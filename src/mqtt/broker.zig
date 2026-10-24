@@ -10520,6 +10520,7 @@ test {
     _ = @import("broker_tests.zig");
     _ = @import("broker/persistence_tests.zig");
     _ = @import("broker/local_consumer_tests.zig");
+    _ = @import("broker/router_churn_tests.zig");
 }
 
 test "broker retained expiry scan persists physical removal" {

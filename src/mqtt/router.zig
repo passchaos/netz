@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const tree = @import("router/tree.zig");
 
 pub const Error = mqtt.Error || error{
     SubscriptionNotFound,
@@ -74,21 +75,7 @@ const SharedGroup = struct {
     }
 };
 
-const Node = struct {
-    literal_children: std.StringHashMapUnmanaged(usize) = .empty,
-    single_wildcard_child: ?usize = null,
-    terminal_entries: std.ArrayList(usize) = .empty,
-    multi_wildcard_entries: std.ArrayList(usize) = .empty,
-
-    fn deinit(self: *Node, allocator: std.mem.Allocator) void {
-        var keys = self.literal_children.keyIterator();
-        while (keys.next()) |level| allocator.free(level.*);
-        self.literal_children.deinit(allocator);
-        self.terminal_entries.deinit(allocator);
-        self.multi_wildcard_entries.deinit(allocator);
-        self.* = undefined;
-    }
-};
+const Node = tree.Node;
 
 /// MQTT topic-filter trie with configurable shared-subscription selection.
 ///
@@ -100,6 +87,7 @@ pub const Router = struct {
     allocator: std.mem.Allocator,
     options: Options,
     nodes: std.ArrayList(Node) = .empty,
+    recycled_node: ?usize = null,
     entries: std.ArrayList(?Entry) = .empty,
     /// Live entry counts are maintained transactionally so broker hot paths do
     /// not rescan the tombstone-preserving entry table before every PUBLISH.
@@ -221,8 +209,7 @@ pub const Router = struct {
         errdefer if (owns_filter) self.allocator.free(filter_owned);
         const parsed = parseFilter(filter_owned) orelse return error.InvalidSubscription;
 
-        const entry_index = self.entries.items.len;
-        try self.entries.append(self.allocator, Entry{
+        const entry_index = try self.insertEntry(Entry{
             .subscriber_id = subscriber_id,
             .subscription = .{
                 .topic_filter = filter_owned,
@@ -237,12 +224,13 @@ pub const Router = struct {
         });
         owns_filter = false;
         errdefer {
-            var removed = self.entries.pop().?;
-            removed.?.deinit(self.allocator);
+            self.entries.items[entry_index].?.deinit(self.allocator);
+            self.entries.items[entry_index] = null;
         }
 
         if (parsed.group) |group| {
             const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
+            errdefer tree.pruneEmpty(self, node_index);
             const group_index, const created = try self.getOrCreateSharedGroup(group, parsed.effective_filter);
             errdefer if (created) self.removeSharedGroupAt(group_index);
             self.entries.items[entry_index].?.shared_group_index = group_index;
@@ -255,6 +243,7 @@ pub const Router = struct {
             }
         } else {
             const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
+            errdefer tree.pruneEmpty(self, node_index);
             try self.appendRouteEntry(node_index, multi_level, entry_index);
             errdefer self.removeRouteEntry(node_index, multi_level, entry_index);
         }
@@ -292,13 +281,14 @@ pub const Router = struct {
         self.entries.items[entry_index] = null;
         self.active_entry_count -= 1;
         self.shared_entry_count -= @intFromBool(was_shared);
+        tree.pruneEmpty(self, node_index);
     }
 
     /// Remove every subscription owned by one live network connection.
     ///
     /// Broker disconnect cleanup uses this instead of retaining a parallel
-    /// filter list. Entries are tombstoned rather than compacted, preserving
-    /// stable shared-group and route indices for concurrent connection slots.
+    /// filter list. Live indexes remain stable; detached entry and trie slots
+    /// are recycled after their route/shared-group references are removed.
     pub fn removeSubscriber(
         self: *Router,
         subscriber_id: SubscriberId,
@@ -737,49 +727,17 @@ pub const Router = struct {
         return selected;
     }
 
-    fn insertFilterPath(self: *Router, filter: []const u8) Error!struct { usize, bool } {
-        var node_index: usize = 0;
-        var it = std.mem.splitScalar(u8, filter, '/');
-        while (it.next()) |level| {
-            if (std.mem.eql(u8, level, "#")) return .{ node_index, true };
-            if (std.mem.eql(u8, level, "+")) {
-                if (self.nodes.items[node_index].single_wildcard_child) |child| {
-                    node_index = child;
-                } else {
-                    const child = self.nodes.items.len;
-                    try self.nodes.append(self.allocator, .{});
-                    self.nodes.items[node_index].single_wildcard_child = child;
-                    node_index = child;
-                }
-                continue;
-            }
-            if (findLiteralChild(self.nodes.items[node_index], level)) |child| {
-                node_index = child;
-            } else {
-                const owned = try self.allocator.dupe(u8, level);
-                errdefer self.allocator.free(owned);
-                const child = self.nodes.items.len;
-                try self.nodes.append(self.allocator, .{});
-                errdefer _ = self.nodes.pop();
-                try self.nodes.items[node_index].literal_children.put(self.allocator, owned, child);
-                node_index = child;
-            }
-        }
-        return .{ node_index, false };
-    }
+    const insertFilterPath = tree.insert;
+    const findFilterPath = tree.find;
 
-    fn findFilterPath(self: Router, filter: []const u8) ?struct { usize, bool } {
-        var node_index: usize = 0;
-        var it = std.mem.splitScalar(u8, filter, '/');
-        while (it.next()) |level| {
-            if (std.mem.eql(u8, level, "#")) return .{ node_index, true };
-            if (std.mem.eql(u8, level, "+")) {
-                node_index = self.nodes.items[node_index].single_wildcard_child orelse return null;
-            } else {
-                node_index = findLiteralChild(self.nodes.items[node_index], level) orelse return null;
-            }
+    fn insertEntry(self: *Router, entry: Entry) Error!usize {
+        for (self.entries.items, 0..) |value, index| {
+            if (value != null) continue;
+            self.entries.items[index] = entry;
+            return index;
         }
-        return .{ node_index, false };
+        try self.entries.append(self.allocator, entry);
+        return self.entries.items.len - 1;
     }
 
     fn findEntry(self: Router, subscriber_id: SubscriberId, topic_filter: []const u8) ?usize {
@@ -904,9 +862,7 @@ fn parseFilter(filter: []const u8) ?ParsedFilter {
     };
 }
 
-fn findLiteralChild(node: Node, level: []const u8) ?usize {
-    return node.literal_children.get(level);
-}
+const findLiteralChild = tree.literalChild;
 
 fn appendUniqueNode(nodes: *[128]usize, count: *usize, node_index: usize) bool {
     for (nodes[0..count.*]) |existing| if (existing == node_index) return true;
@@ -1600,4 +1556,5 @@ fn testSubscriptionAllocationFailures(allocator: std.mem.Allocator) !void {
 
 test {
     _ = @import("router/batch_tests.zig");
+    _ = @import("router/churn_tests.zig");
 }

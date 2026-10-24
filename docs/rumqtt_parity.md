@@ -9,6 +9,17 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Router subscription churn now reuses detached entry/node slots and prunes
+empty literal and `+` branches without changing any live route or shared-group
+index. Trie ownership lives in `src/mqtt/router/tree.zig`; parent links make
+cleanup iterative, including thousands of empty topic levels. Subscription
+failure also removes any unused prefix built before a later allocation failed,
+and uncommitted batches retain allocation-free rollback. Storage follows peak
+live/prepared routes rather than cumulative subscription history. Dedicated
+regressions cover changing normal/shared filters, recycled representatives,
+shared join order, overlapping wildcard routes, every insertion allocation
+failure and the public Broker local-consumer open/publish/close path.
+
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | Listener socket family | Mosquitto-style `socket_domain ipv4|ipv6` and `bind_interface` are listener-local across TCP, TLS, WS, and WSS. Omitted bind addresses become the selected family's wildcard, explicit address-family mismatches fail configuration when no interface overrides the address, and IPv6-only sockets set `IPV6_V6ONLY` before bind. With neither an address nor `socket_domain`, the configured runner opens separate IPv4 and IPv6 wildcard sockets when supported; both share the logical listener's admission cap and policy. A named interface takes precedence over the listener address and contributes its first address from each selected family without requiring privileged `SO_BINDTODEVICE`. Backend, interface, or explicitly selected family limitations fail closed; only an unavailable family in an all-family listener is skipped. | Mosquitto likewise enumerates all supported families by default, creates a separate socket for each, resolves `bind_interface` through `getifaddrs`, and restricts a listener to the configured family; rumqttd has no equivalent audited listener option |
