@@ -8934,6 +8934,10 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeAdmissionOptions,
         "max_connections",
     ));
+    try std.testing.expect(@hasField(netz.http3.runtime.HandshakeAdmissionOptions, "closing_handshake_capacity"));
+    try std.testing.expect(@hasField(netz.http3.runtime.HandshakeAdmissionOptions, "handshake_poll_interval"));
+    try std.testing.expect(@hasField(netz.quic.endpoint_server.Options, "closing_handshake_capacity"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_dispatcher.Dispatcher, "closingHandshakeCount"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
         "HandshakeSupervisor",

@@ -545,9 +545,11 @@ pub const InitialHandshakeFlight = struct {
     /// fatal receive error can use it for CONNECTION_CLOSE without reusing an
     /// AEAD nonce, including after a zero-progress socket failure.
     next_handshake_packet_number: ?u64 = null,
+    last_retransmission: u8 = 0,
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
+        self.last_retransmission = retransmission;
         var initial_options = self.initial_options;
         initial_options.initial.packet_number = try retryPacketNumber(
             self.initial_options.initial.packet_number,

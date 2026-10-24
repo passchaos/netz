@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
+const closing_handshake = @import("handshake/closing.zig");
 const owned_receive_race = @import("owned_receive_race.zig");
 
 test {
@@ -18,6 +19,9 @@ test {
 }
 
 pub const Options = struct {
+    /// Total reserved live-handshake plus closing slots. Unexpired closing
+    /// routes are never evicted to admit a new handshake.
+    closing_handshake_capacity: usize = closing_handshake.default_capacity,
     max_pending_handshakes: usize = 128,
     /// Aggregate pending plus established connection limit. Zero inherits
     /// `max_pending_handshakes`.
@@ -139,6 +143,9 @@ const Admission = struct {
     initial_owned: bool = true,
     connection_initialized: bool = false,
     connection_owned: bool = true,
+    closing_packet: ?closing_handshake.Packet = null,
+    closing_lifetime_ns: u64,
+    retain_closing: bool = false,
 
     fn source(self: *Admission) quic.runtime.DatagramSource {
         return self.inbox.datagramSource();
@@ -171,7 +178,7 @@ const Admission = struct {
 
     fn deinit(self: *Admission) void {
         const allocator = self.inbox.allocator;
-        if (self.registered) {
+        if (self.registered and !(self.retain_closing and self.dispatcher.closePendingHandshake(self.handle, self.closing_packet, self.closing_lifetime_ns))) {
             _ = self.dispatcher.unregisterPendingHandshake(
                 self.handle,
             ) catch false;
@@ -226,7 +233,7 @@ fn createAddressValidationReplayFilter(
         io,
         capacity,
     ) catch |err| switch (err) {
-        error.InvalidCapacity => unreachable,
+        error.InvalidCapacity, error.InvalidToken, error.TokenExpired, error.TokenNotYetValid, error.TokenReplay => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
     return replay_filter;
@@ -310,7 +317,7 @@ pub const Server = struct {
         handshake_options: quic.handshake.ServerOptions,
         options: Options,
     ) Error!Server {
-        if (options.max_pending_handshakes == 0 or
+        if (options.closing_handshake_capacity == 0 or options.max_pending_handshakes == 0 or
             options.inbox_capacity == 0 or
             options.handshake_poll_interval.nanoseconds <= 0 or
             options.stateless_reset_min_interval.nanoseconds < 0)
@@ -405,6 +412,7 @@ pub const Server = struct {
         );
         errdefer allocator.destroy(dispatcher);
         dispatcher.* = .init(allocator, endpoint);
+        dispatcher.closing_handshake_capacity = options.closing_handshake_capacity;
         errdefer dispatcher.deinit();
         const preferred_receive_storage: []u8 = if (preferred_endpoints.secondary != null)
             try allocator.alloc(u8, endpoint.limits.max_datagram_size)
@@ -1645,6 +1653,7 @@ pub const Server = struct {
             .server_connection_id = undefined,
             .preferred_endpoints = self.preferred_endpoints,
             .version = @enumFromInt(initial.version),
+            .closing_lifetime_ns = closing_handshake.lifetimeNs(self.handshake_options.handshake_recovery.initial_pto_ms),
             .deadline_ns = handshakeDeadlineNs(
                 self.endpoint.io,
                 self.options.handshake_timeout_ms,
@@ -1733,6 +1742,7 @@ pub const Server = struct {
         const handle = completion.handle;
         switch (completion.result) {
             .failure => |err| {
+                completion.admission.retain_closing = completion.admission.closing_packet != null or err == error.ConnectionClosed;
                 completion.admission.deinit();
                 self.allocator.destroy(completion.admission);
                 completion.* = undefined;
@@ -1872,6 +1882,8 @@ fn runWorker(
                 ),
             );
     }
+    options.failed_close_out = &admission.closing_packet;
+    options.failed_close_lifetime_out = &admission.closing_lifetime_ns;
     const result: @FieldType(Completion, "result") = blk: {
         admission.connection.* = quic.handshake.acceptFromInitialSourceWithDeadline(
             context.endpoint,

@@ -3,6 +3,7 @@
 const std = @import("std");
 const quic = @import("../mod.zig");
 const retransmit = @import("retransmit.zig");
+const closing = @import("closing.zig");
 const Description = @import("vail").tls.alert.Description;
 
 pub const PacketType = enum { initial, handshake };
@@ -74,6 +75,8 @@ pub const State = struct {
     next_packet_number: ?u64,
     client: bool = false,
     anti_amplification: ?*retransmit.AntiAmplificationBudget = null,
+    closing_out: ?*?closing.Packet = null,
+    closing_lifetime_ns: u64 = 0,
 
     pub fn guardTls(self: *State, result: anytype) @TypeOf(result) {
         return result catch |err| {
@@ -135,8 +138,21 @@ pub const State = struct {
                 .payload = payload.items,
             }),
         };
+        if (self.closing_out) |output| {
+            var retained: closing.Packet = .{
+                .len = packet.len,
+                .bytes_received = if (self.anti_amplification) |budget| budget.bytes_received else 0,
+                .bytes_sent = if (self.anti_amplification) |budget| budget.bytes_sent else 0,
+                .lifetime_ns = self.closing_lifetime_ns,
+            };
+            @memcpy(retained.bytes[0..packet.len], packet);
+            output.* = retained;
+        }
         if (self.anti_amplification) |budget| try budget.reserve(packet.len);
         errdefer if (self.anti_amplification) |budget| budget.release(packet.len);
         try self.endpoint.sendBytes(self.peer, packet);
+        if (self.closing_out) |output| {
+            if (output.*) |*retained| retained.bytes_sent +|= packet.len;
+        }
     }
 };

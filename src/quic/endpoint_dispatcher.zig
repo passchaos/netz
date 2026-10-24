@@ -15,6 +15,7 @@ const endpoint_timers = @import("endpoint_timers.zig");
 const handshake_inbox = @import("handshake_inbox.zig");
 const one_rtt = @import("one_rtt.zig");
 const runtime = @import("runtime.zig");
+const closing_handshake = @import("handshake/closing.zig");
 
 test {
     _ = @import("endpoint_dispatcher/tests.zig");
@@ -51,7 +52,8 @@ const ConnectionEntry = struct {
 };
 
 const PendingHandshakeEntry = struct {
-    inbox: *handshake_inbox.Inbox,
+    inbox: ?*handshake_inbox.Inbox,
+    closing: *closing_handshake.State,
     connection_ids: std.ArrayList(connection_router.ConnectionIdKey) = .empty,
 
     fn deinit(
@@ -59,6 +61,7 @@ const PendingHandshakeEntry = struct {
         allocator: std.mem.Allocator,
     ) void {
         self.connection_ids.deinit(allocator);
+        allocator.destroy(self.closing);
         self.* = undefined;
     }
 };
@@ -265,6 +268,9 @@ pub const Dispatcher = struct {
         ConnectionEntry,
     ) = .empty,
     pending_router: connection_router.Router,
+    closing_handshake_capacity: usize = closing_handshake.default_capacity,
+    closing_handshake_count: usize = 0,
+    closing_handshake_deadline: ?endpoint_timers.EndpointTimerDeadline = null,
     pending_handshakes: std.AutoHashMapUnmanaged(
         PendingHandshakeHandle,
         PendingHandshakeEntry,
@@ -336,7 +342,7 @@ pub const Dispatcher = struct {
         self.connections.deinit(self.allocator);
         var pending_iterator = self.pending_handshakes.valueIterator();
         while (pending_iterator.next()) |entry| {
-            entry.inbox.close();
+            if (entry.inbox) |inbox| inbox.close();
             entry.deinit(self.allocator);
         }
         self.pending_handshakes.deinit(self.allocator);
@@ -361,6 +367,8 @@ pub const Dispatcher = struct {
         handle: PendingHandshakeHandle,
         inbox: *handshake_inbox.Inbox,
     ) Error!void {
+        self.expireClosingHandshakesAt(monotonicNowNs(self.endpoint.io));
+        if (self.pending_handshakes.count() >= self.closing_handshake_capacity) return error.PendingHandshakeLimitReached;
         const connection_ids = inbox.connectionIds();
         for (connection_ids) |connection_id| {
             if ((try self.router.lookup(connection_id.slice())) != null or
@@ -372,12 +380,16 @@ pub const Dispatcher = struct {
         try self.pending_router.ensureCapacity(
             self.pending_router.count() + connection_ids.len,
         );
+        const closing_storage = try self.allocator.create(closing_handshake.State);
+        var closing_owned = true;
+        errdefer if (closing_owned) self.allocator.destroy(closing_storage);
         const slot = try self.pending_handshakes.getOrPut(
             self.allocator,
             handle,
         );
         if (slot.found_existing) return error.DuplicateConnectionHandle;
-        slot.value_ptr.* = .{ .inbox = inbox };
+        slot.value_ptr.* = .{ .inbox = inbox, .closing = closing_storage };
+        closing_owned = false;
         errdefer {
             var removed = self.pending_handshakes.fetchRemove(handle).?.value;
             for (removed.connection_ids.items) |*key| {
@@ -412,10 +424,59 @@ pub const Dispatcher = struct {
             }
         }
         var removed = self.pending_handshakes.fetchRemove(handle).?.value;
-        removed.inbox.close();
+        if (removed.inbox) |inbox| inbox.close() else self.closing_handshake_count -= 1;
         removed.deinit(self.allocator);
+        self.recomputeClosingHandshakeDeadline();
         if (stale_route) return error.StaleConnectionRoute;
         return true;
+    }
+
+    /// Transfer a completed worker's routes into minimal closing state. All
+    /// storage was reserved during admission, so this cannot lose ownership
+    /// because the allocator fails after a fatal close was sent.
+    pub fn closePendingHandshake(self: *Dispatcher, handle: PendingHandshakeHandle, packet: ?closing_handshake.Packet, lifetime_ns: u64) bool {
+        const entry = self.pending_handshakes.getPtr(handle) orelse return false;
+        const inbox = entry.inbox orelse return true;
+        const now_ns = monotonicNowNs(self.endpoint.io);
+        const route = (self.pending_router.lookup(entry.connection_ids.items[0].slice()) catch return false) orelse return false;
+        const peer = route.peer_address orelse return false;
+        const version = if (packet) |value| std.mem.readInt(u32, value.bytes[1..5], .big) else 0;
+        entry.closing.* = .init(peer, version, packet, now_ns, lifetime_ns);
+        entry.inbox = null;
+        self.closing_handshake_count += 1;
+        inbox.close();
+        // The worker has completed. Drain any already-routed Initial suffix
+        // before freeing its inbox, preserving closing response ownership.
+        while (inbox.count() != 0) {
+            var datagram = inbox.receive() catch break;
+            entry.closing.receive(datagram.received_on orelse self.endpoint, .{ .from = datagram.from, .received_on = datagram.received_on, .bytes = datagram.bytes, .ecn = datagram.ecn }, now_ns) catch {};
+            datagram.deinit(self.allocator);
+        }
+        self.recomputeClosingHandshakeDeadline();
+        return true;
+    }
+
+    pub fn closingHandshakeCount(self: *const Dispatcher) usize {
+        return self.closing_handshake_count;
+    }
+
+    pub fn expireClosingHandshakesAt(self: *Dispatcher, now_ns: u64) void {
+        while (self.closing_handshake_deadline) |deadline| {
+            if (now_ns < deadline.timer.deadline_ns) return;
+            _ = self.unregisterPendingHandshake(@intCast(deadline.connection_id)) catch false;
+        }
+    }
+
+    fn recomputeClosingHandshakeDeadline(self: *Dispatcher) void {
+        self.closing_handshake_deadline = null;
+        if (self.closing_handshake_count == 0) return;
+        var iterator = self.pending_handshakes.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.inbox != null) continue;
+            const deadline = entry.value_ptr.closing.deadline_ns;
+            if (self.closing_handshake_deadline) |previous| if (previous.timer.deadline_ns <= deadline) continue;
+            self.closing_handshake_deadline = .{ .connection_id = entry.key_ptr.*, .timer = .{ .kind = .close, .deadline_ns = deadline } };
+        }
     }
 
     /// Atomically replace pending-handshake routes with the established
@@ -429,6 +490,7 @@ pub const Dispatcher = struct {
     ) Error!void {
         const pending = self.pending_handshakes.getPtr(pending_handle) orelse
             return error.UnknownConnectionHandle;
+        const live_inbox = pending.inbox orelse return error.UnknownConnectionHandle;
         if (!self.ownsEndpoint(connection.endpoint)) {
             return error.ConnectionEndpointMismatch;
         }
@@ -473,7 +535,7 @@ pub const Dispatcher = struct {
         try self.router.ensureCapacity(route_capacity);
         try self.buffered_datagrams.ensureUnusedCapacity(
             self.allocator,
-            pending.inbox.applicationCount(),
+            live_inbox.applicationCount(),
         );
         const pending_ready = try self.ensurePendingReady(connection_capacity);
         if (!connection.canBindPendingDatagramObserver(
@@ -503,7 +565,7 @@ pub const Dispatcher = struct {
 
         // `fetchRemove` below can invalidate `pending`, so retain the only
         // caller-owned pointer needed after route removal.
-        const pending_inbox = pending.inbox;
+        const pending_inbox = live_inbox;
         for (pending.connection_ids.items) |*key| {
             std.debug.assert(try self.pending_router.unregister(key.slice()));
         }
@@ -895,7 +957,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn pendingHandshakeCount(self: *const Dispatcher) usize {
-        return self.pending_handshakes.count();
+        return self.pending_handshakes.count() - self.closing_handshake_count;
     }
 
     /// Allocate and register a bounded pending-handshake inbox using a fresh
@@ -932,7 +994,7 @@ pub const Dispatcher = struct {
         server_connection_id_count: usize,
     ) Error!*handshake_inbox.Inbox {
         if (max_pending_handshakes == 0 or
-            self.pending_handshakes.count() >= max_pending_handshakes)
+            self.pendingHandshakeCount() >= max_pending_handshakes)
         {
             return error.PendingHandshakeLimitReached;
         }
@@ -1047,7 +1109,9 @@ pub const Dispatcher = struct {
     pub fn nextTimerDeadline(
         self: *const Dispatcher,
     ) ?endpoint_timers.EndpointTimerDeadline {
-        return self.timers.earliestDeadline();
+        const active = self.timers.earliestDeadline() orelse return self.closing_handshake_deadline;
+        const closing = self.closing_handshake_deadline orelse return active;
+        return if (closing.timer.deadline_ns < active.timer.deadline_ns) closing else active;
     }
 
     /// Return already-buffered packet work or one due timer without reading
@@ -1198,6 +1262,7 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         now_ns: u64,
     ) Error!?TimerEvent {
+        self.expireClosingHandshakesAt(now_ns);
         const scheduled = self.timers.earliestDeadline() orelse return null;
         if (now_ns < scheduled.timer.deadline_ns) return null;
         const entry = self.connections.getPtr(
@@ -1226,6 +1291,7 @@ pub const Dispatcher = struct {
         now_ns: u64,
         output: []TimerEvent,
     ) Error!usize {
+        self.expireClosingHandshakesAt(now_ns);
         if (output.len == 0 or self.timers.count() == 0) return 0;
         var stack_handles: [32]ConnectionHandle = undefined;
         const handles = if (output.len <= stack_handles.len)
@@ -1467,7 +1533,7 @@ pub const Dispatcher = struct {
 
             const receive_timeout = earliestReceiveTimeout(
                 self.endpoint.io,
-                self.timers.earliestDeadline(),
+                self.nextTimerDeadline(),
                 caller_deadline,
             );
             var datagrams: [runtime.max_receive_batch_messages]runtime.ReceivedBytesView = undefined;
@@ -1585,7 +1651,7 @@ pub const Dispatcher = struct {
             }
             const receive_timeout = earliestReceiveTimeout(
                 self.endpoint.io,
-                self.timers.earliestDeadline(),
+                self.nextTimerDeadline(),
                 caller_deadline,
             );
             const datagram = if (receive_timeout == .none)
@@ -1628,6 +1694,7 @@ pub const Dispatcher = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        self.expireClosingHandshakesAt(monotonicNowNs(self.endpoint.io));
         if (datagram.bytes.len != 0) {
             const pending = self.pending_router.routeDatagramFrom(
                 datagram.from,
@@ -1636,7 +1703,15 @@ pub const Dispatcher = struct {
                 error.InvalidPacket, error.InvalidConnectionId => null,
                 else => |other| return other,
             };
-            if (pending) |_| {
+            if (pending) |route| {
+                const entry = self.pending_handshakes.getPtr(route.route.connection_index) orelse return error.StaleConnectionRoute;
+                if (entry.inbox == null) {
+                    var normalized = datagram;
+                    const received_on = datagram.received_on orelse self.endpoint;
+                    normalized.from = try received_on.normalizeSocks5PendingPeer(entry.closing.peer, datagram.from);
+                    try entry.closing.receive(received_on, normalized, monotonicNowNs(self.endpoint.io));
+                    return .consumed;
+                }
                 return self.eventFromOwned(
                     try self.copyView(datagram),
                     context,
@@ -1829,7 +1904,7 @@ pub const Dispatcher = struct {
             }
             const receive_timeout = earliestReceiveTimeout(
                 self.endpoint.io,
-                self.timers.earliestDeadline(),
+                self.nextTimerDeadline(),
                 caller_deadline,
             );
             var datagram = self.endpoint.receiveBytesTimeout(
@@ -1888,6 +1963,7 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         datagram: runtime.OwnedBytes,
     ) Error!Event {
+        self.expireClosingHandshakesAt(monotonicNowNs(self.endpoint.io));
         var owned = datagram;
         var owns_datagram = true;
         errdefer if (owns_datagram) owned.deinit(self.allocator);
@@ -1920,10 +1996,16 @@ pub const Dispatcher = struct {
                 const entry = self.pending_handshakes.getPtr(
                     routed_pending.route.connection_index,
                 ) orelse return error.StaleConnectionRoute;
+                if (entry.inbox == null) {
+                    try entry.closing.receive(owned.received_on orelse self.endpoint, .{ .from = owned.from, .received_on = owned.received_on, .bytes = owned.bytes, .ecn = owned.ecn }, monotonicNowNs(self.endpoint.io));
+                    owned.deinit(self.allocator);
+                    owns_datagram = false;
+                    return .consumed;
+                }
                 const push_result = if ((owned.bytes[0] & 0x80) != 0)
-                    entry.inbox.push(owned)
+                    entry.inbox.?.push(owned)
                 else
-                    entry.inbox.pushApplicationRouted(
+                    entry.inbox.?.pushApplicationRouted(
                         owned,
                         advertised_alternate_cid,
                     );

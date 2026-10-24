@@ -11,6 +11,10 @@ const ConnectionHandle = dispatcher_mod.ConnectionHandle;
 const Dispatcher = dispatcher_mod.Dispatcher;
 const Event = dispatcher_mod.Event;
 
+test {
+    _ = @import("closing_tests.zig");
+}
+
 fn sealShortPacketWithReservedBits(
     allocator: std.mem.Allocator,
     keys: quic.protection.PacketProtectionKeys,

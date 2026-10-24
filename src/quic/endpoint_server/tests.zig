@@ -3,6 +3,10 @@ const quic = @import("../mod.zig");
 const endpoint_server = @import("../endpoint_server.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
+test {
+    _ = @import("closing_handshake_tests.zig");
+}
+
 test "QUIC endpoint server rejects invalid admission limits" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

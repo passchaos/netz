@@ -4390,6 +4390,11 @@ pub const HandshakeServerOptions = struct {
 };
 
 pub const HandshakeAdmissionOptions = struct {
+    /// Closing slots also reserve one slot for each live handshake. Closing
+    /// routes remain until three current PTOs expire; full storage rejects new admission.
+    closing_handshake_capacity: usize = 1024,
+    /// Bound how long a timed socket wait can hide a completed worker.
+    handshake_poll_interval: std.Io.Duration = .fromMilliseconds(5),
     max_pending_handshakes: usize = 128,
     /// Aggregate pending plus established connection budget for the endpoint.
     /// Zero inherits `max_pending_handshakes` for compatibility.
@@ -4447,6 +4452,9 @@ pub const HandshakeAdmission = struct {
     deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
+    closing_packet: ?@import("../quic/handshake/closing.zig").Packet = null,
+    closing_lifetime_ns: u64,
+    retain_closing: bool = false,
 
     pub fn datagramSource(self: *HandshakeAdmission) quic.runtime.DatagramSource {
         return self.inbox.datagramSource();
@@ -4478,6 +4486,10 @@ pub const HandshakeAdmission = struct {
 
     fn abandonRegistration(self: *HandshakeAdmission) void {
         if (!self.registered) return;
+        if (self.retain_closing and self.dispatcher.closePendingHandshake(self.handle, self.closing_packet, self.closing_lifetime_ns)) {
+            self.registered = false;
+            return;
+        }
         _ = self.dispatcher.unregisterPendingHandshake(
             self.handle,
         ) catch {};
@@ -4506,7 +4518,7 @@ pub const HandshakeCompletion = struct {
         const allocator = self.admission.inbox.allocator;
         switch (self.result) {
             .session => |*session| session.deinit(),
-            .failure => {},
+            .failure => |err| self.admission.retain_closing = self.admission.closing_packet != null or err == error.ConnectionClosed,
         }
         self.admission.deinit();
         allocator.destroy(self.admission);
@@ -4608,6 +4620,8 @@ pub const HandshakeSupervisor = struct {
         {
             return error.PendingHandshakeLimitReached;
         }
+        if (options.closing_handshake_capacity == 0 or options.handshake_poll_interval.nanoseconds <= 0) return error.InvalidHandshakeRecovery;
+        dispatcher.closing_handshake_capacity = options.closing_handshake_capacity;
         const storage = try server.allocator.alloc(
             HandshakeCompletion,
             options.max_pending_handshakes,
@@ -4780,7 +4794,7 @@ pub const HandshakeSupervisor = struct {
         };
     }
 
-    /// Perform one receive iteration under the caller's absolute deadline.
+    /// Wait for an event under the caller's absolute deadline.
     /// Handshake expiry and QUIC transport timers may be serviced first, but
     /// neither can renew the outer endpoint-loop budget.
     pub fn receiveWithDeadline(
@@ -4789,10 +4803,19 @@ pub const HandshakeSupervisor = struct {
         deadline: std.Io.Clock.Timestamp,
     ) HandshakeAdmissionError!HandshakeSupervisorEvent {
         const absolute = try deadline_policy.usableAwake(self.io, deadline);
-        return self.receiveOnceUntil(
-            supported_versions,
-            .{ .deadline = absolute },
-        );
+        while (true) {
+            const poll_deadline = if (self.active_workers.load(.acquire) != 0)
+                deadline_policy.earlier(absolute, .fromNow(self.io, .{ .raw = self.admission_options.handshake_poll_interval, .clock = .awake })).?
+            else
+                absolute;
+            return self.receiveOnceUntil(supported_versions, .{ .deadline = poll_deadline }) catch |err| switch (err) {
+                error.Timeout => {
+                    if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) return error.Timeout;
+                    continue;
+                },
+                else => return err,
+            };
+        }
     }
 
     fn receiveOnceUntil(
@@ -6268,6 +6291,7 @@ pub const HandshakeServer = struct {
             .inbox = inbox,
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
+            .closing_lifetime_ns = @import("../quic/handshake/closing.zig").lifetimeNs(self.handshake_options.handshake_recovery.initial_pto_ms),
             .deadline_ns = handshakeAdmissionDeadlineNs(
                 self.quic_server.endpoint.io,
                 options.handshake_timeout_ms,
@@ -6287,6 +6311,8 @@ pub const HandshakeServer = struct {
     ) HandshakeWorkerError!HandshakeServerSession {
         var options = self.handshake_options;
         options.local_connection_id = admission.serverConnectionId();
+        options.failed_close_out = &admission.closing_packet;
+        options.failed_close_lifetime_out = &admission.closing_lifetime_ns;
         var established = try quic.handshake
             .acceptFromInitialSourceWithDeadline(
             &self.quic_server.endpoint,

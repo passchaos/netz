@@ -1192,6 +1192,9 @@ Current protocol coverage includes:
   fatal TLS handshake alerts carried by Initial/Handshake CONNECTION_CLOSE
   with ALPN `0x178`, peer transport-parameter close codes, fresh packet numbers,
   server anti-amplification accounting and close-aware CRYPTO receive loops,
+  bounded failed-handshake closing/draining CID routes with cached close replay,
+  response rate and amplification limits, three-PTO expiry, admission-time
+  allocation and deadline-bounded worker-completion polling,
   transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, indexed PATH_CHALLENGE/PATH_RESPONSE validation state with preallocated clone copies and empty-outstanding challenge/response lookup skips, single-lookup duplicate challenge/response suppression, and caller-storage batch drains/sends wired into 1-RTT,
   including one invariant payload-limit calculation per DATAGRAM batch while
   ordinary packet-number ranges skip duplicate packet-plan materialization

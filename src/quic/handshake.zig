@@ -128,6 +128,10 @@ const SelectedServerPsk = struct {
 };
 
 pub const ServerOptions = struct {
+    /// Endpoint-owned result storage for the final protected close packet.
+    /// The worker writes it before submitting a fatal peer-validation close.
+    failed_close_out: ?*?@import("handshake/closing.zig").Packet = null,
+    failed_close_lifetime_out: ?*u64 = null,
     local_connection_id: []const u8,
     alpn_protocol: []const u8 = "h3",
     /// Optional raw override for the server transport-parameter extension.
@@ -2524,6 +2528,8 @@ fn acceptInternal(
     first_datagram: ?quic.runtime.OwnedBytes,
     options: ServerOptions,
 ) Error!EstablishedConnection {
+    if (options.failed_close_out) |output| output.* = null;
+    if (options.failed_close_lifetime_out) |output| output.* = @import("handshake/closing.zig").lifetimeNs(options.handshake_recovery.initial_pto_ms);
     var reader = datagram_reader.Reader.init(
         endpoint.allocator,
         upstream_source,
@@ -2702,6 +2708,8 @@ fn acceptInternal(
         .source_connection_id = options.local_connection_id,
         .next_packet_number = options.server_initial_packet_number,
         .anti_amplification = &anti_amplification,
+        .closing_out = options.failed_close_out,
+        .closing_lifetime_ns = @import("handshake/closing.zig").lifetimeNs(options.handshake_recovery.initial_pto_ms),
     };
     var parsed_client = try peer_failure.guardTls(quic.tls_client_hello.parseClientHello(
         client_initial.crypto_data,
@@ -2863,18 +2871,7 @@ fn acceptInternal(
             options.local_transport_parameters.grease_quic_bit,
         ) catch |err| {
             if (err == error.InvalidReservedBits) {
-                sendHandshakeProtocolViolation(
-                    endpoint,
-                    client_initial.from,
-                    .initial,
-                    client_initial.initial_secrets.server,
-                    options.version.wireValue(),
-                    client_initial.packet.source_connection_id,
-                    options.local_connection_id,
-                    options.server_initial_packet_number,
-                    "reserved bits",
-                    &anti_amplification,
-                ) catch {};
+                peer_failure.send(@intFromEnum(quic.TransportErrorCode.protocol_violation), "reserved bits") catch {};
             }
             return err;
         };
@@ -2895,18 +2892,7 @@ fn acceptInternal(
                 &anti_amplification,
             ) catch |err| {
                 if (err == error.InvalidReservedBits) {
-                    sendHandshakeProtocolViolation(
-                        endpoint,
-                        client_initial.from,
-                        .initial,
-                        client_initial.initial_secrets.server,
-                        options.version.wireValue(),
-                        client_initial.packet.source_connection_id,
-                        options.local_connection_id,
-                        options.server_initial_packet_number,
-                        "reserved bits",
-                        &anti_amplification,
-                    ) catch {};
+                    peer_failure.send(@intFromEnum(quic.TransportErrorCode.protocol_violation), "reserved bits") catch {};
                 }
                 return err;
             };
@@ -3114,6 +3100,8 @@ fn acceptInternal(
     peer_failure.keys = handshake.server_quic;
     peer_failure.next_packet_number = send_context.next_handshake_packet_number;
     peer_failure.anti_amplification = &send_context.anti_amplification;
+    peer_failure.closing_lifetime_ns = options.handshake_recovery.timeoutMillis(send_context.last_retransmission) * 3 * std.time.ns_per_ms;
+    if (options.failed_close_lifetime_out) |output| output.* = peer_failure.closing_lifetime_ns;
     var client_handshake = receiveClientHandshakeCryptoFromDatagram(
         endpoint,
         source,
@@ -3130,20 +3118,7 @@ fn acceptInternal(
         &send_context.anti_amplification,
     ) catch |err| {
         if (err == error.InvalidReservedBits) {
-            if (send_context.next_handshake_packet_number) |packet_number| {
-                sendHandshakeProtocolViolation(
-                    endpoint,
-                    client_initial.from,
-                    .handshake,
-                    handshake.server_quic,
-                    options.version.wireValue(),
-                    client_initial.packet.source_connection_id,
-                    options.local_connection_id,
-                    packet_number,
-                    "reserved bits",
-                    &send_context.anti_amplification,
-                ) catch {};
-            }
+            peer_failure.send(@intFromEnum(quic.TransportErrorCode.protocol_violation), "reserved bits") catch {};
         }
         return err;
     };

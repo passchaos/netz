@@ -1764,12 +1764,27 @@ and completes the retained retirement request.
 
 ## Known blockers before declaring the goal complete
 
-TLS rejection now sends and recognizes fatal QUIC closes, but failed endpoint
-handshake admissions still remove their Initial CID routes immediately. A
-delayed Initial retransmission can therefore create another admission after
-the failed owner is released. Retaining bounded closing routes and servicing
-their retransmissions through the shared socket owner remains required before
-claiming complete handshake lifecycle parity.
+Fatal handshake rejection now retains its original and server CID routes
+after the worker releases its inbox and TLS state. The raw QUIC and HTTP/3
+endpoint owners replay the final protected close through their shared receive
+path, including borrowed and batched receives. Closing responses use a growing
+interval and a cumulative three-times-received-byte limit; other peers and QUIC
+versions receive no reply. A peer close retains silent draining routes. All
+aliases expire after three times the current handshake PTO, including its
+backoff, without extending the caller's receive deadline. The configurable
+`closing_handshake_capacity` (default 1024) includes reserved live handshakes
+and unexpired closing entries. Admission reserves storage before any worker
+runs, so closing promotion allocates nothing and capacity exhaustion refuses
+new work without evicting an existing closing route. Initial close socket
+failure retains the exact ciphertext for a later permitted response. Endpoint
+tests verify rejection is reported once, retransmission cannot create a second
+admission, aliases and capacity are recovered on expiry, peer binding,
+amplification, rate limiting, allocation failure and socket retry.
+
+HTTP/3 supervisor receives with absolute deadlines also poll worker completion
+at `handshake_poll_interval` (default 5 ms), capped by the original deadline.
+A silent handshake failure can therefore reach the caller promptly without
+requiring another UDP datagram to wake the receive loop.
 
 HTTP/3's shared-endpoint handshake admission now uses the exact absolute
 deadline recorded when the Initial was registered, rather than relying only on
