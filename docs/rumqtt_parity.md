@@ -2601,6 +2601,19 @@ only as raw AUTH packet helpers:
   ends the wait and remains available with its diagnostics to ordinary readers.
   Live-broker tests verify QoS 1/2 progress, receive counters, subscriptions and
   the mechanism-established username before AUTH Success.
+- Valid DISCONNECT packets retire the shared runtime across typed, client-event
+  and broker-event readers. PING, QoS and subscription completion waits stop
+  with `ConnectionClosed` without waiting for another packet or peer EOF, while
+  preserving preceding queued traffic and the owned DISCONNECT diagnostics.
+  An earlier queued ACK can still complete its exchange; packets following the
+  terminal boundary are released, including the emergency overflow slot. A
+  successfully sent DISCONNECT is also the final MQTT packet and interrupts
+  the underlying TCP, TLS or WebSocket transport without releasing caller
+  ownership. Invalid peer DISCONNECT syntax or properties remain protocol
+  errors so the owner can send the appropriate MQTT 5 diagnostic before closing.
+- Direct synchronous re-authentication uses the same method/state validation
+  and Protocol Error DISCONNECT as the event reader. A changed Authentication
+  Method retires the connection after its diagnostic write.
 - A live broker policy can reject re-authentication with a validated
   DISCONNECT reason and optional properties. A successful write atomically
   retires the connection, stops its event loop and prevents any later MQTT
@@ -2627,7 +2640,8 @@ A source-locked production-process port now directly executes Mosquitto's
 successful CONNACK, PING, active multi-step re-authentication, return to PING,
 and changed-method DISCONNECT Protocol Error `0x82`, all through the live
 broker callback. Internal end-to-end tests additionally prove ordinary traffic
-is gated during both authentication phases. The runtime deliberately supplies
+is gated during initial authentication and remains usable during
+re-authentication. The runtime deliberately supplies
 protocol orchestration and policy hooks, not a built-in SCRAM or credential
 database; the deterministic mirror policy exists only in the interop fixture.
 The same source-locked production-process gate completely ports Mosquitto's

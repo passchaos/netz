@@ -109,10 +109,13 @@ test "MQTT reauthentication DISCONNECT stops the wait and preserves diagnostics"
     try pair.peer.writeDisconnectWithProperties(0x87, &.{.{ .utf8 = .{ .id = .reason_string, .value = "expired" } }});
     try std.testing.expectError(error.ConnectionClosed, pair.client.receiveReauthenticationWithTimeout(.fromSeconds(1)));
     try std.testing.expectError(error.ConnectionClosed, pair.client.receiveReauthenticationWithTimeout(.fromSeconds(1)));
+    try std.testing.expect(!pair.client.isUsable());
+    try std.testing.expectError(error.ConnectionClosed, pair.client.writePingReq());
     var first = try pair.client.readPublish();
     defer first.deinit(std.testing.allocator);
     var refused = try pair.client.readDisconnect();
     defer refused.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0x87), refused.disconnect.reason_code);
     try std.testing.expectEqualStrings("expired", refused.disconnect.properties[0].utf8.value);
+    try std.testing.expectError(error.ConnectionClosed, pair.client.readClientPacketEventWithTimeout(.fromMilliseconds(5)));
 }

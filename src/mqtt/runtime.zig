@@ -12,6 +12,7 @@ const stream_io = @import("../internal/stream_io.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const auth_runtime = @import("runtime/auth.zig");
+const termination = @import("runtime/termination.zig");
 const topic_alias = @import("runtime/topic_alias.zig");
 const proxy_protocol = @import("proxy_protocol.zig");
 const listener_namespace = @import("listener_namespace.zig");
@@ -3140,6 +3141,9 @@ pub const Connection = struct {
     /// or write may reuse connection-scoped state (especially Topic Alias)
     /// after that ambiguity. The owner must close this Network Connection.
     transport_unusable: std.atomic.Value(bool) = .init(false),
+    /// A valid peer DISCONNECT stops network I/O while its already-buffered
+    /// wire prefix and diagnostics remain available to the receive owner.
+    peer_disconnect_received: std.atomic.Value(bool) = .init(false),
     assigned_client_id_ptr: ?[*]u8 = null,
     assigned_client_id_len: u16 = 0,
     authentication: auth_runtime.State = .{},
@@ -3359,9 +3363,10 @@ pub const Connection = struct {
     }
 
     /// Whether this Network Connection can still carry MQTT packets. A write
-    /// error or explicit shutdown retires it permanently.
+    /// error, shutdown, or valid DISCONNECT retires it permanently. Already
+    /// queued packets preceding a peer DISCONNECT remain readable.
     pub fn isUsable(self: *const Connection) bool {
-        return !self.transport_unusable.load(.acquire);
+        return termination.usable(self);
     }
 
     /// Wake a concurrent TCP reader while retaining connection ownership.
@@ -5493,6 +5498,18 @@ pub const Connection = struct {
     }
 
     fn parseIncomingDisconnect(
+        self: *Connection,
+        packet: []const u8,
+    ) Error!mqtt.Disconnect {
+        const disconnect_packet = try self.decodeIncomingDisconnect(packet);
+        termination.receivedDisconnect(self);
+        // Ordinary readers have consumed the wire prefix. Only packets
+        // following this terminal packet remain in the pending queue.
+        self.clearPendingPacketState();
+        return disconnect_packet;
+    }
+
+    fn decodeIncomingDisconnect(
         self: *const Connection,
         packet: []const u8,
     ) Error!mqtt.Disconnect {
@@ -5719,9 +5736,7 @@ pub const Connection = struct {
         if (self.authentication.phase != .reauthenticating) return error.InvalidAuthenticationState;
         var auth = try ReauthenticationReader.read(self, deadline);
         errdefer auth.deinit(self.allocator);
-        const complete = try self.authentication.receiveReauth(
-            auth.auth,
-        );
+        const complete = try self.applyAuthenticationEvent(auth.auth);
         return .{ .auth = auth, .complete = complete };
     }
 
@@ -5834,7 +5849,6 @@ pub const Connection = struct {
             return error.InvalidAuthenticationState;
         }
         try self.writeDisconnectWithProperties(reason_code, properties);
-        self.transport_unusable.store(true, .release);
     }
 
     /// Respond to an initial pre-CONNACK authentication challenge.
@@ -5937,6 +5951,27 @@ pub const Connection = struct {
         return .{ .packet = packet, .auth = auth_packet };
     }
 
+    fn observeDisconnectPacket(self: *Connection, packet: OwnedPacket) Error!bool {
+        if (packet.fixed.packet_type != .disconnect) return false;
+        var value = try self.decodeIncomingDisconnect(packet.bytes);
+        value.deinit(self.allocator);
+        termination.receivedDisconnect(self);
+        return true;
+    }
+
+    fn observeQueuedDisconnect(self: *Connection) Error!bool {
+        const pending = self.pending_packets orelse return false;
+        const Match = struct {
+            fn matches(_: void, packet: OwnedPacket) bool {
+                return packet.fixed.packet_type == .disconnect;
+            }
+        };
+        const found = pending.findFirstMatching({}, Match.matches) orelse return false;
+        _ = try self.observeDisconnectPacket(found.packet);
+        pending.keepThrough(self.allocator, found.index);
+        return true;
+    }
+
     /// Read one broker-facing packet while preserving transport-independent
     /// connection validation and inflight state.
     pub fn readBrokerEvent(self: *Connection) Error!BrokerEvent {
@@ -6002,10 +6037,7 @@ pub const Connection = struct {
     ) Error!ClientPacketEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = self.transport.deadlineFromNow(timeout);
-        const packet = if (self.popPendingPacket()) |pending|
-            pending
-        else
-            try self.readTransportPacketWithDeadline(deadline);
+        const packet = try self.readPacketWithDeadline(deadline);
         return self.finishClientPacketEvent(packet);
     }
 
@@ -6019,10 +6051,7 @@ pub const Connection = struct {
             self.transport.ioHandle(),
             deadline,
         );
-        const packet = if (self.popPendingPacket()) |pending|
-            pending
-        else
-            try self.readTransportPacketWithDeadline(deadline);
+        const packet = try self.readPacketWithDeadline(deadline);
         return self.finishClientPacketEvent(packet);
     }
 
@@ -6673,6 +6702,7 @@ pub const Connection = struct {
         try self.validatePacketForWrite(fixed.packet_type, bytes.len);
         try self.writeTransportPacket(bytes);
         self.recordPacketSent(bytes.len);
+        if (fixed.packet_type == .disconnect) termination.sentDisconnect(self);
     }
 
     /// Write bytes produced by the matching MQTT encoder without reparsing
@@ -6686,6 +6716,7 @@ pub const Connection = struct {
         try self.validatePacketForWrite(packet_type, bytes.len);
         try self.writeTransportPacket(bytes);
         self.recordPacketSent(bytes.len);
+        if (packet_type == .disconnect) termination.sentDisconnect(self);
     }
 
     /// Deadline-bounded counterpart for bytes produced by a matching MQTT
@@ -6707,6 +6738,7 @@ pub const Connection = struct {
             return err;
         };
         self.recordPacketSent(bytes.len);
+        if (packet_type == .disconnect) termination.sentDisconnect(self);
     }
 
     fn validatePacketForWrite(
@@ -6745,8 +6777,9 @@ pub const Connection = struct {
     }
 
     fn readPacket(self: *Connection) Error!OwnedPacket {
-        if (!self.isUsable()) return error.ConnectionClosed;
+        if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
         if (self.popPendingPacket()) |packet| return packet;
+        if (!self.isUsable()) return error.ConnectionClosed;
         return self.readTransportPacket();
     }
 
@@ -6754,8 +6787,9 @@ pub const Connection = struct {
         self: *Connection,
         storage: []u8,
     ) Error!OwnedPacket {
-        if (!self.isUsable()) return error.ConnectionClosed;
+        if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
         if (self.popPendingPacket()) |packet| return packet;
+        if (!self.isUsable()) return error.ConnectionClosed;
         const packet = try self.transport.readPacketInto(
             self.allocator,
             self.limits.max_packet_size,
@@ -6786,8 +6820,9 @@ pub const Connection = struct {
         self: *Connection,
         timeout: std.Io.Clock.Duration,
     ) Error!OwnedPacket {
-        if (!self.isUsable()) return error.ConnectionClosed;
+        if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
         if (self.popPendingPacket()) |packet| return packet;
+        if (!self.isUsable()) return error.ConnectionClosed;
         const packet = try self.transport.readPacketWithInactivityTimeout(
             self.allocator,
             self.limits.max_packet_size,
@@ -6802,8 +6837,9 @@ pub const Connection = struct {
         timeout: std.Io.Clock.Duration,
         storage: []u8,
     ) Error!OwnedPacket {
-        if (!self.isUsable()) return error.ConnectionClosed;
+        if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
         if (self.popPendingPacket()) |packet| return packet;
+        if (!self.isUsable()) return error.ConnectionClosed;
         const packet = try self.transport
             .readPacketWithInactivityTimeoutInto(
             self.allocator,
@@ -6819,8 +6855,9 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
-        if (!self.isUsable()) return error.ConnectionClosed;
+        if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
         if (self.popPendingPacket()) |packet| return packet;
+        if (!self.isUsable()) return error.ConnectionClosed;
         return self.readTransportPacketWithDeadline(deadline);
     }
 
@@ -6893,6 +6930,7 @@ pub const Connection = struct {
         pub const readPacket = Connection.readTransportPacket;
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
+        pub const observeDisconnect = Connection.observeDisconnectPacket;
 
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
@@ -6904,14 +6942,16 @@ pub const Connection = struct {
         pub const PacketType = OwnedPacket;
         pub const AuthType = OwnedAuth;
         pub const ErrorType = Error;
+        pub const canReadBuffered = termination.canReadBuffered;
         pub const prepare = Connection.ensurePendingPacketQueueAvailable;
         pub const parse = Connection.parseReadAuth;
         pub const readPacket = Connection.readTransportPacket;
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
         pub fn validateDisconnect(connection: *Connection, bytes: []const u8) Error!void {
-            var packet = try connection.parseIncomingDisconnect(bytes);
+            var packet = try connection.decodeIncomingDisconnect(bytes);
             packet.deinit(connection.allocator);
+            termination.receivedDisconnect(connection);
         }
         pub fn retainOverflow(connection: *Connection, packet: OwnedPacket) void {
             connection.pending_packets.?.retainOverflow(packet);
@@ -6923,6 +6963,9 @@ pub const Connection = struct {
         pub const PacketType = OwnedPacket;
         pub const AckType = OwnedAck;
         pub const ErrorType = Error;
+        pub const canReadBuffered = termination.canReadBuffered;
+        pub const observeDisconnect = Connection.observeDisconnectPacket;
+        pub const observeQueuedDisconnect = Connection.observeQueuedDisconnect;
         pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
         pub const readPacket = Connection.readTransportPacket;
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
@@ -6974,6 +7017,9 @@ pub const Connection = struct {
         pub const ConnectionType = Connection;
         pub const PacketType = OwnedPacket;
         pub const ErrorType = Error;
+        pub const canReadBuffered = termination.canReadBuffered;
+        pub const observeDisconnect = Connection.observeDisconnectPacket;
+        pub const observeQueuedDisconnect = Connection.observeQueuedDisconnect;
         pub const SubAckType = OwnedSubAck;
         pub const UnsubAckType = OwnedUnsubAck;
         pub const readPacket = Connection.readTransportPacket;
@@ -9785,12 +9831,9 @@ test "MQTT variable control writes reuse connection scratch" {
     );
     var expected_unsuback = try peer.readPacket(allocator, 4096);
     defer expected_unsuback.deinit(allocator);
-    try connection.writeDisconnectWithProperties(
-        0x9c,
-        &disconnect_properties,
-    );
-    var expected_disconnect = try peer.readPacket(allocator, 4096);
+    var expected_disconnect: std.ArrayList(u8) = .empty;
     defer expected_disconnect.deinit(allocator);
+    try mqtt.Disconnect.write(&expected_disconnect, allocator, .v5, 0x9c, &disconnect_properties);
     try connection.writeAuth(0x18, &auth_properties);
     var expected_auth = try peer.readPacket(allocator, 4096);
     defer expected_auth.deinit(allocator);
@@ -9816,11 +9859,8 @@ test "MQTT variable control writes reuse connection scratch" {
         &unsuback_reasons,
         &diagnostic_properties,
     );
-    try connection.writeDisconnectWithProperties(
-        0x9c,
-        &disconnect_properties,
-    );
     try connection.writeAuth(0x18, &auth_properties);
+    try connection.writeDisconnectWithProperties(0x9c, &disconnect_properties);
     try std.testing.expect(!failing.has_induced_failure);
 
     const expected_packets = [_][]const u8{
@@ -9828,8 +9868,8 @@ test "MQTT variable control writes reuse connection scratch" {
         expected_puback.bytes,
         expected_suback.bytes,
         expected_unsuback.bytes,
-        expected_disconnect.bytes,
         expected_auth.bytes,
+        expected_disconnect.items,
     };
     for (expected_packets) |expected| {
         var actual = try peer.readPacket(allocator, 4096);
@@ -11752,4 +11792,5 @@ test {
     _ = @import("runtime/acknowledgement/publish_tests.zig");
     _ = @import("runtime/acknowledgement/publish_deadline_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
+    _ = @import("runtime/disconnect_tests.zig");
 }

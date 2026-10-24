@@ -101,6 +101,20 @@ pub const State = struct {
         return packet;
     }
 
+    /// A validated DISCONNECT is a wire-order boundary. Discard any packets
+    /// after it that another correlated wait had already dequeued.
+    pub fn keepThrough(self: *State, allocator: std.mem.Allocator, index: usize) void {
+        if (index == self.packets.items.len) return; // The overflow is last.
+        std.debug.assert(index >= self.head and index < self.packets.items.len);
+        for (self.packets.items[index + 1 ..]) |*packet| {
+            self.queued_bytes -= packet.bytes.len;
+            packet.deinit(allocator);
+        }
+        self.packets.shrinkRetainingCapacity(index + 1);
+        if (self.overflow) |*packet| packet.deinit(allocator);
+        self.overflow = null;
+    }
+
     fn compact(self: *State) void {
         const remaining = self.packets.items.len - self.head;
         @memmove(self.packets.items[0..remaining], self.packets.items[self.head..]);

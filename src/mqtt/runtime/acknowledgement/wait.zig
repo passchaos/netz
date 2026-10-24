@@ -26,6 +26,12 @@ pub fn Reader(comptime Context: type) type {
                     owned = false;
                     return packet;
                 }
+                if (packet.fixed.packet_type == .disconnect) {
+                    Context.retainOverflow(connection, packet);
+                    owned = false;
+                    _ = try Context.observeDisconnect(connection, packet);
+                    return error.ConnectionClosed;
+                }
                 Context.queuePacket(connection, packet) catch |err| {
                     // The packet already left the transport. An emergency
                     // slot retains it after either a quota or allocator error

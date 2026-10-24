@@ -6,10 +6,12 @@ const mqtt = @import("../mod.zig");
 pub fn Controller(comptime Context: type) type {
     return struct {
         pub fn read(connection: *Context.ConnectionType, deadline: ?std.Io.Clock.Timestamp) Context.ErrorType!Context.AuthType {
+            if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
             if (connection.pending_packets) |pending| {
                 if (pending.findFirstMatching({}, matches)) |found| {
                     if (found.packet.fixed.packet_type == .disconnect) {
                         try Context.validateDisconnect(connection, found.packet.bytes);
+                        pending.keepThrough(connection.allocator, found.index);
                         return error.ConnectionClosed;
                     }
                     const result = try Context.parse(connection, found.packet);

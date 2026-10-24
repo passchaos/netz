@@ -1529,7 +1529,8 @@ Current protocol coverage includes:
   and WSS without large-packet progress renewal, MQTT 5 reauthentication
   interleaved with established-session QoS, subscription and PING traffic,
   bounded AUTH waits that preserve packet order across deadlines and local
-  allocation failure, MQTT v5 Server Keep Alive,
+  allocation failure, terminal DISCONNECT handling that stops network I/O
+  while preserving earlier queued packets and peer diagnostics, MQTT v5 Server Keep Alive,
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   adaptive connection-local Packet Identifier tracking with independent
   incoming/outgoing sparse maps and bounded dense fallback for unusually large
