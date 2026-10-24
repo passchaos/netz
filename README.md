@@ -1583,7 +1583,12 @@ Current protocol coverage includes:
   not a wire identifier, persistent identity, or authorization credential.
   An externally negotiated-key stateful runtime has the same
   recovery, congestion/flow-control, associated-stream, cancellation, and
-  session-lifecycle facilities as the integrated TLS-handshake runtime
+  session-lifecycle facilities as the integrated TLS-handshake runtime.
+  Session maintenance settles abandoned RESET/STOP receive data even while
+  applications only receive DATAGRAMs or write sibling streams, allowing
+  WT_MAX_DATA to advance without consuming the pending RESET notification;
+  association-only reliable prefixes can settle immediately, while reliable
+  application bytes remain readable before their reset event.
 - WebRTC signaling, media, security, data-channel codecs, and UDP peer runtime
   have moved to the sibling `horizon` package. Netz remains focused on the
   transport and HTTP/WebSocket/WebTransport stack.

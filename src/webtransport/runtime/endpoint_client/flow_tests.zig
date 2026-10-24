@@ -2,6 +2,9 @@ const std = @import("std");
 const webtransport = @import("../../mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const Fixture = @import("test_support.zig").Fixture;
+test {
+    _ = @import("reset_credit_tests.zig");
+}
 
 test "WebTransport endpoint client routes flow grants to one shared session" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});

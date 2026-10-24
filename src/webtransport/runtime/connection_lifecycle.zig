@@ -1,9 +1,9 @@
 //! WebTransport session state and application queues follow QUIC termination.
 
 const control_mod = @import("session_control.zig");
-const flow_receive = @import("flow/receive.zig");
 const flow_credits = @import("flow/credits.zig");
 const flow_streams = @import("flow/streams.zig");
+const abandoned_receive = @import("association/abandoned.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const max_close_reason: usize = 1024;
@@ -36,7 +36,10 @@ pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: an
 }
 
 fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
-    flow_receive.observeAll(&h3.established.connection, registry) catch {};
+    // DATAGRAM-only consumers and send-side flow waits still own Session
+    // maintenance. Settle terminal receive bytes without consuming the RESET
+    // notification, so they can return WT_MAX_DATA before another stream read.
+    _ = abandoned_receive.drain(&h3.established.connection, registry, true) catch false;
     flow_streams.observeClosed(&h3.established.connection, registry);
     if (replenish) flow_credits.replenish(control, h3, registry);
     if (registry.flow_violation) {

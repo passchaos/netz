@@ -27,12 +27,15 @@ pub fn drain(
             continue;
         var fresh_reset = false;
         if (before.reset) |reset| {
-            // A live reader must receive the reliable prefix before reset.
+            // A live reader must receive reliable application bytes before
+            // reset. An association-only prefix has already been parsed and
+            // is not an application delivery obligation, so a DATAGRAM-only
+            // owner can settle that reset without first claiming a reader.
             // STOP_SENDING explicitly abandons that read contract: QUIC has
             // already settled the final-size credit and still owns overlap/
             // prefix validation, so preserve the reset event and settle the
             // Session credit even while the reliable prefix has gaps.
-            if (stream.stop_sent == null and reset.reliable_size != 0 and
+            if (stream.stop_sent == null and reset.reliable_size > stream.receive_header_len and
                 before.bytes_read < reset.reliable_size)
             {
                 continue;

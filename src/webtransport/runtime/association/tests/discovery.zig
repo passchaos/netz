@@ -1,6 +1,9 @@
 const std = @import("std");
 const webtransport = @import("../../../mod.zig");
 const association = @import("../../stream_association.zig");
+test {
+    _ = @import("datagram_abandoned.zig");
+}
 const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;
 const Role = @import("../../session_control/test_support/handshake_pair.zig").Role;
 const DatagramReader = enum { owned, into, poll };
