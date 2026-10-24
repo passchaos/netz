@@ -5055,6 +5055,7 @@ pub const Message = common.Message;
 pub const MessageWriteProgress = common.MessageWriteProgress;
 const MessageIntoReceiveState = common.MessageIntoReceiveState;
 const PendingAutomaticControl = common.PendingAutomaticControl;
+const automatic_control = @import("runtime/control/automatic.zig");
 
 pub const Connection = struct {
     io: std.Io,
@@ -7161,7 +7162,7 @@ pub const Connection = struct {
             return self.receiveFrameAutoInternal(deadline, delivery);
         }
         while (true) {
-            var frame = try self.receiveFrameInternal(deadline);
+            const frame = try self.receiveFrameInternal(deadline);
             switch (frame.header.opcode) {
                 .ping => {
                     // tungstenite queues automatic Pong replies only while the
@@ -7174,29 +7175,13 @@ pub const Connection = struct {
                         self.closeSent(),
                         self.closeReceived(),
                     )) return frame;
-                    self.beginAutomaticControl(
-                        .pong,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return err;
-                    };
+                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
                 .close => {
                     if (self.closeSent()) return frame;
-                    self.beginAutomaticControl(
-                        .close,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return err;
-                    };
+                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -7862,28 +7847,7 @@ pub const Connection = struct {
     ) Error!void {
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
-        if (self.pending_auto_control != null) return error.WriteInProgress;
-
-        var pending = PendingAutomaticControl{
-            .opcode = opcode,
-            .delivery = delivery,
-            .fin_committed = true,
-            .frame = frame,
-        };
-        const mask_key = if (self.role == .client) blk: {
-            var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
-            break :blk key;
-        } else null;
-        const encoded = try websocket.writeFrameInto(
-            &pending.bytes,
-            opcode,
-            payload,
-            .{ .mask_key = mask_key },
-        );
-        pending.len = encoded.len;
-        self.pending_auto_control = pending;
-        self.automatic_write_pending.store(true, .release);
+        return automatic_control.begin(self, self.io, self.role, opcode, payload, delivery, frame, true);
     }
 
     fn resumeAutomaticControl(
@@ -7900,6 +7864,7 @@ pub const Connection = struct {
         if (!self.canSendOpcodeLocked(pending.opcode)) {
             pending.writes_reply = false;
         }
+        try automatic_control.resumeEncoding(pending, self.io, self.role);
         if (!pending.complete() and deadline != null) {
             const absolute = deadline.?;
             _ = try deadline_policy.usableAwake(self.io, absolute);
@@ -10027,7 +9992,7 @@ pub const H2Connection = struct {
             return self.receiveFrameAutoInternal(deadline, delivery);
         }
         while (true) {
-            var frame = try self.receiveFrameInternal(deadline);
+            const frame = try self.receiveFrameInternal(deadline);
             switch (frame.header.opcode) {
                 .ping => {
                     if (!canSendOpcode(
@@ -10035,29 +10000,13 @@ pub const H2Connection = struct {
                         self.closeSent(),
                         self.closeReceived(),
                     )) return frame;
-                    self.beginAutomaticControl(
-                        .pong,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return err;
-                    };
+                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
                 .close => {
                     if (self.closeSent()) return frame;
-                    self.beginAutomaticControl(
-                        .close,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return err;
-                    };
+                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -10806,27 +10755,7 @@ pub const H2Connection = struct {
     ) Error!void {
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
-        if (self.pending_auto_control != null) return error.WriteInProgress;
-
-        var pending = PendingAutomaticControl{
-            .opcode = opcode,
-            .delivery = delivery,
-            .frame = frame,
-        };
-        const mask_key = if (self.role == .client) blk: {
-            var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
-            break :blk key;
-        } else null;
-        const encoded = try websocket.writeFrameInto(
-            &pending.bytes,
-            opcode,
-            payload,
-            .{ .mask_key = mask_key },
-        );
-        pending.len = encoded.len;
-        self.pending_auto_control = pending;
-        self.automatic_write_pending.store(true, .release);
+        return automatic_control.begin(self, self.tunnel.connection.io, self.role, opcode, payload, delivery, frame, false);
     }
 
     fn resumeAutomaticControl(
@@ -10845,6 +10774,7 @@ pub const H2Connection = struct {
         if (!self.canSendOpcodeLocked(pending.opcode)) {
             pending.writes_reply = false;
         }
+        try automatic_control.resumeEncoding(pending, self.tunnel.connection.io, self.role);
         var progress: http2_runtime.TunnelWriteProgress = .{};
         if (!pending.complete() and deadline != null) {
             const absolute = deadline.?;
@@ -17374,6 +17304,7 @@ test "WebSocket connection serializes concurrent sends" {
 
 test {
     _ = @import("runtime/message/tests/close_ownership.zig");
+    _ = @import("runtime/message/tests/automatic_preparation.zig");
     _ = h3;
     _ = @import("runtime/message/tests/buffer.zig");
     _ = @import("runtime/message/tests/state.zig");

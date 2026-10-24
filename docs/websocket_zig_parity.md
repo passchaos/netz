@@ -1489,6 +1489,14 @@ The reason remains owned beyond receive-buffer reuse and connection teardown;
 still produce no diagnostic, and frame-allocation failure preserves input for
 retry. Direct `Frame.takeClose` validates before ownership transfer and leaves
 an invalid frame owned by its caller.
+Automatic PONG and Close replies retain an already-consumed control frame even
+if the client's secure mask-key source fails during reply preparation. The
+same receive API retries preparation without losing the original frame or
+delivery mode. After encoding succeeds, partial or failed bounded writes keep
+the same mask and byte cursor. A local Close suppresses an unsent reply while
+still delivering the retained peer frame once. Borrowed message readers keep
+the original input bytes until preparation succeeds, so they also resume
+without dropping a PING or Close.
 Allocating receives on every transport preserve `was_compressed` provenance
 after decompression, so callers and concurrency regressions can distinguish an
 RSV1 message from an uncompressed fallback without inspecting wire storage.

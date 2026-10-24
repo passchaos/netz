@@ -26,6 +26,7 @@ const max_batched_payload_slices: usize = 64;
 
 pub const MessageWriteProgress = common.MessageWriteProgress;
 const PendingAutomaticControl = common.PendingAutomaticControl;
+const automatic_control = @import("control/automatic.zig");
 
 const PendingMessage = struct {
     const Source = enum { contiguous, slices, fragmented, in_place };
@@ -2972,15 +2973,7 @@ pub fn Connection(comptime role: common.Role) type {
             switch (frame.header.opcode) {
                 .ping => {
                     if (self.closeSent()) return frame;
-                    self.beginAutomaticControl(
-                        .pong,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return @errorCast(err);
-                    };
+                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -2990,15 +2983,7 @@ pub fn Connection(comptime role: common.Role) type {
                         self.flushTerminalReceiveAck();
                         return frame;
                     }
-                    self.beginAutomaticControl(
-                        .close,
-                        frame.payload,
-                        delivery,
-                        frame,
-                    ) catch |err| {
-                        frame.deinit(self.allocator);
-                        return @errorCast(err);
-                    };
+                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
                     const delivered = (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                     self.flushTerminalReceiveAck();
@@ -3199,29 +3184,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_auto_control != null) {
-                return error.WriteInProgress;
-            }
-
-            var pending = PendingAutomaticControl{
-                .opcode = opcode,
-                .delivery = delivery,
-                .frame = frame,
-            };
-            const mask_key = if (role == .client) blk: {
-                var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
-                break :blk key;
-            } else null;
-            const encoded = try websocket.writeFrameInto(
-                &pending.bytes,
-                opcode,
-                payload,
-                .{ .mask_key = mask_key },
-            );
-            pending.len = encoded.len;
-            self.pending_auto_control = pending;
-            self.automatic_write_pending.store(true, .release);
+            return automatic_control.begin(self, self.io(), role, opcode, payload, delivery, frame, false);
         }
 
         fn resumeAutomaticControl(
@@ -3238,6 +3201,7 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.WriteInProgress;
             }
             if (self.closeSent()) pending.writes_reply = false;
+            try automatic_control.resumeEncoding(pending, self.io(), role);
 
             var progress: http3.runtime.BodyWriteProgress = .{};
             const bytes = pending.bytes[pending.committed..pending.len];

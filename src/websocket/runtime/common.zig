@@ -197,7 +197,7 @@ pub const PendingAutomaticControl = struct {
 
     pub fn complete(self: *const PendingAutomaticControl) bool {
         return !self.writes_reply or
-            (self.committed == self.len and
+            (self.len != 0 and self.committed == self.len and
                 (self.opcode != .close or self.fin_committed));
     }
 
