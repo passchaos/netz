@@ -773,22 +773,12 @@ test "HTTP/3 handshake streaming response error preserves sibling" {
         .authority = "localhost",
     });
     var saw_head = false;
-    var saw_data = false;
-    while (!saw_data) {
+    while (!saw_head) {
         var event = (try client.receiveResponseEvent(malformed)) orelse
             continue;
         defer event.deinit(allocator);
         switch (event) {
             .head => saw_head = true,
-            .data_available => {
-                var byte: [1]u8 = undefined;
-                try std.testing.expectEqual(
-                    @as(usize, 1),
-                    try client.readResponseData(malformed, &byte),
-                );
-                try std.testing.expectEqualStrings("x", &byte);
-                saw_data = true;
-            },
             else => return error.TestUnexpectedResult,
         }
     }

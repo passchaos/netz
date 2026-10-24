@@ -3,6 +3,10 @@ const quic = @import("../../../../quic/mod.zig");
 const datagram_queue = @import("../datagram_queue.zig");
 const send = @import("../send.zig");
 
+test {
+    _ = @import("../data_error_tests.zig");
+}
+
 test "HTTP/3 development send splits STREAM offsets and final FIN exactly" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(quic.Frame) = .empty;

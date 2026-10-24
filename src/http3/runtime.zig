@@ -19,6 +19,7 @@ const development_datagram_queue =
 const development_send = @import("runtime/development/send.zig");
 const development_receive = @import("runtime/development/receive.zig");
 const development_message = @import("runtime/development/message.zig");
+const development_data_error = @import("runtime/development/data_error.zig");
 const development_request_buffer =
     @import("runtime/development/request_buffer.zig");
 const development_server_peer =
@@ -55,6 +56,7 @@ const streaming_set = @import("runtime/stream/set.zig");
 const stream_events = @import("runtime/stream/events.zig");
 const push_state = @import("runtime/stream/push/state.zig");
 const push_aggregate = @import("runtime/stream/push/aggregate.zig");
+const push_read_failure = @import("runtime/stream/push/read_failure.zig");
 
 const net = std.Io.net;
 
@@ -1121,7 +1123,7 @@ pub const Server = struct {
                 defer self.peer_state_mutex.unlock(
                     self.quic_server.endpoint.io,
                 );
-                break :blk self.streaming_peers.pollRequestHead();
+                break :blk self.pollDevelopmentRequestEvent(null, null, true);
             };
             if (try ready) |event| {
                 return event;
@@ -1198,9 +1200,10 @@ pub const Server = struct {
                 defer self.peer_state_mutex.unlock(
                     self.quic_server.endpoint.io,
                 );
-                break :blk self.streaming_peers.pollRequestEventFor(
+                break :blk self.pollDevelopmentRequestEvent(
                     from,
                     stream_id,
+                    false,
                 );
             };
             if (try ready) |event| return event;
@@ -1270,7 +1273,7 @@ pub const Server = struct {
                 defer self.peer_state_mutex.unlock(
                     self.quic_server.endpoint.io,
                 );
-                break :blk self.streaming_peers.pollRequestEvent();
+                break :blk self.pollDevelopmentRequestEvent(null, null, false);
             };
             if (try ready) |event| {
                 return event;
@@ -1299,7 +1302,51 @@ pub const Server = struct {
         );
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
         if (!self.streaming_mode) return null;
-        return self.streaming_peers.pollRequestEvent();
+        return self.pollDevelopmentRequestEvent(null, null, false);
+    }
+
+    /// The caller owns `peer_state_mutex`; untargeted polling obtains the
+    /// actual failed peer/stream from the multiplexed parser before cleanup.
+    fn pollDevelopmentRequestEvent(
+        self: *Server,
+        from: ?net.IpAddress,
+        stream_id: ?u62,
+        head_only: bool,
+    ) Error!?StreamingRequestEvent {
+        const ready = if (head_only)
+            self.streaming_peers.pollRequestHead()
+        else if (from != null and stream_id != null)
+            self.streaming_peers.pollRequestEventFor(from.?, stream_id.?)
+        else
+            self.streaming_peers.pollRequestEvent();
+        return ready catch |err| {
+            if (self.streaming_peers.lastError()) |failed| {
+                self.handleDevelopmentDataError(failed.from, failed.stream_id, err);
+            }
+            return err;
+        };
+    }
+
+    fn handleDevelopmentDataError(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        err: anyerror,
+    ) void {
+        if (!runtime_error.dataReadPeerError(err)) return;
+        if (err == error.InvalidContentLength) {
+            self.cancelRequestUnlocked(
+                from,
+                stream_id,
+                http3.ApplicationErrorCode.message_error,
+            ) catch {};
+            return;
+        }
+        self.streaming_peers.removePeer(from);
+        self.development_streams.removePeer(from);
+        self.development_stream_sends.removePeer(from);
+        self.runtime_datagrams.removePeer(from);
+        development_data_error.close(&self.quic_server.endpoint, from, err);
     }
 
     /// Return one retained raw QUIC datagram without reading UDP.
@@ -1387,7 +1434,10 @@ pub const Server = struct {
             self.quic_server.endpoint.io,
         );
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
-        return self.streaming_peers.readRequestData(from, stream_id, out);
+        return self.streaming_peers.readRequestData(from, stream_id, out) catch |err| {
+            self.handleDevelopmentDataError(from, stream_id, err);
+            return err;
+        };
     }
 
     pub fn skipRequestData(
@@ -1399,7 +1449,10 @@ pub const Server = struct {
             self.quic_server.endpoint.io,
         );
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
-        return self.streaming_peers.skipRequestData(from, stream_id);
+        return self.streaming_peers.skipRequestData(from, stream_id) catch |err| {
+            self.handleDevelopmentDataError(from, stream_id, err);
+            return err;
+        };
     }
 
     fn processDevelopmentRequestDatagram(
@@ -2407,6 +2460,15 @@ pub const Server = struct {
         defer self.peer_state_mutex.unlock(
             self.quic_server.endpoint.io,
         );
+        return self.cancelRequestUnlocked(to, stream_id, application_error_code);
+    }
+
+    fn cancelRequestUnlocked(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
         const peer = self.streaming_peers.find(to) orelse
             return error.UnexpectedStream;
         const cancellation = try peer.cancelRequest(stream_id);
@@ -3073,6 +3135,7 @@ pub const Client = struct {
         progress: ?*DevelopmentBodyWriteProgress,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.request_unusable) return error.ConnectionUnusable;
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(
                 self.quic_client.endpoint.io,
@@ -3252,6 +3315,7 @@ pub const Client = struct {
         defer self.response_receive_mutex.unlock(
             self.quic_client.endpoint.io,
         );
+        if (self.request_unusable) return error.ConnectionUnusable;
         return self.development_streams.takeMatchingComplete(
             self.quic_client.peer,
             match,
@@ -3355,6 +3419,7 @@ pub const Client = struct {
         defer self.response_receive_mutex.unlock(
             self.quic_client.endpoint.io,
         );
+        if (self.request_unusable) return error.ConnectionUnusable;
         while (true) {
             if (try self.development_streams.takeMatchingComplete(
                 self.quic_client.peer,
@@ -3460,6 +3525,7 @@ pub const Client = struct {
         self: *Client,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        if (self.request_unusable) return error.ConnectionUnusable;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -3482,7 +3548,10 @@ pub const Client = struct {
             stream_id,
             &entry.reader,
         );
-        const event = (try entry.reader.next(self.qpack_decode.table)) orelse
+        const event = (entry.reader.next(self.qpack_decode.table) catch |err| {
+            self.handleDevelopmentDataError(stream_id, err);
+            return err;
+        }) orelse
             return null;
         if (event == .finished) {
             _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
@@ -3544,6 +3613,7 @@ pub const Client = struct {
             );
         }
         defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
+        if (self.request_unusable) return error.ConnectionUnusable;
         self.streaming_mode = true;
         while (true) {
             if (self.runtime_datagrams.pop()) |datagram| return datagram;
@@ -3569,9 +3639,13 @@ pub const Client = struct {
         defer self.response_receive_mutex.unlock(
             self.quic_client.endpoint.io,
         );
+        if (self.request_unusable) return error.ConnectionUnusable;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.readData(out);
+        return entry.reader.readData(out) catch |err| {
+            self.handleDevelopmentDataError(stream_id, err);
+            return err;
+        };
     }
 
     pub fn skipResponseData(self: *Client, stream_id: u62) Error!usize {
@@ -3582,9 +3656,34 @@ pub const Client = struct {
         defer self.response_receive_mutex.unlock(
             self.quic_client.endpoint.io,
         );
+        if (self.request_unusable) return error.ConnectionUnusable;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.skipData();
+        return entry.reader.skipData() catch |err| {
+            self.handleDevelopmentDataError(stream_id, err);
+            return err;
+        };
+    }
+
+    fn handleDevelopmentDataError(
+        self: *Client,
+        stream_id: u62,
+        err: anyerror,
+    ) void {
+        if (!runtime_error.dataReadPeerError(err)) return;
+        if (err == error.InvalidContentLength) {
+            self.cancelRequestUnlocked(
+                stream_id,
+                http3.ApplicationErrorCode.message_error,
+            ) catch {};
+            return;
+        }
+        development_data_error.clearClient(self);
+        development_data_error.close(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            err,
+        );
     }
 
     pub fn cancelRequest(
@@ -3599,6 +3698,14 @@ pub const Client = struct {
         defer self.response_receive_mutex.unlock(
             self.quic_client.endpoint.io,
         );
+        return self.cancelRequestUnlocked(stream_id, application_error_code);
+    }
+
+    fn cancelRequestUnlocked(
+        self: *Client,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
         const body = self.outbound_bodies.find(stream_id);
         if (body == null and !self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
@@ -7207,7 +7314,10 @@ pub const HandshakeServerSession = struct {
             &self.established.connection,
             &entry.reader,
         );
-        const read = try entry.reader.readData(out);
+        const read = entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
+            return err;
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -7235,7 +7345,10 @@ pub const HandshakeServerSession = struct {
             => return null,
             else => return err,
         };
-        return try entry.reader.readData(out);
+        return entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequestOnce(stream_id, null, err, false) catch {};
+            return err;
+        };
     }
 
     /// Return DATA bytes currently readable without receiving another packet.
@@ -7245,7 +7358,10 @@ pub const HandshakeServerSession = struct {
     ) Error!usize {
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.availableDataBytes();
+        return entry.reader.availableDataBytes() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
+            return err;
+        };
     }
 
     pub fn skipRequestData(
@@ -7259,7 +7375,10 @@ pub const HandshakeServerSession = struct {
             &self.established.connection,
             &entry.reader,
         );
-        const skipped = try entry.reader.skipData();
+        const skipped = entry.reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
+            return err;
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -7285,7 +7404,10 @@ pub const HandshakeServerSession = struct {
             => return null,
             else => return err,
         };
-        return try entry.reader.skipData();
+        return entry.reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequestOnce(stream_id, null, err, false) catch {};
+            return err;
+        };
     }
 
     /// Detach an established Extended CONNECT receive stream from HTTP/3
@@ -16793,7 +16915,10 @@ pub const HandshakeClient = struct {
             &self.established.connection,
             &entry.reader,
         );
-        const read = try entry.reader.readData(out);
+        const read = entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
+            return err;
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -16809,7 +16934,10 @@ pub const HandshakeClient = struct {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.availableDataBytes();
+        return entry.reader.availableDataBytes() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
+            return err;
+        };
     }
 
     /// Copy available DATA without waiting for receive-credit pacing. `null`
@@ -16833,7 +16961,10 @@ pub const HandshakeClient = struct {
             => return null,
             else => return err,
         };
-        const read = try entry.reader.readData(out);
+        const read = entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponseOnce(stream_id, null, err, false) catch {};
+            return err;
+        };
         // Credit the newly consumed bytes on the next poll/read. Returning
         // them first keeps a later socket error from making the caller retry
         // an application-visible read whose parser cursor already advanced.
@@ -16852,7 +16983,10 @@ pub const HandshakeClient = struct {
             &self.established.connection,
             &entry.reader,
         );
-        const skipped = try entry.reader.skipData();
+        const skipped = entry.reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
+            return err;
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             &entry.reader,
@@ -18304,54 +18438,12 @@ pub const HandshakeClient = struct {
             self.options.local_settings.qpack_blocked_streams,
             target_push_id,
         ) catch |err| {
-            if (self.push_streams.lastErrorStreamId()) |stream_id| {
-                if (messageStreamErrorCode(err)) |code| {
-                    const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
-                    if (cancel_qpack) {
-                        if (single_attempt)
-                            try self.qpack_decode.prepareStreamCancellation()
-                        else
-                            self.qpack_decode.recordStreamCancellation(
-                                stream_id,
-                            ) catch {};
-                    }
-                    if (single_attempt) {
-                        self.established.connection.trySendStopSending(
-                            stream_id,
-                            code,
-                        ) catch |send_err| switch (send_err) {
-                            error.PacingLimited,
-                            error.CongestionLimited,
-                            error.FlowControlBlocked,
-                            => return null,
-                            else => return send_err,
-                        };
-                        if (cancel_qpack) {
-                            self.qpack_decode
-                                .recordStreamCancellationAssumeCapacity(
-                                stream_id,
-                            );
-                        }
-                    } else {
-                        self.established.connection.sendStopSending(
-                            stream_id,
-                            code,
-                        ) catch {};
-                    }
-                    self.push_streams.failStream(stream_id);
-                    if (single_attempt)
-                        self.flushResponsePacketFeedbackOnce() catch {}
-                    else
-                        self.sendQpackFeedback() catch {};
-                    return err;
-                }
-            }
-            if (runtime_error.protocolClose(err) != null) {
-                closeConnectionForHttp3Error(
-                    &self.established.connection,
-                    err,
-                ) catch {};
-            }
+            if (!try push_read_failure.handshake(
+                self,
+                self.push_streams.lastErrorStreamId(),
+                err,
+                single_attempt,
+            )) return null;
             return err;
         } orelse return null;
         var event = ready.event;
@@ -18483,11 +18575,18 @@ pub const HandshakeClient = struct {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
         try releaseStreamingReaderCapacity(
             &self.established.connection,
-            &entry.reader.?,
+            reader,
         );
-        return entry.reader.?.readData(out);
+        return reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                _ = push_read_failure.handshake(self, stream_id, err, false) catch false;
+            }
+            return err;
+        };
     }
 
     /// Copy available push DATA without waiting for receive-credit pacing.
@@ -18501,6 +18600,7 @@ pub const HandshakeClient = struct {
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
         releaseStreamingReaderCapacityOnce(
             &self.established.connection,
             reader,
@@ -18511,7 +18611,12 @@ pub const HandshakeClient = struct {
             => return null,
             else => return err,
         };
-        return try reader.readData(out);
+        return reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                _ = push_read_failure.handshake(self, stream_id, err, true) catch false;
+            }
+            return err;
+        };
     }
 
     pub fn skipPushData(
@@ -18523,11 +18628,17 @@ pub const HandshakeClient = struct {
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             reader,
         );
-        const skipped = try reader.skipData();
+        const skipped = reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                _ = push_read_failure.handshake(self, stream_id, err, false) catch false;
+            }
+            return err;
+        };
         try releaseStreamingReaderCapacity(
             &self.established.connection,
             reader,
@@ -18544,6 +18655,7 @@ pub const HandshakeClient = struct {
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
         releaseStreamingReaderCapacityOnce(
             &self.established.connection,
             reader,
@@ -18554,7 +18666,12 @@ pub const HandshakeClient = struct {
             => return null,
             else => return err,
         };
-        return try reader.skipData();
+        return reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                _ = push_read_failure.handshake(self, stream_id, err, true) catch false;
+            }
+            return err;
+        };
     }
 
     pub fn receivePush(
@@ -20747,7 +20864,10 @@ pub const ProtectedServer = struct {
             &self.protected_send,
             &entry.reader,
         );
-        const read = try entry.reader.readData(out);
+        const read = entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(entry.from, stream_id, null, err, false);
+            return err;
+        };
         try sendProtectedReaderCapacity(
             &self.quic_server.endpoint,
             entry.from orelse return error.UnexpectedStream,
@@ -20777,7 +20897,10 @@ pub const ProtectedServer = struct {
             &self.protected_send,
             &entry.reader,
         );
-        const skipped = try entry.reader.skipData();
+        const skipped = entry.reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(from, stream_id, null, err, false);
+            return err;
+        };
         try sendProtectedReaderCapacity(
             &self.quic_server.endpoint,
             from,
@@ -24703,7 +24826,10 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             &entry.reader,
         );
-        const read = try entry.reader.readData(out);
+        const read = entry.reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(entry.from, stream_id, null, err, false);
+            return err;
+        };
         try sendProtectedReaderCapacity(
             &self.quic_client.endpoint,
             entry.from orelse self.quic_client.peer,
@@ -24733,7 +24859,10 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             &entry.reader,
         );
-        const skipped = try entry.reader.skipData();
+        const skipped = entry.reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(from, stream_id, null, err, false);
+            return err;
+        };
         try sendProtectedReaderCapacity(
             &self.quic_client.endpoint,
             from,
@@ -24856,41 +24985,7 @@ pub const ProtectedClient = struct {
                 self.push_streams.peerForStream(id)
             else
                 null;
-            if (stream_id) |id| {
-                if (messageStreamErrorCode(err)) |code| {
-                    const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
-                    if (cancel_qpack) {
-                        self.qpack_decode.recordStreamCancellation(id) catch {};
-                    }
-                    const frames = [_]quic.Frame{.{ .stop_sending = .{
-                        .stream_id = id,
-                        .application_error_code = code,
-                    } }};
-                    sendProtectedFrames(
-                        &self.quic_client.endpoint,
-                        from orelse self.quic_client.peer,
-                        self.config.send_keys,
-                        self.config.peer_connection_id,
-                        &self.next_packet_number,
-                        &frames,
-                        self.config.max_frames_per_packet,
-                        &self.protected_send,
-                    ) catch {};
-                    self.push_streams.failStream(id);
-                    self.sendQpackFeedback() catch {};
-                    return err;
-                }
-            }
-            if (runtime_error.protocolClose(err) != null) {
-                sendProtectedHttp3Close(
-                    &self.quic_client.endpoint,
-                    from orelse self.quic_client.peer,
-                    self.config,
-                    &self.next_packet_number,
-                    &self.protected_send,
-                    err,
-                );
-            }
+            push_read_failure.protected(self, stream_id, from, err);
             return err;
         } orelse return null;
         var event = ready.event;
@@ -24981,7 +25076,17 @@ pub const ProtectedClient = struct {
         out: []u8,
     ) Error!usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
-        return self.push_streams.readData(push_id, out);
+        const entry = self.push_streams.findByPushId(push_id) orelse
+            return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
+        const from = entry.from;
+        return reader.readData(out) catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                push_read_failure.protected(self, stream_id, from, err);
+            }
+            return err;
+        };
     }
 
     /// Discard currently available push DATA and return its receive-window
@@ -24994,6 +25099,7 @@ pub const ProtectedClient = struct {
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        const stream_id = reader.streamId();
         const from = entry.from orelse self.quic_client.peer;
         try sendProtectedReaderCapacity(
             &self.quic_client.endpoint,
@@ -25003,7 +25109,12 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             reader,
         );
-        const skipped = try reader.skipData();
+        const skipped = reader.skipData() catch |err| {
+            if (runtime_error.dataReadPeerError(err)) {
+                push_read_failure.protected(self, stream_id, from, err);
+            }
+            return err;
+        };
         try sendProtectedReaderCapacity(
             &self.quic_client.endpoint,
             from,

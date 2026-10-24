@@ -1,9 +1,16 @@
 const std = @import("std");
+
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const proxy_socks5 = @import("../../proxy/socks5.zig");
 
 const net = std.Io.net;
+
+/// Errors proven by a DATA reader's frame/final-size validation. API-state or
+/// local I/O failures must not be reclassified as malformed peer messages.
+pub fn dataReadPeerError(err: anyerror) bool {
+    return err == error.InvalidContentLength or err == error.BufferTooShort;
+}
 
 pub const Error = http3.Error || quic.runtime.Error ||
     quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error ||

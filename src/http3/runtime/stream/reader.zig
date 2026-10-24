@@ -351,17 +351,7 @@ pub const Reader = struct {
                 },
                 http3.FrameType.data => {
                     if (self.phase != .body) return error.UnexpectedFrame;
-                    if (!self.body_allowed and header.payload_length != 0) {
-                        return error.InvalidContentLength;
-                    }
-                    const next_body = std.math.add(
-                        usize,
-                        self.body_read,
-                        header.payload_length - self.current_payload_read,
-                    ) catch return error.InvalidContentLength;
-                    if (self.content_length) |expected| {
-                        if (next_body > expected) return error.InvalidContentLength;
-                    }
+                    try self.validateCurrentData();
                     if (header.payload_length == 0) {
                         self.current_frame = null;
                         self.current_header_consumed = false;
@@ -417,21 +407,15 @@ pub const Reader = struct {
     /// QUIC packet. This lets adapters reserve their final destination before
     /// calling `readData`, avoiding an intermediate staging buffer.
     pub fn availableDataBytes(self: Reader) Error!usize {
-        const header = self.current_frame orelse return error.UnexpectedFrame;
-        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
-            return error.UnexpectedFrame;
-        }
+        try self.validateCurrentData();
+        const header = self.current_frame.?;
         const remaining = header.payload_length - self.current_payload_read;
         return @min(remaining, self.receive.available().len);
     }
 
     pub fn skipData(self: *Reader) Error!usize {
-        const header = self.current_frame orelse return error.UnexpectedFrame;
-        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
-            return error.UnexpectedFrame;
-        }
-        const remaining = header.payload_length - self.current_payload_read;
-        const count = @min(remaining, self.receive.available().len);
+        const count = try self.availableDataBytes();
+        const header = self.current_frame.?;
         if (count == 0) return 0;
         try self.receive.consume(count);
         self.current_payload_read += count;
@@ -442,6 +426,26 @@ pub const Reader = struct {
             self.current_payload_read = 0;
         }
         return count;
+    }
+
+    fn validateCurrentData(self: Reader) Error!void {
+        const header = self.current_frame orelse return error.UnexpectedFrame;
+        if (header.frame_type != http3.FrameType.data or self.phase != .body) return error.UnexpectedFrame;
+        // A known QUIC final size proves a truncated frame before any buffered
+        // payload is delivered. Framing failure takes precedence over message
+        // length semantics and retains its connection-level H3_FRAME_ERROR.
+        const final_frame = if (self.receive.final_size) |final_size| blk: {
+            const frame_end = try self.currentFrameEnd();
+            if (frame_end > final_size) return error.BufferTooShort;
+            break :blk frame_end == final_size;
+        } else false;
+        if (!self.body_allowed and header.payload_length != 0) return error.InvalidContentLength;
+        const remaining = header.payload_length - self.current_payload_read;
+        const next_body = std.math.add(usize, self.body_read, remaining) catch return error.InvalidContentLength;
+        if (self.content_length) |expected| {
+            if (next_body > expected) return error.InvalidContentLength;
+            if (final_frame and next_body != expected) return error.InvalidContentLength;
+        }
     }
 
     pub fn streamId(self: Reader) u62 {
@@ -682,21 +686,26 @@ pub const Reader = struct {
     }
 
     fn framePayloadTruncated(self: Reader) bool {
-        const header = self.current_frame orelse return false;
+        if (self.current_frame == null) return false;
         const final_size = self.receive.final_size orelse return false;
+        const required_end = self.currentFrameEnd() catch return true;
+        return required_end > final_size;
+    }
+
+    fn currentFrameEnd(self: Reader) Error!usize {
+        const header = self.current_frame orelse return error.UnexpectedFrame;
         const remaining = header.payload_length - self.current_payload_read;
         const unconsumed_header =
             if (self.current_header_consumed) 0 else header.header_length;
-        const required_end = std.math.add(
+        return std.math.add(
             usize,
             self.receive.read_offset,
             std.math.add(
                 usize,
                 unconsumed_header,
                 remaining,
-            ) catch return true,
-        ) catch return true;
-        return required_end > final_size;
+            ) catch return error.BufferTooShort,
+        ) catch return error.BufferTooShort;
     }
 };
 

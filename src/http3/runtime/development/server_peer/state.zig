@@ -34,6 +34,11 @@ fn requestPriority(headers: []const http3.Qpack.HeaderField) http3.Priority {
 }
 
 pub const Set = struct {
+    pub const ErrorContext = struct {
+        from: net.IpAddress,
+        stream_id: u62,
+    };
+
     pub const Peer = struct {
         pub const ResponseContext = struct {
             scratch: *StreamMessageSendScratch,
@@ -241,6 +246,7 @@ pub const Set = struct {
     max_stream_buffer: usize,
     max_streams: usize,
     last_peer_index: ?usize = null,
+    last_error: ?ErrorContext = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -496,6 +502,7 @@ pub const Set = struct {
         stream_id: ?u62,
         head_only: bool,
     ) Error!?StreamingRequestEvent {
+        self.last_error = null;
         if (self.peers.items.len == 0) return null;
         var index = if (self.last_peer_index) |last|
             (last + 1) % self.peers.items.len
@@ -541,13 +548,21 @@ pub const Set = struct {
             )) {
                 try peer.lifecycle.prepareMarkReceived();
             }
-            if (try peer.streaming_requests.nextMatchingEvent(
+            if (peer.streaming_requests.nextMatchingEvent(
                 &peer.request_streams,
                 peer.qpack_decode.table,
                 0,
                 stream_id,
                 head_only,
-            )) |ready| {
+            ) catch |err| {
+                if (peer.streaming_requests.lastErrorStreamId()) |failed_stream| {
+                    self.last_error = .{
+                        .from = peer.address,
+                        .stream_id = failed_stream,
+                    };
+                }
+                return err;
+            }) |ready| {
                 const ready_stream_id: u62 = @intCast(
                     ready.entry.reader.streamId(),
                 );
@@ -585,6 +600,10 @@ pub const Set = struct {
             index = (index + 1) % self.peers.items.len;
         }
         return null;
+    }
+
+    pub fn lastError(self: Set) ?ErrorContext {
+        return self.last_error;
     }
 
     /// Remove all state associated with one request while the caller holds

@@ -38,6 +38,30 @@ pub const Queue = struct {
         return self.datagrams.items.len - self.head;
     }
 
+    pub fn clear(self: *Queue) void {
+        while (self.pop()) |value| {
+            var datagram = value;
+            datagram.deinit(self.allocator);
+        }
+    }
+
+    /// A connection error must discard only the failed peer's datagrams.
+    pub fn removePeer(self: *Queue, peer: std.Io.net.IpAddress) void {
+        self.compact();
+        var retained: usize = 0;
+        for (self.datagrams.items) |value| {
+            if (value.from.eql(&peer)) {
+                self.queued_bytes -= value.bytes.len;
+                var datagram = value;
+                datagram.deinit(self.allocator);
+            } else {
+                self.datagrams.items[retained] = value;
+                retained += 1;
+            }
+        }
+        self.datagrams.items.len = retained;
+    }
+
     fn compact(self: *Queue) void {
         if (self.head == 0) return;
         const remaining = self.count();

@@ -491,6 +491,18 @@ pub const PeerSendSet = struct {
         return false;
     }
 
+    pub fn removePeer(self: *PeerSendSet, peer: net.IpAddress) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            if (self.entries.items[index].to.eql(&peer)) {
+                _ = self.entries.swapRemove(index);
+            } else {
+                index += 1;
+            }
+        }
+        _ = self.retirePeer(peer);
+    }
+
     /// Forget a peer's ID cursor only after all send entries have gone away.
     pub fn retirePeer(self: *PeerSendSet, peer: net.IpAddress) bool {
         if (self.hasPeerEntries(peer)) return false;

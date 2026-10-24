@@ -605,6 +605,10 @@ Current protocol coverage includes:
   DATA bodies from declared lengths under buffered-byte caps, exposes
   bounded-window DATA availability, dynamic trailers, and FIN while validating
   informational responses and Content-Length without aggregating body bytes,
+  rechecks known QUIC final sizes before DATA reads and skips, including FIN
+  arriving after partial delivery: final Content-Length mismatches cancel only
+  the affected request or push with `H3_MESSAGE_ERROR`, while truncated frames
+  close with `H3_FRAME_ERROR`,
   and a connection-scoped receive-owner guard across development, protected,
   and authenticated client informational callbacks: recursive response, push,
   control, raw-development-stream, or CONNECT-DATAGRAM reads fail locally with

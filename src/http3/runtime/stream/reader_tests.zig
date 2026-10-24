@@ -3,6 +3,14 @@ const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const Reader = @import("reader.zig").Reader;
 
+test {
+    _ = @import("fin_tests.zig");
+    _ = @import("fin_runtime_tests.zig");
+    _ = @import("fin_request_runtime_tests.zig");
+    _ = @import("fin_push_runtime_tests.zig");
+    _ = @import("fin_protected_tests.zig");
+}
+
 test "HTTP/3 incremental reader rejects unbufferable field section from header" {
     const allocator = std.testing.allocator;
     var reader = Reader.initRequest(allocator, 0, 64, .{});
@@ -200,10 +208,8 @@ test "HTTP/3 incremental response reader emits informational and detects truncat
     defer final.deinit(allocator);
     try std.testing.expect(final == .head);
     try std.testing.expectEqual(@as(u16, 200), final.head.response.status);
-    try std.testing.expect((try reader.next(table)).? == .data_available);
-    var data: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 3), try reader.readData(&data));
     try std.testing.expectError(error.InvalidContentLength, reader.next(table));
+    try std.testing.expectEqual(@as(usize, 0), reader.body_read);
 }
 
 test "HTTP/3 incremental request reader distinguishes missing head and truncated frame" {
