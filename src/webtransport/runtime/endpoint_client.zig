@@ -24,6 +24,7 @@ const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
 const flow_write = @import("flow/write.zig");
 const close_write = @import("endpoint_client/close.zig");
+const drain_write = @import("endpoint_client/drain.zig");
 
 const net = std.Io.net;
 
@@ -125,6 +126,7 @@ pub const Session = struct {
     control: session_control.Control,
     close_response_pending: bool = false,
     close_state: close_write.State = .{},
+    drain_state: drain_write.State = .{},
 
     pub fn applicationProtocol(self: Session) ?application_protocol.String {
         return application_protocol.selected(self.response.headers);
@@ -373,6 +375,23 @@ pub const Session = struct {
     pub const stopStreamWithTimeout = StreamControl.stopStreamWithTimeout;
     pub const stopStreamWithDeadline = StreamControl.stopStreamWithDeadline;
 
+    const Drain = drain_write.Controller(struct {
+        pub const SessionType = Session;
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const TimeoutErrorType = TimeoutError;
+        pub const validateOwner = Session.validateOwner;
+        pub const ensureConnectionOpen = Client.ensureConnectionOpen;
+        pub const observeConnection = Client.observeConnection;
+        pub const advanceOnce = terminal.advanceOnce;
+    });
+
+    /// Send the advisory WT_DRAIN_SESSION capsule. Streams and DATAGRAMs stay
+    /// usable after completion; incomplete DATA progress remains retryable.
+    pub const drain = Drain.drain;
+    pub const drainWithTimeout = Drain.drainWithTimeout;
+    pub const drainWithDeadline = Drain.drainWithDeadline;
+
     const Close = close_write.Controller(struct {
         pub const SessionType = Session;
         pub const ClientType = Client;
@@ -426,6 +445,7 @@ pub const Client = struct {
             _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3, &session_ptr.*.streams);
             session_ptr.*.close_response_pending = false;
             session_ptr.*.close_state.clear();
+            session_ptr.*.drain_state.clear();
         }
         return true;
     }
@@ -996,6 +1016,7 @@ pub const Client = struct {
             &current.streams,
             &current.close_response_pending,
             &current.close_state,
+            &current.drain_state,
         );
         const removed = self.sessions.fetchRemove(session_id.value).?.value;
         removed.deinit(self);
@@ -1073,6 +1094,7 @@ pub const Client = struct {
             &session_value.streams,
             &session_value.close_response_pending,
             &session_value.close_state,
+            &session_value.drain_state,
         ) catch |err| switch (err) {
             error.PacingLimited,
             error.CongestionLimited,

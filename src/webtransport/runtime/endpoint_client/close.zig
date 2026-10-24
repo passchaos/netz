@@ -17,6 +17,10 @@ pub const State = struct {
         self.* = .{};
     }
 
+    pub fn isPending(self: *const State) bool {
+        return self.pending != null;
+    }
+
     pub fn prepare(self: *State, h3: *http3.runtime.HandshakeClient, control: *control_mod.Control, code: u32, reason: []const u8) control_mod.Error!void {
         if (self.pending) |*pending| {
             if (!try pending.matches(code, reason)) return error.InvalidSessionState;
@@ -94,6 +98,9 @@ pub fn Controller(comptime Context: type) type {
             if (client.h3.dispatcherBound()) return error.InvalidDispatcherState;
             if (client.h3.callback_reader_active) return error.ConcurrentRead;
             try Context.ensureConnectionOpen(client);
+            // A partial DRAIN DATA frame must be finished before CLOSE can
+            // start its own contribution on the same CONNECT send direction.
+            if (session.drain_state.pending()) return error.InvalidSessionState;
             defer {
                 if (!Context.observeConnection(client)) _ = lifecycle.observe(&session.control, &client.h3, &session.streams);
                 if (session.control.connection_terminated or session.control.local_close_failed) session.close_state.clear();
@@ -127,7 +134,7 @@ pub fn Controller(comptime Context: type) type {
         }
 
         fn advance(session: *Session, client: *Client) Error!control_mod.TerminateProgress {
-            return Context.advanceOnce(&client.h3, &session.control, &session.streams, &session.close_response_pending, &session.close_state);
+            return Context.advanceOnce(&client.h3, &session.control, &session.streams, &session.close_response_pending, &session.close_state, &session.drain_state);
         }
     };
 }

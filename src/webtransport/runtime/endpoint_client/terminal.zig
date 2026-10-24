@@ -8,6 +8,7 @@ const webtransport = @import("../../mod.zig");
 const session_control = @import("../session_control.zig");
 const connection_lifecycle = @import("../connection_lifecycle.zig");
 const close_write = @import("close.zig");
+const drain_write = @import("drain.zig");
 
 pub fn advanceOnce(
     h3: *http3.runtime.HandshakeClient,
@@ -15,10 +16,12 @@ pub fn advanceOnce(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
     pending_close: *close_write.State,
+    pending_drain: *drain_write.State,
 ) session_control.Error!session_control.TerminateProgress {
     if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
         pending_close.clear();
+        pending_drain.clear();
         return .complete;
     }
     observeSendTerminal(h3, control, close_response_pending);
@@ -32,6 +35,9 @@ pub fn advanceOnce(
     if (try control.tryRejectPostTerminalData(&h3.established.connection)) {
         close_response_pending.* = false;
         return .submitted;
+    }
+    if (pending_drain.pending()) {
+        if (try pending_drain.advanceOnce(h3, control, close_response_pending) == .submitted) return .submitted;
     }
     if (pending_close.pending != null) {
         if (try pending_close.advanceOnce(h3, control, close_response_pending) == .submitted) return .submitted;
@@ -65,19 +71,22 @@ pub fn finish(
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
     pending_close: *close_write.State,
+    pending_drain: *drain_write.State,
 ) session_control.Error!void {
     defer _ = connection_lifecycle.observe(control, h3, streams);
     if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
         pending_close.clear();
+        pending_drain.clear();
         return;
     }
     try inspectControl(h3, control, close_response_pending);
     try rejectPending(h3, control, close_response_pending);
     observeSendTerminal(h3, control, close_response_pending);
+    if (pending_drain.pending()) try progressActive(h3, control, close_response_pending, pending_drain);
     if ((!control.state.closed or pending_close.pending != null) and !control.local_close_sent and !control.local_close_failed) {
         if (pending_close.pending == null) try pending_close.prepare(h3, control, 0, "");
-        try closeActive(h3, control, close_response_pending, pending_close);
+        try progressActive(h3, control, close_response_pending, pending_close);
     }
     if (!control.local_close_sent and !control.local_close_failed) close_response_pending.* = true;
     if (close_response_pending.*) {
@@ -125,8 +134,8 @@ fn rejectPending(h3: *http3.runtime.HandshakeClient, control: *session_control.C
     if (control.handledInvalidCapsule()) reply.* = false;
 }
 
-fn closeActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: *close_write.State) session_control.Error!void {
-    while (state.pending != null) {
+fn progressActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: anytype) session_control.Error!void {
+    while (state.isPending()) {
         try inspectControl(h3, control, reply);
         try rejectPending(h3, control, reply);
         observeSendTerminal(h3, control, reply);

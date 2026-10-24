@@ -510,6 +510,15 @@ the CLOSE is pending; peer CLOSE cancels a partial DATA frame or receives an
 empty FIN when no bytes were submitted. Polling and explicit removal resume
 the same pending metadata, while a cleanup failure after FIN never replays
 the capsule. Sibling traffic remains routed by the owning HTTP/3 reader.
+Shared-client Sessions also expose `drain`, `drainWithTimeout`, and
+`drainWithDeadline`. The advisory capsule uses fixed encoded storage and
+retains one HTTP/3 DATA contribution across partial writes, allocation failure,
+timeout and socket failure. No FIN is sent; stream and DATAGRAM operations
+remain available after completion. While a DRAIN contribution is incomplete,
+CLOSE and ordinary application sends are rejected rather than interleaved.
+Polling resumes it one packet at a time, and removal finishes DRAIN before
+its normal CLOSE. Peer CLOSE preserves its exact event and cancels incomplete
+DATA framing, while connection termination updates all shared Sessions.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte
