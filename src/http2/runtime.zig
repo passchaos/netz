@@ -14882,6 +14882,8 @@ pub const Connection = struct {
         var body_capacity_exact = false;
         var informational_count: usize = 0;
         var trailers_only = false;
+        var receive_credit: response_credit.Tracker = .{};
+        errdefer self.releaseConnectionCapacity(receive_credit.unreleased_connection_bytes) catch {};
 
         while (true) {
             var pending_owned: ?OwnedFrame = null;
@@ -14980,7 +14982,9 @@ pub const Connection = struct {
                 },
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
+                    const connection_before = self.recv_connection_window.value;
                     const data = try self.receiveDataPayload(stream_id, frame);
+                    defer receive_credit.observe(connection_before, self.recv_connection_window.value, data.adaptive_connection_increment);
                     defer self.releaseDataFrameBudget(data);
                     _ = checkedResponseBodyLength(
                         response_content_length,
@@ -15157,6 +15161,8 @@ pub const Connection = struct {
         var expected_body_len: ?usize = null;
         var body_bytes: usize = 0;
         var informational_count: usize = 0;
+        var receive_credit: response_credit.Tracker = .{};
+        errdefer self.releaseConnectionCapacity(receive_credit.unreleased_connection_bytes) catch {};
 
         while (true) {
             var pending_owned: ?OwnedFrame = null;
@@ -15197,10 +15203,13 @@ pub const Connection = struct {
                             trailers,
                             .response_trailers,
                         );
-                        try validateExpectedContentLength(
+                        validateExpectedContentLength(
                             expected_body_len,
                             body_bytes,
-                        );
+                        ) catch |err| {
+                            self.recordResponseStreamReadError(stream_id, .protocol_error);
+                            return err;
+                        };
                         break;
                     }
 
@@ -15339,10 +15348,12 @@ pub const Connection = struct {
                 },
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
+                    const connection_before = self.recv_connection_window.value;
                     const data = try self.receiveDataPayload(
                         stream_id,
                         frame,
                     );
+                    defer receive_credit.observe(connection_before, self.recv_connection_window.value, data.adaptive_connection_increment);
                     defer self.releaseDataFrameBudget(data);
                     body_bytes = checkedResponseBodyLength(
                         expected_body_len,
@@ -15399,6 +15410,9 @@ pub const Connection = struct {
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame);
                     try self.recordResetStream(reset);
+                    // A complete peer reset is terminal stream evidence. It
+                    // does not abandon partial shared framing like a timeout.
+                    completed = true;
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -38185,6 +38199,7 @@ test {
     _ = @import("runtime/headers/limit_reuse_tests.zig");
     _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
+    _ = @import("runtime/response/credit_failure_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/response/body_length_tests.zig");
     _ = @import("runtime/frame/tests/io.zig");

@@ -486,6 +486,10 @@ Current protocol coverage includes:
   without a fixed field-count ceiling,
   status-forbidden response-body write rejection plus sender-side empty-content
   enforcement for 205 without changing DATA/END_STREAM receive framing,
+  failed aggregate and callback response reads return all still-held DATA
+  connection credit, including padding, without counting low-watermark
+  refills or adaptive grants twice; complete peer resets and length errors at
+  response trailers preserve connection reuse for later streams,
   Hyper-style default automatic server `date` generation for ordinary,
   streaming, batched, pushed, and CONNECT final responses, with explicit-field
   preservation, informational-response exclusion, and an opt-out limit,
