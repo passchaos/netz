@@ -40,3 +40,39 @@ test "WebTransport explicit initial quotas reject stateless adapters before allo
     try std.testing.expectError(error.WebTransportNotNegotiated, webtransport.runtime.ProtectedServer.bind(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, limits, undefined));
     try std.testing.expect(!failing.has_induced_failure);
 }
+
+test "WebTransport required Session flow control validates local intent before transport allocation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const allocator = failing.allocator();
+    const limits: webtransport.runtime.Limits = .{ .initial_flow_limits = .{}, .require_session_flow_control = true };
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x72} ** quic.protection.secret_len);
+    try std.testing.expectError(error.InvalidSessionState, webtransport.runtime.StatefulProtectedServer.bind(allocator, io, address, limits, .{}, .{
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "required-server",
+        .peer_connection_id = "required-client",
+    }));
+    const h3: http3.runtime.HandshakeClientOptions = .{
+        .handshake = .{ .original_destination_connection_id = "required-server", .local_connection_id = "required-client" },
+    };
+    try std.testing.expectError(error.InvalidSessionState, webtransport.runtime.EndpointClient.connect(allocator, io, address, address, .{
+        .h3 = h3,
+        .initial_flow_limits = .{},
+        .require_session_flow_control = true,
+    }));
+    try std.testing.expectError(error.InvalidSessionState, webtransport.runtime.HandshakeClientSession.connectAttempt(allocator, io, address, address, .{
+        .authority = "localhost",
+        .h3 = h3,
+        .limits = limits,
+    }));
+    const required: webtransport.runtime.Limits = .{ .require_session_flow_control = true };
+    try std.testing.expectError(error.SessionFlowControlRequired, webtransport.runtime.Server.bind(allocator, io, address, required));
+    try std.testing.expectError(error.SessionFlowControlRequired, webtransport.runtime.ProtectedServer.bind(allocator, io, address, required, undefined));
+    try std.testing.expectError(error.SessionFlowControlRequired, webtransport.runtime.ClientSession.connectAttempt(allocator, io, address, address, .{ .authority = "localhost", .limits = required }));
+    try std.testing.expectError(error.SessionFlowControlRequired, webtransport.runtime.ProtectedClientSession.connectAttempt(allocator, io, address, address, .{ .authority = "localhost", .limits = required, .config = undefined }));
+    try std.testing.expect(!failing.has_induced_failure);
+}

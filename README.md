@@ -1604,6 +1604,8 @@ Current protocol coverage includes:
   Both expose exact initial Session stream-data/bidi/uni quotas through
   `initial_flow_limits`, including negotiated zero credit that waits for
   explicit Capsule grants; shared endpoints retain independent Session budgets.
+  Applications can set `require_session_flow_control = true` to reject peers
+  whose SETTINGS do not enable those quotas before a Session is established.
   Session maintenance settles abandoned RESET/STOP receive data even while
   applications only receive DATAGRAMs or write sibling streams, allowing
   WT_MAX_DATA to advance without consuming the pending RESET notification;

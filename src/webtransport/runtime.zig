@@ -10,6 +10,7 @@ const net = std.Io.net;
 const connect_headers = @import("runtime/connect/headers.zig");
 const connect_negotiation = @import("runtime/connect/negotiation.zig");
 const connect_rejection = @import("runtime/connect/rejection.zig");
+const connect_configuration = @import("runtime/connect/options.zig");
 const application_protocol = webtransport.application_protocol;
 const protocol_negotiation = @import("runtime/connect/application_protocol.zig");
 const pending_connect_request = @import("runtime/connect/pending_request.zig");
@@ -89,6 +90,8 @@ test "WebTransport pending close uses inline then exact heap storage" {
 
 test {
     _ = @import("runtime/connect/admission_tests.zig");
+    _ = @import("runtime/connect/required_flow_tests.zig");
+    _ = @import("runtime/connect/required_endpoint_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_client_tests.zig");
@@ -123,6 +126,8 @@ pub const Limits = struct {
     /// uses existing defaults; negotiated zero quotas require a Capsule grant.
     /// Adoption of an existing transport requires matching its SETTINGS.
     initial_flow_limits: ?webtransport.flow_control.Limits = null,
+    /// Reject Session establishment unless both peers declare flow-control intent.
+    require_session_flow_control: bool = false,
     max_session_streams: usize = 128,
     /// Concurrent Sessions admitted on one HTTP/3 connection by
     /// `EndpointServer`. Standalone owning Session adapters remain limited to
@@ -188,6 +193,7 @@ pub const Server = struct {
     datagram_batch_scratch: datagram_send.DevelopmentBatchScratch = .{},
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        if (limits.require_session_flow_control) return error.SessionFlowControlRequired;
         if (limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
         try application_protocol.validateValues(limits.application_protocols.values);
         return .{
@@ -631,7 +637,7 @@ pub const ProtectedServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                try webTransportProtectedConfig(config, limits.initial_flow_limits),
+                try connect_configuration.protected(config, limits),
             ),
             .origin_policy = limits.origin_policy,
             .application_protocols = limits.application_protocols,
@@ -1536,7 +1542,7 @@ pub const StatefulProtectedServer = struct {
         if (!http3.isHttp3Alpn(transport.alpn_protocol)) {
             return error.InvalidAlpn;
         }
-        var resolved_h3 = try webTransportHandshakeSessionOptions(h3_options, limits.initial_flow_limits);
+        var resolved_h3 = try connect_configuration.session(h3_options, limits);
         resolved_h3.early_connect_datagrams = limits.early_connect_datagrams;
         return .{
             .endpoint = try .bind(
@@ -1806,7 +1812,7 @@ pub const HandshakeServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                try webTransportHandshakeServerOptions(options, capacity, limits.early_connect_datagrams, limits.initial_flow_limits),
+                try connect_configuration.server(options, capacity, limits),
             ),
             .limits = limits,
         };
@@ -2138,9 +2144,9 @@ pub const HandshakeAdmission = struct {
                 .message => |*message| switch (message.value) {
                     .head => |*head| {
                         if (head.* != .request) return error.InvalidConnect;
-                        connect_negotiation.validateRequest(&self.h3, head.request) catch |err| {
+                        connect_negotiation.validateRequestWithPolicy(&self.h3, head.request, self.limits.require_session_flow_control) catch |err| {
                             const failure = connect_rejection.Failure.fromError(err) orelse return err;
-                            const pending = connect_rejection.Pending{ .stream_id = message.stream_id, .failure = failure };
+                            const pending = connect_rejection.Pending.forFailure(message.stream_id, failure);
                             self.rejection_pending = pending;
                             pending.submit(&self.h3) catch |submission_error| switch (submission_error) {
                                 error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return null,
@@ -3268,6 +3274,7 @@ pub const EndpointServer = struct {
                 stream_buffer,
             ) catch |err| switch (err) {
                 error.Canceled => if (options.shutdown.isSet()) return else return err,
+                error.SessionFlowControlRequired => continue,
                 else => |other| return other,
             } orelse continue;
             var event = event_value;
@@ -3552,9 +3559,9 @@ pub const EndpointServer = struct {
         var owned_request = request.request;
         var transferred = false;
         defer if (!transferred) owned_request.deinit(self.allocator);
-        connect_negotiation.validateRequest(h3, owned_request.request) catch |err| {
+        connect_negotiation.validateRequestWithPolicy(h3, owned_request.request, self.limits.require_session_flow_control) catch |err| {
             const failure = connect_rejection.Failure.fromError(err) orelse return err;
-            const rejection = connect_rejection.Pending{ .stream_id = request.session_id.value, .failure = failure };
+            const rejection = connect_rejection.Pending.forFailure(request.session_id.value, failure);
             try self.noteEarlyRejection(handle, h3, request.session_id.value);
             self.request_rejection_pending.putAssumeCapacity(handle, rejection);
             rejection.submit(h3) catch |submission_error| switch (submission_error) {
@@ -5073,22 +5080,18 @@ pub const PendingHandshakeSession = struct {
     ) Error!AcceptedHandshakeSession {
         if (self.deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
         if (self.rejection_pending) |pending| {
-            try pending.submit(&self.h3);
+            try pending.submitBefore(&self.h3, self.deadline);
             self.rejection_pending = null;
             return pending.failure.?.cause();
         }
-        if (self.h3.dispatcherBound()) {
-            connect_negotiation.validateRequest(&self.h3, self.request.request) catch |err| {
-                const failure = connect_rejection.Failure.fromError(err) orelse return err;
-                const pending = connect_rejection.Pending{ .stream_id = self.session_id.value, .failure = failure };
-                self.rejection_pending = pending;
-                try pending.submit(&self.h3);
-                self.rejection_pending = null;
-                return failure.cause();
-            };
-        } else {
-            try connect_rejection.validate(&self.h3, self.session_id.value, self.request.request, self.deadline);
-        }
+        connect_negotiation.validateRequestWithPolicy(&self.h3, self.request.request, self.limits.require_session_flow_control) catch |err| {
+            const failure = connect_rejection.Failure.fromError(err) orelse return err;
+            const pending = connect_rejection.Pending.forFailure(self.session_id.value, failure);
+            self.rejection_pending = pending;
+            try pending.submitBefore(&self.h3, self.deadline);
+            self.rejection_pending = null;
+            return failure.cause();
+        };
         try validateConnectOrigin(
             self.request.request,
             self.limits.origin_policy,
@@ -7416,6 +7419,7 @@ pub const ClientSession = struct {
         options: ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!ConnectAttempt {
+        if (options.limits.require_session_flow_control) return error.SessionFlowControlRequired;
         if (options.limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
         try connect_headers.validate(options.headers, .request);
         var offer = try application_protocol.Request.init(allocator, options.limits.application_protocols, options.headers);
@@ -8440,7 +8444,7 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         try application_protocol.validateRequestPolicy(options.limits.application_protocols, options.headers);
-        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits));
+        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, try connect_configuration.client(options.h3, options.limits));
         errdefer h3_client.deinit();
         return connectStatefulAttempt(
             &h3_client,
@@ -8473,7 +8477,7 @@ pub const HandshakeClientSession = struct {
             local_address,
             server,
             options.limits.http3,
-            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
+            try connect_configuration.client(options.h3, options.limits),
             deadline,
         );
         errdefer h3_client.deinit();
@@ -8524,7 +8528,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             source,
             server,
-            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
+            try connect_configuration.client(options.h3, options.limits),
         );
         errdefer h3_client.deinit();
         return beginPendingConnect(
@@ -8561,7 +8565,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             source,
             server,
-            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
+            try connect_configuration.client(options.h3, options.limits),
             absolute,
         );
         errdefer h3_client.deinit();
@@ -8676,7 +8680,7 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        const effective_h3 = try webTransportHandshakeClientOptions(h3_options, options.limits.initial_flow_limits);
+        const effective_h3 = try connect_configuration.client(h3_options, options.limits);
         var h3_client = if (options.socks5_proxy) |proxy|
             try http3.socks5_runtime.connectHost(
                 allocator,
@@ -8730,7 +8734,7 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        const effective_h3 = try webTransportHandshakeClientOptions(h3_options, options.limits.initial_flow_limits);
+        const effective_h3 = try connect_configuration.client(h3_options, options.limits);
         var h3_client = if (options.socks5_proxy) |proxy|
             try http3.socks5_runtime.connectHostWithDeadline(
                 allocator,
@@ -8909,7 +8913,7 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         try application_protocol.validateRequestPolicy(options.limits.application_protocols, options.headers);
-        const h3_options = try webTransportHandshakeSessionOptions(options.h3, options.limits.initial_flow_limits);
+        const h3_options = try connect_configuration.session(options.h3, options.limits);
         var h3_client = try http3.runtime.HandshakeClient.initPreconfigured(
             allocator,
             io,
@@ -8948,7 +8952,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             server,
             established,
-            try webTransportHandshakeSessionOptions(options.h3, options.limits.initial_flow_limits),
+            try connect_configuration.session(options.h3, options.limits),
         );
         errdefer h3_client.deinit();
         return beginPendingConnect(
@@ -11383,6 +11387,8 @@ fn retainedClientLimits(limits: Limits) Limits {
 }
 
 fn beginPendingConnect(h3: *http3.runtime.HandshakeClient, authority: []const u8, path: []const u8, origin: []const u8, additional: []const http3.Qpack.HeaderField, limits: Limits, deadline: ?std.Io.Clock.Timestamp) Error!PendingHandshakeConnect {
+    try @import("settings/flow.zig").validateExisting(h3.options.local_settings, limits.initial_flow_limits);
+    try @import("settings/flow.zig").validateRequired(h3.options.local_settings, limits.require_session_flow_control);
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
     try connect_headers.validate(additional, .request);
     var offer = try application_protocol.Request.init(h3.allocator, limits.application_protocols, additional);
@@ -11566,7 +11572,7 @@ pub const PendingHandshakeConnect = struct {
                 else => return err,
             };
             if (!preface_ready or !h3.control.settings.received) return null;
-            const version = try connect_negotiation.clientVersion(h3);
+            const version = try connect_negotiation.clientVersionWithPolicy(h3, self.limits.require_session_flow_control);
             const complete = queued.submit(h3, version, self.session_id.value) catch |err| switch (err) {
                 error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked, error.StreamLimitExceeded => return null,
                 else => return err,
@@ -11751,7 +11757,7 @@ pub const HandshakeConnectAttempt = struct {
         std.debug.assert(self.response_trailers.len == 0);
         std.debug.assert(!self.stream_complete);
         var h3 = &self.h3.?;
-        _ = try connect_negotiation.clientVersion(h3);
+        _ = try connect_negotiation.clientVersionWithPolicy(h3, self.limits.require_session_flow_control);
         var streams = try initHandshakeStreamRegistry(
             h3.allocator,
             self.session_id,
@@ -11983,7 +11989,7 @@ pub const ProtectedClientSession = struct {
             &offer,
         );
         defer prepared_headers.deinit(allocator);
-        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportProtectedConfig(options.config, options.limits.initial_flow_limits));
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, try connect_configuration.protected(options.config, options.limits));
         errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
@@ -14408,47 +14414,6 @@ pub const StatefulProtectedConnectAttempt = struct {
     }
 };
 
-fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig, initial: ?webtransport.flow_control.Limits) Error!http3.runtime.ProtectedConfig {
-    // This legacy adapter lacks stateful Session flow-control accounting.
-    if (initial != null) return error.WebTransportNotNegotiated;
-    var out = config;
-    out.local_settings = webtransport.defaultSettings(out.local_settings);
-    if (!out.local_settings.webTransportVersions().legacy) return error.WebTransportNotNegotiated;
-    out.local_settings.webtransport_versions = .{ .legacy = true };
-    return out;
-}
-
-fn webTransportHandshakeServerOptions(
-    options: http3.runtime.HandshakeServerOptions,
-    max_sessions: u64,
-    early_datagrams: EarlyDatagramLimits,
-    initial: ?webtransport.flow_control.Limits,
-) Error!http3.runtime.HandshakeServerOptions {
-    var out = options;
-    out.session.local_settings = try webtransport.settingsWithInitialFlowLimits(
-        out.session.local_settings,
-        max_sessions,
-        initial,
-    );
-    out.session.early_connect_datagrams = early_datagrams;
-    return out;
-}
-
-fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOptions, initial: ?webtransport.flow_control.Limits) Error!http3.runtime.HandshakeClientOptions {
-    var out = options;
-    out.session.local_settings = try webtransport.settingsWithInitialFlowLimits(out.session.local_settings, 1, initial);
-    return out;
-}
-
-fn webTransportHandshakeSessionOptions(
-    options: http3.runtime.HandshakeSessionOptions,
-    initial: ?webtransport.flow_control.Limits,
-) Error!http3.runtime.HandshakeSessionOptions {
-    var out = options;
-    out.local_settings = try webtransport.settingsWithInitialFlowLimits(out.local_settings, 1, initial);
-    return out;
-}
-
 fn connectStatefulAttempt(
     h3_client: *http3.runtime.HandshakeClient,
     authority: []const u8,
@@ -14460,6 +14425,7 @@ fn connectStatefulAttempt(
     restore_to: ?*http3.runtime.HandshakeClient,
 ) Error!HandshakeConnectAttempt {
     try @import("settings/flow.zig").validateExisting(h3_client.options.local_settings, limits.initial_flow_limits);
+    try @import("settings/flow.zig").validateRequired(h3_client.options.local_settings, limits.require_session_flow_control);
     try connect_headers.validate(additional_headers, .request);
     const allocator = h3_client.allocator;
     var offer = try application_protocol.Request.init(allocator, limits.application_protocols, additional_headers);
@@ -14470,6 +14436,7 @@ fn connectStatefulAttempt(
         path,
         origin,
         additional_headers,
+        limits.require_session_flow_control,
         deadline,
         &offer,
     );
@@ -14528,11 +14495,13 @@ fn startStatefulConnect(
     path: []const u8,
     origin: []const u8,
     additional_headers: []const http3.Qpack.HeaderField,
+    required_flow_control: bool,
     deadline: ?std.Io.Clock.Timestamp,
     offer: *const application_protocol.Request,
 ) Error!webtransport.SessionId {
     try connect_headers.validate(additional_headers, .request);
     const version = try connect_negotiation.prepareClient(h3_client, deadline);
+    try connect_negotiation.requireFlowControl(h3_client.options.local_settings, h3_client.control.settings.peer, required_flow_control);
     const allocator = h3_client.allocator;
     var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
         undefined;
@@ -14595,6 +14564,8 @@ fn receiveStatefulSessionRequestBefore(
     errdefer request.head.deinit(
         session.established.connection.endpoint.allocator,
     );
+    // Local policy is decided by PendingHandshakeSession.accept, where a
+    // failed cancellation can retain both the request and transport owner.
     try connect_rejection.validate(session, request.stream_id, request.head, deadline);
     const session_id = webtransport.SessionId.init(request.stream_id);
     if (!session_id.isClientInitiatedBidirectional()) {

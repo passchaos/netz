@@ -1532,8 +1532,29 @@ its sibling blocked. The settings policy is grouped under
 ```zig
 .limits = .{
     .initial_flow_limits = .{ .data = 0, .bidi = 1, .uni = 0 },
+    .require_session_flow_control = true,
 }
 ```
+
+`Limits.require_session_flow_control` and
+`EndpointClientOptions.require_session_flow_control` default to false. Setting
+either to true makes negotiated Session flow control an admission requirement:
+the client checks peer SETTINGS before allocating or sending CONNECT, including
+queued dispatcher attempts and reuse of an existing authenticated transport.
+The shared client retains this transport-wide policy for every Session open.
+Servers reject a valid CONNECT that lacks negotiated flow control with scoped
+`H3_REQUEST_REJECTED` RESET_STREAM/STOP_SENDING before sending status 200.
+Failed cancellation retains the request owner for retry, leaving the connection
+and sibling Sessions usable. The `serveUntil` loop continues after this policy
+refusal and can accept a later qualifying peer. Owning pending server decisions
+enforce the policy on acceptance, retaining their metadata for cancellation
+retries. The local result is `SessionFlowControlRequired`,
+not a malformed-peer error. Explicit three-zero initial quotas combined with
+the requirement fail as `InvalidSessionState` before transport construction;
+legacy stateless adapters return `SessionFlowControlRequired` because they
+cannot enforce it. Real protected-QUIC and TLS/shared-endpoint regressions
+exercise required-policy rejection, retained cancellation, and accepted quota
+grants. Legacy wtransport interoperability continues with the default policy.
 
 ## Remaining gaps
 

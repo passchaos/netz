@@ -1,6 +1,21 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public WebTransport required flow policy rejects contradictory initial quotas" {
+    const limits: netz.webtransport.runtime.Limits = .{
+        .require_session_flow_control = true,
+        .initial_flow_limits = .{},
+    };
+    try std.testing.expect(!@as(netz.webtransport.runtime.Limits, .{}).require_session_flow_control);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidSessionState, netz.webtransport.runtime.EndpointClient.connect(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, .{ .ip4 = .loopback(443) }, .{
+        .initial_flow_limits = limits.initial_flow_limits,
+        .require_session_flow_control = limits.require_session_flow_control,
+        .h3 = .{ .handshake = .{ .original_destination_connection_id = "required-origin", .local_connection_id = "required-client" } },
+    }));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "public WebTransport exact initial quotas allow data only after a decoded grant" {
     const settings = try netz.webtransport.settingsWithInitialFlowLimits(.{}, 2, .{ .data = 0, .bidi = 1, .uni = 0 });
     var state = try netz.webtransport.flow_control.State.init(settings, settings);

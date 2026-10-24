@@ -16,6 +16,10 @@ pub const Pair = struct {
     }
 
     pub fn initWithProtocols(self: *Pair, io: std.Io, local_parameters: quic.TransportParameters, peer_parameters: quic.TransportParameters, fields: []const http3.Qpack.HeaderField, protocols: webtransport.application_protocol.Policy) !void {
+        return self.initWithLimits(io, local_parameters, peer_parameters, fields, .{ .application_protocols = protocols });
+    }
+
+    pub fn initWithLimits(self: *Pair, io: std.Io, local_parameters: quic.TransportParameters, peer_parameters: quic.TransportParameters, fields: []const http3.Qpack.HeaderField, limits: runtime.Limits) !void {
         self.server_owned = true;
         const allocator = std.testing.allocator;
         self.client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
@@ -37,7 +41,7 @@ pub const Pair = struct {
             .path = "/modern",
             .origin = "https://localhost",
             .headers = fields,
-            .limits = .{ .application_protocols = protocols },
+            .limits = limits,
             .h3 = .{ .max_frames_per_packet = 1 },
         });
         errdefer self.client.deinit();

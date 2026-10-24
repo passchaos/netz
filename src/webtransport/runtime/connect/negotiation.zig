@@ -29,6 +29,17 @@ pub fn clientVersion(h3: *const http3.runtime.HandshakeClient) Error!webtranspor
     return check(h3.options.local_settings, h3.control.settings.peer, h3.established.connection.config, .client);
 }
 
+/// Local admission policy: a peer without intent is valid but unsuitable.
+pub fn requireFlowControl(local: http3.Settings, peer: http3.Settings, required: bool) Error!void {
+    if (required and !webtransport.flow_control.negotiated(local, peer)) return error.SessionFlowControlRequired;
+}
+
+pub fn clientVersionWithPolicy(h3: *const http3.runtime.HandshakeClient, required: bool) Error!webtransport.Version {
+    const version = try clientVersion(h3);
+    try requireFlowControl(h3.options.local_settings, h3.control.settings.peer, required);
+    return version;
+}
+
 /// Session operations use the authenticated endpoint role. The client's
 /// local SETTINGS_ENABLE_CONNECT_PROTOCOL is optional under RFC 9220.
 pub fn ensure(h3: anytype) Error!void {
@@ -45,6 +56,11 @@ pub fn validateRequest(h3: *const http3.runtime.HandshakeServerSession, request:
     if (!h3.control.settings.received) return error.MissingSettings;
     const version = try check(h3.options.local_settings, h3.control.settings.peer, h3.established.connection.config, .server);
     try headers.validateRequestForVersion(request, version);
+}
+
+pub fn validateRequestWithPolicy(h3: *const http3.runtime.HandshakeServerSession, request: anytype, required: bool) Error!void {
+    try validateRequest(h3, request);
+    try requireFlowControl(h3.options.local_settings, h3.control.settings.peer, required);
 }
 
 /// Publish SETTINGS before waiting for the server's capability advertisement.

@@ -11,6 +11,7 @@ test "WebTransport explicit initial quotas survive public constructors and requi
     const keys = quic.protection.deriveAes128Keys([_]u8{0xb9} ** quic.protection.secret_len);
     var server = try runtime.StatefulProtectedServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .initial_flow_limits = .{ .data = 0, .bidi = 1, .uni = 0 },
+        .require_session_flow_control = true,
     }, .{}, .{
         .receive_keys = keys,
         .send_keys = keys,
@@ -64,7 +65,7 @@ test "WebTransport explicit initial quotas survive public constructors and requi
     var client = try runtime.HandshakeClientSession.connectPreconfiguredWithTimeout(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
         .authority = "localhost",
         .path = "/initial-quotas",
-        .limits = .{ .initial_flow_limits = .{ .data = 0, .bidi = 0, .uni = 1 } },
+        .limits = .{ .initial_flow_limits = .{ .data = 0, .bidi = 0, .uni = 1 }, .require_session_flow_control = true },
         .h3 = .{},
         .transport = .{
             .receive_keys = keys,

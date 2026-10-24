@@ -22,3 +22,14 @@ pub fn validateExisting(settings: http3.Settings, initial: ?webtransport.flow_co
         settings.webtransport_initial_max_streams_bidi != limits.bidi or
         settings.webtransport_initial_max_streams_uni != limits.uni) return error.InvalidSessionState;
 }
+
+/// A required negotiation cannot succeed when this endpoint declares no intent.
+pub fn validateRequired(settings: http3.Settings, required: bool) webtransport.Error!void {
+    if (required and !webtransport.flow_control.intent(settings)) return error.InvalidSessionState;
+}
+
+pub fn applyRequired(settings: http3.Settings, max_sessions: u64, initial: ?webtransport.flow_control.Limits, required: bool) webtransport.Error!http3.Settings {
+    const out = try apply(settings, max_sessions, initial);
+    try validateRequired(out, required);
+    return out;
+}

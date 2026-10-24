@@ -21,6 +21,7 @@ pub const Error = wire.Error || error{
     WebTransportNotNegotiated,
     DatagramsNotNegotiated,
     ReliableResetNotNegotiated,
+    SessionFlowControlRequired,
     IntegerOverflow,
     FlowControlBlocked,
     FlowControlViolation,

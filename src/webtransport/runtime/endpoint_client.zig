@@ -41,6 +41,8 @@ pub const Options = struct {
     limits: http3.runtime.Limits = .{},
     /// Transport-wide initial Session quotas; zero remains zero on the wire.
     initial_flow_limits: ?webtransport.flow_control.Limits = null,
+    /// Require negotiated Session flow control before sending any CONNECT.
+    require_session_flow_control: bool = false,
     h3: http3.runtime.HandshakeClientOptions,
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
@@ -402,6 +404,7 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     h3: http3.runtime.HandshakeClient,
     max_sessions: usize,
+    require_session_flow_control: bool = false,
     sessions: std.AutoHashMapUnmanaged(u62, *Session) = .empty,
     pending_open_cleanup: open_cleanup.Pending = .{},
     last_ready_session_id: ?u62 = null,
@@ -429,7 +432,7 @@ pub const Client = struct {
         options: Options,
     ) Error!Client {
         if (options.max_sessions == 0) return error.InvalidSessionState;
-        const h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits);
+        const h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits, options.require_session_flow_control);
         return .{
             .allocator = allocator,
             .h3 = try http3.runtime.HandshakeClient.connect(
@@ -441,6 +444,7 @@ pub const Client = struct {
                 h3_options,
             ),
             .max_sessions = options.max_sessions,
+            .require_session_flow_control = options.require_session_flow_control,
         };
     }
 
@@ -461,10 +465,11 @@ pub const Client = struct {
                 local_address,
                 server,
                 options.limits,
-                try resolvedH3Options(options.h3, options.initial_flow_limits),
+                try resolvedH3Options(options.h3, options.initial_flow_limits, options.require_session_flow_control),
                 deadline,
             ),
             .max_sessions = options.max_sessions,
+            .require_session_flow_control = options.require_session_flow_control,
         };
     }
 
@@ -553,7 +558,7 @@ pub const Client = struct {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        var h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits);
+        var h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits, options.require_session_flow_control);
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
@@ -604,6 +609,7 @@ pub const Client = struct {
             .allocator = allocator,
             .h3 = h3_client,
             .max_sessions = options.max_sessions,
+            .require_session_flow_control = options.require_session_flow_control,
         };
     }
 
@@ -777,7 +783,9 @@ pub const Client = struct {
         defer offer.deinit(self.allocator);
         try self.ensureConnectionOpen();
         defer _ = self.observeConnection();
+        try @import("../settings/flow.zig").validateRequired(self.h3.options.local_settings, self.require_session_flow_control);
         const version = try connect_negotiation.prepareClient(&self.h3, deadline);
+        try connect_negotiation.requireFlowControl(self.h3.options.local_settings, self.h3.control.settings.peer, self.require_session_flow_control);
         const peer = self.h3.control.settings.peer;
         if (self.sessions.count() + self.pending_open_cleanup.count() >= sessionCapacity(
             self.max_sessions,
@@ -1256,14 +1264,9 @@ fn validateSessionOptions(options: SessionOptions) Error!void {
 fn resolvedH3Options(
     options: http3.runtime.HandshakeClientOptions,
     initial: ?webtransport.flow_control.Limits,
+    required: bool,
 ) Error!http3.runtime.HandshakeClientOptions {
-    var resolved = options;
-    resolved.session.local_settings = try webtransport.settingsWithInitialFlowLimits(
-        resolved.session.local_settings,
-        1,
-        initial,
-    );
-    return resolved;
+    return @import("connect/options.zig").client(options, .{ .initial_flow_limits = initial, .require_session_flow_control = required });
 }
 
 test "WebTransport endpoint option normalization preserves resolver" {
@@ -1289,7 +1292,7 @@ test "WebTransport endpoint option normalization preserves resolver" {
             .context = &context,
             .resolve = Resolver.resolve,
         },
-    }, .{ .data = 0, .bidi = 1, .uni = 0 });
+    }, .{ .data = 0, .bidi = 1, .uni = 0 }, false);
     try std.testing.expectEqual(
         @intFromPtr(&context),
         @intFromPtr(resolved.address_resolver.?.context),

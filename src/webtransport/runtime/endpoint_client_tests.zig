@@ -133,6 +133,7 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
         } },
         .max_session_streams = 8,
         .max_sessions_per_connection = 2,
+        .require_session_flow_control = true,
         .application_protocols = .{ .values = &.{ "p1", "p2" } },
     };
     var server = try runtime.HandshakeServer.bindForEndpoint(
@@ -181,6 +182,7 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 .{
                     .limits = self.limits,
                     .max_sessions = 2,
+                    .require_session_flow_control = true,
                     .h3 = .{
                         .handshake = .{
                             .original_destination_connection_id = "wt-ec-origin",
@@ -198,6 +200,7 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 },
             );
             defer client.deinit();
+            try std.testing.expect(client.require_session_flow_control);
             try std.testing.expectEqual(self.address, client.remoteAddress());
             try std.testing.expect(client.remoteAddressValidated());
             try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
