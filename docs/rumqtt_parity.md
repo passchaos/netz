@@ -404,7 +404,8 @@ same connection-local sender space, as required by MQTT 5 section 2.2.1
 (`MQTT-2.2.1-3`). A subscription command keeps its identifier after a successful
 write followed by timeout or pending-queue failure. It releases that identifier
 only after a parsed, property-validated SUBACK/UNSUBACK with the expected reason
-count; legacy UNSUBACK remains identifier-only. Ordinary typed readers also
+count and SUBACK grants at or below each requested maximum QoS; legacy
+UNSUBACK remains identifier-only. Ordinary typed readers also
 settle late responses. A later exchange queues earlier known subscription ACKs
 in wire order while waiting for its own identifier. Wrong-stage, malformed and
 wrong-count acknowledgements cannot release an active command, and PUBLISH
@@ -415,6 +416,17 @@ the QoS PUBLISH Receive Maximum window. Shared allocation and sparse/dense
 storage live under `runtime/packet_identifiers/`, with adjacent tests for the
 complete 1..65,535 shared space, wraparound, independent incoming ownership,
 allocation rollback and MQTT 3.1/3.1.1/5 late-ACK recovery.
+Each submitted SUBSCRIBE owns an ordered QoS snapshot before transport output,
+following the requested-maximum semantics in MQTT 3.1.1/5 sections 3.8.3 and
+3.8.4. A valid identifier, reason count and individual reason code cannot hide
+a grant above its corresponding request: both correlated completion and typed
+readers return `UnexpectedPacket` without releasing command ownership. Lower
+grants and failure reasons remain valid. Caller mutation, receive timeout,
+decode-allocation retries and reverse-order ACKs retain the original limits;
+completion, pre-write rollback, connection reset and close release the owned
+snapshot. The metadata implementation lives in
+`runtime/packet_identifiers/control.zig`, with adjacent real TCP regressions
+for MQTT 3.1/3.1.1/5 and exhaustive pre-output allocation-failure coverage.
 Validation covers the Debug MQTT/session matrix, focused Debug/ReleaseFast
 identifier and subscription tests, package reachability, and real Mosquitto
 publish, Mosquitto CLI client and rumqttc 0.25.1 interoperability gates.

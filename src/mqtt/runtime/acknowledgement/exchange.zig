@@ -16,11 +16,12 @@ pub fn Controller(comptime Context: type) type {
             const initial = connection.next_packet_id;
             const packet_id = try Context.reserve(connection, .outgoing_subscribe, subscriptions.len);
             errdefer {
-                _ = connection.packet_identifiers.remove(packet_id, .outgoing_subscribe);
+                _ = connection.packet_identifiers.remove(connection.allocator, packet_id, .outgoing_subscribe);
                 connection.next_packet_id = initial;
             }
             connection.write_scratch.clearRetainingCapacity();
             try mqtt.Subscribe.write(&connection.write_scratch, connection.allocator, connection.protocol, packet_id, options.properties, subscriptions);
+            try connection.packet_identifiers.rememberSubscribe(connection.allocator, packet_id, subscriptions);
             try write(connection, connection.write_scratch.items, .subscribe, deadline);
             return packet_id;
         }
@@ -35,7 +36,7 @@ pub fn Controller(comptime Context: type) type {
             const initial = connection.next_packet_id;
             const packet_id = try Context.reserve(connection, .outgoing_unsubscribe, filters.len);
             errdefer {
-                _ = connection.packet_identifiers.remove(packet_id, .outgoing_unsubscribe);
+                _ = connection.packet_identifiers.remove(connection.allocator, packet_id, .outgoing_unsubscribe);
                 connection.next_packet_id = initial;
             }
             connection.write_scratch.clearRetainingCapacity();

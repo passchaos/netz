@@ -1,15 +1,17 @@
 const std = @import("std");
+const mqtt = @import("../mod.zig");
 const Storage = @import("packet_identifiers/storage.zig").Storage;
+const Control = @import("packet_identifiers/control.zig").State;
 const Incoming = Storage(u2);
 pub const Ownership = @import("../identifier/ownership.zig").Ownership;
 const Outgoing = struct {
     stages: Storage(u3) = .{},
-    filter_counts: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+    controls: Control = .{},
     external: ?Ownership = null,
 
     fn deinit(self: *Outgoing, allocator: std.mem.Allocator) void {
         self.stages.deinit(allocator);
-        self.filter_counts.deinit(allocator);
+        self.controls.deinit(allocator);
     }
 };
 
@@ -129,23 +131,33 @@ pub const State = struct {
         std.debug.assert(stage == .outgoing_subscribe or stage == .outgoing_unsubscribe);
         std.debug.assert(!self.containsOutgoing(packet_id));
         _ = try self.add(allocator, packet_id, stage);
-        errdefer _ = self.remove(packet_id, stage);
-        try self.outgoing.?.filter_counts.putNoClobber(allocator, packet_id, filter_count);
+        errdefer _ = self.remove(allocator, packet_id, stage);
+        try self.outgoing.?.controls.add(allocator, packet_id, filter_count);
     }
 
     pub fn controlFilterCount(self: *const State, packet_id: u16, stage: Stage) ?usize {
         if (!self.contains(packet_id, stage)) return null;
-        return self.outgoing.?.filter_counts.get(packet_id);
+        return self.outgoing.?.controls.filterCount(packet_id);
+    }
+
+    pub fn rememberSubscribe(self: *State, allocator: std.mem.Allocator, packet_id: u16, subscriptions: []const mqtt.Subscription) std.mem.Allocator.Error!void {
+        std.debug.assert(self.contains(packet_id, .outgoing_subscribe));
+        try self.outgoing.?.controls.rememberSubscribe(allocator, packet_id, subscriptions);
+    }
+
+    pub fn validateSubAck(self: *const State, packet_id: u16, reasons: []const u8) error{UnexpectedPacket}!void {
+        if (!self.contains(packet_id, .outgoing_subscribe)) return;
+        try self.outgoing.?.controls.validateSubAck(packet_id, reasons);
     }
 
     /// Remove the matching stage in its own direction, including control data.
-    pub fn remove(self: *State, packet_id: u16, stage: Stage) bool {
+    pub fn remove(self: *State, allocator: std.mem.Allocator, packet_id: u16, stage: Stage) bool {
         const removed = switch (direction(stage)) {
             .incoming => if (self.incoming) |entries| entries.remove(packet_id, @intCast(code(stage))) else false,
             .outgoing => if (self.outgoing) |entries| entries.stages.remove(packet_id, code(stage)) else false,
         };
         if (removed and (stage == .outgoing_subscribe or stage == .outgoing_unsubscribe)) {
-            _ = self.outgoing.?.filter_counts.remove(packet_id);
+            self.outgoing.?.controls.remove(allocator, packet_id);
         }
         return removed;
     }
@@ -164,11 +176,11 @@ pub const State = struct {
         };
     }
 
-    pub fn clearRetainingCapacity(self: *State) void {
+    pub fn clearRetainingCapacity(self: *State, allocator: std.mem.Allocator) void {
         if (self.incoming) |entries| entries.clearRetainingCapacity();
         if (self.outgoing) |entries| {
             entries.stages.clearRetainingCapacity();
-            entries.filter_counts.clearRetainingCapacity();
+            entries.controls.clearRetainingCapacity(allocator);
             entries.external = null;
         }
     }
@@ -240,10 +252,10 @@ test "MQTT packet identifier state is sparse and direction independent" {
         state.count(.outgoing_qos1),
     );
 
-    try std.testing.expect(state.remove(65_535, .outgoing_qos1));
+    try std.testing.expect(state.remove(std.testing.allocator, 65_535, .outgoing_qos1));
     try std.testing.expect(!state.containsOutgoing(65_535));
     try std.testing.expect(state.contains(65_535, .incoming_qos2));
-    try std.testing.expect(state.remove(65_535, .incoming_qos2));
+    try std.testing.expect(state.remove(std.testing.allocator, 65_535, .incoming_qos2));
     try std.testing.expectEqual(@as(usize, 0), state.incoming.?.sparse.count());
     try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.stages.sparse.count());
 }
@@ -276,7 +288,7 @@ test "MQTT packet identifier QoS 2 transition retains allocation" {
     try std.testing.expectEqual(allocations, counting.allocations);
     try std.testing.expect(!state.contains(42, .outgoing_qos2));
     try std.testing.expect(state.contains(42, .outgoing_qos2_pubrel));
-    state.clearRetainingCapacity();
+    state.clearRetainingCapacity(counting.allocator());
     try std.testing.expect(state.incoming == null);
     try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.stages.sparse.count());
 }
@@ -323,7 +335,7 @@ test "MQTT packet identifier state promotes to bounded dense storage" {
         @as(usize, Incoming.sparse_limit + 1),
         state.count(.incoming_qos1),
     );
-    try std.testing.expect(state.remove(1, .incoming_qos1));
+    try std.testing.expect(state.remove(std.testing.allocator, 1, .incoming_qos1));
     try std.testing.expect(!state.contains(1, .incoming_qos1));
     try std.testing.expect(state.contains(
         @intCast(Incoming.sparse_limit + 1),
@@ -335,7 +347,7 @@ test "MQTT packet identifier state promotes to bounded dense storage" {
         .incoming_qos2,
     ));
     try std.testing.expect(state.contains(65_535, .incoming_qos2));
-    state.clearRetainingCapacity();
+    state.clearRetainingCapacity(std.testing.allocator);
     try std.testing.expect(!state.contains(65_535, .incoming_qos2));
 }
 
@@ -392,12 +404,12 @@ test "MQTT packet identifier control metadata rolls back on allocation failure" 
         succeeded = true;
         failing.fail_index = failing.alloc_index;
         try std.testing.expectEqual(@as(?usize, 3), state.controlFilterCount(42, .outgoing_subscribe));
-        try std.testing.expect(!state.remove(42, .outgoing_unsubscribe));
+        try std.testing.expect(!state.remove(failing.allocator(), 42, .outgoing_unsubscribe));
         try std.testing.expectEqual(@as(?usize, 3), state.controlFilterCount(42, .outgoing_subscribe));
-        try std.testing.expect(state.remove(42, .outgoing_subscribe));
+        try std.testing.expect(state.remove(failing.allocator(), 42, .outgoing_subscribe));
         try std.testing.expectEqual(@as(?usize, null), state.controlFilterCount(42, .outgoing_subscribe));
         try state.addControl(failing.allocator(), 42, .outgoing_unsubscribe, 2);
-        state.clearRetainingCapacity();
+        state.clearRetainingCapacity(failing.allocator());
         try std.testing.expectEqual(@as(?usize, null), state.controlFilterCount(42, .outgoing_unsubscribe));
         try std.testing.expect(!state.containsOutgoing(42));
         break;
@@ -419,12 +431,12 @@ test "MQTT packet identifier external sender ownership follows live mutations wi
     try std.testing.expect(!state.containsOutgoingPublish(65_535));
     try std.testing.expectEqual(@as(usize, 0), state.count(.outgoing_qos2));
     _ = try state.add(std.testing.allocator, 65_535, .incoming_qos2);
-    try std.testing.expect(external.remove(65_535, .outgoing_qos2));
+    try std.testing.expect(external.remove(std.testing.allocator, 65_535, .outgoing_qos2));
     try std.testing.expect(!state.containsOutgoing(65_535));
     try std.testing.expect(state.contains(65_535, .incoming_qos2));
     try state.addControl(std.testing.allocator, 42, .outgoing_subscribe, 1);
     _ = try external.add(std.testing.allocator, 43, .outgoing_qos1);
-    state.clearRetainingCapacity();
+    state.clearRetainingCapacity(std.testing.allocator);
     try std.testing.expect(!state.containsOutgoing(42));
     try std.testing.expect(!state.containsOutgoing(43));
     try std.testing.expect(external.containsOutgoing(43));

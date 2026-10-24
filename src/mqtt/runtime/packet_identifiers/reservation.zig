@@ -45,7 +45,7 @@ test "MQTT packet identifier reservation exhausts the shared sender space transa
     }
     try std.testing.expectError(error.InflightFull, Reservations.reserve(&connection, .outgoing_subscribe, 2));
     try std.testing.expectEqual(@as(u16, 65_535), connection.next_packet_id);
-    try std.testing.expect(connection.packet_identifiers.remove(65_534, stages[65_534 % stages.len]));
+    try std.testing.expect(connection.packet_identifiers.remove(connection.allocator, 65_534, stages[65_534 % stages.len]));
     _ = try connection.packet_identifiers.add(connection.allocator, 65_534, .incoming_qos2);
     try std.testing.expectEqual(@as(u16, 65_534), try Reservations.reserve(&connection, .outgoing_subscribe, 2));
     try std.testing.expectEqual(@as(?usize, 2), connection.packet_identifiers.controlFilterCount(65_534, .outgoing_subscribe));

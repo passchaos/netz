@@ -5222,7 +5222,7 @@ pub const Connection = struct {
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer suback.deinit(self.allocator);
         try self.validateIncomingProperties(suback.properties);
-        try ControlCompletion.finish(self, .suback, suback.packet_id, suback.reason_codes.len);
+        try ControlCompletion.finish(self, .suback, suback.packet_id, suback.reason_codes);
         return .{ .packet = packet, .suback = suback };
     }
 
@@ -5302,7 +5302,7 @@ pub const Connection = struct {
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsuback.deinit(self.allocator);
         try self.validateIncomingProperties(unsuback.properties);
-        try ControlCompletion.finish(self, .unsuback, unsuback.packet_id, unsuback.reason_codes.len);
+        try ControlCompletion.finish(self, .unsuback, unsuback.packet_id, unsuback.reason_codes);
         return .{ .packet = packet, .unsuback = unsuback };
     }
 
@@ -5390,7 +5390,7 @@ pub const Connection = struct {
         self.next_packet_id = 1;
         self.outgoing_inflight = 0;
         self.incoming_inflight = 0;
-        self.packet_identifiers.clearRetainingCapacity();
+        self.packet_identifiers.clearRetainingCapacity(self.allocator);
     }
 
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
@@ -6448,7 +6448,7 @@ pub const Connection = struct {
                 .at_least_once => .incoming_qos1,
                 .exactly_once => .incoming_qos2,
             };
-            std.debug.assert(self.packet_identifiers.remove(packet_id, stage));
+            std.debug.assert(self.packet_identifiers.remove(self.allocator, packet_id, stage));
             self.incoming_inflight -= 1;
         };
         try self.applyValidatedIncomingTopicAlias(publish_packet);
@@ -6591,7 +6591,7 @@ pub const Connection = struct {
             .pubcomp => .incoming_qos2,
             else => return,
         };
-        if (!self.packet_identifiers.remove(packet_id, stage)) return;
+        if (!self.packet_identifiers.remove(self.allocator, packet_id, stage)) return;
         self.incoming_inflight -= 1;
     }
 
@@ -7139,9 +7139,10 @@ pub const Connection = struct {
             .exactly_once => .outgoing_qos2,
         };
         if (qos == .exactly_once and self.packet_identifiers.remove(
+            self.allocator,
             packet_id,
             .outgoing_qos2_pubrel,
-        )) {} else if (!self.packet_identifiers.remove(packet_id, stage)) return;
+        )) {} else if (!self.packet_identifiers.remove(self.allocator, packet_id, stage)) return;
         self.outgoing_inflight -= 1;
     }
 };
@@ -10533,6 +10534,7 @@ test "MQTT incoming PUBLISH commits QoS and Topic Alias transactionally" {
         .incoming_qos1,
     );
     try std.testing.expect(connection.packet_identifiers.remove(
+        connection.allocator,
         19,
         .incoming_qos1,
     ));
@@ -11727,6 +11729,7 @@ test {
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
     _ = @import("runtime/acknowledgement/control/tests.zig");
     _ = @import("runtime/acknowledgement/control/exchange_tests.zig");
+    _ = @import("runtime/acknowledgement/control/qos_tests.zig");
     _ = @import("runtime/acknowledgement/identifier_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");

@@ -64,12 +64,13 @@ pub fn Controller(comptime Context: type) type {
 
         /// Decoders call this only after syntax and property validation. An
         /// unknown identifier is readable through ordinary typed APIs; known
-        /// commands must match both stage and the expected reason count.
-        pub fn finish(connection: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_count: usize) Error!void {
+        /// commands must match stage, reason count and each requested QoS.
+        pub fn finish(connection: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reasons: []const u8) Error!void {
             const stage = stageFor(packet_type);
             if (connection.packet_identifiers.controlFilterCount(packet_id, stage)) |expected_count| {
-                if ((packet_type == .suback or connection.protocol == .v5) and reason_count != expected_count) return error.UnexpectedPacket;
-                const removed = connection.packet_identifiers.remove(packet_id, stage);
+                if ((packet_type == .suback or connection.protocol == .v5) and reasons.len != expected_count) return error.UnexpectedPacket;
+                if (packet_type == .suback) try connection.packet_identifiers.validateSubAck(packet_id, reasons);
+                const removed = connection.packet_identifiers.remove(connection.allocator, packet_id, stage);
                 std.debug.assert(removed);
             } else if (connection.packet_identifiers.containsOutgoing(packet_id)) return error.UnexpectedPacket;
         }

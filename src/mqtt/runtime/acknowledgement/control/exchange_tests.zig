@@ -214,16 +214,17 @@ test "MQTT subscription completion recovers convenience exchange ACKs after loca
         defer pair.deinit();
         const client = &pair.client;
         const stage: @import("../../packet_identifiers.zig").State.Stage = if (operation == .subscribe) .outgoing_subscribe else .outgoing_unsubscribe;
-        // Warm every pre-write allocation so the injected failure belongs to
-        // response decoding after the convenience API submits its request.
+        // Warm reusable pre-write storage. SUBSCRIBE also allocates one owned
+        // QoS snapshot; fail after that and raw ACK storage so the fault still
+        // belongs to response decoding after the request was submitted.
         try client.packet_identifiers.addControl(client.allocator, 42, stage, 1);
-        try std.testing.expect(client.packet_identifiers.remove(42, stage));
+        try std.testing.expect(client.packet_identifiers.remove(client.allocator, 42, stage));
         const Pending = @import("../pending.zig").State;
         client.pending_packets = try client.allocator.create(Pending);
         client.pending_packets.?.* = .{};
         try client.write_scratch.ensureTotalCapacity(client.allocator, 1024);
         try writeAck(&pair.peer, operation, 1);
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 + @as(usize, @intFromBool(operation == .subscribe)) });
         client.allocator = failing.allocator();
         switch (operation) {
             .subscribe => try std.testing.expectError(error.OutOfMemory, client.subscribeWithTimeout(&.{.{ .topic_filter = "split/#" }}, .{}, .fromSeconds(1))),
