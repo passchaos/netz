@@ -78,6 +78,7 @@ test "public WebTransport flow-control model consumes encoded peer grants" {
 }
 
 test "public modules are reachable" {
+    try std.testing.expect(@hasDecl(netz.http2, "SettingsIterator"));
     try std.testing.expect(@hasDecl(
         netz.quic.tls.trust,
         "verifyServerCertificateIdentity",

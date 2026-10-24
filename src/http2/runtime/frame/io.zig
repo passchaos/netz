@@ -268,6 +268,21 @@ pub const Reader = struct {
     buffer: std.ArrayList(u8) = .empty,
     start: usize = 0,
     last_envelope_violation: ?wire.EnvelopeViolation = null,
+    retry_len: usize = 0,
+    last_replayed: bool = false,
+
+    /// Copy the latest borrow into independent ownership. Failed allocation
+    /// keeps that complete frame ahead of every following buffered frame.
+    pub fn copyOwned(self: *Reader, allocator: std.mem.Allocator, borrowed: BorrowedFrame) std.mem.Allocator.Error!OwnedFrame {
+        const bytes = allocator.dupe(u8, borrowed.bytes) catch |err| {
+            std.debug.assert(self.start >= borrowed.bytes.len);
+            std.debug.assert(borrowed.bytes.ptr == self.buffer.items[self.start - borrowed.bytes.len ..].ptr);
+            self.retry_len = borrowed.bytes.len;
+            return err;
+        };
+        self.retry_len = 0;
+        return .{ .bytes = bytes, .frame = http2.Frame.parse(bytes) catch unreachable };
+    }
 
     pub fn deinit(self: *Reader, allocator: std.mem.Allocator) void {
         self.buffer.deinit(allocator);
@@ -350,6 +365,13 @@ pub const Reader = struct {
         inbound_payload_limit: usize,
     ) !BorrowedFrame {
         self.last_envelope_violation = null;
+        self.last_replayed = false;
+        if (self.retry_len != 0) {
+            const bytes = self.buffer.items[self.start - self.retry_len .. self.start];
+            self.retry_len = 0;
+            self.last_replayed = true;
+            return .{ .bytes = bytes, .frame = http2.Frame.parse(bytes) catch unreachable };
+        }
         while (true) {
             const available = self.buffer.items[self.start..];
             var target_read_size = default_read_size;

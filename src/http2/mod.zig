@@ -139,19 +139,45 @@ pub const Setting = struct {
     value: u32,
 };
 
+/// Borrow a complete SETTINGS payload after validating every entry. Unknown
+/// identifiers remain ignorable; repeated known identifiers retain wire order.
+/// The payload must stay unchanged and alive while the iterator is used.
+pub const SettingsIterator = struct {
+    payload: []const u8,
+    offset: usize = 0,
+
+    pub fn init(payload: []const u8) Error!SettingsIterator {
+        if (payload.len % 6 != 0) return error.InvalidSetting;
+        var offset: usize = 0;
+        while (offset < payload.len) : (offset += 6) {
+            const setting = decode(payload[offset..][0..6]);
+            try validateSetting(setting.id, setting.value);
+        }
+        return .{ .payload = payload };
+    }
+
+    pub fn next(self: *SettingsIterator) ?Setting {
+        if (self.offset == self.payload.len) return null;
+        const setting = decode(self.payload[self.offset..][0..6]);
+        self.offset += 6;
+        return setting;
+    }
+
+    fn decode(bytes: *const [6]u8) Setting {
+        return .{
+            .id = @enumFromInt(std.mem.readInt(u16, bytes[0..2], .big)),
+            .value = std.mem.readInt(u32, bytes[2..6], .big),
+        };
+    }
+};
+
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
-    if (payload.len % 6 != 0) return error.InvalidSetting;
+    var iterator = try SettingsIterator.init(payload);
     if (payload.len == 0) return @constCast(&[_]Setting{});
     const settings = try allocator.alloc(Setting, payload.len / 6);
     errdefer allocator.free(settings);
 
-    for (settings, 0..) |*setting, index| {
-        const offset = index * 6;
-        const id: SettingId = @enumFromInt(std.mem.readInt(u16, payload[offset..][0..2], .big));
-        const value = std.mem.readInt(u32, payload[offset + 2 ..][0..4], .big);
-        try validateSetting(id, value);
-        setting.* = .{ .id = id, .value = value };
-    }
+    for (settings) |*setting| setting.* = iterator.next().?;
     return settings;
 }
 

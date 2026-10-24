@@ -11050,7 +11050,7 @@ pub const Connection = struct {
                 }
                 return err;
             };
-            if (self.last_peer_frame_at != null) {
+            if (self.last_peer_frame_at != null and !self.frame_reader.last_replayed) {
                 self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
             }
             return borrowed;
@@ -11104,12 +11104,18 @@ pub const Connection = struct {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         self.borrowed_pending_frame.deinit(self.allocator);
         const borrowed = try self.readTransportFrameWithDeadline(deadline);
-        const bytes = try self.allocator.dupe(u8, borrowed.bytes);
-        errdefer self.allocator.free(bytes);
-        return .{
-            .bytes = bytes,
-            .frame = try http2.Frame.parse(bytes),
-        };
+        return self.copyBorrowedFrame(borrowed);
+    }
+
+    fn copyBorrowedFrame(self: *Connection, borrowed: frame_io.BorrowedFrame) Error!OwnedFrame {
+        if (self.borrowed_pending_frame.getPtr()) |pending| {
+            if (pending.bytes.ptr == borrowed.bytes.ptr and pending.bytes.len == borrowed.bytes.len) {
+                // A queued owning frame was exposed through a borrowed read.
+                // Transfer that owner instead of allocating another copy.
+                return self.borrowed_pending_frame.take().?;
+            }
+        }
+        return self.frame_reader.copyOwned(self.allocator, borrowed);
     }
 
     fn readOwnedFrameRawWithDeadline(
@@ -11120,12 +11126,7 @@ pub const Connection = struct {
         self.borrowed_pending_frame.deinit(self.allocator);
         if (self.popQueuedApplicationFrame()) |frame| return frame;
         const borrowed = try self.readTransportFrameWithDeadline(deadline);
-        const bytes = try self.allocator.dupe(u8, borrowed.bytes);
-        errdefer self.allocator.free(bytes);
-        return .{
-            .bytes = bytes,
-            .frame = try http2.Frame.parse(bytes),
-        };
+        return self.copyBorrowedFrame(borrowed);
     }
 
     fn popQueuedApplicationFrame(self: *Connection) ?OwnedFrame {
@@ -11629,13 +11630,7 @@ pub const Connection = struct {
         const is_direct_data = header.frame_type == .data and
             header.stream_id == stream_id and (header.flags & 0x8) == 0;
         if (!is_direct_data) {
-            const bytes = try self.allocator.dupe(u8, borrowed.bytes);
-            errdefer self.allocator.free(bytes);
-            const frame = try http2.Frame.parse(bytes);
-            return .{ .owned_frame = .{
-                .bytes = bytes,
-                .frame = frame,
-            } };
+            return .{ .owned_frame = try self.copyBorrowedFrame(borrowed) };
         }
 
         const connection_before = self.recv_connection_window.value;
@@ -13449,11 +13444,7 @@ pub const Connection = struct {
     ) Error!void {
         if (try self.handleConnectionOrGoAwayFrame(borrowed.frame)) return;
 
-        const bytes = try self.allocator.dupe(u8, borrowed.bytes);
-        var frame = OwnedFrame{
-            .bytes = bytes,
-            .frame = http2.Frame.parse(bytes) catch unreachable,
-        };
+        var frame = try self.copyBorrowedFrame(borrowed);
         var frame_owned = true;
         defer if (frame_owned) frame.deinit(self.allocator);
         self.queuePendingApplicationFrame(frame) catch |err| {
@@ -13520,14 +13511,7 @@ pub const Connection = struct {
                 continue;
             }
 
-            const bytes = try self.allocator.dupe(u8, borrowed.bytes);
-            var frame = OwnedFrame{
-                .bytes = bytes,
-                // `borrowed` already passed frame parsing and envelope
-                // validation. Reparse only to redirect payload slices into the
-                // owned allocation that may outlive frame-reader scratch.
-                .frame = http2.Frame.parse(bytes) catch unreachable,
-            };
+            var frame = try self.copyBorrowedFrame(borrowed);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
             self.ensurePendingApplicationFrameCapacity() catch |err| {
@@ -17336,84 +17320,23 @@ pub const Connection = struct {
         self.peer_initial_stream_window = new_window;
     }
 
-    fn applySettings(self: *Connection, settings: []const http2.Setting) Error!void {
-        for (settings) |setting| {
-            switch (setting.id) {
-                .initial_window_size => try self.applyInitialWindowSize(setting.value),
-                .max_frame_size => {
-                    if (setting.value < default_max_frame_size or setting.value > max_max_frame_size) return error.InvalidSetting;
-                    self.peer_max_frame_size = setting.value;
-                },
-                .max_header_list_size => self.peer_max_header_list_size = setting.value,
-                .max_concurrent_streams => self.peer_max_concurrent_streams = setting.value,
-                .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(
-                    self.allocator,
-                    @min(
-                        setting.value,
-                        self.limits.max_encoder_table_size,
-                    ),
-                ),
-                .no_rfc7540_priorities => {
-                    if (setting.value > 1) return error.InvalidSetting;
-                    const enabled = setting.value == 1;
-                    if (self.peer_initial_settings_applied and
-                        !self.peer_priority_setting_seen)
-                    {
-                        // SETTINGS_NO_RFC7540_PRIORITIES is only valid in the
-                        // first peer SETTINGS frame.
-                        return error.InvalidSetting;
-                    }
-                    if (self.peer_priority_setting_seen and
-                        self.peer_no_rfc7540_priorities != enabled)
-                    {
-                        // RFC 9218 requires this value in the initial SETTINGS
-                        // and forbids changing it later. Rejecting a change
-                        // avoids switching scheduling semantics mid-connection.
-                        return error.InvalidSetting;
-                    }
-                    self.peer_priority_setting_seen = true;
-                    self.peer_no_rfc7540_priorities = enabled;
-                },
-                .enable_push => {
-                    if (setting.value > 1) return error.InvalidSetting;
-                    // RFC 9113 allows a server to send the setting explicitly
-                    // with value 0; only server-to-client value 1 is a
-                    // connection-level protocol error.
-                    if (self.role == .client and setting.value == 1) {
-                        return error.InvalidSetting;
-                    }
-                    self.peer_enable_push = setting.value == 1;
-                },
-                .enable_connect_protocol => {
-                    if (setting.value > 1) return error.InvalidSetting;
-                    // RFC 8441 uses SETTINGS_ENABLE_CONNECT_PROTOCOL as an
-                    // irreversible opt-in because :protocol changes request
-                    // validation semantics.  A peer may omit the setting or
-                    // send 0 before opting in, but once 1 has been observed it
-                    // must not downgrade the connection back to 0.
-                    if (self.peer_enable_connect_protocol and setting.value == 0) return error.InvalidSetting;
-                    self.peer_enable_connect_protocol = setting.value == 1;
-                },
-                else => {},
-            }
-        }
-        self.peer_initial_settings_applied = true;
-    }
+    const PeerSettings = @import("runtime/settings/apply.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const applyInitialWindowSize = Connection.applyInitialWindowSize;
+    });
+    const applySettings = PeerSettings.apply;
 
     fn applyPeerSettingsPayload(
         self: *Connection,
         payload: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        const settings = http2.parseSettings(
-            self.allocator,
-            payload,
-        ) catch |err| {
+        const iterator = http2.SettingsIterator.init(payload) catch |err| {
             self.reportPeerSettingsFailure(payload, err, deadline);
             return err;
         };
-        defer self.allocator.free(settings);
-        self.applySettings(settings) catch |err| {
+        PeerSettings.applyBorrowed(self, iterator) catch |err| {
             self.reportPeerSettingsFailure(payload, err, deadline);
             return err;
         };
@@ -21705,6 +21628,10 @@ pub const testing = struct {
         return connection.readOwnedFrame();
     }
 
+    pub fn copyBorrowedFrame(connection: *Connection, borrowed: frame_io.BorrowedFrame) Error!OwnedFrame {
+        return connection.copyBorrowedFrame(borrowed);
+    }
+
     pub fn queuePendingApplicationFrame(
         connection: *Connection,
         frame: OwnedFrame,
@@ -22011,8 +21938,8 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
         const connection_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 1_840,
-            .ReleaseFast, .ReleaseSmall => 1_760,
+            .Debug, .ReleaseSafe => 1_856,
+            .ReleaseFast, .ReleaseSmall => 1_776,
         };
         try std.testing.expectEqual(connection_size, @sizeOf(Connection));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
@@ -38225,6 +38152,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/frame/retention_tests.zig");
     _ = @import("runtime/headers/limit_reuse_tests.zig");
     _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");

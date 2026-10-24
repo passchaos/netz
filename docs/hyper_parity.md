@@ -2242,7 +2242,25 @@ SETTINGS paths now emit a connection-level GOAWAY before failing: an oversized
 frame-size, role, and irreversible extension values use `PROTOCOL_ERROR`. RFC
 9218 update and idle-reservation indexes are also retained only after the first
 priority operation; the ordinary stream lifecycle takes a null-state fast path.
-On 64-bit targets these changes reduce
+Complete HTTP/2 frame borrows now retain one retry span when copying into
+independent ownership cannot allocate. Owned, duplex, PING/keep-alive and
+direct-response handoffs use the same frame-reader transaction, so the failed
+frame remains ahead of later buffered or socket data. A replay keeps its
+original activity timestamp instead of renewing keep-alive merely because
+local allocation is retried. The retry span adds 16 bytes to a 64-bit
+connection and owns no additional heap buffer. Queued owning frames exposed
+through borrowed reads transfer their original owner without another copy;
+direct copy retries also retire the retry span once ownership succeeds.
+Tests include repeated OOM, coalesced frames,
+real TCP/FIN and an application frame encountered while waiting for PING ACK.
+The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
+allocating descriptors. Established connections use it for setting updates,
+while owned parsing retains its existing result type. The peer policy lives
+in `runtime/settings/apply.zig`; duplicate values preserve wire order, unknown
+identifiers remain ignorable, and initial/irreversible extension policies and
+GOAWAY classifications still apply. Invalid scalar values are rejected before
+any setting is applied, including under an allocator that fails immediately.
+On 64-bit targets the earlier lazy-state changes reduced
 `runtime.Connection` from 2,496 to 1,840 bytes: 80 bytes from peer metadata,
 112 bytes after alignment from the cold decoder, 160 bytes from batch staging,
 160 bytes from push state, 112 bytes after alignment from priority state, and
