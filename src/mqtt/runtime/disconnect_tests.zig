@@ -275,3 +275,29 @@ test "MQTT retained DISCONNECT observation preserves the queued prefix and diagn
         try std.testing.expectError(error.ConnectionClosed, pair.client.readClientPacketEventWithTimeout(.fromMilliseconds(5)));
     }
 }
+
+test "MQTT reauthentication DISCONNECT survives exhausted pending packet quotas" {
+    inline for (.{ .count, .bytes }) |quota| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        var pair = try Pair.init(threaded.io(), .v5);
+        defer pair.deinit();
+        try pair.client.authentication.beginConnect(std.testing.allocator, &.{.{ .utf8 = .{ .id = .authentication_method, .value = "mirror" } }});
+        try pair.client.authentication.finishServerInitial();
+        try pair.client.authentication.beginReauthentication(&.{.{ .utf8 = .{ .id = .authentication_method, .value = "mirror" } }});
+        if (quota == .count) pair.client.limits.max_pending_ping_packets = 1 else pair.client.limits.max_pending_packet_bytes = 8;
+        // MQTT 5 QoS 0 PUBLISH is exactly eight bytes: fixed header, one-byte
+        // topic, empty property list, and a two-byte payload.
+        _ = try pair.peer.writePublish("x", "ab", .{});
+        try pair.peer.writeDisconnectWithProperties(0x87, &.{.{ .utf8 = .{ .id = .reason_string, .value = "expired" } }});
+        try std.testing.expectError(error.ConnectionClosed, pair.client.receiveReauthenticationWithTimeout(.fromSeconds(1)));
+        try std.testing.expect(!pair.client.isUsable());
+        var prefix = try pair.client.readPublish();
+        defer prefix.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("ab", prefix.publish.payload);
+        var terminal = try pair.client.readDisconnect();
+        defer terminal.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("expired", terminal.disconnect.properties[0].utf8.value);
+        try std.testing.expectError(error.ConnectionClosed, pair.client.readClientPacketEventWithTimeout(.fromMilliseconds(5)));
+    }
+}

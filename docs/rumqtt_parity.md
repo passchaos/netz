@@ -2607,6 +2607,8 @@ only as raw AUTH packet helpers:
   preserving preceding queued traffic and the owned DISCONNECT diagnostics.
   An earlier queued ACK can still complete its exchange; packets following the
   terminal boundary are released, including the emergency overflow slot. A
+  live AUTH wait retains a terminal diagnostic in that slot even when ordinary
+  traffic has exhausted the pending packet-count or byte quota. A
   successfully sent DISCONNECT is also the final MQTT packet and interrupts
   the underlying TCP, TLS or WebSocket transport without releasing caller
   ownership. Invalid peer DISCONNECT syntax or properties remain protocol

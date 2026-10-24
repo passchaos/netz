@@ -48,6 +48,12 @@ pub fn Controller(comptime Context: type) type {
                         }
                         return err;
                     };
+                    // A terminal packet needs no queue append. The bounded
+                    // emergency slot preserves its diagnostics even when
+                    // ordinary traffic has exhausted either queue quota.
+                    Context.retainOverflow(connection, packet);
+                    owned = false;
+                    return error.ConnectionClosed;
                 }
                 Context.queuePacket(connection, packet) catch |err| {
                     Context.retainOverflow(connection, packet);
@@ -55,9 +61,6 @@ pub fn Controller(comptime Context: type) type {
                     return err;
                 };
                 owned = false;
-                // A peer's terminal packet cannot be followed by AUTH.
-                // Preserve its diagnostics for the ordinary event reader.
-                if (packet.fixed.packet_type == .disconnect) return error.ConnectionClosed;
             }
         }
 
