@@ -4896,97 +4896,27 @@ pub const Connection = struct {
         return self.readAck(.puback);
     }
 
+    const AckApplication = @import("runtime/acknowledgement/apply.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const release = Connection.releaseOutgoingPublish;
+        pub const writePubRel = Connection.writePubRelUntil;
+    });
+
     /// Apply a PUBACK that was parsed by `readBrokerEvent`.
     ///
     /// Broker readers must demultiplex inbound packets before knowing which
     /// typed operation to invoke. Keeping state mutation here preserves the
     /// same unsolicited/negative-ack checks as the synchronous client path.
-    pub fn applyPubAck(
-        self: *Connection,
-        ack: mqtt.AckPacket,
-    ) Error!void {
-        if (ack.packet_type != .puback or
-            !self.packet_identifiers.contains(
-                ack.packet_id,
-                .outgoing_qos1,
-            ))
-        {
-            return error.UnexpectedPacket;
-        }
-        self.releaseOutgoingPublish(
-            ack.packet_id,
-            .at_least_once,
-        );
-        if (!ack.accepted()) return error.PublishRefused;
-    }
+    pub const applyPubAck = AckApplication.puback;
 
-    /// Apply a downstream PUBREC parsed by `readBrokerEvent` and advance the
-    /// broker-side sender to PUBREL.
-    ///
-    /// The caller serializes this method with all other writes for the same
-    /// connection. State moves to the PUBREL set only after the packet is
-    /// written, so a transport error cannot leave a live connection claiming
-    /// progress that never reached its peer.
-    pub fn applyPubRec(
-        self: *Connection,
-        ack: mqtt.AckPacket,
-    ) Error!void {
-        return self.applyPubRecUntil(ack, null);
-    }
+    /// Apply a validated PUBREC and send PUBREL before committing its QoS 2
+    /// stage. The caller serializes this with other connection writes.
+    pub const applyPubRec = AckApplication.pubrec;
+    const applyPubRecUntil = AckApplication.pubrecUntil;
 
-    fn applyPubRecUntil(self: *Connection, ack: mqtt.AckPacket, deadline: ?std.Io.Clock.Timestamp) Error!void {
-        if (ack.packet_type != .pubrec) {
-            return error.UnexpectedPacket;
-        }
-        if (self.packet_identifiers.contains(
-            ack.packet_id,
-            .outgoing_qos2_pubrel,
-        )) {
-            // A repeated successful PUBREC means the peer did not observe the
-            // prior PUBREL. Retransmit it without changing inflight accounting
-            // or the already-advanced QoS 2 stage.
-            if (!ack.accepted()) return error.UnexpectedPacket;
-            try self.writePubRelUntil(ack.packet_id, self.protocol == .v3_1, deadline);
-            return;
-        }
-        if (!self.packet_identifiers.contains(
-            ack.packet_id,
-            .outgoing_qos2,
-        )) return error.UnexpectedPacket;
-        if (!ack.accepted()) {
-            self.releaseOutgoingPublish(
-                ack.packet_id,
-                .exactly_once,
-            );
-            return error.PublishRefused;
-        }
-        try self.writePubRelUntil(ack.packet_id, false, deadline);
-        std.debug.assert(self.packet_identifiers.transition(
-            ack.packet_id,
-            .outgoing_qos2,
-            .outgoing_qos2_pubrel,
-        ));
-    }
-
-    /// Apply the final PUBCOMP of a broker-originated QoS 2 delivery.
-    pub fn applyPubComp(
-        self: *Connection,
-        ack: mqtt.AckPacket,
-    ) Error!void {
-        if (ack.packet_type != .pubcomp or
-            !self.packet_identifiers.contains(
-                ack.packet_id,
-                .outgoing_qos2_pubrel,
-            ))
-        {
-            return error.UnexpectedPacket;
-        }
-        self.releaseOutgoingPublish(
-            ack.packet_id,
-            .exactly_once,
-        );
-        if (!ack.accepted()) return error.PublishRefused;
-    }
+    /// Apply a validated PUBCOMP and release its completed QoS 2 exchange.
+    pub const applyPubComp = AckApplication.pubcomp;
 
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacketNoProperties(.pubrec, packet_id, reason_code);
@@ -9132,107 +9062,6 @@ test "MQTT connection enforces outgoing inflight limit before writing" {
     try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
 }
 
-test "MQTT acknowledgement apply preserves wrong-stage inflight state" {
-    const allocator = std.testing.allocator;
-    var connection = Connection{
-        .allocator = allocator,
-        .transport = undefined,
-        .protocol = .v5,
-        .outgoing_inflight = 2,
-    };
-    defer connection.packet_identifiers.deinit(allocator);
-    try std.testing.expect(try connection.packet_identifiers.add(
-        allocator,
-        41,
-        .outgoing_qos1,
-    ));
-    try std.testing.expect(try connection.packet_identifiers.add(
-        allocator,
-        42,
-        .outgoing_qos2,
-    ));
-
-    try std.testing.expectError(
-        error.UnexpectedPacket,
-        connection.applyPubAck(.{
-            .packet_type = .puback,
-            .packet_id = 42,
-        }),
-    );
-    try std.testing.expectError(
-        error.UnexpectedPacket,
-        connection.applyPubRec(.{
-            .packet_type = .pubrec,
-            .packet_id = 41,
-        }),
-    );
-    try std.testing.expectError(
-        error.UnexpectedPacket,
-        connection.applyPubComp(.{
-            .packet_type = .pubcomp,
-            .packet_id = 42,
-        }),
-    );
-    try std.testing.expectEqual(@as(u16, 2), connection.outgoing_inflight);
-    try std.testing.expect(connection.packet_identifiers.contains(
-        41,
-        .outgoing_qos1,
-    ));
-    try std.testing.expect(connection.packet_identifiers.contains(
-        42,
-        .outgoing_qos2,
-    ));
-}
-
-test "MQTT duplicate successful PUBREC retransmits PUBREL" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
-        io,
-        .{ .reuse_address = true },
-    );
-    defer listener.deinit(io);
-    const client_stream = try listener.socket.address.connect(
-        io,
-        .{ .mode = .stream },
-    );
-    defer client_stream.close(io);
-    const server_stream = try listener.accept(io);
-    defer server_stream.close(io);
-
-    var connection = Connection{
-        .allocator = allocator,
-        .transport = .initTcp(io, client_stream),
-        .protocol = .v5,
-        .outgoing_inflight = 1,
-    };
-    defer connection.packet_identifiers.deinit(allocator);
-    try std.testing.expect(try connection.packet_identifiers.add(
-        allocator,
-        42,
-        .outgoing_qos2_pubrel,
-    ));
-
-    try connection.applyPubRec(.{
-        .packet_type = .pubrec,
-        .packet_id = 42,
-    });
-    var peer = PacketTransport.initTcp(io, server_stream);
-    var repeated = try peer.readPacket(allocator, 16);
-    defer repeated.deinit(allocator);
-    var pubrel = try mqtt.AckPacket.parse(allocator, .v5, repeated.bytes);
-    defer pubrel.deinit(allocator);
-    try std.testing.expectEqual(mqtt.PacketType.pubrel, pubrel.packet_type);
-    try std.testing.expectEqual(@as(u16, 42), pubrel.packet_id);
-    try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
-    try std.testing.expect(connection.packet_identifiers.contains(
-        42,
-        .outgoing_qos2_pubrel,
-    ));
-}
-
 test "MQTT split publish API pipelines QoS publishes up to receive maximum" {
     const allocator = std.testing.allocator;
 
@@ -11736,6 +11565,7 @@ test {
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acknowledgement/byte_limit_tests.zig");
     _ = @import("runtime/acknowledgement/publish_tests.zig");
+    _ = @import("runtime/acknowledgement/apply_tests.zig");
     _ = @import("runtime/acknowledgement/publish_deadline_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
     _ = @import("runtime/disconnect_tests.zig");

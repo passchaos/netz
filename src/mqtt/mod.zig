@@ -1865,6 +1865,33 @@ pub const AckPacket = struct {
     reason_code: u8 = 0,
     properties: []Property = &.{},
 
+    /// Validate a borrowed ACK before encoding or applying protocol state.
+    /// This performs no allocation and leaves the caller's properties intact.
+    pub fn validate(self: AckPacket, protocol: ProtocolVersion) Error!void {
+        try validateFields(protocol, self.packet_type, self.dup, self.packet_id, self.reason_code, self.properties);
+    }
+
+    fn validateFields(protocol: ProtocolVersion, packet_type: PacketType, dup: bool, packet_id: u16, reason_code: u8, properties: []const Property) Error!void {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        switch (packet_type) {
+            .puback, .pubrec, .pubrel, .pubcomp => {},
+            else => return error.InvalidPacketType,
+        }
+        if (protocol.isLegacy()) {
+            if (reason_code != 0) return error.InvalidReasonCode;
+            if (properties.len != 0) return error.InvalidProperty;
+        } else {
+            try validateAckReasonCode(packet_type, reason_code);
+            try validateAckProperties(packet_type, properties);
+        }
+        try validatePacketFlags(protocol, .{
+            .packet_type = packet_type,
+            .flags = packet_type.defaultFlags() | (if (dup) @as(u4, 0x08) else 0),
+            .remaining_len = 2,
+            .header_len = 0,
+        });
+    }
+
     pub fn deinit(self: *AckPacket, allocator: std.mem.Allocator) void {
         allocator.free(self.properties);
         self.* = undefined;
@@ -2013,18 +2040,7 @@ pub const AckPacket = struct {
     ) Error!void {
         const original_len = list.items.len;
         errdefer list.items.len = original_len;
-        if (packet_id == 0) return error.InvalidPacketIdentifier;
-        switch (packet_type) {
-            .puback, .pubrec, .pubrel, .pubcomp => {},
-            else => return error.InvalidPacketType,
-        }
-        if (protocol.isLegacy()) {
-            if (reason_code != 0) return error.InvalidReasonCode;
-            if (properties.len != 0) return error.InvalidProperty;
-        } else {
-            try validateAckReasonCode(packet_type, reason_code);
-            try validateAckProperties(packet_type, properties);
-        }
+        try validateFields(protocol, packet_type, dup, packet_id, reason_code, properties);
         const properties_len = if (protocol == .v5 and properties.len != 0)
             try propertiesEncodedLen(properties)
         else
@@ -2038,12 +2054,6 @@ pub const AckPacket = struct {
                 0;
         const flags = packet_type.defaultFlags() |
             (if (dup) @as(u4, 0x08) else 0);
-        try validatePacketFlags(protocol, .{
-            .packet_type = packet_type,
-            .flags = flags,
-            .remaining_len = remaining_len,
-            .header_len = 0,
-        });
         try writeFixedHeaderAssumeCapacity(
             list,
             allocator,
@@ -2095,27 +2105,12 @@ pub const AckPacket = struct {
         packet_id: u16,
         reason_code: u8,
     ) Error![]u8 {
-        if (packet_id == 0) return error.InvalidPacketIdentifier;
-        switch (packet_type) {
-            .puback, .pubrec, .pubrel, .pubcomp => {},
-            else => return error.InvalidPacketType,
-        }
-        if (protocol.isLegacy()) {
-            if (reason_code != 0) return error.InvalidReasonCode;
-        } else {
-            try validateAckReasonCode(packet_type, reason_code);
-        }
+        try validateFields(protocol, packet_type, dup, packet_id, reason_code, &.{});
 
         const include_reason = protocol == .v5 and reason_code != 0;
         const remaining_len: u8 = if (include_reason) 3 else 2;
         const flags = packet_type.defaultFlags() |
             (if (dup) @as(u4, 0x08) else 0);
-        try validatePacketFlags(protocol, .{
-            .packet_type = packet_type,
-            .flags = flags,
-            .remaining_len = remaining_len,
-            .header_len = 0,
-        });
         storage[0] = (@as(u8, @intFromEnum(packet_type)) << 4) |
             flags;
         storage[1] = remaining_len;

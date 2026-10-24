@@ -117,6 +117,7 @@ test "public modules are reachable" {
     try std.testing.expect(!@hasDecl(netz.runtime.Backend, "initAuto"));
     try std.testing.expect(!@hasDecl(netz.runtime, "zio"));
     try std.testing.expect(@hasDecl(netz.mqtt, "validateSubscription"));
+    try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "validate"));
     try std.testing.expect(@hasDecl(netz.mqtt, "socks5_runtime"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.socks5_runtime,

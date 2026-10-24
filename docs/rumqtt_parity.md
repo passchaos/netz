@@ -265,6 +265,18 @@ all 256 byte values and compare Session statistics and encoded snapshots after
 invalid ACKs; valid negative PUBREC still terminates the delivery and releases
 its credit.
 
+The public connection ACK application APIs now use `AckPacket.validate` before
+releasing outgoing identifiers/credit or sending PUBREL. Typed ACKs receive
+the same version, DUP, reason and property validation as both ACK writers;
+invalid metadata no longer completes a publication or advances QoS 2 merely
+because it bypassed the wire parser. The ACK and its properties remain
+borrowed by the state operation. `runtime/acknowledgement/apply.zig` owns this
+transition policy, with adjacent tests for all 256 reasons across MQTT
+3.1/3.1.1/5, independent incoming/outgoing identifier spaces, sibling
+publications, invalid properties/DUP, and exact legal PUBREL retransmission.
+Invalid ACKs perform no allocation or socket write and preserve the original
+QoS stage so a later valid acknowledgement can continue the exchange.
+
 Single-event Session drains retain only a genuinely unsent inflight suffix.
 After PUBREC, selecting one PUBREL no longer advertises already-sent later
 PUBLISH packets as pending work. The regression combines multiple QoS 2
