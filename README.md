@@ -338,6 +338,8 @@ Current protocol coverage includes:
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
   owning request/response head APIs with opt-in line unfolding, metadata-derived
   runtime body boundaries, and retained folded values in streaming results,
+  complete folded-field validation even in ignored groups, with one owned
+  unfolded value per accepted field and bounded storage under repeated folding,
   Hyper-style default automatic server `Date` generation backed by a shared
   allocation-free per-second cache, with explicit-field preservation, 1xx
   exclusion, deterministic pure codec helpers, and an opt-out limit,

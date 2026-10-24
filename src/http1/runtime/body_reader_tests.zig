@@ -721,7 +721,7 @@ test "HTTP/1 streaming request optionally unfolds chunked trailers" {
         "sha-256=abc def ghi",
         request.trailers[0].value,
     );
-    try std.testing.expectEqual(@as(usize, 2), request.trailer_value_storage.len);
+    try std.testing.expectEqual(@as(usize, 1), request.trailer_value_storage.len);
 }
 
 test "HTTP/1 streaming request rejects connection-control trailers" {

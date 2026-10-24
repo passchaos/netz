@@ -43,7 +43,3 @@ pub fn Parser(comptime Context: type) type {
         }
     };
 }
-
-test {
-    _ = @import("tests.zig");
-}

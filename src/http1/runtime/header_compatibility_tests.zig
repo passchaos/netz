@@ -171,3 +171,26 @@ test "HTTP/1 compatible streaming response releases unfolded values on consumer 
     try std.testing.expectError(error.ConsumerFailed, pair.client.requestStreamingWithParseOptionsAndTimeout(.{ .method = .GET, .target = "/failed", .host = "example" }, .{ .allow_obs_fold = true }, .fromSeconds(1), &consumer, Consumer.consume));
     try std.testing.expectError(error.ConnectionUnusable, pair.client.request(.{ .method = .GET, .target = "/after", .host = "example" }));
 }
+
+test "HTTP/1 compatible readers reject fatal bytes in discarded folded groups" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const options: http1.ParseOptions = .{ .allow_obs_fold = true, .ignore_invalid_headers_in_requests = true, .ignore_invalid_headers_in_responses = true };
+    for ([_]u8{ 0, '\r', '\n' }) |fatal| {
+        for ([_]bool{ false, true }) |streaming| {
+            var pair = try Pair.init(threaded.io());
+            defer pair.deinit();
+            var bytes: [256]u8 = undefined;
+            var writer = pair.peer.stream.writer(threaded.io(), &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&bytes, "HTTP/1.1 200 OK\r\nMalformed field\r\n {c}danger\r\nContent-Length: 0\r\n\r\n", .{fatal}));
+            const request: runtime.RequestOptions = .{ .method = .GET, .target = "/bad-fold", .host = "example" };
+            if (streaming) {
+                var sink: Sink = .{};
+                try std.testing.expectError(error.MalformedHeader, pair.client.requestStreamingWithParseOptionsAndTimeout(request, options, .fromSeconds(1), &sink, Sink.consume));
+            } else {
+                try std.testing.expectError(error.MalformedHeader, pair.client.requestWithParseOptionsAndTimeout(request, options, .fromSeconds(1)));
+            }
+            try std.testing.expectError(error.ConnectionUnusable, pair.client.request(request));
+        }
+    }
+}

@@ -438,6 +438,18 @@ buffer compaction, and works when every trailer byte arrives in a separate
 transport read. Focused request and response regressions cover both directions,
 matching Hyper's documented response-side obsolete-line-folding behavior.
 
+Folded fields now validate a complete logical field before allocating its
+unfolded value. `http1/head/folded.zig` checks every continuation for NUL and
+bare CR/LF even when an earlier malformed field or continuation was ignored;
+ignoring an unrelated extension field cannot suppress ambiguous bytes later in
+its group. Each accepted folded field owns one exact-sized value rather than
+retaining all intermediate versions, so storage grows with input size rather
+than the square of the continuation count. Empty whitespace-only continuations
+also contribute one SP as RFC 9112 requires. Direct and real TCP regressions
+cover discarded groups, safe continuation skipping, request/response decoding,
+field cleanup on allocation failure and a 4,096-continuation response that fits
+a 24-KiB allocation budget.
+
 The aggregate chunked encoder now matches the streaming writer by eliding empty
 application slices. Since a zero-sized HTTP/1 chunk is the message terminator,
 emitting one for an empty slice would truncate any later chunks and trailers.

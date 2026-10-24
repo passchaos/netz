@@ -1245,69 +1245,16 @@ fn parseHeaderLines(
         );
     }
 
-    var headers: std.ArrayList(Header) = .empty;
-    var value_storage: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (value_storage.items) |value| allocator.free(value);
-        value_storage.deinit(allocator);
-        headers.deinit(allocator);
-    }
-
-    var skip_continuations = false;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        if (line[0] == ' ' or line[0] == '\t') {
-            if (skip_continuations) continue;
-            if (headers.items.len == 0) {
-                if (policy.ignore_invalid and
-                    !hasFatalInvalidHeaderByte(line))
-                {
-                    continue;
-                }
-                return error.MalformedHeader;
-            }
-            const continuation = wire.trimOws(line);
-            validateHeaderValue(continuation) catch |err| {
-                if (!policy.ignore_invalid or
-                    hasFatalInvalidHeaderByte(line))
-                {
-                    return err;
-                }
-                _ = headers.pop();
-                skip_continuations = true;
-                continue;
-            };
-            try appendFoldedHeaderValue(allocator, &headers, &value_storage, continuation);
-            continue;
-        }
-        const header = parseHeaderLine(
-            line,
-            policy.allow_spaces_before_colon,
-        ) catch |err| {
-            if (!policy.ignore_invalid or
-                hasFatalInvalidHeaderByte(line))
-            {
-                return err;
-            }
-            skip_continuations = true;
-            continue;
-        };
-        if (headers.items.len >= options.max_headers) return error.TooManyHeaders;
-        try headers.append(allocator, header);
-        skip_continuations = false;
-    }
-
-    if (headers.items.len == 0 and value_storage.items.len == 0) {
-        return .{
-            .headers = @constCast(&[_]Header{}),
-            .value_storage = @constCast(&[_][]u8{}),
-        };
-    }
-    const owned_headers = try headers.toOwnedSlice(allocator);
-    errdefer allocator.free(owned_headers);
-    const owned_value_storage = try value_storage.toOwnedSlice(allocator);
-    return .{ .headers = owned_headers, .value_storage = owned_value_storage };
+    return FoldedHeaders.parse(allocator, lines, options, policy);
 }
+
+const FoldedHeaders = @import("head/folded.zig").Parser(struct {
+    pub const PolicyType = HeaderParsePolicy;
+    pub const ResultType = ParsedHeaders;
+    pub const parseLine = parseHeaderLine;
+    pub const validateValue = validateHeaderValue;
+    pub const fatal = hasFatalInvalidHeaderByte;
+});
 
 /// Owned result of parsing a CRLF-delimited trailer field block.
 pub const ParsedTrailerFields = struct {
@@ -1549,30 +1496,6 @@ fn hasFatalInvalidHeaderByte(line: []const u8) bool {
     return std.mem.indexOfScalar(u8, line, 0) != null or
         std.mem.indexOfScalar(u8, line, '\r') != null or
         std.mem.indexOfScalar(u8, line, '\n') != null;
-}
-
-fn appendFoldedHeaderValue(
-    allocator: std.mem.Allocator,
-    headers: *std.ArrayList(Header),
-    value_storage: *std.ArrayList([]u8),
-    continuation: []const u8,
-) Error!void {
-    const last = &headers.items[headers.items.len - 1];
-    var unfolded: std.ArrayList(u8) = .empty;
-    errdefer unfolded.deinit(allocator);
-    try unfolded.appendSlice(allocator, last.value);
-    if (continuation.len != 0) {
-        // RFC 9112 deprecates obs-fold but permits recipients to replace each
-        // fold with whitespace.  Hyper trims the folded line before joining;
-        // doing the same turns "Fold: just\r\n some\r\n\t folding" into the
-        // application-facing value "just some folding".
-        try unfolded.append(allocator, ' ');
-        try unfolded.appendSlice(allocator, continuation);
-    }
-    const owned = try unfolded.toOwnedSlice(allocator);
-    errdefer allocator.free(owned);
-    try value_storage.append(allocator, owned);
-    last.value = owned;
 }
 
 const ParsedBody = struct {
@@ -5686,4 +5609,6 @@ test "HTTP/1 enforces RFC 8470 Early-Data placement" {
 }
 test {
     _ = runtime;
+    _ = @import("head/tests.zig");
+    _ = @import("head/folded_tests.zig");
 }
