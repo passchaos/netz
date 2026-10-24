@@ -70,37 +70,16 @@ pub fn findHeadEndWithinLimit(
 }
 
 pub fn transferEncodingState(head: []const u8) Error!TransferEncodingState {
-    var saw_transfer_encoding = false;
-    var saw_chunked = false;
-    var saw_non_chunked = false;
-    var final_is_chunked = false;
+    var state: @import("../../transfer_encoding.zig").State = .{};
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(
-            line[0..colon],
-            "transfer-encoding",
-        )) continue;
-        saw_transfer_encoding = true;
-        var tokens = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
-        while (tokens.next()) |raw| {
-            const token = wire.trimOws(raw);
-            if (token.len == 0) return error.InvalidTransferEncoding;
-            const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
-            if (is_chunked) {
-                if (saw_chunked) return error.InvalidTransferEncoding;
-                saw_chunked = true;
-            } else {
-                saw_non_chunked = true;
-            }
-            final_is_chunked = is_chunked;
-        }
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], "transfer-encoding")) continue;
+        try state.feed(line[colon + 1 ..]);
     }
-    if (!saw_transfer_encoding) return .none;
-    if (saw_chunked and final_is_chunked) return .chunked;
-    if (saw_non_chunked or saw_chunked) return .non_chunked;
-    return error.InvalidTransferEncoding;
+    if (!state.present) return .none;
+    return if (state.final_is_chunked) .chunked else .non_chunked;
 }
 
 pub fn contentLengthFromHead(head: []const u8) Error!?usize {

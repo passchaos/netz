@@ -554,6 +554,23 @@ async fn handle_request(
     if connection_index == 2 {
         return handle_expected_request(request).await;
     }
+    if request.uri().path() == "/transfer-parameters" {
+        if request.method() != Method::GET {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected transfer-parameter request method",
+            ));
+        }
+        let mut response =
+            Response::new(body_with_trailers(b"hyper-", b"quoted", HeaderMap::new()));
+        response.headers_mut().insert(
+            "transfer-encoding",
+            HeaderValue::from_static(
+                "custom; note=\"a,chunked,z\"; escaped=\"x\\\",chunked,y\", chunked",
+            ),
+        );
+        return Ok(response);
+    }
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/extension?from=netz") {
         if request.method().as_str() != "PURGE" || request.version() != Version::HTTP_11 {
             return Err(std::io::Error::new(

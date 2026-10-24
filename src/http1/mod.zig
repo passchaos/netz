@@ -1754,117 +1754,14 @@ fn updateTransferEncodingFraming(
     saw_chunked: *bool,
     final_is_chunked: *bool,
 ) Error!void {
-    var codings = TransferCodingIterator{ .value = value };
-    while (try codings.next()) |coding| {
-        const is_chunked = std.ascii.eqlIgnoreCase(
-            coding.name,
-            "chunked",
-        );
-        if (is_chunked) {
-            // RFC 9112 allows other transfer codings before chunked, but
-            // chunked itself may only be applied once, must be final, and has
-            // no parameters.
-            if (saw_chunked.* or coding.has_parameters) {
-                return error.InvalidTransferEncoding;
-            }
-            saw_chunked.* = true;
-        }
-        final_is_chunked.* = is_chunked;
-    }
+    var state: @import("transfer_encoding.zig").State = .{ .saw_chunked = saw_chunked.*, .final_is_chunked = final_is_chunked.* };
+    try state.feed(value);
+    saw_chunked.* = state.saw_chunked;
+    final_is_chunked.* = state.final_is_chunked;
 }
 
-const TransferCoding = struct {
-    name: []const u8,
-    has_parameters: bool,
-};
-
-const TransferCodingIterator = struct {
-    value: []const u8,
-    pos: usize = 0,
-    done: bool = false,
-
-    fn next(self: *TransferCodingIterator) Error!?TransferCoding {
-        if (self.done) return null;
-        skipTransferOws(self.value, &self.pos);
-        const name_start = self.pos;
-        while (self.pos < self.value.len and
-            validHeaderNameByte(self.value[self.pos]))
-        {
-            self.pos += 1;
-        }
-        if (self.pos == name_start) return error.InvalidTransferEncoding;
-        const name = self.value[name_start..self.pos];
-        skipTransferOws(self.value, &self.pos);
-
-        var has_parameters = false;
-        while (self.pos < self.value.len and self.value[self.pos] == ';') {
-            has_parameters = true;
-            self.pos += 1;
-            skipTransferOws(self.value, &self.pos);
-            const parameter_start = self.pos;
-            while (self.pos < self.value.len and
-                validHeaderNameByte(self.value[self.pos]))
-            {
-                self.pos += 1;
-            }
-            if (self.pos == parameter_start) {
-                return error.InvalidTransferEncoding;
-            }
-            skipTransferOws(self.value, &self.pos);
-            if (self.pos == self.value.len or self.value[self.pos] != '=') {
-                return error.InvalidTransferEncoding;
-            }
-            self.pos += 1;
-            skipTransferOws(self.value, &self.pos);
-            if (self.pos == self.value.len) {
-                return error.InvalidTransferEncoding;
-            }
-            if (self.value[self.pos] == '"') {
-                try consumeTransferQuotedString(self.value, &self.pos);
-            } else {
-                const parameter_value_start = self.pos;
-                while (self.pos < self.value.len and
-                    validHeaderNameByte(self.value[self.pos]))
-                {
-                    self.pos += 1;
-                }
-                if (self.pos == parameter_value_start) {
-                    return error.InvalidTransferEncoding;
-                }
-            }
-            skipTransferOws(self.value, &self.pos);
-        }
-
-        if (self.pos == self.value.len) {
-            self.done = true;
-        } else {
-            if (self.value[self.pos] != ',') {
-                return error.InvalidTransferEncoding;
-            }
-            self.pos += 1;
-        }
-        return .{ .name = name, .has_parameters = has_parameters };
-    }
-};
-
-fn skipTransferOws(value: []const u8, pos: *usize) void {
-    while (pos.* < value.len and
-        (value[pos.*] == ' ' or value[pos.*] == '\t'))
-    {
-        pos.* += 1;
-    }
-}
-
-fn consumeTransferQuotedString(
-    value: []const u8,
-    pos: *usize,
-) Error!void {
-    return consumeQuotedString(
-        value,
-        pos,
-        error.InvalidTransferEncoding,
-    );
-}
+const TransferCodingIterator = @import("transfer_encoding.zig").Iterator;
+const skipTransferOws = @import("transfer_encoding.zig").skipOws;
 
 fn consumeQuotedString(
     value: []const u8,

@@ -70,6 +70,7 @@ fi
 wait "$server_pid"
 server_pid=
 cat "$work/netz-client.log"
+grep -Fq 'netz HTTP/1 client parsed Hyper quoted Transfer-Encoding: transport=cleartext aggregate=true streaming=true following_request=true' "$work/netz-client.log"
 grep -Fq \
   'netz HTTP/1 client observed Hyper 100 Continue: transport=cleartext interim=1 body=11 response_body=15' \
   "$work/netz-client.log"
@@ -241,6 +242,7 @@ grep -Fq \
   'netz HTTP/1 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true' \
   "$work/tls-netz-client.log"
 cat "$work/tls-netz-client.log"
+grep -Fq 'netz HTTP/1 client parsed Hyper quoted Transfer-Encoding: transport=tls aggregate=true streaming=true following_request=true' "$work/tls-netz-client.log"
 echo 'Hyper HTTPS server -> netz client interop passed'
 
 port=$(free_tcp_port)

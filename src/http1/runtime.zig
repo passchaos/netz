@@ -14465,6 +14465,7 @@ test {
     _ = runtime_write;
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");
+    _ = @import("runtime/transfer_encoding_tests.zig");
     _ = close_delimited;
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");

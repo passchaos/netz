@@ -40,6 +40,29 @@ test "HTTP/1 message framing rejects ambiguous head framing" {
     );
 }
 
+test "HTTP/1 message framing recognizes quoted transfer parameters without phantom codings" {
+    const head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: custom; note=\"a,chunked,z\", chunked\r\n\r\n";
+    const body = "2\r\nok\r\n0\r\n\r\n";
+    try std.testing.expectEqual((head ++ body).len, try targetLength(head ++ body, 1024, 2, .GET));
+    try std.testing.expectEqual(framing.TransferEncodingState.non_chunked, try framing.transferEncodingState("HTTP/1.1 200 OK\r\nTransfer-Encoding: custom; note=\"a,chunked\""));
+    const split = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: custom; note=\"a,chunked,z\"\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expectEqual((split ++ body).len, try targetLength(split ++ body, 1024, 2, null));
+}
+
+test "HTTP/1 message framing validates transfer parameters before reading a body" {
+    for ([_][]const u8{
+        "chunked; x=yes",
+        "gzip; note=\"unterminated, chunked",
+        "custom; note=bad value, chunked",
+        "custom; flag, chunked",
+        "gzi(p, chunked",
+    }) |value| {
+        var head: [256]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&head, "HTTP/1.1 200 OK\r\nTransfer-Encoding: {s}", .{value});
+        try std.testing.expectError(error.InvalidTransferEncoding, framing.transferEncodingState(bytes));
+    }
+}
+
 test "HTTP/1 message framing counts decoded chunk payload only" {
     const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
     const exact = head ++ "2;ignored=yes\r\nab\r\n3  \r\ncde\r\n0\r\n\r\n";
@@ -193,6 +216,12 @@ test "HTTP/1 message framing validates automatic continue eligibility" {
     ));
     try std.testing.expect(!framing.requestShouldSendContinue(
         "GET / HTTP/1.1\r\nHost: example\r\nExpect: 100-continue",
+    ));
+    try std.testing.expect(framing.requestShouldSendContinue(
+        "POST / HTTP/1.1\r\nHost: example\r\nExpect: 100-continue\r\nTransfer-Encoding: custom; note=\"a,chunked,z\", chunked",
+    ));
+    try std.testing.expect(!framing.requestShouldSendContinue(
+        "POST / HTTP/1.1\r\nHost: example\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked; x=yes",
     ));
 }
 

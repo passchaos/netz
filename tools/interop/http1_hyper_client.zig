@@ -121,6 +121,33 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
+    var quoted_response = try client.requestWithTimeout(.{
+        .method = .GET,
+        .target = "/transfer-parameters",
+        .host = "localhost",
+    }, .fromSeconds(5));
+    defer quoted_response.deinit(allocator);
+    if (!std.mem.eql(u8, quoted_response.response.body, "hyper-quoted") or
+        quoted_response.response.body_framing != .chunked or
+        !headerEquals(quoted_response.response.headers, "transfer-encoding", "custom; note=\"a,chunked,z\"; escaped=\"x\\\",chunked,y\", chunked")) return error.InvalidQuotedTransferResponse;
+    const QuotedSink = struct {
+        buffer: [32]u8 = undefined,
+        len: usize = 0,
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len > self.buffer.len - self.len) return error.BodyTooLarge;
+            @memcpy(self.buffer[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    var quoted_sink: QuotedSink = .{};
+    var quoted_streaming = try client.requestStreamingWithTimeout(.{
+        .method = .GET,
+        .target = "/transfer-parameters",
+        .host = "localhost",
+    }, .fromSeconds(5), &quoted_sink, QuotedSink.consume);
+    defer quoted_streaming.deinit(allocator);
+    if (!std.mem.eql(u8, quoted_sink.buffer[0..quoted_sink.len], "hyper-quoted") or quoted_streaming.body_framing != .chunked) return error.InvalidQuotedTransferResponse;
+
     var extension_response = try client.request(.{
         .method = try netz.http1.Method.parse("PURGE"),
         .target = "/extension?from=netz",
@@ -140,6 +167,7 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client sent extension method to Hyper: transport={s} method=PURGE response_body=15\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+    std.debug.print("netz HTTP/1 client parsed Hyper quoted Transfer-Encoding: transport={s} aggregate=true streaming=true following_request=true\n", .{if (tls_enabled) "tls" else "cleartext"});
 
     // Hyper's public `on_informational` API has a netz counterpart. Exercise
     // more than status skipping: validate both borrowed 103/102 header blocks

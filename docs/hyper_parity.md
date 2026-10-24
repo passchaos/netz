@@ -141,7 +141,16 @@ benchmark response:
   suppress both content and the otherwise-required terminating chunk;
 - Transfer-Encoding parsing validates coding and parameter tokens without
   allocation, honors commas inside quoted parameter values, rejects malformed
-  or unterminated parameters, and rejects parameters on `chunked` itself;
+  or unterminated parameters, and rejects parameters on `chunked` itself.
+  `http1/transfer_encoding.zig` now supplies the same iterator/state to codecs
+  and runtime boundary scans: a quoted `chunked` parameter cannot manufacture
+  a duplicate transfer coding, and invalid chunked parameters are rejected
+  before a persistent response reader waits for EOF. Repeated field lines
+  preserve coding order. Real TCP regressions cover buffered/unbuffered and
+  streaming responses followed by another response, aggregate/streaming/batch requests,
+  and invalid heads on an open connection. The Hyper interop peer additionally
+  emits quoted commas and escaped quotes under cleartext and TLS, with both
+  receive APIs followed by an ordinary request on the same connection;
 - aggregate, pipeline-boundary, and streaming chunked readers share one RFC
   9112 chunk-extension parser. It accepts token or quoted-string values with
   bad whitespace, rejects empty names/values, invalid separators, controls and
