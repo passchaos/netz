@@ -3103,6 +3103,7 @@ const pending_packets_module = @import("runtime/acknowledgement/pending.zig");
 const PendingPacketState = pending_packets_module.State;
 
 pub const write_property_staging_capacity = 8;
+pub const PublishProgress = @import("runtime/acknowledgement/publish_api.zig").Progress;
 
 pub const Connection = struct {
     const EndpointRole = enum { unestablished, client, server };
@@ -4324,7 +4325,27 @@ pub const Connection = struct {
         if (packet_id) |id| try self.completePublish(id, options.qos);
     }
 
+    pub const publishWithTimeout = PublishApi.publishWithTimeout;
+    pub const publishWithDeadline = PublishApi.publishWithDeadline;
+    pub const writePublishWithTimeout = PublishApi.writePublishWithTimeout;
+    pub const writePublishWithDeadline = PublishApi.writePublishWithDeadline;
+    pub const completePublishWithTimeout = PublishApi.completePublishWithTimeout;
+    pub const completePublishWithDeadline = PublishApi.completePublishWithDeadline;
+    pub const completePublishQoS2WithTimeout = PublishApi.completePublishQoS2WithTimeout;
+    pub const completePublishQoS2WithDeadline = PublishApi.completePublishQoS2WithDeadline;
+    pub const completePublishPubAckWithTimeout = PublishApi.completePublishPubAckWithTimeout;
+    pub const completePublishPubAckWithDeadline = PublishApi.completePublishPubAckWithDeadline;
+    pub const completePublishPubRecWithTimeout = PublishApi.completePublishPubRecWithTimeout;
+    pub const completePublishPubRecWithDeadline = PublishApi.completePublishPubRecWithDeadline;
+    pub const completePublishPubCompWithTimeout = PublishApi.completePublishPubCompWithTimeout;
+    pub const completePublishPubCompWithDeadline = PublishApi.completePublishPubCompWithDeadline;
+
     pub fn writePublish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!?u16 {
+        return self.writePublishUntil(topic, payload, options, null);
+    }
+
+    fn writePublishUntil(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions, deadline: ?std.Io.Clock.Timestamp) Error!?u16 {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.transport.ioHandle(), absolute);
         try self.validateOutgoingPublish(
             topic,
             options.qos,
@@ -4335,13 +4356,13 @@ pub const Connection = struct {
         const packet_id = if (options.qos == .at_most_once) null else try self.reserveOutgoingPublish(options.qos);
         errdefer if (packet_id) |id| self.releaseOutgoingPublish(id, options.qos);
 
-        try self.writeValidatedPublish(topic, payload, .{
+        try self.writeValidatedPublishUntil(topic, payload, .{
             .qos = options.qos,
             .retain = options.retain,
             .dup = options.dup,
             .packet_id = packet_id,
             .properties = options.properties,
-        });
+        }, deadline);
         return packet_id;
     }
 
@@ -4770,28 +4791,35 @@ pub const Connection = struct {
     /// known sibling acknowledgements. Interleaved packets remain bounded by
     /// the pending count/byte limits and are available to ordinary readers.
     pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {
+        return self.completePublishUntil(packet_id, qos, null);
+    }
+
+    fn completePublishUntil(self: *Connection, packet_id: u16, qos: mqtt.QoS, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.transport.ioHandle(), absolute);
         switch (qos) {
             .at_most_once => return,
-            .at_least_once => try self.completePublishPubAck(packet_id),
-            .exactly_once => try self.completePublishQoS2(packet_id),
+            .at_least_once => try PublishCompletion.puback(self, packet_id, deadline),
+            .exactly_once => {
+                const id = if (packet_id != 0 and self.packet_identifiers.contains(packet_id, .outgoing_qos2_pubrel)) packet_id else try PublishCompletion.pubrec(self, packet_id, deadline);
+                try PublishCompletion.pubcomp(self, id, deadline);
+            },
         }
     }
 
     pub fn completePublishPubAck(self: *Connection, packet_id: u16) Error!void {
-        return PublishCompletion.puback(self, packet_id);
+        return PublishCompletion.puback(self, packet_id, null);
     }
 
     pub fn completePublishQoS2(self: *Connection, packet_id: u16) Error!void {
-        const id = try self.completePublishPubRec(packet_id);
-        try self.completePublishPubComp(id);
+        return self.completePublishUntil(packet_id, .exactly_once, null);
     }
 
     pub fn completePublishPubRec(self: *Connection, packet_id: u16) Error!u16 {
-        return PublishCompletion.pubrec(self, packet_id);
+        return PublishCompletion.pubrec(self, packet_id, null);
     }
 
     pub fn completePublishPubComp(self: *Connection, packet_id: u16) Error!void {
-        return PublishCompletion.pubcomp(self, packet_id);
+        return PublishCompletion.pubcomp(self, packet_id, null);
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
@@ -4890,6 +4918,10 @@ pub const Connection = struct {
         self: *Connection,
         ack: mqtt.AckPacket,
     ) Error!void {
+        return self.applyPubRecUntil(ack, null);
+    }
+
+    fn applyPubRecUntil(self: *Connection, ack: mqtt.AckPacket, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (ack.packet_type != .pubrec) {
             return error.UnexpectedPacket;
         }
@@ -4901,7 +4933,7 @@ pub const Connection = struct {
             // prior PUBREL. Retransmit it without changing inflight accounting
             // or the already-advanced QoS 2 stage.
             if (!ack.accepted()) return error.UnexpectedPacket;
-            try self.writePubRelWithDup(ack.packet_id, 0, self.protocol == .v3_1);
+            try self.writePubRelUntil(ack.packet_id, self.protocol == .v3_1, deadline);
             return;
         }
         if (!self.packet_identifiers.contains(
@@ -4915,7 +4947,7 @@ pub const Connection = struct {
             );
             return error.PublishRefused;
         }
-        try self.writePubRel(ack.packet_id, 0);
+        try self.writePubRelUntil(ack.packet_id, false, deadline);
         std.debug.assert(self.packet_identifiers.transition(
             ack.packet_id,
             .outgoing_qos2,
@@ -4976,6 +5008,12 @@ pub const Connection = struct {
             ),
             .pubrel,
         );
+    }
+
+    fn writePubRelUntil(self: *Connection, packet_id: u16, dup: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
+        const bytes = try mqtt.AckPacket.writeNoPropertiesIntoWithDup(&encoded, self.protocol, .pubrel, dup, packet_id, 0);
+        if (deadline) |absolute| try self.writeGeneratedPacketWithDeadline(bytes, .pubrel, absolute) else try self.writeGeneratedPacket(bytes, .pubrel);
     }
 
     pub fn readPubRel(self: *Connection) Error!OwnedAck {
@@ -6821,16 +6859,29 @@ pub const Connection = struct {
         pub const ErrorType = Error;
         pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
         pub const readPacket = Connection.readTransportPacket;
+        pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
         pub const parseAck = Connection.parseReadAck;
         pub const hasOutgoing = Connection.hasOutgoingPacketIdentifier;
         pub const applyPubAck = Connection.applyPubAck;
-        pub const applyPubRec = Connection.applyPubRec;
+        pub const applyPubRec = Connection.applyPubRecUntil;
         pub const applyPubComp = Connection.applyPubComp;
 
         pub fn contains(connection: *const Connection, packet_id: u16, stage: packet_identifiers.State.Stage) bool {
             return connection.packet_identifiers.contains(packet_id, stage);
         }
+    });
+
+    const PublishApi = @import("runtime/acknowledgement/publish_api.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const OptionsType = PublishOptions;
+        pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
+        pub const writePublish = Connection.writePublishUntil;
+        pub const complete = Connection.completePublishUntil;
+        pub const puback = PublishCompletion.puback;
+        pub const pubrec = PublishCompletion.pubrec;
+        pub const pubcomp = PublishCompletion.pubcomp;
     });
 
     const ControlExchange = @import("runtime/acknowledgement/exchange.zig").Controller(struct {
@@ -11636,5 +11687,6 @@ test {
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acknowledgement/byte_limit_tests.zig");
     _ = @import("runtime/acknowledgement/publish_tests.zig");
+    _ = @import("runtime/acknowledgement/publish_deadline_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
 }

@@ -2,25 +2,30 @@
 
 const std = @import("std");
 const mqtt = @import("../../mod.zig");
+const deadline_policy = @import("../../../internal/deadline.zig");
 
 pub fn Controller(comptime Context: type) type {
     return struct {
         const Connection = Context.ConnectionType;
         const Error = Context.ErrorType;
         const Packet = Context.PacketType;
+        const Ready = struct { ack: Context.AckType, index: usize };
         const Match = struct {
             connection: *Connection,
             packet_type: mqtt.PacketType,
             packet_id: u16,
         };
 
-        pub fn puback(connection: *Connection, packet_id: u16) Error!void {
+        pub fn puback(connection: *Connection, packet_id: u16, deadline: ?std.Io.Clock.Timestamp) Error!void {
             if (packet_id != 0 and !Context.contains(connection, packet_id, .outgoing_qos1)) return error.UnexpectedPacket;
             while (true) {
-                var ack = try read(connection, .puback, packet_id);
-                defer ack.deinit(connection.allocator);
+                var ready = try read(connection, .puback, packet_id, deadline);
+                const ack = &ready.ack;
+                var retain = false;
+                defer finish(connection, &ready, retain);
+                errdefer |err| retain = err == error.Timeout and connection.isUsable();
                 if (ack.ack.packet_type == .pubrec and Context.contains(connection, ack.ack.packet_id, .outgoing_qos2_pubrel)) {
-                    try Context.applyPubRec(connection, ack.ack);
+                    try Context.applyPubRec(connection, ack.ack, deadline);
                     continue;
                 }
                 try Context.applyPubAck(connection, ack.ack);
@@ -28,14 +33,17 @@ pub fn Controller(comptime Context: type) type {
             }
         }
 
-        pub fn pubrec(connection: *Connection, packet_id: u16) Error!u16 {
+        pub fn pubrec(connection: *Connection, packet_id: u16, deadline: ?std.Io.Clock.Timestamp) Error!u16 {
             if (packet_id != 0 and !Context.contains(connection, packet_id, .outgoing_qos2)) return error.UnexpectedPacket;
             while (true) {
-                var ack = try read(connection, .pubrec, packet_id);
-                defer ack.deinit(connection.allocator);
+                var ready = try read(connection, .pubrec, packet_id, deadline);
+                const ack = &ready.ack;
+                var retain = false;
+                defer finish(connection, &ready, retain);
+                errdefer |err| retain = err == error.Timeout and connection.isUsable();
                 if (ack.ack.packet_type != .pubrec) return error.UnexpectedPacket;
                 const repeated = Context.contains(connection, ack.ack.packet_id, .outgoing_qos2_pubrel);
-                try Context.applyPubRec(connection, ack.ack);
+                try Context.applyPubRec(connection, ack.ack, deadline);
                 // Completing the next initial PUBREC may encounter a repeat
                 // for an older exchange. Resend its PUBREL and keep waiting.
                 if (repeated) continue;
@@ -43,15 +51,18 @@ pub fn Controller(comptime Context: type) type {
             }
         }
 
-        pub fn pubcomp(connection: *Connection, packet_id: u16) Error!void {
+        pub fn pubcomp(connection: *Connection, packet_id: u16, deadline: ?std.Io.Clock.Timestamp) Error!void {
             if (!Context.contains(connection, packet_id, .outgoing_qos2_pubrel)) return error.UnexpectedPacket;
             while (true) {
-                var ack = try read(connection, .pubcomp, packet_id);
-                defer ack.deinit(connection.allocator);
+                var ready = try read(connection, .pubcomp, packet_id, deadline);
+                const ack = &ready.ack;
+                var retain = false;
+                defer finish(connection, &ready, retain);
+                errdefer |err| retain = err == error.Timeout and connection.isUsable();
                 if (ack.ack.packet_type == .pubrec) {
                     // MQTT 4.3.3: successful PUBREC repeats require PUBREL
                     // retransmission until PUBCOMP completes the exchange.
-                    try Context.applyPubRec(connection, ack.ack);
+                    try Context.applyPubRec(connection, ack.ack, deadline);
                     continue;
                 }
                 try Context.applyPubComp(connection, ack.ack);
@@ -59,31 +70,35 @@ pub fn Controller(comptime Context: type) type {
             }
         }
 
-        fn read(connection: *Connection, packet_type: mqtt.PacketType, packet_id: u16) Error!Context.AckType {
+        fn read(connection: *Connection, packet_type: mqtt.PacketType, packet_id: u16, deadline: ?std.Io.Clock.Timestamp) Error!Ready {
             if (!connection.isUsable()) return error.ConnectionClosed;
+            if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
             const match: Match = .{ .connection = connection, .packet_type = packet_type, .packet_id = packet_id };
             if (connection.pending_packets) |pending| {
                 if (pending.findFirstMatching(match, matches)) |queued| {
                     const ack = try Context.parseAck(connection, queued.packet);
-                    _ = pending.takeMatch(queued.index);
-                    return ack;
+                    return .{ .ack = ack, .index = queued.index };
                 }
             }
             try Context.prepareQueue(connection);
             while (true) {
-                var packet = try Context.readPacket(connection);
+                // A transport can return already-buffered packets without a
+                // blocking read. They still consume the same application
+                // budget as socket waits and cannot renew it per packet.
+                if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
+                var packet = if (deadline) |absolute| try Context.readPacketWithDeadline(connection, absolute) else try Context.readPacket(connection);
                 var owned = true;
                 defer if (owned) packet.deinit(connection.allocator);
                 if (matches(match, packet)) {
-                    const ack = Context.parseAck(connection, packet) catch |err| {
-                        if (err == error.OutOfMemory) {
-                            connection.pending_packets.?.retainOverflow(packet);
-                            owned = false;
-                        }
-                        return err;
-                    };
+                    // Keep the packet in its original queue position until
+                    // decoding and any PUBREL write have both committed. A
+                    // deadline expiring before the write may then retry the
+                    // same ACK without losing the accepted QoS transition.
+                    const pending = connection.pending_packets.?;
+                    pending.retainOverflow(packet);
                     owned = false;
-                    return ack;
+                    const ack = try Context.parseAck(connection, packet);
+                    return .{ .ack = ack, .index = pending.packets.items.len };
                 }
                 Context.queuePacket(connection, packet) catch |err| {
                     // This complete packet has already left the transport.
@@ -94,6 +109,14 @@ pub fn Controller(comptime Context: type) type {
                     return err;
                 };
                 owned = false;
+            }
+        }
+
+        fn finish(connection: *Connection, ready: *Ready, retain: bool) void {
+            ready.ack.ack.deinit(connection.allocator);
+            if (!retain) {
+                var packet = connection.pending_packets.?.takeMatch(ready.index);
+                packet.deinit(connection.allocator);
             }
         }
 

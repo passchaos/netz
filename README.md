@@ -1512,6 +1512,10 @@ Current protocol coverage includes:
   interleaved application packets and sibling ACKs in bounded wire order,
   retries queued ACK decoding after allocation failure, and retransmits
   PUBREL for repeated successful PUBREC while preserving inflight accounting,
+  timeout/deadline-bounded complete and split publishes whose single budget
+  spans PUBLISH, PUBACK or PUBREC/PUBREL/PUBCOMP and interleaved traffic,
+  reports committed PUBLISH identifiers for receive-timeout recovery, and
+  resumes QoS 2 at its retained stage without retransmitting the PUBLISH,
 - WebTransport capsules with core and incremental UTF-8/1024-byte close-reason
   enforcement, unidirectional and bidirectional stream headers, and HTTP/3
   DATAGRAM payloads with transactional single-reservation encoding,

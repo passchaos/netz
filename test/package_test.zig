@@ -1,6 +1,18 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public MQTT publish budgets reject zero timeout without emitting or reserving" {
+    var connection = netz.mqtt.runtime.Connection{ .allocator = std.testing.allocator, .transport = undefined };
+    var progress: netz.mqtt.runtime.PublishProgress = .{};
+    try std.testing.expectError(error.Timeout, connection.publishWithTimeout("budget", "payload", .{ .qos = .exactly_once }, &progress, .zero));
+    try std.testing.expectError(error.Timeout, connection.writePublishWithTimeout("budget", "payload", .{}, .zero));
+    try std.testing.expectError(error.Timeout, connection.completePublishWithTimeout(1, .exactly_once, .zero));
+    try std.testing.expect(!progress.publish_sent and !progress.completed);
+    try std.testing.expect(progress.packet_id == null);
+    try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
+    try std.testing.expectEqual(@as(u16, 1), connection.next_packet_id);
+}
+
 test "public WebTransport flow-control model consumes encoded peer grants" {
     const initial = netz.http3.Settings{
         .webtransport_initial_max_data = 8,
