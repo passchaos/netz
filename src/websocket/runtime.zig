@@ -1457,6 +1457,7 @@ fn receiveUpgradeRequestFromTransport(
     const extension_policy: websocket.ExtensionNegotiation.Policy = .{
         .enable_permessage_deflate = options.enable_permessage_deflate,
         .allow_context_takeover = options.allow_context_takeover,
+        .context_takeover = options.context_takeover,
         .accept_client_max_window_bits = options.client_max_window_bits,
         .accept_server_max_window_bits = options.server_max_window_bits,
     };
@@ -1765,6 +1766,8 @@ pub const AcceptOptions = struct {
     /// Permit RFC 7692 history retention in either negotiated direction.
     /// Disabled by default so existing endpoints retain no-context behavior.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// If offered by the client, select at most this receive-history window.
     client_max_window_bits: ?u8 = null,
     /// Select at most this server send-history window.
@@ -2037,6 +2040,8 @@ pub const ConnectAttempt = struct {
     require_subprotocol: bool = false,
     enable_permessage_deflate: bool,
     allow_context_takeover: bool,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     client_max_window_bits: ?u8,
     server_max_window_bits: ?u8,
     compression_threshold: usize,
@@ -2103,6 +2108,7 @@ pub const ConnectAttempt = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.enable_permessage_deflate,
             .allow_context_takeover = self.allow_context_takeover,
+            .context_takeover = self.context_takeover,
         };
         var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
         const extension_offer = try websocket.ExtensionNegotiation
@@ -4633,6 +4639,7 @@ pub const Client = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .context_takeover = options.context_takeover,
         };
         var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
         const extension_offer = try websocket.ExtensionNegotiation
@@ -4800,6 +4807,7 @@ pub const Client = struct {
             .require_subprotocol = options.require_subprotocol,
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .context_takeover = options.context_takeover,
             .client_max_window_bits = options.client_max_window_bits,
             .server_max_window_bits = options.server_max_window_bits,
             .compression_threshold = options.compression_threshold,
@@ -4986,6 +4994,8 @@ pub const ConnectOptions = struct {
     /// Offer RFC 7692 context takeover. The peer may still select
     /// direction-specific no-context parameters.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// Offer a bound for this client's compression history.
     client_max_window_bits: ?u8 = null,
     /// Require the server compressor to use at most this history window.
@@ -10965,6 +10975,7 @@ pub const H2Client = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .context_takeover = options.context_takeover,
         };
         var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
         const extension_offer = try websocket.ExtensionNegotiation
@@ -11134,6 +11145,7 @@ pub const H2ConnectAttempt = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
+            .context_takeover = self.options.context_takeover,
         };
         var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
         const extension_offer = try websocket.ExtensionNegotiation
@@ -11340,6 +11352,7 @@ pub const H2Server = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .context_takeover = options.context_takeover,
             .accept_client_max_window_bits = options.client_max_window_bits,
             .accept_server_max_window_bits = options.server_max_window_bits,
         };
@@ -12028,6 +12041,8 @@ pub const H2ConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// Offer a bound for this client's compression history.
     client_max_window_bits: ?u8 = null,
     /// Require the server compressor to use at most this history window.
@@ -12048,6 +12063,8 @@ pub const H2AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// If offered by the client, select at most this receive-history window.
     client_max_window_bits: ?u8 = null,
     /// Select at most this server send-history window.
@@ -17330,6 +17347,8 @@ test {
     _ = @import("runtime/message/tests/assembly_allocation.zig");
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
+    _ = @import("runtime/compression/directional_tests.zig");
+    _ = @import("runtime/compression/client_hint_tests.zig");
     _ = @import("runtime/wss_tests.zig");
     _ = @import("runtime/resolver_tests.zig");
     _ = @import("runtime/proxy_tests.zig");

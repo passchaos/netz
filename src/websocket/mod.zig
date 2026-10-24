@@ -4,11 +4,13 @@ const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 const deflate = @import("../internal/deflate.zig");
 const compression_context = @import("compression_context.zig");
+const compression_policy = @import("compression/policy.zig");
 const server_handshake = @import("handshake/server.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const CompressionContext = compression_context.CompressionContext;
 pub const DecompressionContext = compression_context.DecompressionContext;
+pub const ContextTakeover = compression_policy.ContextTakeover;
 
 const backend_supports_vectors = switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_c => true,
@@ -144,26 +146,14 @@ pub const ExtensionNegotiation = struct {
     client_max_window_bits: ?u8 = null,
     server_max_window_bits: ?u8 = null,
 
-    pub const Policy = struct {
-        enable_permessage_deflate: bool = false,
-        allow_context_takeover: bool = false,
-        /// Server-side selection for the peer's compressor. Emitted only when
-        /// the client offered `client_max_window_bits`, and capped by an
-        /// explicit client value. Client offer construction ignores this.
-        accept_client_max_window_bits: ?u8 = null,
-        /// Server-side limit for its own compressor. RFC 7692 permits this
-        /// selection even when the client omitted the parameter; an offered
-        /// maximum remains authoritative. Client offer construction ignores
-        /// this field.
-        accept_server_max_window_bits: ?u8 = null,
-    };
+    pub const Policy = compression_policy.Policy;
 
     pub fn offerValue(policy: Policy) ?[]const u8 {
         if (!policy.enable_permessage_deflate) return null;
-        return if (policy.allow_context_takeover)
-            "permessage-deflate"
-        else
-            "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
+        if (!policy.serverTakeover() and !policy.clientTakeover()) return "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
+        if (!policy.serverTakeover()) return "permessage-deflate; server_no_context_takeover";
+        if (!policy.clientTakeover()) return "permessage-deflate; client_no_context_takeover";
+        return "permessage-deflate";
     }
 
     /// Render a client offer with optional RFC 7692 window bounds into caller
@@ -188,11 +178,8 @@ pub const ExtensionNegotiation = struct {
         }
         var writer = std.Io.Writer.fixed(out);
         try writer.writeAll("permessage-deflate");
-        if (!policy.allow_context_takeover) {
-            try writer.writeAll(
-                "; server_no_context_takeover; client_no_context_takeover",
-            );
-        }
+        if (!policy.serverTakeover()) try writer.writeAll("; server_no_context_takeover");
+        if (!policy.clientTakeover()) try writer.writeAll("; client_no_context_takeover");
         if (client_max_window_bits) |bits| {
             try writer.print("; client_max_window_bits={d}", .{bits});
         }
@@ -280,12 +267,12 @@ pub const ExtensionNegotiation = struct {
         var value: std.ArrayList(u8) = .empty;
         errdefer value.deinit(allocator);
         try value.appendSlice(allocator, "permessage-deflate");
-        if (!policy.allow_context_takeover or
+        if (!policy.serverTakeover() or
             offer.server_no_context_takeover)
         {
             try value.appendSlice(allocator, "; server_no_context_takeover");
         }
-        if (!policy.allow_context_takeover or
+        if (!policy.clientTakeover() or
             offer.client_no_context_takeover)
         {
             try value.appendSlice(allocator, "; client_no_context_takeover");
@@ -394,9 +381,9 @@ pub const ExtensionNegotiation = struct {
     ) Error!ExtensionNegotiation {
         const response = try validateResponseHeadersWithPolicy(
             headers,
-            policy,
+            policy.clientResponsePolicy(),
         );
-        return validateResponseAgainstOffer(response, offer_header);
+        return validateClientSelection(try validateResponseAgainstOffer(response, offer_header), policy);
     }
 
     fn mergeResponseValue(
@@ -410,9 +397,8 @@ pub const ExtensionNegotiation = struct {
                 .unknown, .declined => return error.InvalidExtension,
                 .permessage_deflate => |parsed| {
                     if (negotiated.* != null) return error.InvalidExtension;
-                    if (!policy.allow_context_takeover and
-                        (!parsed.client_no_context_takeover or
-                            !parsed.server_no_context_takeover))
+                    if ((!policy.clientTakeover() and !parsed.client_no_context_takeover) or
+                        (!policy.serverTakeover() and !parsed.server_no_context_takeover))
                     {
                         return error.InvalidExtension;
                     }
@@ -458,14 +444,16 @@ pub const ExtensionNegotiation = struct {
     /// to choose server_max_window_bits without an offer parameter, but it
     /// forbids an unsolicited client_max_window_bits. An offered
     /// client_max_window_bits value is only a hint, while an offered
-    /// server_max_window_bits value is a hard upper bound.
+    /// server_max_window_bits value is a hard upper bound. An offered
+    /// server_no_context_takeover must be acknowledged in the selection;
+    /// client_no_context_takeover remains a client-side hint.
     pub fn validateResponseForOfferWithPolicy(
         header_value: ?[]const u8,
         offer_header: ?[]const u8,
         policy: Policy,
     ) Error!ExtensionNegotiation {
-        const response = try validateResponseWithPolicy(header_value, policy);
-        return validateResponseAgainstOffer(response, offer_header);
+        const response = try validateResponseWithPolicy(header_value, policy.clientResponsePolicy());
+        return validateClientSelection(try validateResponseAgainstOffer(response, offer_header), policy);
     }
 
     fn validateResponseAgainstOffer(
@@ -481,6 +469,7 @@ pub const ExtensionNegotiation = struct {
             switch (extension) {
                 .unknown, .declined => {},
                 .permessage_deflate => |offer| {
+                    if (offer.server_no_context_takeover and !response.server_no_context_takeover) continue;
                     if (response.client_max_window_bits != null and
                         offer.client_max_window_bits == null)
                     {
@@ -497,7 +486,20 @@ pub const ExtensionNegotiation = struct {
                 },
             }
         }
-        return if (matched) response else error.InvalidExtension;
+        if (!matched) return error.InvalidExtension;
+        return response;
+    }
+
+    fn validateClientSelection(response: ExtensionNegotiation, policy: Policy) Error!ExtensionNegotiation {
+        if (response.permessage_deflate and !policy.serverTakeover() and !response.server_no_context_takeover) {
+            return error.InvalidExtension;
+        }
+        var effective = response;
+        // RFC 7692 permits a client to use no takeover even when the server
+        // omitted the flag. Preserve local policy without inventing a peer
+        // acknowledgement requirement or treating the offer hint as mandatory.
+        if (effective.permessage_deflate and !policy.clientTakeover()) effective.client_no_context_takeover = true;
+        return effective;
     }
 };
 
@@ -3570,5 +3572,6 @@ test "WebSocket handshake rejects malformed nonce" {
 }
 
 test {
+    _ = @import("compression/negotiation_tests.zig");
     _ = runtime;
 }

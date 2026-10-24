@@ -1286,6 +1286,26 @@ the receive dictionary. HTTP/1, H2, and H3 invoke those boundaries at their
 transport commit points while retaining both `*_no_context_takeover`
 parameters as the default negotiation policy.
 
+The shared policy now lives in `compression/policy.zig` and exposes
+`context_takeover = .none | .client | .server | .both`, naming the WebSocket
+endpoint whose compressor may retain history. HTTP/1, RFC 8441, RFC 9220 and
+URI options carry this policy through pending handshakes. An explicit value
+overrides `allow_context_takeover`; null retains that shorthand and the default
+no-context behavior. The server direction requires the corresponding
+no-context flag when restricted; a client may choose stateless sends locally
+even when the server omits its client-side flag. A permitted direction can
+still agree to a stricter peer offer. Twenty-four loopback combinations select each policy
+from either endpoint across all three transports. They inspect negotiated
+flags and independently inflate actual messages with Zig's standard decoder:
+only the retained-history direction's second message depends on its first.
+Exact-offer validation additionally requires the server to acknowledge an
+offered `server_no_context_takeover`, as RFC 7692 section 7.1.1.1 specifies.
+The client-only offer flag remains a hint as section 7.2.1 specifies, so a
+permissive client can use the final agreed parameters. Real TCP regressions
+also emulate a peer omitting that hint and verify stateless sends under local
+no-context policy. Alternative offers are checked separately so response
+parameters cannot be assembled from incompatible alternatives.
+
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock
 domains before sending Ping/Close or mutating incremental receive state. The

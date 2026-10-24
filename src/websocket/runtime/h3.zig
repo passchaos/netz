@@ -227,6 +227,8 @@ pub const ConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// Offer a bound for this client's compression history.
     client_max_window_bits: ?u8 = null,
     /// Require the server compressor to use at most this history window.
@@ -250,6 +252,8 @@ pub const UriConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// Offer a bound for this client's compression history.
     client_max_window_bits: ?u8 = null,
     /// Require the server compressor to use at most this history window.
@@ -272,6 +276,8 @@ pub const AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Explicit client/server direction policy overrides allow_context_takeover.
+    context_takeover: ?websocket.ContextTakeover = null,
     /// If offered by the client, select at most this receive-history window.
     client_max_window_bits: ?u8 = null,
     /// Select at most this server send-history window.
@@ -373,6 +379,7 @@ pub const ConnectAttempt = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
+            .context_takeover = self.options.context_takeover,
         };
         var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
         const extension_offer = try websocket.ExtensionNegotiation
@@ -4639,6 +4646,7 @@ pub const Client = struct {
                 .cookies = options.cookies,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
                 .allow_context_takeover = options.allow_context_takeover,
+                .context_takeover = options.context_takeover,
                 .client_max_window_bits = options.client_max_window_bits,
                 .server_max_window_bits = options.server_max_window_bits,
                 .compression_threshold = options.compression_threshold,
@@ -4715,6 +4723,7 @@ fn connectAttemptEstablishedBefore(
     const extension_policy: websocket.ExtensionNegotiation.Policy = .{
         .enable_permessage_deflate = options.enable_permessage_deflate,
         .allow_context_takeover = options.allow_context_takeover,
+        .context_takeover = options.context_takeover,
     };
     var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
     const extension_offer = try websocket.ExtensionNegotiation.offerValueInto(
@@ -5187,6 +5196,7 @@ fn receiveServerUpgradeBefore(
     const extension_policy: websocket.ExtensionNegotiation.Policy = .{
         .enable_permessage_deflate = options.enable_permessage_deflate,
         .allow_context_takeover = options.allow_context_takeover,
+        .context_takeover = options.context_takeover,
         .accept_client_max_window_bits = options.client_max_window_bits,
         .accept_server_max_window_bits = options.server_max_window_bits,
     };
