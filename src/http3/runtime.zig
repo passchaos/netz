@@ -229,6 +229,9 @@ pub const StreamingRequestEvent = stream_events.Request;
 const request_failure = @import("runtime/receive/request_failure.zig");
 pub const RequestFailure = request_failure.Failure;
 pub const RequestEventResult = request_failure.Result;
+test {
+    _ = @import("runtime/receive/request_failure_retry_tests.zig");
+}
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
 pub const SessionTicketStats = ticket_receiver.Stats;
@@ -6370,6 +6373,7 @@ pub const HandshakeServerSession = struct {
     qpack_decoder_prefix_sent: bool = false,
     request_streams: RequestStreamSet,
     streaming_requests: StreamingRequestSet,
+    pending_request_failures: request_failure.Pending = .{},
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     connect_datagrams: connect_datagram.Registry,
@@ -6596,6 +6600,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.pending_request_failures.deinit(self.established.connection.endpoint.allocator);
         self.critical_stream_send_scratch.deinit(
             self.established.connection.endpoint.allocator,
         );
@@ -7117,6 +7122,7 @@ pub const HandshakeServerSession = struct {
         failure_out: ?*?RequestFailure,
     ) Error!?StreamingRequestEvent {
         if (failure_out) |output| output.* = null;
+        try self.progressRequestPollFailures(target_stream_id, failure_out);
         _ = self.routePreexistingRequestStreams(true) catch |err| {
             closeConnectionForHttp3Error(
                 &self.established.connection,
@@ -7150,6 +7156,7 @@ pub const HandshakeServerSession = struct {
             } };
         }
         try self.qpack_decode.prepareSectionAcknowledgments(1);
+        if (failure_out == null) try self.pending_request_failures.reserve(self.established.connection.endpoint.allocator);
         if (self.streaming_requests.mightProduceRequestHead(
             &self.request_streams,
             target_stream_id,
@@ -7165,6 +7172,12 @@ pub const HandshakeServerSession = struct {
         ) catch |err| {
             const stream_id = self.streaming_requests.lastErrorStreamId();
             if (request_failure.capture(failure_out, stream_id, err)) return err;
+            if (RequestFailure.fromError(stream_id, err)) |failure| {
+                self.pending_request_failures.append(failure);
+                self.streaming_requests.suspendFailedRequest(failure.stream_id);
+                try self.progressRequestPollFailures(target_stream_id, null);
+                return err;
+            }
             if (single_attempt)
                 self.failReceivedRequestOnce(
                     stream_id,
@@ -7188,6 +7201,12 @@ pub const HandshakeServerSession = struct {
                 single_attempt,
             ) catch |err| {
                 if (request_failure.capture(failure_out, value.entry.reader.streamId(), err)) return err;
+                if (RequestFailure.fromError(value.entry.reader.streamId(), err)) |failure| {
+                    self.pending_request_failures.append(failure);
+                    self.streaming_requests.suspendFailedRequest(failure.stream_id);
+                    try self.progressRequestPollFailures(target_stream_id, null);
+                    return err;
+                }
                 if (single_attempt)
                     self.failReceivedRequestOnce(
                         value.entry.reader.streamId(),
@@ -7206,6 +7225,27 @@ pub const HandshakeServerSession = struct {
             };
         }
         return null;
+    }
+
+    fn submitRequestPollFailure(self: *HandshakeServerSession, failure: RequestFailure) Error!void {
+        try self.cancelRequestInternalOnce(failure.stream_id, failure.application_error_code, false);
+    }
+
+    fn progressRequestPollFailures(self: *HandshakeServerSession, target: ?u62, failure_out: ?*?RequestFailure) Error!void {
+        if (self.pending_request_failures.count() == 0) return;
+        const connection = &self.established.connection;
+        if (connection.closing() or connection.draining() or connection.closed()) {
+            self.pending_request_failures.clear();
+            return error.ConnectionClosed;
+        }
+        if (failure_out) |output| {
+            if (self.pending_request_failures.take(target)) |failure| {
+                output.* = failure;
+                return failure.err;
+            }
+        } else if (try self.pending_request_failures.poll(self, target, submitRequestPollFailure)) |failure| {
+            return failure.err;
+        }
     }
 
     fn failReceivedRequest(

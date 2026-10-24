@@ -1609,6 +1609,19 @@ QUIC tests cover missing or duplicate pseudo-headers, socket-failure retry,
 coalesced sibling admission, explicit rejection ownership, allocation errors,
 and QPACK connection scope.
 
+Default HTTP/3 request event polling now retains its own failed-message
+cancellation state. It reserves failure storage before decoding and suspends
+the failed reader until cancellation is submitted, allowing healthy sibling
+requests to remain selectable under pacing or congestion. Detection still
+reports the parser error immediately when cancellation is only backpressured.
+Socket errors propagate with the original failure retained; completed retry
+reports the original parser error while retiring its owner. Targeted polls
+preserve each request's own failure, and owning receives retain cancellation across their existing
+deadline. The explicit `pollRequestEventOnceWithFailure` API can also take
+ownership of a failure previously retained by default polling. This state
+remains bounded by the existing live request limit and is owned by
+`http3/runtime/receive/request_failure.zig`.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

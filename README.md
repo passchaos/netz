@@ -1613,6 +1613,8 @@ Current protocol coverage includes:
   operation errors return to the caller.
   HTTP/3 message failures transfer typed request-rejection ownership before
   CONNECT admission, preserving their parser cause through send retries.
+  Default HTTP/3 request polling also retains failed cancellation, reports
+  socket errors, and keeps healthy request readers selectable during retries.
   Session maintenance settles abandoned RESET/STOP receive data even while
   applications only receive DATAGRAMs or write sibling streams, allowing
   WT_MAX_DATA to advance without consuming the pending RESET notification;
