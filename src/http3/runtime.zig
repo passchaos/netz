@@ -229,12 +229,16 @@ pub const StreamingRequestEvent = stream_events.Request;
 const request_failure = @import("runtime/receive/request_failure.zig");
 pub const RequestFailure = request_failure.Failure;
 pub const RequestEventResult = request_failure.Result;
+const message_data = @import("runtime/receive/message_data.zig");
+const releaseStreamingReaderCapacity = message_data.releaseCapacity;
+const releaseStreamingReaderCapacityOnce = message_data.releaseCapacityOnce;
 const response_failure = @import("runtime/receive/response_failure.zig");
 pub const ResponseFailure = response_failure.Failure;
 pub const ResponseEventResult = response_failure.Result;
 test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/response_failure_retry_tests.zig");
+    _ = @import("runtime/receive/message_data_tests.zig");
 }
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
@@ -7252,6 +7256,17 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    fn retainRequestDataFailure(self: *HandshakeServerSession, stream_id: ?u62, err: Error, failure_out: ?*?RequestFailure) Error!void {
+        if (RequestFailure.fromError(stream_id, err)) |failure| {
+            if (request_failure.capture(failure_out, stream_id, err)) return;
+            self.pending_request_failures.append(failure);
+            self.streaming_requests.suspendFailedMessage(failure.stream_id);
+            try self.progressRequestPollFailures(failure.stream_id, null);
+            return;
+        }
+        try closeConnectionForHttp3Error(&self.established.connection, err);
+    }
+
     fn failReceivedRequest(
         self: *HandshakeServerSession,
         stream_id: ?u62,
@@ -7366,53 +7381,49 @@ pub const HandshakeServerSession = struct {
         };
     }
 
+    fn accessRequestData(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        out: []u8,
+        comptime operation: message_data.Operation,
+        comptime single_attempt: bool,
+    ) Error!?usize {
+        return message_data.access(
+            self,
+            &self.established.connection,
+            &self.streaming_requests,
+            &self.pending_request_failures,
+            self.established.connection.endpoint.allocator,
+            stream_id,
+            out,
+            operation,
+            single_attempt,
+            HandshakeServerSession.progressRequestPollFailures,
+            HandshakeServerSession.retainRequestDataFailure,
+        );
+    }
+
+    /// Copy available request DATA, retaining stream-local cancellation after
+    /// malformed content. Consumed bytes are credited on the next read or poll.
     pub fn readRequestData(
         self: *HandshakeServerSession,
         stream_id: u62,
         out: []u8,
     ) Error!usize {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.streaming_requests.find(stream_id) orelse
-            return error.UnexpectedStream;
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        const read = entry.reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
-            return err;
-        };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        return read;
+        return (try self.accessRequestData(stream_id, out, .read, false)) orelse 0;
     }
 
     /// Copy currently available request DATA without waiting for receive-credit
     /// pacing. `null` leaves the reader cursor unchanged until the dispatcher
-    /// services the connection's pending transport work.
+    /// services the connection's pending transport work. Newly consumed bytes
+    /// are reported before their receive credit is advertised.
     pub fn readRequestDataOnce(
         self: *HandshakeServerSession,
         stream_id: u62,
         out: []u8,
     ) Error!?usize {
-        const entry = self.streaming_requests.find(stream_id) orelse
-            return error.UnexpectedStream;
-        releaseStreamingReaderCapacityOnce(
-            &self.established.connection,
-            &entry.reader,
-        ) catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => return null,
-            else => return err,
-        };
-        return entry.reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequestOnce(stream_id, null, err, false) catch {};
-            return err;
-        };
+        return self.accessRequestData(stream_id, out, .read, true);
     }
 
     /// Return DATA bytes currently readable without receiving another packet.
@@ -7420,12 +7431,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!usize {
-        const entry = self.streaming_requests.find(stream_id) orelse
-            return error.UnexpectedStream;
-        return entry.reader.availableDataBytes() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
-            return err;
-        };
+        return (try self.accessRequestData(stream_id, &.{}, .available, false)) orelse 0;
     }
 
     pub fn skipRequestData(
@@ -7433,21 +7439,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
     ) Error!usize {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.streaming_requests.find(stream_id) orelse
-            return error.UnexpectedStream;
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        const skipped = entry.reader.skipData() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequest(stream_id, null, err, false) catch {};
-            return err;
-        };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        return skipped;
+        return (try self.accessRequestData(stream_id, &.{}, .skip, false)) orelse 0;
     }
 
     /// Discard currently available request DATA without waiting for
@@ -7456,22 +7448,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?usize {
-        const entry = self.streaming_requests.find(stream_id) orelse
-            return error.UnexpectedStream;
-        releaseStreamingReaderCapacityOnce(
-            &self.established.connection,
-            &entry.reader,
-        ) catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => return null,
-            else => return err,
-        };
-        return entry.reader.skipData() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedRequestOnce(stream_id, null, err, false) catch {};
-            return err;
-        };
+        return self.accessRequestData(stream_id, &.{}, .skip, true);
     }
 
     /// Detach an established Extended CONNECT receive stream from HTTP/3
@@ -11352,6 +11329,9 @@ pub const HandshakeServerSession = struct {
         application_error_code: u64,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        defer if (!self.request_lifecycle.contains(stream_id)) {
+            _ = self.pending_request_failures.take(stream_id);
+        };
         return self.cancelRequestInternal(
             stream_id,
             application_error_code,
@@ -11367,6 +11347,9 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        defer if (!self.request_lifecycle.contains(stream_id)) {
+            _ = self.pending_request_failures.take(stream_id);
+        };
         return self.cancelRequestInternalOnce(
             stream_id,
             application_error_code,
@@ -11686,6 +11669,7 @@ pub const HandshakeServerSession = struct {
     ) Error!void {
         var index: usize = 0;
         while (self.streaming_requests.entryAt(index)) |entry| : (index += 1) {
+            if (entry.message_failure_pending) continue;
             try releaseStreamingReaderCapacity(
                 &self.established.connection,
                 &entry.reader,
@@ -11698,6 +11682,7 @@ pub const HandshakeServerSession = struct {
     ) Error!bool {
         var index: usize = 0;
         while (self.streaming_requests.entryAt(index)) |entry| : (index += 1) {
+            if (entry.message_failure_pending) continue;
             releaseStreamingReaderCapacityOnce(
                 &self.established.connection,
                 &entry.reader,
@@ -16943,10 +16928,33 @@ pub const HandshakeClient = struct {
         return self.established.connection.endpoint.io;
     }
 
+    fn accessResponseData(
+        self: *HandshakeClient,
+        stream_id: u62,
+        out: []u8,
+        comptime operation: message_data.Operation,
+        comptime single_attempt: bool,
+    ) Error!?usize {
+        return message_data.access(
+            self,
+            &self.established.connection,
+            &self.streaming_responses,
+            &self.pending_response_failures,
+            self.allocator,
+            stream_id,
+            out,
+            operation,
+            single_attempt,
+            HandshakeClient.progressResponsePollFailures,
+            HandshakeClient.retainResponsePollFailure,
+        );
+    }
+
     /// Copy currently available DATA bytes into caller-owned storage.
     ///
-    /// Returning zero means the current DATA frame needs more STREAM bytes;
-    /// call `receiveResponseEvent` again to pump another packet.
+    /// Returning zero means more STREAM bytes or cancellation progress is
+    /// needed. Consumed bytes are credited on the next read or event poll,
+    /// preserving the returned count if receive-credit submission fails.
     pub fn readResponseData(
         self: *HandshakeClient,
         stream_id: u62,
@@ -16954,21 +16962,7 @@ pub const HandshakeClient = struct {
     ) Error!usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        const read = entry.reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
-            return err;
-        };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        return read;
+        return (try self.accessResponseData(stream_id, out, .read, false)) orelse 0;
     }
 
     /// Return DATA bytes currently readable without receiving another packet.
@@ -16976,13 +16970,9 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        return entry.reader.availableDataBytes() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
-            return err;
-        };
+        return (try self.accessResponseData(stream_id, &.{}, .available, false)) orelse 0;
     }
 
     /// Copy available DATA without waiting for receive-credit pacing. `null`
@@ -16994,26 +16984,7 @@ pub const HandshakeClient = struct {
         out: []u8,
     ) Error!?usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
-        const entry = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        releaseStreamingReaderCapacityOnce(
-            &self.established.connection,
-            &entry.reader,
-        ) catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => return null,
-            else => return err,
-        };
-        const read = entry.reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponseOnce(stream_id, null, err, false) catch {};
-            return err;
-        };
-        // Credit the newly consumed bytes on the next poll/read. Returning
-        // them first keeps a later socket error from making the caller retry
-        // an application-visible read whose parser cursor already advanced.
-        return read;
+        return self.accessResponseData(stream_id, out, .read, true);
     }
 
     pub fn skipResponseData(
@@ -17022,21 +16993,7 @@ pub const HandshakeClient = struct {
     ) Error!usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.streaming_responses.find(stream_id) orelse
-            return error.UnexpectedStream;
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        const skipped = entry.reader.skipData() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) self.failReceivedResponse(stream_id, null, err, false) catch {};
-            return err;
-        };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
-        return skipped;
+        return (try self.accessResponseData(stream_id, &.{}, .skip, false)) orelse 0;
     }
 
     /// Detach an established Extended CONNECT response stream from HTTP/3
@@ -26322,29 +26279,6 @@ fn responseFieldSectionCount(bytes: []const u8) Error!usize {
         }
     }
     return count;
-}
-
-fn releaseStreamingReaderCapacity(
-    connection: *quic.one_rtt.Connection,
-    reader: *StreamingMessageReader,
-) Error!void {
-    const amount = reader.uncreditedConsumed();
-    if (amount == 0) return;
-    try connection.releaseReceivedCapacity(
-        reader.streamId(),
-        amount,
-    );
-    reader.markCredited(amount);
-}
-
-fn releaseStreamingReaderCapacityOnce(
-    connection: *quic.one_rtt.Connection,
-    reader: *StreamingMessageReader,
-) Error!void {
-    const amount = reader.uncreditedConsumed();
-    if (amount == 0) return;
-    try connection.tryReleaseReceivedCapacity(reader.streamId(), amount);
-    reader.markCredited(amount);
 }
 
 fn sendProtectedReaderCapacity(

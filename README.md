@@ -611,6 +611,9 @@ Current protocol coverage includes:
   cancellation across socket failures, backpressure and receive deadlines,
   healthy sibling response progress, and explicit `ResponseEventResult` failure
   ownership transfer through `pollNextResponseEventOnceWithFailure`,
+  shared handshake request/response DATA access with retained Content-Length
+  cancellation, scoped truncated-frame errors and consumed-byte counts that
+  survive receive-credit socket failures,
   HEADERS-only dynamic request/response writers for incremental DATA sending
   with Content-Length generation/verification, parsed length reuse, and
   CONNECT/204/304 body guards, including detached Extended CONNECT FIN

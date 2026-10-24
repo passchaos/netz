@@ -1633,6 +1633,19 @@ leave decoding retryable; malformed QPACK remains a connection error. Shared
 pending cancellation storage lives in `http3/runtime/receive/pending_failure.zig`,
 with adjacent request and response ownership types and protected-QUIC tests.
 
+Handshake request and response DATA access shares that failed-message owner.
+Reads, available-byte queries and skips retain Content-Length cancellation
+across socket failures or backpressure, and a later event poll can transfer
+the failure to its explicit caller. A suspended message exposes no further
+payload while healthy siblings remain eligible for events. Truncated DATA
+frames still close the connection with `H3_FRAME_ERROR`; API-state errors leave
+the message intact. The shared `http3/runtime/receive/message_data.zig` module
+returns successful read/skip counts before advertising their receive credit,
+so a later socket failure cannot hide bytes already consumed. The next read
+or event poll submits that credit. Real QUIC regressions cover both roles,
+late FIN, cancellation retry and transfer, rejection allocation failure,
+framing/operation error scope, and receive-credit retry without duplicate DATA.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
