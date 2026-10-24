@@ -23,7 +23,7 @@ const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
 const flow_write = @import("flow/write.zig");
-const body_fragment = @import("../../http3/runtime/send/body_fragment.zig");
+const close_write = @import("endpoint_client/close.zig");
 
 const net = std.Io.net;
 
@@ -124,7 +124,7 @@ pub const Session = struct {
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
     close_response_pending: bool = false,
-    removal_close: body_fragment.State = .{},
+    close_state: close_write.State = .{},
 
     pub fn applicationProtocol(self: Session) ?application_protocol.String {
         return application_protocol.selected(self.response.headers);
@@ -153,6 +153,7 @@ pub const Session = struct {
         self.response.deinit(client.allocator);
         self.control.deinit();
         self.streams.deinit();
+        self.close_state.clear();
         self.* = undefined;
     }
 
@@ -372,34 +373,25 @@ pub const Session = struct {
     pub const stopStreamWithTimeout = StreamControl.stopStreamWithTimeout;
     pub const stopStreamWithDeadline = StreamControl.stopStreamWithDeadline;
 
-    pub fn close(
-        self: *Session,
-        client: *Client,
-        code: u32,
-        reason: []const u8,
-    ) Error!void {
-        try self.validateOwner(client);
-        _ = client.observeConnection();
-        defer _ = client.observeConnection();
-        if (self.control.local_close_sent or
-            self.control.local_close_failed) return;
-        var storage: [4 + session_control.max_close_reason + 16]u8 = undefined;
-        const encoded = try session_control.writeCloseInto(
-            &storage,
-            code,
-            reason,
-        );
-        try self.control.beginLocalClose();
-        client.h3.sendRequestBodyPaced(
-            self.session_id.value,
-            encoded,
-            true,
-        ) catch |err| {
-            self.control.recordLocalCloseFailure(code);
-            return err;
-        };
-        try self.control.recordLocalClose(code);
-    }
+    const Close = close_write.Controller(struct {
+        pub const SessionType = Session;
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const TimeoutErrorType = TimeoutError;
+        pub const validateOwner = Session.validateOwner;
+        pub const ensureConnectionOpen = Client.ensureConnectionOpen;
+        pub const observeConnection = Client.observeConnection;
+        pub const advanceOnce = terminal.advanceOnce;
+    });
+
+    /// Send CLOSE/CONNECT FIN and terminate associated streams. A failed
+    /// submission retains the encoded metadata and DATA progress for retry.
+    pub const close = Close.close;
+    /// Relative budget covering CLOSE, FIN and associated-stream cleanup.
+    pub const closeWithTimeout = Close.closeWithTimeout;
+    /// Resume closure under one absolute awake-clock deadline. Retry with the
+    /// same code/reason; polling and removal also preserve pending metadata.
+    pub const closeWithDeadline = Close.closeWithDeadline;
 
     pub fn grantData(self: *Session, client: *Client, maximum: u64) Error!void {
         try self.validateOwner(client);
@@ -433,6 +425,7 @@ pub const Client = struct {
         while (sessions.next()) |session_ptr| {
             _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3, &session_ptr.*.streams);
             session_ptr.*.close_response_pending = false;
+            session_ptr.*.close_state.clear();
         }
         return true;
     }
@@ -1002,7 +995,7 @@ pub const Client = struct {
             &current.control,
             &current.streams,
             &current.close_response_pending,
-            &current.removal_close,
+            &current.close_state,
         );
         const removed = self.sessions.fetchRemove(session_id.value).?.value;
         removed.deinit(self);
@@ -1079,6 +1072,7 @@ pub const Client = struct {
             &session_value.control,
             &session_value.streams,
             &session_value.close_response_pending,
+            &session_value.close_state,
         ) catch |err| switch (err) {
             error.PacingLimited,
             error.CongestionLimited,

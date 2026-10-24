@@ -502,6 +502,14 @@ If progress receives a QUIC connection close or a connection-scoped HTTP/3
 protocol failure, cancellation updates every shared Session and discards all
 their DATAGRAM queues before returning. A Session CLOSE remains isolated and
 its exact code/reason event stays readable while siblings continue operating.
+Shared-client `closeWithTimeout/Deadline` also bounds CLOSE, CONNECT FIN and
+associated SESSION_GONE cleanup. CLOSE encoding is retained before the first
+write, and a one-byte DATA-frame budget is resumable across timeout or socket
+failure without duplicate bytes. Retries must use the same code/reason while
+the CLOSE is pending; peer CLOSE cancels a partial DATA frame or receives an
+empty FIN when no bytes were submitted. Polling and explicit removal resume
+the same pending metadata, while a cleanup failure after FIN never replays
+the capsule. Sibling traffic remains routed by the owning HTTP/3 reader.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

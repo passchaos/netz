@@ -7,16 +7,18 @@ const http3 = @import("../../../http3/mod.zig");
 const webtransport = @import("../../mod.zig");
 const session_control = @import("../session_control.zig");
 const connection_lifecycle = @import("../connection_lifecycle.zig");
-const body_fragment = @import("../../../http3/runtime/send/body_fragment.zig");
+const close_write = @import("close.zig");
 
 pub fn advanceOnce(
     h3: *http3.runtime.HandshakeClient,
     control: *session_control.Control,
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
+    pending_close: *close_write.State,
 ) session_control.Error!session_control.TerminateProgress {
     if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
+        pending_close.clear();
         return .complete;
     }
     observeSendTerminal(h3, control, close_response_pending);
@@ -30,6 +32,9 @@ pub fn advanceOnce(
     if (try control.tryRejectPostTerminalData(&h3.established.connection)) {
         close_response_pending.* = false;
         return .submitted;
+    }
+    if (pending_close.pending != null) {
+        if (try pending_close.advanceOnce(h3, control, close_response_pending) == .submitted) return .submitted;
     }
     if (close_response_pending.*) {
         h3.trySendRequestBody(control.session_id.value, &.{}, true) catch |err|
@@ -59,18 +64,20 @@ pub fn finish(
     control: *session_control.Control,
     streams: *webtransport.StreamRegistry,
     close_response_pending: *bool,
-    removal_close: *body_fragment.State,
+    pending_close: *close_write.State,
 ) session_control.Error!void {
     defer _ = connection_lifecycle.observe(control, h3, streams);
     if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
+        pending_close.clear();
         return;
     }
     try inspectControl(h3, control, close_response_pending);
     try rejectPending(h3, control, close_response_pending);
     observeSendTerminal(h3, control, close_response_pending);
-    if ((!control.state.closed or removal_close.initialized) and !control.local_close_sent and !control.local_close_failed) {
-        try closeActive(h3, control, close_response_pending, removal_close);
+    if ((!control.state.closed or pending_close.pending != null) and !control.local_close_sent and !control.local_close_failed) {
+        if (pending_close.pending == null) try pending_close.prepare(h3, control, 0, "");
+        try closeActive(h3, control, close_response_pending, pending_close);
     }
     if (!control.local_close_sent and !control.local_close_failed) close_response_pending.* = true;
     if (close_response_pending.*) {
@@ -118,43 +125,12 @@ fn rejectPending(h3: *http3.runtime.HandshakeClient, control: *session_control.C
     if (control.handledInvalidCapsule()) reply.* = false;
 }
 
-fn closeActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: *body_fragment.State) session_control.Error!void {
-    var storage: [16]u8 = undefined;
-    const data = try session_control.writeCloseInto(&storage, 0, "");
-    while (!state.complete) {
+fn closeActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: *close_write.State) session_control.Error!void {
+    while (state.pending != null) {
         try inspectControl(h3, control, reply);
         try rejectPending(h3, control, reply);
         observeSendTerminal(h3, control, reply);
-        if (control.local_close_failed or control.local_close_sent) return;
-        if (control.terminal_reported) {
-            // A peer termination cannot leave us waiting for new data credit.
-            // An unfinished DATA frame requires RESET; an unwritten one can
-            // still acknowledge the peer with an empty FIN.
-            if (state.wire_sent != 0) {
-                while (true) {
-                    h3.tryCancelRequest(control.session_id.value, webtransport.ApplicationErrorCode.session_gone) catch |err| switch (err) {
-                        error.PacingLimited => {
-                            try h3.established.connection.waitForPacingAvailability();
-                            continue;
-                        },
-                        error.CongestionLimited, error.FlowControlBlocked => {
-                            try h3.receiveDetachedResponseProgress(control.session_id.value);
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    break;
-                }
-                control.recordLocalCloseFailure(0);
-                reply.* = false;
-            } else {
-                control.local_close_started = false;
-                reply.* = true;
-            }
-            return;
-        }
-        if (!control.local_close_started) try control.beginLocalClose();
-        body_fragment.write(&h3.established.connection, &h3.outbound_bodies, control.session_id.value, data, true, state, h3.options) catch |err| switch (err) {
+        _ = state.advanceOnce(h3, control, reply) catch |err| switch (err) {
             error.PacingLimited => {
                 try h3.established.connection.waitForPacingAvailability();
                 continue;
@@ -166,8 +142,6 @@ fn closeActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Con
             else => return err,
         };
     }
-    try control.recordLocalClose(0);
-    reply.* = false;
 }
 
 fn observeSendTerminal(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool) void {

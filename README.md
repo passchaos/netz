@@ -1595,7 +1595,8 @@ Current protocol coverage includes:
   metadata, enforce both peer SETTINGS and a local Session cap, and expose
   targeted DATAGRAM, associated-stream, CLOSE and removal operations, plus
   timeout/deadline-bounded RESET/STOP and reliable application-prefix reset
-  while preserving sibling traffic through the owning HTTP/3 reader, plus
+  while preserving sibling traffic through the owning HTTP/3 reader, resumable
+  CLOSE/FIN with timeout/deadline bounds and retained close metadata, plus
   stable-key `pollAny`/`receiveAny*` fairness across ready Sessions even after
   hash-map growth or removal of the prior producer,
   modern

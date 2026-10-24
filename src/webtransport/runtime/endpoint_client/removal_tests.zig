@@ -100,8 +100,8 @@ test "WebTransport endpoint client active removal resumes a one-byte DATA prefix
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.client.removeSession(id));
     try std.testing.expect(fixture.client.session(id) == session and session.control.local_close_started);
-    try std.testing.expectEqual(@as(usize, 2), session.removal_close.wire_sent);
-    try std.testing.expectEqual(@as(usize, 0), session.removal_close.dataSent());
+    try std.testing.expectEqual(@as(usize, 2), session.close_state.fragment.wire_sent);
+    try std.testing.expectEqual(@as(usize, 0), session.close_state.fragment.dataSent());
     try std.testing.expectEqual(start + 2, connection.sendStreamStats(id.value).?.highest_sent_offset);
     try std.testing.expect(!connection.closed());
     connection.endpoint.io = original_io;
