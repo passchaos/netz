@@ -73,15 +73,7 @@ pub const CloseFrame = struct {
     reason: []const u8 = "",
 };
 
-pub const OwnedCloseFrame = struct {
-    code: CloseCode,
-    reason: []u8,
-
-    pub fn deinit(self: *OwnedCloseFrame, allocator: std.mem.Allocator) void {
-        allocator.free(self.reason);
-        self.* = undefined;
-    }
-};
+pub const OwnedCloseFrame = @import("close/owned.zig").OwnedCloseFrame;
 
 pub const FrameHeader = struct {
     fin: bool,
@@ -529,6 +521,13 @@ pub const Frame = struct {
     pub fn deinit(self: *Frame, allocator: std.mem.Allocator) void {
         allocator.free(self.payload);
         self.* = undefined;
+    }
+
+    /// Consume this Close frame and transfer its existing payload allocation
+    /// to the owned diagnostic without another allocation. On validation
+    /// failure, the frame remains owned by the caller.
+    pub fn takeClose(self: *Frame, allocator: std.mem.Allocator) Error!?OwnedCloseFrame {
+        return @import("close/owned.zig").take(self, allocator);
     }
 };
 

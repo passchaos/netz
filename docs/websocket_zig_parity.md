@@ -1480,6 +1480,15 @@ data or control frame after the closing handshake has begun. Ping and Close
 deadline APIs revalidate their absolute budget after lock contention. Close
 flags use acquire/release atomics because a sole receive owner and concurrent
 application writers may observe those transitions on different threads.
+Owned Close diagnostics now take over the already-allocated frame payload on
+HTTP/1, RFC 8441 and RFC 9220. Typed Close reads, Ping waits and close-handshake
+waits no longer allocate a second reason buffer after consuming the terminal
+frame, so local memory pressure cannot lose an otherwise decoded diagnostic.
+The reason remains owned beyond receive-buffer reuse and connection teardown;
+`OwnedCloseFrame.deinit` releases the original allocation. Empty Close payloads
+still produce no diagnostic, and frame-allocation failure preserves input for
+retry. Direct `Frame.takeClose` validates before ownership transfer and leaves
+an invalid frame owned by its caller.
 Allocating receives on every transport preserve `was_compressed` provenance
 after decompression, so callers and concurrency regressions can distinguish an
 RSV1 message from an uncompressed fallback without inspecting wire storage.

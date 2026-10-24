@@ -5912,11 +5912,8 @@ pub const Connection = struct {
                     return .{ .pong = {} };
                 },
                 .close => {
-                    defer frame.deinit(self.allocator);
-                    return .{ .closed = try websocket.parseClosePayloadOwned(
-                        self.allocator,
-                        frame.payload,
-                    ) };
+                    errdefer frame.deinit(self.allocator);
+                    return .{ .closed = try frame.takeClose(self.allocator) };
                 },
                 .text, .binary, .continuation => {
                     return .{ .application = frame };
@@ -6049,9 +6046,9 @@ pub const Connection = struct {
 
     pub fn receiveCloseFrame(self: *Connection) Error!?websocket.OwnedCloseFrame {
         var frame = try self.receiveFrame();
-        defer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
-        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+        return frame.takeClose(self.allocator);
     }
 
     pub fn receiveCloseFrameWithTimeout(
@@ -6074,9 +6071,9 @@ pub const Connection = struct {
     ) Error!?websocket.OwnedCloseFrame {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         var frame = try self.receiveFrameWithDeadline(deadline);
-        defer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
-        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+        return frame.takeClose(self.allocator);
     }
 
     /// Relative-budget counterpart to `receiveFrameWithDeadline`. Partial
@@ -6254,11 +6251,8 @@ pub const Connection = struct {
                     continue;
                 },
                 .close => {
-                    defer frame.deinit(self.allocator);
-                    return .{ .closed = try websocket.parseClosePayloadOwned(
-                        self.allocator,
-                        frame.payload,
-                    ) };
+                    errdefer frame.deinit(self.allocator);
+                    return .{ .closed = try frame.takeClose(self.allocator) };
                 },
                 .text, .binary, .continuation => {
                     return .{ .application = frame };
@@ -8786,11 +8780,8 @@ pub const H2Connection = struct {
                     return .{ .pong = {} };
                 },
                 .close => {
-                    defer frame.deinit(self.allocator);
-                    return .{ .closed = try websocket.parseClosePayloadOwned(
-                        self.allocator,
-                        frame.payload,
-                    ) };
+                    errdefer frame.deinit(self.allocator);
+                    return .{ .closed = try frame.takeClose(self.allocator) };
                 },
                 .text, .binary, .continuation => {
                     return .{ .application = frame };
@@ -8927,9 +8918,9 @@ pub const H2Connection = struct {
 
     pub fn receiveCloseFrame(self: *H2Connection) Error!?websocket.OwnedCloseFrame {
         var frame = try self.receiveFrame();
-        defer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
-        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+        return frame.takeClose(self.allocator);
     }
 
     pub fn receiveCloseFrameWithTimeout(
@@ -8954,9 +8945,9 @@ pub const H2Connection = struct {
             deadline,
         );
         var frame = try self.receiveFrameWithDeadline(deadline);
-        defer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.allocator);
         if (frame.header.opcode != .close) return error.InvalidFrame;
-        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
+        return frame.takeClose(self.allocator);
     }
 
     /// RFC 8441 relative-budget counterpart to
@@ -9131,11 +9122,8 @@ pub const H2Connection = struct {
                     continue;
                 },
                 .close => {
-                    defer frame.deinit(self.allocator);
-                    return .{ .closed = try websocket.parseClosePayloadOwned(
-                        self.allocator,
-                        frame.payload,
-                    ) };
+                    errdefer frame.deinit(self.allocator);
+                    return .{ .closed = try frame.takeClose(self.allocator) };
                 },
                 .text, .binary, .continuation => {
                     return .{ .application = frame };
@@ -17385,6 +17373,7 @@ test "WebSocket connection serializes concurrent sends" {
 }
 
 test {
+    _ = @import("runtime/message/tests/close_ownership.zig");
     _ = h3;
     _ = @import("runtime/message/tests/buffer.zig");
     _ = @import("runtime/message/tests/state.zig");

@@ -2022,12 +2022,9 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.InvalidFrame;
             }
             var frame = try self.receiveFrame();
-            defer frame.deinit(self.allocator);
+            errdefer frame.deinit(self.allocator);
             if (frame.header.opcode != .close) return error.InvalidFrame;
-            return websocket.parseClosePayloadOwned(
-                self.allocator,
-                frame.payload,
-            );
+            return frame.takeClose(self.allocator);
         }
 
         /// Relative-budget counterpart to `receiveCloseFrameWithDeadline`.
@@ -2054,12 +2051,9 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.InvalidFrame;
             }
             var frame = try self.receiveFrameWithDeadline(deadline);
-            defer frame.deinit(self.allocator);
+            errdefer frame.deinit(self.allocator);
             if (frame.header.opcode != .close) return error.InvalidFrame;
-            return websocket.parseClosePayloadOwned(
-                self.allocator,
-                frame.payload,
-            );
+            return frame.takeClose(self.allocator);
         }
 
         /// Send Close once and wait for peer-close progress under one relative
@@ -2828,11 +2822,8 @@ pub fn Connection(comptime role: common.Role) type {
                         return .{ .pong = {} };
                     },
                     .close => {
-                        defer frame.deinit(self.allocator);
-                        const close = try websocket.parseClosePayloadOwned(
-                            self.allocator,
-                            frame.payload,
-                        );
+                        errdefer frame.deinit(self.allocator);
+                        const close = try frame.takeClose(self.allocator);
                         return .{ .closed = close };
                     },
                     .text, .binary, .continuation => {
@@ -2861,11 +2852,8 @@ pub fn Connection(comptime role: common.Role) type {
                         continue;
                     },
                     .close => {
-                        defer frame.deinit(self.allocator);
-                        const close = try websocket.parseClosePayloadOwned(
-                            self.allocator,
-                            frame.payload,
-                        );
+                        errdefer frame.deinit(self.allocator);
+                        const close = try frame.takeClose(self.allocator);
                         return .{ .closed = close };
                     },
                     .text, .binary, .continuation => {
