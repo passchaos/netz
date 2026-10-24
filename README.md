@@ -1601,6 +1601,9 @@ Current protocol coverage includes:
   An externally negotiated-key stateful runtime has the same
   recovery, congestion/flow-control, associated-stream, cancellation, and
   session-lifecycle facilities as the integrated TLS-handshake runtime.
+  Both expose exact initial Session stream-data/bidi/uni quotas through
+  `initial_flow_limits`, including negotiated zero credit that waits for
+  explicit Capsule grants; shared endpoints retain independent Session budgets.
   Session maintenance settles abandoned RESET/STOP receive data even while
   applications only receive DATAGRAMs or write sibling streams, allowing
   WT_MAX_DATA to advance without consuming the pending RESET notification;

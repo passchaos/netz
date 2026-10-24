@@ -231,6 +231,10 @@ pub fn defaultSettings(settings: http3.Settings) http3.Settings {
     return settingsWithSessionCapacity(settings, 1) catch unreachable;
 }
 
+/// Preserve every requested initial quota, including zero, while applying
+/// WebTransport capabilities. Null retains the ordinary defaulting policy.
+pub const settingsWithInitialFlowLimits = @import("settings/flow.zig").apply;
+
 /// Apply WebTransport capability settings while advertising the exact number
 /// of concurrent Sessions this endpoint can independently route on one HTTP/3
 /// connection. `max_sessions` must be a non-zero QUIC varint.
@@ -698,6 +702,7 @@ test "WebTransport settings negotiation and datagram budget" {
 
 test {
     _ = runtime;
+    _ = @import("settings/flow_tests.zig");
     _ = flow_control;
     _ = application_protocol;
     _ = @import("runtime/negotiation_tests.zig");

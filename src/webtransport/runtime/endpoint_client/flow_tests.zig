@@ -67,9 +67,8 @@ test "WebTransport endpoint client send flow grants preserve independent shared 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.initWithSettings(threaded.io(), try webtransport.settingsWithInitialFlowLimits(.{}, 2, .{ .data = 0, .bidi = 4, .uni = 4 }));
     defer fixture.deinit();
-    fixture.client.h3.control.settings.peer.webtransport_initial_max_data = 0;
     const first = try fixture.addSession();
     const second = try fixture.addSession();
     const first_stream = try first.openBidirectionalStream(&fixture.client);
@@ -90,6 +89,24 @@ test "WebTransport endpoint client send flow grants preserve independent shared 
     try std.testing.expectEqual(@as(u64, 0), first.streams.flow.?.send_limit.data);
     try std.testing.expectEqual(@as(u64, 4), second.streams.flow.?.sent.data);
     try std.testing.expect(!first.control.state.closed and !second.control.state.closed);
+}
+
+test "WebTransport endpoint existing transport rejects mismatched initial quotas before CONNECT" {
+    const runtime = @import("../../runtime.zig");
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    _ = try fixture.addSession();
+    const before = fixture.client.h3.established.connection.nextLocalBidirectionalStreamId();
+    try std.testing.expectError(error.InvalidSessionState, runtime.HandshakeClientSession.connectSessionAttempt(&fixture.client.h3, .{
+        .authority = "localhost",
+        .path = "/mismatched-initial-quotas",
+        .limits = .{ .initial_flow_limits = .{ .data = 0, .bidi = 1, .uni = 1 } },
+    }));
+    try std.testing.expectEqual(before, fixture.client.h3.established.connection.nextLocalBidirectionalStreamId());
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.sessions.count());
 }
 
 test "WebTransport endpoint client retired stream grants stay within one shared session" {

@@ -1510,6 +1510,31 @@ replaceable receive-credit acknowledgements. Dropping a
 pending decision rejects only that CONNECT before restoring the session. A
 real handshake test exercises both outcomes and then serves a sibling request.
 
+Authenticated and stateful preconfigured QUIC constructors now accept exact
+initial Session quotas through `Limits.initial_flow_limits` and
+`EndpointClientOptions.initial_flow_limits`. Null retains the existing defaults;
+an explicit zero remains zero in SETTINGS rather than being filled by a
+constructor. `settingsWithInitialFlowLimits` provides the same normalization
+for direct HTTP/3 setup. When Session flow control is negotiated, zero data or
+stream credit remains blocked until its WT_MAX_DATA/WT_MAX_STREAMS grant.
+These initial values apply to every Session on that transport as draft-16
+section 5.5 requires. A single Session can explicitly disable negotiation with
+three zero values; a multi-Session server configuration requires at least one
+nonzero intent value. Legacy stateless adapters reject explicit quotas because
+they lack Session flow accounting. Reusing an established transport requires
+matching its already configured settings and cannot rewrite initial quotas.
+Adjacent real protected-QUIC tests drive both constructor directions, retain
+zero data through an initial timeout, then exchange bytes after explicit data
+and stream grants. Shared-client tests prove that granting one Session leaves
+its sibling blocked. The settings policy is grouped under
+`webtransport/settings/flow.zig`.
+
+```zig
+.limits = .{
+    .initial_flow_limits = .{ .data = 0, .bidi = 1, .uni = 0 },
+}
+```
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

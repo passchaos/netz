@@ -39,6 +39,8 @@ pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const Options = struct {
     limits: http3.runtime.Limits = .{},
+    /// Transport-wide initial Session quotas; zero remains zero on the wire.
+    initial_flow_limits: ?webtransport.flow_control.Limits = null,
     h3: http3.runtime.HandshakeClientOptions,
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
@@ -427,7 +429,7 @@ pub const Client = struct {
         options: Options,
     ) Error!Client {
         if (options.max_sessions == 0) return error.InvalidSessionState;
-        const h3_options = resolvedH3Options(options.h3);
+        const h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits);
         return .{
             .allocator = allocator,
             .h3 = try http3.runtime.HandshakeClient.connect(
@@ -459,7 +461,7 @@ pub const Client = struct {
                 local_address,
                 server,
                 options.limits,
-                resolvedH3Options(options.h3),
+                try resolvedH3Options(options.h3, options.initial_flow_limits),
                 deadline,
             ),
             .max_sessions = options.max_sessions,
@@ -551,7 +553,7 @@ pub const Client = struct {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        var h3_options = resolvedH3Options(options.h3);
+        var h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits);
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
@@ -1253,10 +1255,13 @@ fn validateSessionOptions(options: SessionOptions) Error!void {
 
 fn resolvedH3Options(
     options: http3.runtime.HandshakeClientOptions,
-) http3.runtime.HandshakeClientOptions {
+    initial: ?webtransport.flow_control.Limits,
+) Error!http3.runtime.HandshakeClientOptions {
     var resolved = options;
-    resolved.session.local_settings = webtransport.defaultSettings(
+    resolved.session.local_settings = try webtransport.settingsWithInitialFlowLimits(
         resolved.session.local_settings,
+        1,
+        initial,
     );
     return resolved;
 }
@@ -1275,7 +1280,7 @@ test "WebTransport endpoint option normalization preserves resolver" {
         }
     };
     var context: u8 = 0;
-    const resolved = resolvedH3Options(.{
+    const resolved = try resolvedH3Options(.{
         .handshake = .{
             .original_destination_connection_id = "origin",
             .local_connection_id = "local",
@@ -1284,7 +1289,7 @@ test "WebTransport endpoint option normalization preserves resolver" {
             .context = &context,
             .resolve = Resolver.resolve,
         },
-    });
+    }, .{ .data = 0, .bidi = 1, .uni = 0 });
     try std.testing.expectEqual(
         @intFromPtr(&context),
         @intFromPtr(resolved.address_resolver.?.context),
@@ -1292,6 +1297,8 @@ test "WebTransport endpoint option normalization preserves resolver" {
     try std.testing.expect(
         resolved.session.local_settings.enable_connect_protocol,
     );
+    try std.testing.expectEqual(@as(u64, 0), resolved.session.local_settings.webtransport_initial_max_data);
+    try std.testing.expectEqual(@as(u64, 0), resolved.session.local_settings.webtransport_initial_max_streams_uni);
 }
 
 test "WebTransport endpoint URI routes through configured SOCKS5" {

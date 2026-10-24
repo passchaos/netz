@@ -23,7 +23,7 @@ pub const Limits = struct {
     bidi: u64 = 0,
     uni: u64 = 0,
 
-    fn validate(self: Limits) Error!void {
+    pub fn validate(self: Limits) Error!void {
         if (self.data > quic.varint.max_value or self.bidi > max_streams or self.uni > max_streams) {
             return error.FlowControlViolation;
         }

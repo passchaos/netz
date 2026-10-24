@@ -1,6 +1,19 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public WebTransport exact initial quotas allow data only after a decoded grant" {
+    const settings = try netz.webtransport.settingsWithInitialFlowLimits(.{}, 2, .{ .data = 0, .bidi = 1, .uni = 0 });
+    var state = try netz.webtransport.flow_control.State.init(settings, settings);
+    try state.openLocal(.bidirectional);
+    try std.testing.expectError(error.FlowControlBlocked, state.accountSent(0, 4, 3));
+    var storage: [32]u8 = undefined;
+    const encoded = try (netz.webtransport.Capsule{ .max_data = 1 }).writeInto(&storage);
+    const grant = try netz.webtransport.Capsule.parse(encoded);
+    try std.testing.expect(try state.receiveCapsule(grant.capsule));
+    try state.accountSent(0, 4, 3);
+    try std.testing.expectEqual(@as(u64, 1), state.sent.data);
+}
+
 test "public HTTP1 owned heads accept folded metadata without requiring the body" {
     const bytes = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Trace: first\r\n second\r\n\r\n";
     var response = try netz.http1.parseOwnedResponseHead(std.testing.allocator, bytes, .{ .allow_obs_fold = true }, .{ .request_method = .GET });

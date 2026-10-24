@@ -96,6 +96,7 @@ test {
     _ = @import("runtime/development_lifecycle_tests.zig");
     _ = @import("runtime/development_stream_tests.zig");
     _ = @import("runtime/recovery_tests.zig");
+    _ = @import("runtime/flow/configuration_tests.zig");
 }
 
 pub const Error = webtransport.Error || http3.runtime.Error ||
@@ -118,6 +119,10 @@ pub const EarlyStreamLimits = early_streams.Limits;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
+    /// Exact initial quotas advertised by stateful QUIC constructors. Null
+    /// uses existing defaults; negotiated zero quotas require a Capsule grant.
+    /// Adoption of an existing transport requires matching its SETTINGS.
+    initial_flow_limits: ?webtransport.flow_control.Limits = null,
     max_session_streams: usize = 128,
     /// Concurrent Sessions admitted on one HTTP/3 connection by
     /// `EndpointServer`. Standalone owning Session adapters remain limited to
@@ -183,6 +188,7 @@ pub const Server = struct {
     datagram_batch_scratch: datagram_send.DevelopmentBatchScratch = .{},
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        if (limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
         try application_protocol.validateValues(limits.application_protocols.values);
         return .{
             .h3 = try .bind(allocator, io, bind_address, limits.http3),
@@ -625,7 +631,7 @@ pub const ProtectedServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                try webTransportProtectedConfig(config),
+                try webTransportProtectedConfig(config, limits.initial_flow_limits),
             ),
             .origin_policy = limits.origin_policy,
             .application_protocols = limits.application_protocols,
@@ -1530,7 +1536,7 @@ pub const StatefulProtectedServer = struct {
         if (!http3.isHttp3Alpn(transport.alpn_protocol)) {
             return error.InvalidAlpn;
         }
-        var resolved_h3 = webTransportHandshakeSessionOptions(h3_options);
+        var resolved_h3 = try webTransportHandshakeSessionOptions(h3_options, limits.initial_flow_limits);
         resolved_h3.early_connect_datagrams = limits.early_connect_datagrams;
         return .{
             .endpoint = try .bind(
@@ -1800,7 +1806,7 @@ pub const HandshakeServer = struct {
                 io,
                 bind_address,
                 limits.http3,
-                try webTransportHandshakeServerOptions(options, capacity, limits.early_connect_datagrams),
+                try webTransportHandshakeServerOptions(options, capacity, limits.early_connect_datagrams, limits.initial_flow_limits),
             ),
             .limits = limits,
         };
@@ -7410,6 +7416,7 @@ pub const ClientSession = struct {
         options: ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!ConnectAttempt {
+        if (options.limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
         try connect_headers.validate(options.headers, .request);
         var offer = try application_protocol.Request.init(allocator, options.limits.application_protocols, options.headers);
         defer offer.deinit(allocator);
@@ -8433,7 +8440,7 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         try application_protocol.validateRequestPolicy(options.limits.application_protocols, options.headers);
-        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
+        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits));
         errdefer h3_client.deinit();
         return connectStatefulAttempt(
             &h3_client,
@@ -8466,7 +8473,7 @@ pub const HandshakeClientSession = struct {
             local_address,
             server,
             options.limits.http3,
-            webTransportHandshakeClientOptions(options.h3),
+            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
             deadline,
         );
         errdefer h3_client.deinit();
@@ -8517,7 +8524,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             source,
             server,
-            webTransportHandshakeClientOptions(options.h3),
+            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
         );
         errdefer h3_client.deinit();
         return beginPendingConnect(
@@ -8554,7 +8561,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             source,
             server,
-            webTransportHandshakeClientOptions(options.h3),
+            try webTransportHandshakeClientOptions(options.h3, options.limits.initial_flow_limits),
             absolute,
         );
         errdefer h3_client.deinit();
@@ -8669,7 +8676,7 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        const effective_h3 = webTransportHandshakeClientOptions(h3_options);
+        const effective_h3 = try webTransportHandshakeClientOptions(h3_options, options.limits.initial_flow_limits);
         var h3_client = if (options.socks5_proxy) |proxy|
             try http3.socks5_runtime.connectHost(
                 allocator,
@@ -8723,7 +8730,7 @@ pub const HandshakeClientSession = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
-        const effective_h3 = webTransportHandshakeClientOptions(h3_options);
+        const effective_h3 = try webTransportHandshakeClientOptions(h3_options, options.limits.initial_flow_limits);
         var h3_client = if (options.socks5_proxy) |proxy|
             try http3.socks5_runtime.connectHostWithDeadline(
                 allocator,
@@ -8902,7 +8909,7 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeConnectAttempt {
         try validateAdditionalConnectHeaders(options.headers, .request);
         try application_protocol.validateRequestPolicy(options.limits.application_protocols, options.headers);
-        const h3_options = webTransportHandshakeSessionOptions(options.h3);
+        const h3_options = try webTransportHandshakeSessionOptions(options.h3, options.limits.initial_flow_limits);
         var h3_client = try http3.runtime.HandshakeClient.initPreconfigured(
             allocator,
             io,
@@ -8941,7 +8948,7 @@ pub const HandshakeClientSession = struct {
             endpoint,
             server,
             established,
-            webTransportHandshakeSessionOptions(options.h3),
+            try webTransportHandshakeSessionOptions(options.h3, options.limits.initial_flow_limits),
         );
         errdefer h3_client.deinit();
         return beginPendingConnect(
@@ -11976,7 +11983,7 @@ pub const ProtectedClientSession = struct {
             &offer,
         );
         defer prepared_headers.deinit(allocator);
-        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportProtectedConfig(options.config));
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, try webTransportProtectedConfig(options.config, options.limits.initial_flow_limits));
         errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
@@ -14401,7 +14408,9 @@ pub const StatefulProtectedConnectAttempt = struct {
     }
 };
 
-fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) Error!http3.runtime.ProtectedConfig {
+fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig, initial: ?webtransport.flow_control.Limits) Error!http3.runtime.ProtectedConfig {
+    // This legacy adapter lacks stateful Session flow-control accounting.
+    if (initial != null) return error.WebTransportNotNegotiated;
     var out = config;
     out.local_settings = webtransport.defaultSettings(out.local_settings);
     if (!out.local_settings.webTransportVersions().legacy) return error.WebTransportNotNegotiated;
@@ -14413,27 +14422,30 @@ fn webTransportHandshakeServerOptions(
     options: http3.runtime.HandshakeServerOptions,
     max_sessions: u64,
     early_datagrams: EarlyDatagramLimits,
+    initial: ?webtransport.flow_control.Limits,
 ) Error!http3.runtime.HandshakeServerOptions {
     var out = options;
-    out.session.local_settings = try webtransport.settingsWithSessionCapacity(
+    out.session.local_settings = try webtransport.settingsWithInitialFlowLimits(
         out.session.local_settings,
         max_sessions,
+        initial,
     );
     out.session.early_connect_datagrams = early_datagrams;
     return out;
 }
 
-fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOptions) http3.runtime.HandshakeClientOptions {
+fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOptions, initial: ?webtransport.flow_control.Limits) Error!http3.runtime.HandshakeClientOptions {
     var out = options;
-    out.session.local_settings = webtransport.defaultSettings(out.session.local_settings);
+    out.session.local_settings = try webtransport.settingsWithInitialFlowLimits(out.session.local_settings, 1, initial);
     return out;
 }
 
 fn webTransportHandshakeSessionOptions(
     options: http3.runtime.HandshakeSessionOptions,
-) http3.runtime.HandshakeSessionOptions {
+    initial: ?webtransport.flow_control.Limits,
+) Error!http3.runtime.HandshakeSessionOptions {
     var out = options;
-    out.local_settings = webtransport.defaultSettings(out.local_settings);
+    out.local_settings = try webtransport.settingsWithInitialFlowLimits(out.local_settings, 1, initial);
     return out;
 }
 
@@ -14447,6 +14459,7 @@ fn connectStatefulAttempt(
     deadline: ?std.Io.Clock.Timestamp,
     restore_to: ?*http3.runtime.HandshakeClient,
 ) Error!HandshakeConnectAttempt {
+    try @import("settings/flow.zig").validateExisting(h3_client.options.local_settings, limits.initial_flow_limits);
     try connect_headers.validate(additional_headers, .request);
     const allocator = h3_client.allocator;
     var offer = try application_protocol.Request.init(allocator, limits.application_protocols, additional_headers);
