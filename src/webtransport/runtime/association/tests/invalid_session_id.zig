@@ -6,6 +6,9 @@ const fixture = @import("../../session_control/test_support/handshake_pair.zig")
 const Pair = fixture.Pair;
 const Role = fixture.Role;
 const ObservedBatchSend = @import("../../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
+test {
+    _ = @import("truncated.zig");
+}
 
 const Reader = enum {
     whole,

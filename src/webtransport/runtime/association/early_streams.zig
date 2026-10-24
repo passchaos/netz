@@ -8,6 +8,7 @@ const quic = @import("../../../quic/mod.zig");
 const range_set = @import("../../../internal/exact_range_set.zig");
 const association = @import("../stream_association.zig");
 const rejection = @import("rejection.zig");
+const association_header = @import("header.zig");
 
 pub const Error = association.Error || http3.runtime.Error;
 pub const Limits = struct {
@@ -27,11 +28,7 @@ pub const Owners = struct {
     }
 };
 
-const Header = struct {
-    direction: webtransport.StreamDirection,
-    session_id: ?u62,
-    invalid: bool = false,
-};
+const Header = association_header.Header;
 
 pub const State = struct {
     const Entry = struct {
@@ -103,8 +100,7 @@ pub const State = struct {
                 _ = self.entries.orderedRemove(index);
                 continue;
             }
-            if (peek(connection, entry.stream_id)) |header| entry.header = header;
-            if (entry.header.invalid) return association.rejectInvalidSessionId(connection);
+            if (try association_header.peek(connection, entry.stream_id)) |header| entry.header = header;
             if (entry.header.session_id) |session_id| {
                 if (active.contains(session_id)) {
                     _ = self.entries.orderedRemove(index);
@@ -136,8 +132,7 @@ pub const State = struct {
                     continue;
                 }
                 if (self.find(id) != null) continue;
-                const header = peek(connection, id) orelse continue;
-                if (header.invalid) return association.rejectInvalidSessionId(connection);
+                const header = (try association_header.peek(connection, id)) orelse continue;
                 if (header.session_id) |session_id| {
                     if (active.contains(session_id)) continue;
                 }
@@ -190,16 +185,4 @@ fn gone(self: *const State, connection: *const quic.one_rtt.Connection, session_
         if (stats.final_size != null or stats.reset != null) return true;
     }
     return false;
-}
-
-fn peek(connection: *quic.one_rtt.Connection, stream_id: u62) ?Header {
-    const bytes = connection.retainedReceivedStream(stream_id) orelse return null;
-    const kind = quic.varint.decodeSlice(bytes) catch return null;
-    const direction: webtransport.StreamDirection = if (quic.StreamId.init(stream_id).direction() == .bidirectional) .bidirectional else .unidirectional;
-    const expected: u64 = if (direction == .bidirectional) http3.FrameType.webtransport_stream else @intFromEnum(http3.StreamType.webtransport_unidirectional);
-    if (kind.value != expected) return null;
-    const session_id = quic.varint.decodeSlice(bytes[kind.len..]) catch return .{ .direction = direction, .session_id = null };
-    const id = std.math.cast(u62, session_id.value) orelse return .{ .direction = direction, .session_id = null, .invalid = true };
-    if (!webtransport.SessionId.init(id).isClientInitiatedBidirectional()) return .{ .direction = direction, .session_id = null, .invalid = true };
-    return .{ .direction = direction, .session_id = id };
 }

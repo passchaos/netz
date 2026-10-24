@@ -1562,7 +1562,10 @@ Current protocol coverage includes:
   hash-map growth or removal of the prior producer,
   modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
-  stream association, real-handshake bidi/uni open/send/receive with
+  stream association with shared parsing for accepted and early streams,
+  clean-FIN truncated Session IDs rejected with `H3_FRAME_ERROR` while
+  reordered header bytes and pre-association resets retain their ownership,
+  real-handshake bidi/uni open/send/receive with
   per-session limits, prevalidated transactional cross-stream packet-batch writes that
   commit only the socket-visible prefix, with indexed O(n) duplicate validation
   and stable fixed-capacity priority selection under `runtime/stream/`, shared

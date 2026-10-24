@@ -8,6 +8,7 @@ const flow_receive = @import("flow/receive.zig");
 const association_prefix = @import("stream/prefix.zig");
 const buffered_rejection = @import("association/rejection.zig");
 const abandoned_receive = @import("association/abandoned.zig");
+const association_header = @import("association/header.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 
@@ -244,70 +245,16 @@ fn identifyInternal(
             );
             return .{ .rejected = progressed };
         }
-        const available = connection.retainedReceivedStream(stream_id) orelse
-            return .unclaimed;
-        const prefix_len = switch (direction) {
-            .bidirectional => blk: {
-                const parsed =
-                    webtransport.BidirectionalStreamHeader.parse(available) catch |err|
-                        switch (err) {
-                            error.BufferTooShort => return .unclaimed,
-                            // Another HTTP/3 adapter owns ordinary request or
-                            // extension streams on the same QUIC connection.
-                            error.InvalidStreamType => return .unclaimed,
-                            error.InvalidSessionId => return rejectInvalidSessionId(connection),
-                            else => return err,
-                        };
-                if (parsed.session_id.value != session_id.value) {
-                    if (sessions) |known| {
-                        if (known.contains(parsed.session_id.value)) {
-                            return .unclaimed;
-                        }
-                    }
-                    const progressed = try rejectWrongSession(
-                        connection,
-                        stream_id,
-                        direction,
-                        single_attempt,
-                    );
-                    return .{ .rejected = progressed };
-                }
-                break :blk parsed.consumed;
-            },
-            .unidirectional => blk: {
-                const parsed =
-                    webtransport.UnidirectionalStreamHeader.parse(available) catch |err|
-                        switch (err) {
-                            error.BufferTooShort => return .unclaimed,
-                            error.InvalidSessionId => return rejectInvalidSessionId(connection),
-                            else => return err,
-                        };
-                if (parsed.stream_type !=
-                    http3.StreamType.webtransport_unidirectional)
-                {
-                    return .unclaimed;
-                }
-                if (parsed.session_id == null or
-                    parsed.session_id.?.value != session_id.value)
-                {
-                    if (parsed.session_id) |other| {
-                        if (sessions) |known| {
-                            if (known.contains(other.value)) {
-                                return .unclaimed;
-                            }
-                        }
-                    }
-                    const progressed = try rejectWrongSession(
-                        connection,
-                        stream_id,
-                        direction,
-                        single_attempt,
-                    );
-                    return .{ .rejected = progressed };
-                }
-                break :blk parsed.consumed;
-            },
-        };
+        const header = (try association_header.peek(connection, stream_id)) orelse return .unclaimed;
+        const associated_session = header.session_id orelse return .unclaimed;
+        if (associated_session != session_id.value) {
+            if (sessions) |known| {
+                if (known.contains(associated_session)) return .unclaimed;
+            }
+            const progressed = try rejectWrongSession(connection, stream_id, direction, single_attempt);
+            return .{ .rejected = progressed };
+        }
+        const prefix_len = header.consumed;
         stream = try registry.registerPeer(stream_id, direction);
         stream.?.receive_header_len = prefix_len;
         try flow_receive.observe(connection, registry, stream.?);
