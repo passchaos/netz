@@ -7945,6 +7945,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingPushEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "PushFailure"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "PushEventResult"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "pollPushEventOnceWithFailure"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "tryRejectPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "PushedResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ServerPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));

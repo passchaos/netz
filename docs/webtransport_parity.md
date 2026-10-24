@@ -1646,6 +1646,21 @@ or event poll submits that credit. Real QUIC regressions cover both roles,
 late FIN, cancellation retry and transfer, rejection allocation failure,
 framing/operation error scope, and receive-credit retry without duplicate DATA.
 
+Handshake-client push polling and DATA reads also retain stream-local failure
+ownership. A failed push keeps its Push ID, parent request ID, stream ID,
+parser cause and cancellation code until STOP_SENDING is submitted, and skips
+that reader while healthy pushes and ordinary responses remain usable.
+`pollPushEventOnceWithFailure` returns an event or an identified `PushFailure`;
+its caller can retry `tryRejectPush` without cancelling the parent request.
+Detection reports its parser cause under cancellation backpressure, socket
+errors preserve the rejection for retry, and receive deadlines keep the owner.
+Explicit CANCEL_PUSH can take over retained rejection; a peer RESET retires
+the failed owner and promise without reopening its stream. QPACK cancellation
+is prepared before STOP_SENDING and recorded once; failed decoder feedback
+remains queued. Allocation/API errors retain ordinary scope and malformed
+QPACK or truncated DATA remains a connection error. These policies live under
+`http3/runtime/stream/push/` with adjacent protected-QUIC regressions.
+
 ## Remaining gaps
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

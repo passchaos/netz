@@ -239,6 +239,7 @@ test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/response_failure_retry_tests.zig");
     _ = @import("runtime/receive/message_data_tests.zig");
+    _ = @import("runtime/stream/push/failure_tests.zig");
 }
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
@@ -859,6 +860,9 @@ pub const Limits = struct {
 /// correlates the response with PUSH_PROMISE/CANCEL_PUSH, while the latter is
 /// the QPACK section-acknowledgment and transport flow-control identity.
 pub const StreamingPushEvent = push_state.PushEvent;
+const push_failure = @import("runtime/stream/push/failure.zig");
+pub const PushFailure = push_failure.Failure;
+pub const PushEventResult = push_failure.Result;
 
 pub const PushedResponse = push_aggregate.Response;
 const ClientPushAggregateState = push_aggregate.State;
@@ -11847,6 +11851,7 @@ pub const HandshakeClient = struct {
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
     pending_response_failures: response_failure.Pending = .{},
+    pending_push_failures: push_failure.Pending = .{},
     push_streams: PushStreamSet,
     push_aggregate: ClientPushAggregateState = .{},
     receive_packets: ConnectionPacketCursor = .{},
@@ -14170,6 +14175,7 @@ pub const HandshakeClient = struct {
 
     pub fn deinit(self: *HandshakeClient) void {
         self.pending_response_failures.deinit(self.allocator);
+        self.pending_push_failures.deinit(self.allocator);
         self.critical_stream_send_scratch.deinit(self.allocator);
         self.stream_send_scratch.deinit(self.allocator);
         self.ticket_receiver.deinit();
@@ -18337,7 +18343,7 @@ pub const HandshakeClient = struct {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
-        return self.pollPushEventMatching(null, false);
+        return self.pollPushEventMatching(null, false, null);
     }
 
     /// Return one buffered push event without waiting for pacing, congestion,
@@ -18348,7 +18354,21 @@ pub const HandshakeClient = struct {
     ) Error!?StreamingPushEvent {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
-        return self.pollPushEventMatching(null, true);
+        return self.pollPushEventMatching(null, true, null);
+    }
+
+    /// Return a buffered push event or transfer an identified stream-local
+    /// failure. The caller retries tryRejectPush; connection and local errors
+    /// retain their ordinary error scope.
+    pub fn pollPushEventOnceWithFailure(self: *HandshakeClient) Error!?PushEventResult {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        var failed: ?PushFailure = null;
+        const event = self.pollPushEventMatching(null, true, &failed) catch |err| {
+            if (failed) |value| return .{ .failure = value };
+            return err;
+        } orelse return null;
+        return .{ .event = event };
     }
 
     /// Wait for an event from any promised push within one relative budget.
@@ -18387,6 +18407,7 @@ pub const HandshakeClient = struct {
             if (try self.pollPushEventMatching(
                 target_push_id,
                 false,
+                null,
             )) |event| {
                 return event;
             }
@@ -18415,8 +18436,11 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         target_push_id: ?u64,
         single_attempt: bool,
+        failure_out: ?*?PushFailure,
     ) Error!?StreamingPushEvent {
         if (self.callback_reader_active) return error.ConcurrentRead;
+        if (failure_out) |output| output.* = null;
+        try push_read_failure.progress(self, target_push_id, failure_out);
         if (single_attempt) {
             self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
                 error.PacingLimited,
@@ -18428,6 +18452,7 @@ pub const HandshakeClient = struct {
         }
         var index: usize = 0;
         while (self.push_streams.entryAt(index)) |entry| : (index += 1) {
+            if (PushStreamSet.entryFailurePending(entry)) continue;
             if (PushStreamSet.entryReader(entry)) |reader| {
                 if (single_attempt) {
                     releaseStreamingReaderCapacityOnce(
@@ -18462,18 +18487,14 @@ pub const HandshakeClient = struct {
                 return ready.event;
             }
         }
+        if (failure_out == null) try self.pending_push_failures.reserve(self.allocator);
         try self.qpack_decode.prepareSectionAcknowledgments(1);
         const ready = self.push_streams.next(
             self.qpack_decode.table,
             self.options.local_settings.qpack_blocked_streams,
             target_push_id,
         ) catch |err| {
-            if (!try push_read_failure.handshake(
-                self,
-                self.push_streams.lastErrorStreamId(),
-                err,
-                single_attempt,
-            )) return null;
+            try push_read_failure.retain(self, self.push_streams.lastErrorStreamId(), err, failure_out);
             return err;
         } orelse return null;
         var event = ready.event;
@@ -18603,20 +18624,7 @@ pub const HandshakeClient = struct {
     ) Error!usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.push_streams.findByPushId(push_id) orelse
-            return error.UnexpectedStream;
-        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
-        const stream_id = reader.streamId();
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            reader,
-        );
-        return reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) {
-                _ = push_read_failure.handshake(self, stream_id, err, false) catch false;
-            }
-            return err;
-        };
+        return (try push_read_failure.access(self, push_id, out, .read, false)) orelse 0;
     }
 
     /// Copy available push DATA without waiting for receive-credit pacing.
@@ -18627,26 +18635,7 @@ pub const HandshakeClient = struct {
         out: []u8,
     ) Error!?usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
-        const entry = self.push_streams.findByPushId(push_id) orelse
-            return error.UnexpectedStream;
-        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
-        const stream_id = reader.streamId();
-        releaseStreamingReaderCapacityOnce(
-            &self.established.connection,
-            reader,
-        ) catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => return null,
-            else => return err,
-        };
-        return reader.readData(out) catch |err| {
-            if (runtime_error.dataReadPeerError(err)) {
-                _ = push_read_failure.handshake(self, stream_id, err, true) catch false;
-            }
-            return err;
-        };
+        return push_read_failure.access(self, push_id, out, .read, true);
     }
 
     pub fn skipPushData(
@@ -18655,25 +18644,7 @@ pub const HandshakeClient = struct {
     ) Error!usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        const entry = self.push_streams.findByPushId(push_id) orelse
-            return error.UnexpectedStream;
-        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
-        const stream_id = reader.streamId();
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            reader,
-        );
-        const skipped = reader.skipData() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) {
-                _ = push_read_failure.handshake(self, stream_id, err, false) catch false;
-            }
-            return err;
-        };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            reader,
-        );
-        return skipped;
+        return (try push_read_failure.access(self, push_id, &.{}, .skip, false)) orelse 0;
     }
 
     /// Discard available push DATA without waiting for receive-credit pacing.
@@ -18682,26 +18653,7 @@ pub const HandshakeClient = struct {
         push_id: u64,
     ) Error!?usize {
         if (self.callback_reader_active) return error.ConcurrentRead;
-        const entry = self.push_streams.findByPushId(push_id) orelse
-            return error.UnexpectedStream;
-        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
-        const stream_id = reader.streamId();
-        releaseStreamingReaderCapacityOnce(
-            &self.established.connection,
-            reader,
-        ) catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => return null,
-            else => return err,
-        };
-        return reader.skipData() catch |err| {
-            if (runtime_error.dataReadPeerError(err)) {
-                _ = push_read_failure.handshake(self, stream_id, err, true) catch false;
-            }
-            return err;
-        };
+        return push_read_failure.access(self, push_id, &.{}, .skip, true);
     }
 
     pub fn receivePush(
@@ -19418,6 +19370,9 @@ pub const HandshakeClient = struct {
         push_id: u64,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        defer if (self.push_streams.isCancelledPush(push_id)) {
+            push_read_failure.discard(self, push_id);
+        };
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const max_push_id = self.control.local_max_push_id orelse
@@ -19502,6 +19457,14 @@ pub const HandshakeClient = struct {
         }
     }
 
+    /// Retry scoped rejection for a failure returned by push polling. A
+    /// failed submission preserves the stream, promise and original identity.
+    pub fn tryRejectPush(self: *HandshakeClient, failed: PushFailure) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        try push_read_failure.submit(self, failed);
+        push_read_failure.discard(self, failed.push_id);
+    }
+
     /// Submit CANCEL_PUSH once without waiting for pacing or reading UDP. All
     /// fallible push-state capacity is reserved before the frame reaches the
     /// socket; a failed send leaves the promise and control cursor unchanged.
@@ -19509,6 +19472,9 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!void {
+        defer if (self.push_streams.isCancelledPush(push_id)) {
+            push_read_failure.discard(self, push_id);
+        };
         if (self.callback_reader_active) return error.ConcurrentRead;
         const push_stream_id = self.push_streams.streamIdForPush(push_id);
         try self.push_streams.preparePeerCancellation(push_id);

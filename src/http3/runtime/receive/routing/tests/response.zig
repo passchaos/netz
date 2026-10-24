@@ -1054,6 +1054,8 @@ test "HTTP/3 fragmented push prefix credits QUIC once and reset retires stream" 
     );
     try std.testing.expect(connection.peerStreamClosed(3));
     try std.testing.expect(!pushes.containsStream(3));
+    try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
+    try std.testing.expect(pushes.promiseCompleted(0));
 }
 
 test "HTTP/3 response router enforces blocked budget across buffered and streaming sets" {

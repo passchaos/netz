@@ -37,6 +37,7 @@ pub const Set = struct {
         receive: quic.stream_state.RecvState,
         reader: ?Reader = null,
         push_id: ?u64 = null,
+        failure_pending: bool = false,
         from: ?net.IpAddress = null,
 
         pub fn deinit(self: *Entry) void {
@@ -267,6 +268,28 @@ pub const Set = struct {
         return null;
     }
 
+    pub const Identity = struct { push_id: u64, request_stream_id: u62 };
+
+    pub fn identityForStream(self: *Set, stream_id: u62) ?Identity {
+        const entry = self.findByStreamId(stream_id) orelse return null;
+        const push_id = entry.push_id orelse return null;
+        const promise = self.findPromise(push_id) orelse return null;
+        return .{ .push_id = push_id, .request_stream_id = promise.request_stream_id };
+    }
+
+    pub fn suspendFailedStream(self: *Set, stream_id: u62) void {
+        if (self.findByStreamId(stream_id)) |entry| entry.failure_pending = true;
+    }
+
+    pub fn failurePending(self: *Set, stream_id: u62) bool {
+        const entry = self.findByStreamId(stream_id) orelse return false;
+        return entry.failure_pending;
+    }
+
+    pub fn entryFailurePending(entry: *const Entry) bool {
+        return entry.failure_pending;
+    }
+
     pub fn promiseCount(self: Set) usize {
         return self.promises.items.len;
     }
@@ -285,6 +308,10 @@ pub const Set = struct {
     pub fn hasPromise(self: Set, push_id: u64) bool {
         return self.completed_promises.contains(push_id) or
             self.findPromise(push_id) != null;
+    }
+
+    pub fn promiseCompleted(self: Set, push_id: u64) bool {
+        return self.completed_promises.contains(push_id);
     }
 
     /// True after a promise has reached a terminal state, including a locally
@@ -587,6 +614,10 @@ pub const Set = struct {
         var remaining = entry_count;
         while (remaining != 0) : (remaining -= 1) {
             const entry = &self.entries.items[index];
+            if (entry.failure_pending) {
+                index = if (index + 1 == entry_count) 0 else index + 1;
+                continue;
+            }
             if (entry.reader) |*reader| {
                 const push_id = entry.push_id orelse unreachable;
                 if (self.findPromise(push_id)) |promise| {
@@ -650,6 +681,7 @@ pub const Set = struct {
     fn finishedEntryEvent(self: *Set, index: usize) ?ReadyEvent {
         if (index >= self.entries.items.len) return null;
         const entry = &self.entries.items[index];
+        if (entry.failure_pending) return null;
         const reader = if (entry.reader) |*value| value else return null;
         if (!reader.finished()) return null;
         const push_id = entry.push_id orelse return null;
@@ -674,7 +706,7 @@ pub const Set = struct {
     ) Error!?ReadyEvent {
         if (index >= self.entries.items.len) return null;
         const entry = &self.entries.items[index];
-        if (entry.reader == null) return null;
+        if (entry.failure_pending or entry.reader == null) return null;
         const push_id = entry.push_id orelse return null;
         const promise = self.findPromise(push_id) orelse return null;
         const event = entry.reader.?.next(table) catch |err| switch (err) {
@@ -815,6 +847,10 @@ pub const Set = struct {
             }
         }
         self.removeStream(stream_id);
+    }
+
+    pub fn retireFailedPromise(self: *Set, push_id: u64) void {
+        if (self.findPromise(push_id) != null) self.retirePromiseAssumeCapacity(push_id);
     }
 
     pub fn lastErrorStreamId(self: Set) ?u62 {

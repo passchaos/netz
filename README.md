@@ -614,6 +614,9 @@ Current protocol coverage includes:
   shared handshake request/response DATA access with retained Content-Length
   cancellation, scoped truncated-frame errors and consumed-byte counts that
   survive receive-credit socket failures,
+  incremental pushed-response failure retention with parent-request isolation,
+  scoped STOP_SENDING/QPACK retry and explicit `PushEventResult` ownership
+  through `pollPushEventOnceWithFailure` and `tryRejectPush`,
   HEADERS-only dynamic request/response writers for incremental DATA sending
   with Content-Length generation/verification, parsed length reuse, and
   CONNECT/204/304 body guards, including detached Extended CONNECT FIN

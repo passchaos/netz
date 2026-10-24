@@ -124,7 +124,7 @@ pub fn routePacket(
                                 .requestCompletedPeerStreamRelease(stream_id);
                         }
                     }
-                    pushes.removeByStreamId(stream_id);
+                    pushes.failStream(stream_id);
                 }
             }
             if (!tracked_push and !preserve_for_detached) {
