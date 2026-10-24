@@ -38237,6 +38237,8 @@ test {
     _ = @import("runtime/flow/tests/window.zig");
     _ = @import("runtime/flow/tests/data.zig");
     _ = @import("runtime/headers/tests/message.zig");
+    _ = @import("../http/field_value_tests.zig");
+    _ = @import("runtime/headers/value_reuse_tests.zig");
     _ = @import("runtime/tls_tests.zig");
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");

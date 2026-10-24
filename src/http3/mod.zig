@@ -5468,11 +5468,7 @@ fn validateHeaderName(name: []const u8) Error!void {
     }
 }
 
-fn validateHeaderValue(value: []const u8) Error!void {
-    for (value) |byte| {
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeader;
-    }
-}
+const validateHeaderValue = @import("../http/field_value.zig").validate;
 
 fn validHeaderNameByte(byte: u8) bool {
     if (byte >= 'A' and byte <= 'Z') return false;

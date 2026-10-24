@@ -27,6 +27,22 @@ test "HTTP/3 owned request head preflight leaves unallocated streams unowned" {
     }, 0, &owner));
     try std.testing.expect(owner == null);
     try std.testing.expectEqual(packet_number, h3.established.connection.next_packet_number);
+    for ([_][]const u8{ " leading", "trailing\t" }) |value| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        const original = h3.allocator;
+        h3.allocator = failing.allocator();
+        defer h3.allocator = original;
+        owner = 123;
+        try std.testing.expectError(error.InvalidHeader, h3.startRequestOwned(.{
+            .method = "GET",
+            .authority = "localhost",
+            .path = "/invalid-value",
+            .headers = &.{.{ .name = "x-test", .value = value }},
+        }, 0, &owner));
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expect(owner == null);
+        try std.testing.expectEqual(packet_number, h3.established.connection.next_packet_number);
+    }
     try std.testing.expectEqual(@as(u62, 4), h3.next_stream_id);
     try std.testing.expectEqual(@as(u64, 4), h3.established.connection.nextLocalBidirectionalStreamId());
     try std.testing.expectEqual(requests, h3.request_lifecycle.count());

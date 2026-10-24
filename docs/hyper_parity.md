@@ -747,6 +747,18 @@ validation and exact buffered-byte handoff.
 
 ## HTTP/2 consecutive and parallel round trips
 
+HTTP/2 and HTTP/3 now share field-content validation in
+`src/http/field_value.zig`. RFC 9113 section 8.2.1 and RFC 9114 section 10.3
+reject values with leading/trailing SP or HTAB across request, response and
+trailer blocks. Empty values, internal whitespace and opaque non-ASCII bytes
+remain valid. Encoding rejects invalid values before stream-ID, HPACK/QPACK or
+wire mutation; the HTTP/3 codec also preserves a pre-existing output prefix.
+Real TCP/protected-UDP regressions reject malformed fields with stream-scoped
+protocol errors, keep application handlers uninvolved, and then decode healthy
+messages that reuse the same dynamic HPACK/QPACK table entries. Header-value
+validation therefore does not weaken compression-table synchronization or
+connection reuse after a message error.
+
 Hyper's `benches/end_to_end.rs` defines consecutive empty GET, consecutive
 10-byte and 100-KiB POST, parallel x10 empty GET, max-window chunked request,
 and max-window 1-MiB response scenarios on persistent HTTP/2 connections. The

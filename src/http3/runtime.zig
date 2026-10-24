@@ -237,6 +237,7 @@ pub const ResponseFailure = response_failure.Failure;
 pub const ResponseEventResult = response_failure.Result;
 test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
+    _ = @import("runtime/receive/field_value_tests.zig");
     _ = @import("runtime/receive/response_failure_retry_tests.zig");
     _ = @import("runtime/receive/message_data_tests.zig");
     _ = @import("runtime/receive/failure_ownership_tests.zig");
