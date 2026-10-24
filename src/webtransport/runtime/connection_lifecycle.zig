@@ -16,6 +16,13 @@ pub fn observeGoAway(control: *control_mod.Control, h3: anytype) void {
     if (!terminating(&h3.established.connection)) control.observeGoAway(h3.control.peer_goaway_id);
 }
 
+pub fn observeConnectSend(control: *control_mod.Control, h3: anytype) void {
+    if (!control.observeConnectSend(&h3.established.connection)) return;
+    // Retain already-accepted DATAGRAMs under H3's queue contract, and reject
+    // future arrivals for this association without affecting sibling Sessions.
+    h3.connect_datagrams.markTerminal(control.session_id.value, .peer_fin);
+}
+
 pub fn activate(control: *control_mod.Control, h3: anytype, registry: anytype) void {
     control.bindFlow(registry.flow);
     h3.connect_datagrams.discardOnConnectionClose(control.session_id.value);
@@ -40,6 +47,7 @@ pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: an
 }
 
 fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
+    observeConnectSend(control, h3);
     // DATAGRAM-only consumers and send-side flow waits still own Session
     // maintenance. Settle terminal receive bytes without consuming the RESET
     // notification, so they can return WT_MAX_DATA before another stream read.

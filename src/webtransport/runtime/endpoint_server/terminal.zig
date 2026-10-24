@@ -90,12 +90,5 @@ pub fn finish(target: anytype) @TypeOf(target.close(0, "")) {
 }
 
 fn observeSendTerminal(target: anytype) void {
-    const stats = target.h3.established.connection.sendStreamStats(target.session_id.value) orelse return;
-    if (stats.reset != null or stats.stopped != null) {
-        target.control.recordLocalCloseFailure(0);
-        target.close_response_pending = false;
-    } else if (stats.final_size != null) {
-        target.control.local_close_sent = true;
-        if (!target.control.state.closed) target.control.state.close(0);
-    }
+    if (target.control.observeConnectSend(&target.h3.established.connection)) target.close_response_pending = false;
 }

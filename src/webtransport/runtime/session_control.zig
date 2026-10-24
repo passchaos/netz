@@ -12,6 +12,7 @@ const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const stream_termination = @import("session_control/stream_termination.zig");
+const connect_termination = @import("session_control/connect_termination.zig");
 
 pub const TerminateProgress = stream_termination.TerminateProgress;
 pub const terminateStreams = stream_termination.terminateStreams;
@@ -105,6 +106,9 @@ pub const Control = struct {
     pending_draining: bool = false,
     pending_closed: bool = false,
     pending_reset: ?webtransport.StreamError = null,
+    /// A synthesized send-side event remains set after delivery. Actual peer
+    /// CLOSE/FIN/reset clears it, preserving strict post-CLOSE validation.
+    send_termination: connect_termination.Send = .none,
 
     h3_stage: H3Stage = .frame_type,
     h3_varint: VarIntDecoder = .{},
@@ -286,6 +290,12 @@ pub const Control = struct {
         return true;
     }
 
+    /// Stop application use immediately, while retaining buffered peer
+    /// Capsule events until polling can deliver them in order.
+    pub fn observeConnectSend(self: *Control, connection: *const quic.one_rtt.Connection) bool {
+        return connect_termination.observe(self, connection);
+    }
+
     pub fn beginLocalClose(self: *Control) Error!void {
         try self.ensureOpen();
         self.local_close_started = true;
@@ -393,10 +403,23 @@ pub const Control = struct {
         single_attempt: bool,
     ) Error!?Event {
         if (self.observeConnection(connection)) return error.ConnectionClosed;
+        _ = self.observeConnectSend(connection);
         const available = connection.availableReceivedStream(
             self.session_id.value,
         ) orelse &.{};
         if (self.terminal_reported) {
+            if (self.send_termination != .none) {
+                // The peer's send direction can still carry in-flight bytes
+                // after our send direction ends. No peer CLOSE was decoded,
+                // so discard these bytes without inventing H3_MESSAGE_ERROR.
+                if (available.len != 0) {
+                    if (single_attempt)
+                        try connection.tryReleaseReceivedCapacity(self.session_id.value, available.len)
+                    else
+                        try connection.releaseReceivedCapacity(self.session_id.value, available.len);
+                }
+                return null;
+            }
             if (available.len == 0 or self.handledInvalidCapsule()) {
                 return null;
             }
@@ -436,31 +459,43 @@ pub const Control = struct {
             if (result.event) |event| return event;
         }
 
-        const stats = connection.recvStreamStats(
-            self.session_id.value,
-        ) orelse return null;
-        if (stats.reset) |reset| {
-            if (self.terminal_reported) return null;
-            self.terminal_reported = true;
-            self.state.close(0);
-            return .{ .reset = .fromHttp3(
-                reset.application_error_code,
-            ) };
+        if (connection.recvStreamStats(self.session_id.value)) |stats| {
+            if (stats.reset) |reset| {
+                if (self.terminal_reported) return null;
+                self.send_termination = .none;
+                self.terminal_reported = true;
+                self.state.close(0);
+                return .{ .reset = .fromHttp3(
+                    reset.application_error_code,
+                ) };
+            }
+            if (stats.final_size != null and
+                stats.bytes_read == stats.final_size.? and
+                !self.terminal_reported)
+            {
+                if (!self.atMessageBoundary()) return error.InvalidCapsule;
+                // A clean CONNECT FIN without WT_CLOSE_SESSION is defined as a
+                // normal close with code zero and an empty reason.
+                self.clearCloseReason();
+                self.send_termination = .none;
+                self.terminal_reported = true;
+                self.state.close(0);
+                return .{ .closed = .{
+                    .code = 0,
+                    .reason = &.{},
+                } };
+            }
         }
-        if (stats.final_size != null and
-            stats.bytes_read == stats.final_size.? and
-            !self.terminal_reported)
-        {
-            if (!self.atMessageBoundary()) return error.InvalidCapsule;
-            // A clean CONNECT FIN without WT_CLOSE_SESSION is defined as a
-            // normal close with code zero and an empty reason.
-            self.clearCloseReason();
+        if (self.send_termination != .none) {
             self.terminal_reported = true;
-            self.state.close(0);
-            return .{ .closed = .{
-                .code = 0,
-                .reason = &.{},
-            } };
+            return switch (self.send_termination) {
+                .none => unreachable,
+                .closed => blk: {
+                    self.clearCloseReason();
+                    break :blk .{ .closed = .{ .code = 0, .reason = &.{} } };
+                },
+                else => .{ .reset = .fromHttp3(@intFromEnum(self.send_termination)) },
+            };
         }
         return null;
     }
@@ -592,7 +627,7 @@ pub const Control = struct {
         self: *Control,
         connection: *quic.one_rtt.Connection,
     ) bool {
-        if (!self.terminal_reported or self.handledInvalidCapsule()) {
+        if (!self.terminal_reported or self.send_termination != .none or self.handledInvalidCapsule()) {
             return false;
         }
         if (!self.post_terminal_data_pending) {
@@ -718,6 +753,7 @@ pub const Control = struct {
             return error.InvalidCapsule;
         }
         self.clearCloseReason();
+        self.send_termination = .none;
         self.terminal_reported = true;
         self.state.close(0);
         return .{ .closed = .{
@@ -822,6 +858,7 @@ pub const Control = struct {
                         self.capsule_stage = .capsule_type;
                         self.capsule_type = 0;
                         self.capsule_value_remaining = 0;
+                        self.send_termination = .none;
                         self.terminal_reported = true;
                         self.state.close(code);
                         return .{ .closed = .{

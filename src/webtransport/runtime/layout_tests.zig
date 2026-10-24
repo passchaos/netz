@@ -30,26 +30,26 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
         // the resulting tail padding without increasing the adapter budget.
         const expected: Layout = switch (builtin.mode) {
             .Debug, .ReleaseSafe => .{
+                .accepted = 1_152,
+                .accepted_handshake_overhead = 968,
+                .client_overhead = 1_064,
+                .handshake_client_overhead = 888,
+                .protected_client_overhead = 896,
+            },
+            .ReleaseFast, .ReleaseSmall => .{
                 .accepted = 1_144,
                 .accepted_handshake_overhead = 960,
                 .client_overhead = 1_056,
                 .handshake_client_overhead = 880,
-                .protected_client_overhead = 888,
-            },
-            .ReleaseFast, .ReleaseSmall => .{
-                .accepted = 1_136,
-                .accepted_handshake_overhead = 952,
-                .client_overhead = 1_048,
-                .handshake_client_overhead = 872,
-                .protected_client_overhead = 888,
+                .protected_client_overhead = 896,
             },
         };
         try std.testing.expectEqual(
-            @as(usize, 344),
+            @as(usize, 352),
             @sizeOf(session_control.Control),
         );
         try std.testing.expectEqual(
-            @as(usize, 504),
+            @as(usize, 512),
             @sizeOf(protected_control.Reader),
         );
         try std.testing.expectEqual(
@@ -58,7 +58,7 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
         );
         try std.testing.expectEqual(expected.accepted, @sizeOf(AcceptedSession));
         try std.testing.expectEqual(
-            @as(usize, 944),
+            @as(usize, 952),
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(

@@ -27,6 +27,23 @@ Sessions, control-only wakeups, DATAGRAM/stream reuse, duplicate advisory
 signals and exact later CLOSE metadata; the pending CONNECT regression checks
 that backpressure resumes its committed suffix after GOAWAY.
 
+## CONNECT send termination
+
+Authenticated Session owners observe CONNECT send-side STOP_SENDING, RESET
+and FIN in the shared lifecycle, including before application sends and stream
+opens. STOP_SENDING closes the Session even while QUIC's mandatory RESET
+response is paced. Polling retains one scoped reset event with the transport
+error code, or a normal code-zero close for an otherwise-untracked local FIN.
+Associated streams terminate with WT_SESSION_GONE; sibling Sessions keep
+their streams and DATAGRAMs on the same QUIC connection.
+
+Buffered DRAIN/CLOSE events retain their order and exact application metadata
+when they race with send termination. In-flight peer CONNECT bytes after a
+synthesized termination are discarded; bytes beyond an actually decoded
+WT_CLOSE_SESSION still require H3_MESSAGE_ERROR. Regression coverage lives in
+`src/webtransport/runtime/session_control/connect_termination_tests.zig` and
+`connect_sibling_tests.zig`, using real UDP/H3 traffic in both endpoint roles.
+
 ## Current direct evidence
 
 Run:

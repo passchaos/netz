@@ -1289,12 +1289,18 @@ test "WebTransport handshake rejects FIN during Capsule type varint" {
                 );
 
                 const event = try session.receiveSessionEvent();
-                try std.testing.expect(event == .reset);
+                // The sender observes its own untracked CONNECT FIN first.
+                // Still verify that the peer rejects the truncated Capsule
+                // with H3_MESSAGE_ERROR on the opposite transport direction.
+                try std.testing.expect(event == .closed);
+                const connection = &session.h3.established.connection;
+                const deadline = std.Io.Clock.Timestamp.fromNow(connection.endpoint.io, .{ .clock = .awake, .raw = .fromSeconds(1) });
+                while (connection.recvStreamStats(session.session_id.value).?.reset == null) try session.h3.receiveDetachedRequestProgressWithDeadline(session.session_id.value, deadline);
+                const reset = connection.recvStreamStats(session.session_id.value).?.reset.?;
                 try std.testing.expectEqual(
                     @as(u64, http3.ApplicationErrorCode.message_error),
-                    event.reset.http3_code,
+                    reset.application_error_code,
                 );
-                try std.testing.expect(event.reset.application_code == null);
             }
         }
     };

@@ -3899,7 +3899,7 @@ fn finishEndpointSessionEvent(
     event: SessionEvent,
 ) Error!void {
     if (event == .closed or event == .reset) {
-        if (event == .closed and !target.control.local_close_sent) {
+        if (event == .closed and !target.control.local_close_sent and !target.control.local_close_failed) {
             // Deliver the peer event even when its response FIN is currently
             // paced or flow-control blocked. The next endpoint turn owns the
             // retry and cannot consume another socket receive here.
@@ -11194,7 +11194,7 @@ pub const HandshakeClientSession = struct {
             },
         };
         if (event) |value| {
-            if (value == .closed and !self.control.local_close_sent) {
+            if (value == .closed and !self.control.local_close_sent and !self.control.local_close_failed) {
                 self.close_response_pending = true;
             }
             return value;
@@ -11213,6 +11213,7 @@ pub const HandshakeClientSession = struct {
     fn advanceTerminalCleanupOnce(
         self: *HandshakeClientSession,
     ) Error!session_control.TerminateProgress {
+        if (self.control.local_close_sent or self.control.local_close_failed) self.close_response_pending = false;
         if (try self.control.tryRejectPostTerminalData(
             &self.h3.established.connection,
         )) {
@@ -19132,6 +19133,8 @@ test {
     _ = @import("runtime/session_control/endpoint_rejection_tests.zig");
     _ = @import("runtime/session_control/handshake_rejection_tests.zig");
     _ = @import("runtime/session_control/connection_lifecycle_tests.zig");
+    _ = @import("runtime/session_control/connect_termination_tests.zig");
+    _ = @import("runtime/session_control/connect_sibling_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
     _ = @import("runtime/flow/receive.zig");
     _ = @import("runtime/flow/write.zig");

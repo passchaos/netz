@@ -171,7 +171,8 @@ test "WebTransport endpoint server local CLOSE hides queued data while keeping s
         .{ .datagram = .{ .data = "\x01alive" } },
     });
     const h3 = fixture.connectionSession();
-    while (try h3.connect_datagrams.queuedCount(0) == 0) try fixture.routeTransport();
+    while (try h3.connect_datagrams.queuedCount(sibling.session_id.value) == 0) try fixture.routeTransport();
+    try std.testing.expectEqual(@as(usize, 0), try h3.connect_datagrams.queuedCount(accepted.session_id.value));
     var output: [16]u8 = undefined;
     for (0..4) |_| try std.testing.expect((try @import("../../runtime.zig").EndpointServer.testing.pollAcceptedSessionEntry(accepted, &output)) == null);
     var event = try fixture.receive(&output);

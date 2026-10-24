@@ -154,12 +154,5 @@ fn progressActive(h3: *http3.runtime.HandshakeClient, control: *session_control.
 }
 
 fn observeSendTerminal(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool) void {
-    const stats = h3.established.connection.sendStreamStats(control.session_id.value) orelse return;
-    if (stats.reset != null or stats.stopped != null) {
-        control.recordLocalCloseFailure(0);
-        reply.* = false;
-    } else if (stats.final_size != null) {
-        control.local_close_sent = true;
-        if (!control.state.closed) control.state.close(0);
-    }
+    if (control.observeConnectSend(&h3.established.connection)) reply.* = false;
 }

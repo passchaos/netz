@@ -440,15 +440,19 @@ pub const Client = struct {
     last_ready_session_id: ?u62 = null,
 
     fn observeConnection(self: *Client) bool {
-        if (!connection_lifecycle.terminating(&self.h3.established.connection)) return false;
+        const terminating = connection_lifecycle.terminating(&self.h3.established.connection);
         var sessions = self.sessions.valueIterator();
         while (sessions.next()) |session_ptr| {
+            if (!terminating) {
+                connection_lifecycle.observeConnectSend(&session_ptr.*.control, &self.h3);
+                continue;
+            }
             _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3, &session_ptr.*.streams);
             session_ptr.*.close_response_pending = false;
             session_ptr.*.close_state.clear();
             session_ptr.*.drain_state.clear();
         }
-        return true;
+        return terminating;
     }
 
     fn ensureConnectionOpen(self: *Client) Error!void {
