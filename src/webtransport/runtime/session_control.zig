@@ -233,7 +233,7 @@ pub const Control = struct {
         }
     }
 
-    fn takePending(self: *Control) ?Event {
+    pub fn takePending(self: *Control) ?Event {
         if (self.pending_draining) {
             self.pending_draining = false;
             return .draining;
@@ -247,6 +247,18 @@ pub const Control = struct {
             return .{ .reset = info };
         }
         return null;
+    }
+
+    /// GOAWAY is an advisory drain for every Session on this H3 connection.
+    /// Repeated GOAWAYs and a later WT_DRAIN_SESSION share one notification.
+    /// Existing streams and DATAGRAMs remain usable until Session termination.
+    pub fn observeGoAway(self: *Control, peer_goaway_id: ?u64) void {
+        if (peer_goaway_id == null or self.peer_drain_reported or
+            !self.state.established or self.state.closed or
+            self.connection_terminated or self.capsule_error_pending) return;
+        self.peer_drain_reported = true;
+        self.state.drain();
+        self.pending_draining = true;
     }
 
     pub fn ensureOpen(self: Control) Error!void {

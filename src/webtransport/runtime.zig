@@ -6585,6 +6585,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
     ) Error!?SessionEvent {
         self.control.bindFlow(self.streams.flow);
+        connection_lifecycle.observeGoAway(&self.control, &self.h3);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         if (capsule_rejection.pending(&self.control)) {
             try capsule_rejection.finish(&self.control, &self.h3.established.connection, &self.streams);
@@ -7031,6 +7032,7 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        connection_lifecycle.observeGoAway(&self.control, &self.h3);
         if (capsule_rejection.pending(&self.control)) {
             try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);
             return capsule_rejection.errorFor(&self.control);
@@ -10958,6 +10960,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         self.control.bindFlow(self.streams.flow);
+        connection_lifecycle.observeGoAway(&self.control, &self.h3);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (self.dispatcher == null) {
             if (capsule_rejection.pending(&self.control)) {
@@ -11033,6 +11036,7 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        connection_lifecycle.observeGoAway(&self.control, &self.h3);
         if (capsule_rejection.pending(&self.control)) {
             try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);
             return capsule_rejection.errorFor(&self.control);
@@ -11155,6 +11159,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         self.control.bindFlow(self.streams.flow);
+        connection_lifecycle.observeGoAway(&self.control, &self.h3);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         if (capsule_rejection.pending(&self.control)) {
             const ready = capsule_rejection.finishOnce(&self.control, &self.h3.established.connection, &self.streams) catch |err| switch (err) {
@@ -11311,6 +11316,7 @@ fn beginPendingConnect(h3: *http3.runtime.HandshakeClient, authority: []const u8
     try @import("settings/flow.zig").validateRequired(h3.options.local_settings, limits.require_session_flow_control);
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
     try connect_headers.validate(additional, .request);
+    try connect_negotiation.ensureCanStart(h3);
     var offer = try application_protocol.Request.init(h3.allocator, limits.application_protocols, additional);
     errdefer offer.deinit(h3.allocator);
     var queued = try pending_connect_request.Request.initWithOffer(h3.allocator, authority, path, origin, additional, &offer);
@@ -12771,30 +12777,7 @@ fn receiveProtectedServerEvent(
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
     if (session.pending_session_event == null) {
-        if (try session.control.pollPending()) |event| {
-            session.pending_session_event = event;
-        } else {
-            var buffer: [protected_control.buffer_capacity]u8 = undefined;
-            while (session.pending_session_event == null) {
-                const read = if (deadline) |absolute|
-                    try server.receiveSessionDataWithDeadline(
-                        session.session_id,
-                        &buffer,
-                        absolute,
-                    )
-                else
-                    try server.receiveSessionData(session.session_id, &buffer);
-                if (read.fin) {
-                    session.pending_session_event =
-                        (try session.control.finish()) orelse
-                        return error.InvalidSessionState;
-                } else if (try session.control.consume(
-                    buffer[0..read.bytes],
-                )) |event| {
-                    session.pending_session_event = event;
-                }
-            }
-        }
+        session.pending_session_event = try @import("runtime/session_control/received_event.zig").receive(&server.h3, &session.control, session.session_id.value, deadline);
     }
     const event = session.pending_session_event.?;
     if (deadline) |absolute| {
@@ -12864,29 +12847,7 @@ fn receiveProtectedClientEvent(
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
     if (session.pending_session_event == null) {
-        if (try session.control.pollPending()) |event| {
-            session.pending_session_event = event;
-        } else {
-            var buffer: [protected_control.buffer_capacity]u8 = undefined;
-            while (session.pending_session_event == null) {
-                const read = if (deadline) |absolute|
-                    try session.receiveSessionDataWithDeadline(
-                        &buffer,
-                        absolute,
-                    )
-                else
-                    try session.receiveSessionData(&buffer);
-                if (read.fin) {
-                    session.pending_session_event =
-                        (try session.control.finish()) orelse
-                        return error.InvalidSessionState;
-                } else if (try session.control.consume(
-                    buffer[0..read.bytes],
-                )) |event| {
-                    session.pending_session_event = event;
-                }
-            }
-        }
+        session.pending_session_event = try @import("runtime/session_control/received_event.zig").receive(&session.h3, &session.control, session.session_id.value, deadline);
     }
     const event = session.pending_session_event.?;
     if (deadline) |absolute| {
@@ -19185,6 +19146,7 @@ test {
 test {
     _ = @import("runtime/connect/negotiation.zig");
     _ = @import("runtime/connect/pending_request.zig");
+    _ = @import("runtime/goaway_tests.zig");
 }
 
 test {

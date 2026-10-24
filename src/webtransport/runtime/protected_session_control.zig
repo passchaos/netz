@@ -78,6 +78,7 @@ pub const Reader = struct {
     pub fn pollPending(
         self: *Reader,
     ) Error!?session_control.Event {
+        if (self.control.takePending()) |event| return event;
         if (self.pending_start == self.pending_end) return null;
         const bytes = self.pendingBytes();
         const result = try self.control.feedCapsulePayload(bytes);

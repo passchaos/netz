@@ -12,6 +12,10 @@ pub fn terminating(connection: *const quic.one_rtt.Connection) bool {
     return connection.closing() or connection.draining() or connection.closed();
 }
 
+pub fn observeGoAway(control: *control_mod.Control, h3: anytype) void {
+    if (!terminating(&h3.established.connection)) control.observeGoAway(h3.control.peer_goaway_id);
+}
+
 pub fn activate(control: *control_mod.Control, h3: anytype, registry: anytype) void {
     control.bindFlow(registry.flow);
     h3.connect_datagrams.discardOnConnectionClose(control.session_id.value);
@@ -47,7 +51,10 @@ fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype
         control.capsule_error_pending = !control.capsule_error_reported;
         _ = control.tryRejectInvalidCapsule(&h3.established.connection) catch false;
     }
-    if (!control.observeConnection(&h3.established.connection)) return false;
+    if (!control.observeConnection(&h3.established.connection)) {
+        control.observeGoAway(h3.control.peer_goaway_id);
+        return false;
+    }
     h3.connect_datagrams.discardOnConnectionClose(control.session_id.value);
     h3.connect_datagrams.markTerminal(control.session_id.value, .connection_closed);
     return true;

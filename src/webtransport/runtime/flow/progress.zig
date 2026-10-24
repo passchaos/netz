@@ -80,6 +80,7 @@ pub fn Context(comptime H3Pointer: type) type {
         fn maintain(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             self.control.bindFlow(self.registry.flow);
+            lifecycle.observeGoAway(self.control, self.h3);
             if (self.registry.flow_violation) {
                 _ = lifecycle.observeWithoutCredits(self.control, self.h3, self.registry);
                 return error.FlowControlViolation;

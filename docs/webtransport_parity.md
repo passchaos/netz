@@ -5,6 +5,28 @@ This audit compares netz with the WebTransport implementations available under
 differences explicitly because draft WebTransport stream association changed
 over time.
 
+## GOAWAY and Session drain
+
+Received HTTP/3 GOAWAY becomes an application-visible `draining` event for every
+active WebTransport Session on that connection, including shared client and
+server endpoints and the protected-runtime control readers. This follows
+draft-16 Section 4.7: the signal is advisory, so existing Sessions can still
+open streams and exchange DATAGRAMs. Repeated GOAWAY frames and a
+WT_DRAIN_SESSION capsule share one notification per Session; subsequent CLOSE
+metadata remains ordered and intact, and already-closed Sessions do not emit a
+new drain event. Protected readers advance one control packet at a time rather
+than waiting indefinitely for CONNECT DATA after a control-only GOAWAY.
+
+A client with a received GOAWAY cannot start another WebTransport CONNECT on
+that H3 connection, even when the first GOAWAY carries the maximum stream ID.
+Admission returns `GoAwayReceived` before allocation or stream reservation and
+requires a new connection. A CONNECT whose prefix was already sent before
+GOAWAY remains retryable below the peer's request cutoff. Wire regressions in
+`src/webtransport/runtime/goaway_tests.zig` cover both endpoint roles, multiple
+Sessions, control-only wakeups, DATAGRAM/stream reuse, duplicate advisory
+signals and exact later CLOSE metadata; the pending CONNECT regression checks
+that backpressure resumes its committed suffix after GOAWAY.
+
 ## Current direct evidence
 
 Run:

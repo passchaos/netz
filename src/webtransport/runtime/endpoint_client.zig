@@ -818,9 +818,10 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) TimeoutError!OpenResult {
         try validateSessionOptions(options);
+        try self.ensureConnectionOpen();
+        try connect_negotiation.ensureCanStart(&self.h3);
         var offer = try application_protocol.Request.init(self.allocator, options.application_protocols, options.headers);
         defer offer.deinit(self.allocator);
-        try self.ensureConnectionOpen();
         defer _ = self.observeConnection();
         try @import("../settings/flow.zig").validateRequired(self.h3.options.local_settings, self.require_session_flow_control);
         const version = try connect_negotiation.prepareClient(&self.h3, deadline);
@@ -1057,6 +1058,7 @@ pub const Client = struct {
         try self.ensureConnectionOpen();
         session_value.control.bindFlow(session_value.streams.flow);
         defer _ = connection_lifecycle.observe(&session_value.control, &self.h3, &session_value.streams);
+        connection_lifecycle.observeGoAway(&session_value.control, &self.h3);
         const session_id = session_value.session_id;
         // Retain the detached CONNECT association until removal: late bytes
         // after CLOSE still require H3_MESSAGE_ERROR on this stream.

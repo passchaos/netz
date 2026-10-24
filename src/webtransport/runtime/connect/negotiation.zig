@@ -11,6 +11,12 @@ pub const Role = enum { client, server };
 pub const Error = webtransport.Error || http3.runtime.Error || error{InvalidConnect};
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
+/// WebTransport requires a fresh H3 connection after any received GOAWAY,
+/// including the maximum-ID first phase of graceful shutdown.
+pub fn ensureCanStart(h3: anytype) error{GoAwayReceived}!void {
+    if (h3.control.peer_goaway_id != null) return error.GoAwayReceived;
+}
+
 pub fn check(local: http3.Settings, peer: http3.Settings, config: quic.one_rtt.ConnectionConfig, role: Role) Error!webtransport.Version {
     const server = if (role == .server) local else peer;
     if (!server.enable_connect_protocol) return error.WebTransportNotNegotiated;
@@ -68,6 +74,7 @@ pub fn validateRequestWithPolicy(h3: *const http3.runtime.HandshakeServerSession
 pub fn prepareClient(h3: *http3.runtime.HandshakeClient, deadline: ?std.Io.Clock.Timestamp) TimeoutError!webtransport.Version {
     if (h3.dispatcherBound()) return error.InvalidDispatcherState;
     if (h3.callback_reader_active) return error.ConcurrentRead;
+    try ensureCanStart(h3);
     while (!h3.control.settings.sent) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
         const submission = if (deadline) |absolute| h3.ensureSettingsSentWithDeadline(absolute) else h3.ensureSettingsSent();
@@ -90,6 +97,7 @@ pub fn prepareClient(h3: *http3.runtime.HandshakeClient, deadline: ?std.Io.Clock
         };
     }
     _ = if (deadline) |absolute| try h3.receivePeerSettingsWithDeadline(absolute) else try h3.receivePeerSettings();
+    try ensureCanStart(h3);
     return clientVersion(h3);
 }
 

@@ -73,6 +73,7 @@ pub const Request = struct {
         const connection = &h3.established.connection;
         const next = std.math.add(u62, stream_id, 4) catch return error.StreamCreationError;
         if (h3.next_stream_id != stream_id) return error.StreamCreationError;
+        if (self.offset == 0) try @import("negotiation.zig").ensureCanStart(h3);
         if (!h3.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         if (h3.options.max_stream_frame_data == 0) return error.InvalidFrame;
         if (!self.prepared) {
@@ -139,7 +140,7 @@ test "WebTransport pending CONNECT metadata allocation is transactional" {
     }
 }
 
-test "WebTransport pending CONNECT owns options and resumes large headers after backpressure" {
+test "WebTransport GOAWAY preserves an already-started CONNECT across backpressure" {
     const Pair = @import("../session_control/test_support/handshake_pair.zig").Pair;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -155,6 +156,9 @@ test "WebTransport pending CONNECT owns options and resumes large headers after 
     try std.testing.expect(!try request.submit(&pair.client.h3, .draft16, id));
     const submitted = request.offset;
     try std.testing.expect(submitted > 0 and submitted < request.encoded.items.len);
+    // A visible CONNECT prefix predates GOAWAY, so this is still an in-flight
+    // request below the peer's cutoff. Its exact suffix must remain retryable.
+    pair.client.h3.control.peer_goaway_id = quic.varint.max_value - 3;
     const next_transport = pair.connection(.client).nextLocalBidirectionalStreamId();
     _ = try quic.one_rtt.testing.clampSendStreamLimitToUsed(pair.connection(.client), id);
     try std.testing.expectError(error.FlowControlBlocked, request.submit(&pair.client.h3, .draft16, id));
