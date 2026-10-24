@@ -9,6 +9,7 @@ const wire = @import("../internal/wire.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
+const message_reuse = @import("runtime/message/reuse.zig");
 const message_head = @import("runtime/message/head.zig");
 const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
@@ -3877,7 +3878,7 @@ pub const Client = struct {
             return err;
         };
         self.writer_state.phase = if (requestOptionsKeepAlive(options) and
-            responseIsReusable(response.response))
+            responseIsReusable(response.response, request_options.method))
             .idle
         else
             .unusable;
@@ -5129,6 +5130,11 @@ pub const Client = struct {
             return err;
         };
         errdefer response.deinit(self.allocator);
+        self.writer_state.phase = if (requestOptionsKeepAlive(.{ .method = .CONNECT, .target = target, .headers = headers }) and responseIsReusable(response.response, .CONNECT)) .idle else .unusable;
+        // Even a response rejected by the CONNECT adapter may have switched
+        // the peer's framing (101 or successful CONNECT). Never resume HTTP
+        // on that socket; retain TLS ownership while waking the peer.
+        errdefer if (message_reuse.switchesProtocol(.CONNECT, response.response.status)) self.transport().abort();
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidResponse;
         if (response.response.body.len != 0 or response.response.trailers.len != 0) return error.InvalidResponse;
         response.deinit(self.allocator);
@@ -5495,34 +5501,25 @@ pub const Client = struct {
             return err;
         };
         errdefer response.deinit(self.allocator);
-        const selected = response.response.upgradeProtocol() orelse {
-            if (require_capsule_protocol) {
-                self.writer_state.phase = .unusable;
-                self.transport().abort();
-            }
-            return error.InvalidResponse;
-        };
+        self.writer_state.phase = if (!require_capsule_protocol and responseIsReusable(response.response, .GET)) .idle else .unusable;
+        // The peer exits HTTP at 101, before application-specific protocol
+        // validation. A failed handoff must abort instead of reusing HTTP.
+        errdefer if (require_capsule_protocol or message_reuse.switchesProtocol(.GET, response.response.status)) self.transport().abort();
+        if (response.response.version != .http_1_1) return error.InvalidResponse;
+        const selected = response.response.upgradeProtocol() orelse return error.InvalidResponse;
         if (!std.ascii.eqlIgnoreCase(selected, protocol) or
             response.response.body.len != 0 or
             response.response.trailers.len != 0)
         {
-            if (require_capsule_protocol) {
-                self.writer_state.phase = .unusable;
-                self.transport().abort();
-            }
             return error.InvalidResponse;
         }
         if (require_capsule_protocol) {
             const enabled = http3.capsule.protocolEnabled(
                 response.response.headers,
             ) catch {
-                self.writer_state.phase = .unusable;
-                self.transport().abort();
                 return error.InvalidResponse;
             };
             if (!enabled) {
-                self.writer_state.phase = .unusable;
-                self.transport().abort();
                 return error.InvalidResponse;
             }
         }
@@ -7310,7 +7307,7 @@ pub const RequestWriter = struct {
             self.body.fail();
             return err;
         };
-        self.body.release(responseIsReusable(response.response));
+        self.body.release(responseIsReusable(response.response, self.method));
         return response;
     }
 
@@ -7792,27 +7789,8 @@ fn connectionWriteSlices(
     );
 }
 
-fn responseIsReusable(response: http1.Response) bool {
-    // Close-delimited bodies consume EOF as their message boundary, and 101
-    // transfers the socket to another protocol. Neither can begin another
-    // HTTP/1 exchange even if the header block omitted Connection: close.
-    return response.version != .http_0_9 and
-        response.keepAlive() and
-        response.body_framing != .close_delimited and
-        response.status != 101;
-}
-
-fn streamingResponseIsReusable(
-    response: StreamingResponse,
-    request_method: http1.Method,
-) bool {
-    return response.version != .http_0_9 and
-        response.keepAlive() and
-        response.body_framing != .close_delimited and
-        response.status != 101 and
-        !(request_method == .CONNECT and
-            response.status >= 200 and response.status < 300);
-}
+const responseIsReusable = message_reuse.reusable;
+const streamingResponseIsReusable = message_reuse.reusable;
 
 fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
     const path_value = uriComponentBytes(uri.path);
@@ -14072,7 +14050,7 @@ test "HTTP/0.9 aggregate body reader is opt in and bounded" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(http1.Version.http_0_9, response.version);
     try std.testing.expectEqualStrings("legacy", response.body);
-    try std.testing.expect(!responseIsReusable(response));
+    try std.testing.expect(!responseIsReusable(response, .GET));
 
     var scratch: WriteScratch = .{};
     defer scratch.deinit(allocator);
@@ -14397,6 +14375,7 @@ test {
     _ = @import("runtime/proxy_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/handoff_timeout_tests.zig");
+    _ = @import("runtime/handoff_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

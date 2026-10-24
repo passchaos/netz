@@ -651,7 +651,20 @@ completion instead of inferring success from the HTTP status.
 Successful CONNECT handoff now permanently marks the parent netz HTTP/1 client
 or server connection unusable for HTTP framing, matching the existing generic
 Upgrade ownership rule. A pooled lease therefore closes a handed-off tunnel
-instead of returning it to idle reuse. The client now also exposes a production
+instead of returning it to idle reuse. Owned and streaming responses now share
+the originating-method-aware persistence rule in
+`src/http1/runtime/message/reuse.zig`, so an ordinary aggregate CONNECT with any
+2xx response also leaves HTTP mode. A generic Upgrade retires HTTP at a parsed
+101 before validating HTTP/1.1 and the selected protocol. Failed validation
+aborts both socket directions while retaining TLS ownership for cleanup.
+Ordinary CONNECT/Upgrade rejection responses remain reusable only when the
+request and response permit persistence and the complete framed entity has
+been consumed; HTTP/1.0 defaults, Connection close and EOF-delimited entities
+retire the connection. Regressions in `src/http1/runtime/handoff_tests.zig`
+cover buffered upgraded bytes, informational prefixes, exact later HTTP
+requests after chunked rejection/trailers, allocator-free refusal of further
+HTTP writes, pool retirement and failed 101 over standard/native TLS clients.
+The client now also exposes a production
 forward-proxy surface rather than requiring callers to construct raw start
 lines. Persistent cleartext proxy connections send validated fragment-free
 absolute-form targets with the origin authority as Host. One-shot HTTP/HTTPS
