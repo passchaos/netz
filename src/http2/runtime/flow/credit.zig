@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Credit owned by one stack-based response reader. Track the net DATA debit
+/// Credit owned by one stack-based message reader. Track the net DATA debit
 /// after normal refills and rejection refunds, excluding adaptive grants, so
 /// abandoning the reader can return exactly the credit it still owns.
 pub const Tracker = struct {
@@ -14,7 +14,7 @@ pub const Tracker = struct {
     }
 };
 
-/// Account only credit still held after response processing. A rejected DATA
+/// Account only credit still held after message processing. A rejected DATA
 /// frame or callback can already return its exact payload credit; counting
 /// that payload again would refund it twice during stream reset cleanup.
 pub fn account(controls: anytype, state_index: usize, before: i64, after: i64, adaptive_increment: u31) error{MessageTooLarge}!void {

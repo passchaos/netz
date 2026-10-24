@@ -490,6 +490,10 @@ Current protocol coverage includes:
   connection credit, including padding, without counting low-watermark
   refills or adaptive grants twice; complete peer resets and length errors at
   response trailers preserve connection reuse for later streams,
+  failed aggregate, callback, and batched request reads reclaim their held
+  DATA connection credit through the shared `http2/runtime/flow` model; a
+  reset batch member returns only its own credit while surviving requests
+  retain their accounting and can be completed with replacement admission,
   Hyper-style default automatic server `date` generation for ordinary,
   streaming, batched, pushed, and CONNECT final responses, with explicit-field
   preservation, informational-response exclusion, and an opt-out limit,

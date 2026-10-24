@@ -114,9 +114,10 @@ fn exercise(comptime mode: Mode, violation: Violation) !void {
             }
             try std.testing.expectEqual(@as(usize, if (self.violation == .cumulative and (mode == .callback or mode == .batch)) 1 else 0), self.delivered);
             try std.testing.expectEqual(@as(usize, 0), self.handler_calls);
-            // Legitimate prefix content retains normal low-watermark batching.
-            // Only the rejected DATA's full payload must be returned immediately.
-            try std.testing.expectEqual(before - @as(i64, if (self.violation == .cumulative) 1 else 0), connection.recv_connection_window.value);
+            // Stack-owned request readers retire their whole partial message
+            // on error, returning earlier DATA as well as the rejected frame.
+            // Duplex still owns its delivered event prefix until reset.
+            try std.testing.expectEqual(before - @as(i64, if (self.violation == .cumulative and mode == .duplex) 1 else 0), connection.recv_connection_window.value);
             if (mode != .serve and mode != .batch and mode != .duplex) {
                 // Direct readers leave reset policy to their caller.
                 try sendReset(&connection, 1, code);
