@@ -649,6 +649,10 @@ pub fn parseRequestHead(
     const parsed = try parseHeadLines(bytes, header_storage, options, .{
         .ignore_invalid = options.ignore_invalid_headers_in_requests,
     });
+    return finishRequestHead(parsed, options);
+}
+
+fn finishRequestHead(parsed: BorrowedHead, options: ParseOptions) Error!RequestHead {
     const request_line = try parseRequestLine(
         parsed.start_line,
         options.allow_multiple_spaces_in_request_line_delimiters,
@@ -698,6 +702,10 @@ pub fn parseResponseHead(
             .ignore_invalid = options.ignore_invalid_headers_in_responses,
         },
     );
+    return finishResponseHead(parsed, context);
+}
+
+fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!ResponseHead {
     const status_line = try parseStatusLine(parsed.start_line);
     const version = try Version.parse(status_line.version);
     const status = try parseStatusCode(status_line.status_code);
@@ -748,6 +756,37 @@ pub fn parseResponseHead(
         .head_len = parsed.head_len,
         .must_close = saw_transfer_encoding and saw_content_length,
     };
+}
+
+const OwnedHeadParser = @import("head/owned.zig").Parser(struct {
+    pub const parseFields = parseOwnedHeadFields;
+    pub fn deinitFields(fields: *OwnedHeadFields, allocator: std.mem.Allocator) void {
+        fields.storage.deinit(allocator);
+    }
+    pub fn finishRequest(start_line: []const u8, headers: []Header, head_len: usize, options: ParseOptions) Error!RequestHead {
+        return finishRequestHead(.{ .start_line = start_line, .headers = headers, .head_len = head_len }, options);
+    }
+    pub fn finishResponse(start_line: []const u8, headers: []Header, head_len: usize, context: ResponseContext) Error!ResponseHead {
+        return finishResponseHead(.{ .start_line = start_line, .headers = headers, .head_len = head_len }, context);
+    }
+});
+pub const OwnedRequestHead = OwnedHeadParser.Request;
+pub const OwnedResponseHead = OwnedHeadParser.Response;
+/// Parse head metadata with owned descriptors and optional unfolded values.
+/// Input bytes need only contain a complete head; no body is required.
+pub const parseOwnedRequestHead = OwnedHeadParser.request;
+pub const parseOwnedResponseHead = OwnedHeadParser.response;
+
+const OwnedHeadFields = struct { start_line: []const u8, head_len: usize, storage: ParsedHeaders };
+fn parseOwnedHeadFields(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions, kind: enum { request, response }) Error!OwnedHeadFields {
+    const end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
+    var lines = std.mem.splitSequence(u8, bytes[0..end], "\r\n");
+    const start_line = lines.next() orelse return error.MalformedStartLine;
+    const fields = try parseHeaderLines(allocator, &lines, options, .{
+        .allow_spaces_before_colon = kind == .response and options.allow_spaces_after_header_name_in_responses,
+        .ignore_invalid = if (kind == .response) options.ignore_invalid_headers_in_responses else options.ignore_invalid_headers_in_requests,
+    });
+    return .{ .start_line = start_line, .head_len = end + 4, .storage = fields };
 }
 
 const BorrowedHead = struct {

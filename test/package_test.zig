@@ -1,6 +1,15 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP1 owned heads accept folded metadata without requiring the body" {
+    const bytes = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Trace: first\r\n second\r\n\r\n";
+    var response = try netz.http1.parseOwnedResponseHead(std.testing.allocator, bytes, .{ .allow_obs_fold = true }, .{ .request_method = .GET });
+    defer response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?usize, 100), response.head.content_length);
+    try std.testing.expectEqualStrings("first second", response.head.header("x-trace").?);
+    try std.testing.expectEqual(bytes.len, response.head.head_len);
+}
+
 test "public MQTT publish budgets reject zero timeout without emitting or reserving" {
     var connection = netz.mqtt.runtime.Connection{ .allocator = std.testing.allocator, .transport = undefined };
     var progress: netz.mqtt.runtime.PublishProgress = .{};

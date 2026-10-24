@@ -9,6 +9,7 @@ const wire = @import("../internal/wire.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
+const message_head = @import("runtime/message/head.zig");
 const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
@@ -25,10 +26,7 @@ const net = std.Io.net;
 const tls = std.crypto.tls;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
-const messageTargetLength = message_framing.messageTargetLength;
 const findHttpHeadEndWithinLimit = message_framing.findHeadEndWithinLimit;
-const responseHeadUsesCloseDelimitedBody =
-    message_framing.responseHeadUsesCloseDelimitedBody;
 const informationalResponseToSkip = message_framing.informationalResponseToSkip;
 const requestShouldSendContinue = message_framing.requestShouldSendContinue;
 const RequestReadStage = enum { head, continue_write, body };
@@ -6077,7 +6075,7 @@ pub const Connection = struct {
             .context = self,
             .read_some = connectionReadSome,
             .read_head_some = connectionReadHeadSome,
-            .before_request_body = connectionMaybeWriteContinue,
+            .before_request_head = connectionMaybeWriteContinue,
             .inbuf = &self.inbuf,
             .limits = .{
                 .max_head_bytes = self.limits.max_head_bytes,
@@ -7772,15 +7770,10 @@ fn ensureResponseStartDeadlineForBuffer(
 
 fn connectionMaybeWriteContinue(
     context: ?*anyopaque,
-    head: []const u8,
+    head: http1.RequestHead,
 ) Error!void {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
-    try maybeWriteContinue(
-        connection.transport(),
-        head,
-        connection.inbuf.items.len,
-        true,
-    );
+    if (message_head.shouldContinue(head)) try connection.transport().writeAll("HTTP/1.1 100 Continue\r\n\r\n");
 }
 
 fn connectionWriteSlices(
@@ -8063,7 +8056,7 @@ pub fn readResponseFromStreamObserved(
             limits,
             null,
             false,
-            null,
+            options,
             true,
             options.allow_http_0_9_responses,
             response_head_deadline,
@@ -8072,7 +8065,6 @@ pub fn readResponseFromStreamObserved(
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
-        applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
             try validateAndCountInformationalResponse(
                 response,
@@ -8233,7 +8225,7 @@ fn readResponseFromStreamForRequestObservedUntil(
             limits,
             request_method,
             false,
-            null,
+            options,
             true,
             options.allow_http_0_9_responses,
             effective_head_deadline,
@@ -8247,7 +8239,6 @@ fn readResponseFromStreamForRequestObservedUntil(
             request_method,
         );
         errdefer response.deinit(allocator);
-        applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
             try validateAndCountInformationalResponse(
                 response,
@@ -8342,7 +8333,6 @@ pub fn readResponseFromStreamBufferedObserved(
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
-        applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
             try validateAndCountInformationalResponse(
                 response,
@@ -8521,7 +8511,6 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
-        applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
             try validateAndCountInformationalResponse(
                 response,
@@ -8564,25 +8553,18 @@ fn parseResponseForRuntime(
             .consumed = bytes.len,
         };
     }
-    if (request_method) |method| {
-        return http1.parseResponseForRequest(
-            allocator,
-            bytes,
-            options,
-            method,
-        );
+    var response = if (request_method) |method|
+        try http1.parseResponseForRequest(allocator, bytes, options, method)
+    else
+        try http1.parseResponse(allocator, bytes, options);
+    // The transport has already reached EOF for a permitted undelimited body.
+    // Use parsed semantics so compatibility field spelling cannot change it.
+    if (response.body_framing == .none and response.body_allowed) {
+        response.body = bytes[response.consumed..];
+        response.body_framing = .close_delimited;
+        response.consumed = bytes.len;
     }
-    return http1.parseResponse(allocator, bytes, options);
-}
-
-fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8, request_method: ?http1.Method) void {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return;
-    if (!responseHeadUsesCloseDelimitedBody(bytes[0..head_end], request_method)) return;
-    const body_start = head_end + 4;
-    if (bytes.len < body_start) return;
-    response.body = bytes[body_start..];
-    response.body_framing = .close_delimited;
-    response.consumed = bytes.len;
+    return response;
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
@@ -8991,7 +8973,7 @@ fn readMessageBytesWithContext(
     limits: Limits,
     request_method: ?http1.Method,
     auto_continue: bool,
-    request_options: ?http1.ParseOptions,
+    options: http1.ParseOptions,
     close_delimited_when_unknown: bool,
     allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
@@ -9042,40 +9024,19 @@ fn readMessageBytesWithContext(
         }
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
-    if (auto_continue) {
-        const options = request_options orelse return error.InvalidResponse;
-        const head = bytes.items[0..head_end.?];
-        if (requestShouldSendContinue(head)) {
-            try http1.validateRequestHead(allocator, bytes.items, options);
-            if (try message_framing.transferEncodingState(head) == .none) {
-                if (try message_framing.contentLengthFromHead(head)) |len| {
-                    if (len > limits.max_body_bytes) {
-                        return error.BodyTooLarge;
-                    }
-                }
-            }
-            try maybeWriteContinue(
-                transport,
-                head,
-                bytes.items.len - (head_end.? + 4),
-                true,
-            );
-        }
-    }
-
-    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
-        const body_start = head_end.? + 4;
-        try EofBodyReader.collect(allocator, transport, &bytes, body_start, limits.max_body_bytes, &scratch, body_deadline);
+    const plan = try message_head.inspect(allocator, bytes.items, options, request_method, auto_continue);
+    try plan.validateBodyLimit(limits.max_body_bytes);
+    if (auto_continue and plan.send_continue) try transport.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+    if (close_delimited_when_unknown and plan.body_framing == .close_delimited) {
+        try EofBodyReader.collect(allocator, transport, &bytes, plan.head_len, limits.max_body_bytes, &scratch, body_deadline);
         return bytes.toOwnedSlice(allocator);
     }
 
     const target_len = while (true) {
-        const len = messageTargetLength(
+        const len = plan.targetLength(
             bytes.items,
-            head_end.?,
             limits.max_head_bytes,
             limits.max_body_bytes,
-            request_method,
         ) catch |err| switch (err) {
             error.BufferTooShort => {
                 // Unknown-length bodies such as chunked framing cannot safely
@@ -9285,7 +9246,6 @@ fn readOneResponseFromTransportBufferedForRequest(
         request_method,
     );
     errdefer response.deinit(allocator);
-    applyCloseDelimitedResponseBody(&response, bytes, request_method);
     return .{ .bytes = bytes, .response = response };
 }
 
@@ -9348,59 +9308,25 @@ fn readMessageBytesBufferedWithContext(
         }
         try inbuf.appendSlice(allocator, scratch[0..n]);
     }
-    var borrowed_headers_stack: [128]http1.Header = undefined;
-    const borrowed_headers = if (options.max_headers <= borrowed_headers_stack.len)
-        borrowed_headers_stack[0..options.max_headers]
-    else
-        try allocator.alloc(http1.Header, options.max_headers);
-    defer if (borrowed_headers.ptr != borrowed_headers_stack[0..].ptr) allocator.free(borrowed_headers);
-
-    const known_target_len: ?usize = if (auto_continue) request: {
-        const request_head = try http1.parseRequestHead(inbuf.items, borrowed_headers, options);
-        break :request try request_head.messageLength();
-    } else response: {
-        const response_head = try http1.parseResponseHead(
-            inbuf.items,
-            borrowed_headers,
-            options,
-            .{ .request_method = request_method },
-        );
-        break :response try response_head.messageLength();
-    };
-
-    const head = inbuf.items[0..head_end.?];
-    if (auto_continue and requestShouldSendContinue(head)) {
-        if (request_stage) |stage| stage.* = .continue_write;
-        try maybeWriteContinue(
-            transport,
-            head,
-            inbuf.items.len - (head_end.? + 4),
-            true,
-        );
-    }
+    const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
     if (request_stage) |stage| stage.* = .body;
-
-    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(head, request_method)) {
-        const body_start = head_end.? + 4;
-        try EofBodyReader.collect(allocator, transport, inbuf, body_start, limits.max_body_bytes, &scratch, body_deadline);
+    try plan.validateBodyLimit(limits.max_body_bytes);
+    if (auto_continue and plan.send_continue) {
+        if (request_stage) |stage| stage.* = .continue_write;
+        try transport.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+        if (request_stage) |stage| stage.* = .body;
+    }
+    if (close_delimited_when_unknown and plan.body_framing == .close_delimited) {
+        try EofBodyReader.collect(allocator, transport, inbuf, plan.head_len, limits.max_body_bytes, &scratch, body_deadline);
         const bytes = try inbuf.toOwnedSlice(allocator);
         inbuf.* = .empty;
         return bytes;
     }
-
-    const body_start = std.math.add(usize, head_end.?, 4) catch
-        return error.HeadersTooLarge;
-    const target_len = if (known_target_len) |len| blk: {
-        if (len < body_start) return error.InvalidResponse;
-        if (len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
-        break :blk len;
-    } else while (true) {
-        const len = messageTargetLength(
+    const target_len = while (true) {
+        const len = plan.targetLength(
             inbuf.items,
-            head_end.?,
             limits.max_head_bytes,
             limits.max_body_bytes,
-            request_method,
         ) catch |err| switch (err) {
             error.BufferTooShort => {
                 const n = try readTransportUntil(
@@ -10694,13 +10620,6 @@ test "HTTP/1 response batch retains chunk framing beside borrowed bodies" {
         "5\r\nchunk\r\n0\r\n\r\n",
         parts[3],
     );
-}
-
-fn maybeWriteContinue(transport: RuntimeTransport, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
-    _ = already_buffered_body_bytes;
-    if (!auto_continue) return;
-    if (!requestShouldSendContinue(head)) return;
-    try transport.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
 }
 
 fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
@@ -14466,6 +14385,7 @@ test {
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");
     _ = @import("runtime/transfer_encoding_tests.zig");
+    _ = @import("runtime/header_compatibility_tests.zig");
     _ = close_delimited;
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");

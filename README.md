@@ -336,6 +336,8 @@ Current protocol coverage includes:
   server-side `Expect: 100-continue` handling even when body bytes are pre-read, with full request-head/Host/framing/size validation before any interim response, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping and mandatory connection retirement on ambiguous requests, shared quote-aware Transfer-Encoding parsing across codecs and runtime message boundaries, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
+  owning request/response head APIs with opt-in line unfolding, metadata-derived
+  runtime body boundaries, and retained folded values in streaming results,
   Hyper-style default automatic server `Date` generation backed by a shared
   allocation-free per-second cache, with explicit-field preservation, 1xx
   exclusion, deterministic pure codec helpers, and an opt-out limit,

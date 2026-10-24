@@ -23,6 +23,11 @@ pub fn Reader(comptime RuntimeError: type) type {
             context: ?*anyopaque,
             head: []const u8,
         ) RuntimeError!void = null,
+        /// Typed counterpart for protocol decisions based on accepted fields.
+        before_request_head: ?*const fn (
+            context: ?*anyopaque,
+            head: http1.RequestHead,
+        ) RuntimeError!void = null,
         informational_context: ?*anyopaque = null,
         informational_responses_seen: ?*usize = null,
         on_informational: ?*const fn (
@@ -51,6 +56,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             body_framing: http1.BodyFraming,
             body_bytes: usize,
             must_close: bool = false,
+            header_value_storage: [][]u8 = &.{},
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
@@ -60,6 +66,8 @@ pub fn Reader(comptime RuntimeError: type) type {
                 allocator: std.mem.Allocator,
             ) void {
                 allocator.free(self.headers);
+                for (self.header_value_storage) |value| allocator.free(value);
+                allocator.free(self.header_value_storage);
                 for (self.trailer_value_storage) |value| allocator.free(value);
                 allocator.free(self.trailer_value_storage);
                 allocator.free(self.trailers);
@@ -103,6 +111,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             body_bytes: usize,
             body_allowed: bool = true,
             must_close: bool = false,
+            header_value_storage: [][]u8 = &.{},
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
@@ -112,6 +121,8 @@ pub fn Reader(comptime RuntimeError: type) type {
                 allocator: std.mem.Allocator,
             ) void {
                 allocator.free(self.headers);
+                for (self.header_value_storage) |value| allocator.free(value);
+                allocator.free(self.header_value_storage);
                 for (self.trailer_value_storage) |value| allocator.free(value);
                 allocator.free(self.trailer_value_storage);
                 allocator.free(self.trailers);
@@ -249,8 +260,12 @@ pub fn Reader(comptime RuntimeError: type) type {
         ) !Request {
             const head_bytes = try self.readHeadBytes();
             errdefer self.allocator.free(head_bytes);
+            var owned_head: ?http1.OwnedRequestHead = null;
+            defer if (owned_head) |*owned| owned.deinit(self.allocator);
             var headers_stack: [128]http1.Header = undefined;
-            const headers = if (self.options.max_headers <=
+            const headers = if (self.options.allow_obs_fold)
+                headers_stack[0..0]
+            else if (self.options.max_headers <=
                 headers_stack.len)
                 headers_stack[0..self.options.max_headers]
             else
@@ -261,7 +276,10 @@ pub fn Reader(comptime RuntimeError: type) type {
             defer if (headers.ptr != headers_stack[0..].ptr) {
                 self.allocator.free(headers);
             };
-            const head = try http1.parseRequestHead(
+            const head = if (self.options.allow_obs_fold) blk: {
+                owned_head = try http1.parseOwnedRequestHead(self.allocator, head_bytes, self.options);
+                break :blk owned_head.?.head;
+            } else try http1.parseRequestHead(
                 head_bytes,
                 headers,
                 self.options,
@@ -270,6 +288,9 @@ pub fn Reader(comptime RuntimeError: type) type {
                 head.body_framing,
                 head.content_length,
             );
+            if (self.before_request_head) |before| {
+                try before(self.context, head);
+            }
             if (self.before_request_body) |before| {
                 try before(self.context, head_bytes);
             }
@@ -313,6 +334,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .body_bytes = body.body_bytes,
                 .must_close = head.must_close,
                 .trailers = body.trailers.headers,
+                .header_value_storage = if (owned_head) |*owned| owned.takeValues() else &.{},
                 .trailer_bytes = body.trailers.bytes,
                 .trailer_value_storage = body.trailers.value_storage,
             };
@@ -364,8 +386,12 @@ pub fn Reader(comptime RuntimeError: type) type {
                 const head_bytes = try self.readHeadBytes();
                 var head_needs_free = true;
                 defer if (head_needs_free) self.allocator.free(head_bytes);
+                var owned_head: ?http1.OwnedResponseHead = null;
+                defer if (owned_head) |*owned| owned.deinit(self.allocator);
                 var headers_stack: [128]http1.Header = undefined;
-                const headers = if (self.options.max_headers <=
+                const headers = if (self.options.allow_obs_fold)
+                    headers_stack[0..0]
+                else if (self.options.max_headers <=
                     headers_stack.len)
                     headers_stack[0..self.options.max_headers]
                 else
@@ -376,7 +402,10 @@ pub fn Reader(comptime RuntimeError: type) type {
                 defer if (headers.ptr != headers_stack[0..].ptr) {
                     self.allocator.free(headers);
                 };
-                var head = try http1.parseResponseHead(
+                var head = if (self.options.allow_obs_fold) blk: {
+                    owned_head = try http1.parseOwnedResponseHead(self.allocator, head_bytes, self.options, .{ .request_method = request_method });
+                    break :blk owned_head.?.head;
+                } else try http1.parseResponseHead(
                     head_bytes,
                     headers,
                     self.options,
@@ -470,6 +499,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .body_allowed = head.body_allowed,
                     .must_close = head.must_close,
                     .trailers = body.trailers.headers,
+                    .header_value_storage = if (owned_head) |*owned| owned.takeValues() else &.{},
                     .trailer_bytes = body.trailers.bytes,
                     .trailer_value_storage = body.trailers.value_storage,
                 };

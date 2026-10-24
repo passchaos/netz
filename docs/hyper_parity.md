@@ -151,6 +151,21 @@ benchmark response:
   and invalid heads on an open connection. The Hyper interop peer additionally
   emits quoted commas and escaped quotes under cleartext and TLS, with both
   receive APIs followed by an ordinary request on the same connection;
+- runtime body boundaries now come from parsed request/response heads, including
+  the caller's response whitespace and invalid-field compatibility policy.
+  A tolerated `Content-Length : 2` remains a two-byte body; it cannot fall back
+  to reading through EOF or absorb a later response. The shared
+  `http1/runtime/message/head.zig` plan handles fixed, chunked and close-delimited
+  bodies after header validation and computes automatic 100 Continue from the
+  accepted request fields. `parseOwnedRequestHead` and `parseOwnedResponseHead`
+  supply owned descriptors and optional unfolded values without requiring body
+  bytes; the start-line strings continue to borrow the input. Owning runtime
+  reads use these APIs for opt-in obs-fold, and streaming results retain
+  `header_value_storage` until deinit. Borrowed-head parsing keeps its existing
+  contiguous-value contract. TCP regressions cover folded framing values,
+  skipped malformed Transfer-Encoding, strict-default rejection, pipelined
+  reads and folded-value lifetime after reuse; allocation and callback failures
+  exercise owned-field cleanup;
 - aggregate, pipeline-boundary, and streaming chunked readers share one RFC
   9112 chunk-extension parser. It accepts token or quoted-string values with
   bad whitespace, rejects empty names/values, invalid separators, controls and
