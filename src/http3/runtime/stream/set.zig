@@ -28,9 +28,9 @@ pub const Set = struct {
     pub const Entry = struct {
         reader: Reader,
         from: ?net.IpAddress = null,
-        /// Keep transport routing alive while a request's failed parse awaits
+        /// Keep transport routing alive while a message's failed parse awaits
         /// cancellation; event selection must not decode that message again.
-        request_failure_pending: bool = false,
+        message_failure_pending: bool = false,
 
         pub fn deinit(self: *Entry) void {
             self.reader.deinit();
@@ -292,9 +292,8 @@ pub const Set = struct {
         }
     }
 
-    pub fn suspendFailedRequest(self: *Set, stream_id: u62) void {
-        std.debug.assert(self.kind == .request);
-        if (self.find(stream_id)) |entry| entry.request_failure_pending = true;
+    pub fn suspendFailedMessage(self: *Set, stream_id: u62) void {
+        if (self.find(stream_id)) |entry| entry.message_failure_pending = true;
     }
 
     pub fn removeEntry(self: *Set, stream_id: u62) void {
@@ -338,12 +337,12 @@ pub const Set = struct {
     ) bool {
         if (target_stream_id) |stream_id| {
             if (self.find(stream_id)) |entry| {
-                return !entry.request_failure_pending and entry.reader.awaitingInitialHead();
+                return !entry.message_failure_pending and entry.reader.awaitingInitialHead();
             }
             return buffered.contains(stream_id);
         }
         for (self.entries.items) |entry| {
-            if (!entry.request_failure_pending and entry.reader.awaitingInitialHead()) return true;
+            if (!entry.message_failure_pending and entry.reader.awaitingInitialHead()) return true;
         }
         return !buffered.isEmpty();
     }
@@ -505,7 +504,7 @@ pub const Set = struct {
                 if (!buffered.contains(stream_id)) return null;
                 break :blk try self.activateRequest(buffered, stream_id);
             };
-            if (entry.request_failure_pending) return null;
+            if (entry.message_failure_pending) return null;
             const event = entry.reader.next(table) catch |err| switch (err) {
                 error.QpackBlocked => {
                     if (max_blocked_streams == 0) {
@@ -528,7 +527,7 @@ pub const Set = struct {
 
         var blocked_streams: u64 = 0;
         for (self.entries.items) |*entry| {
-            if (entry.request_failure_pending) continue;
+            if (entry.message_failure_pending) continue;
             if (!entry.reader.awaitingInitialHead()) continue;
             const event = entry.reader.next(table) catch |err| switch (err) {
                 error.QpackBlocked => {
@@ -612,7 +611,7 @@ pub const Set = struct {
         var remaining = entry_count;
         while (remaining != 0) : (remaining -= 1) {
             const entry = &self.entries.items[index];
-            if (entry.request_failure_pending) {
+            if (entry.message_failure_pending) {
                 index = if (index + 1 == entry_count) 0 else index + 1;
                 continue;
             }

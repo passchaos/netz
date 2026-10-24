@@ -1619,8 +1619,19 @@ reports the original parser error while retiring its owner. Targeted polls
 preserve each request's own failure, and owning receives retain cancellation across their existing
 deadline. The explicit `pollRequestEventOnceWithFailure` API can also take
 ownership of a failure previously retained by default polling. This state
-remains bounded by the existing live request limit and is owned by
-`http3/runtime/receive/request_failure.zig`.
+remains bounded by the existing live request limit.
+
+The handshake client's incremental response event polls retain the same
+cancellation ownership. A malformed response suspends only its reader, while
+healthy response streams can continue under cancellation backpressure. Socket
+errors and receive deadlines preserve the failed request and its parser cause;
+a completed cancellation retry reports that original cause. The explicit
+`HandshakeClient.pollNextResponseEventOnceWithFailure` API returns a
+`ResponseEventResult` with either an event or a `ResponseFailure`, and transfers
+cancellation ownership for fresh or retained failures. Local allocation errors
+leave decoding retryable; malformed QPACK remains a connection error. Shared
+pending cancellation storage lives in `http3/runtime/receive/pending_failure.zig`,
+with adjacent request and response ownership types and protected-QUIC tests.
 
 ## Remaining gaps
 

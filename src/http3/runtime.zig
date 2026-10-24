@@ -229,8 +229,12 @@ pub const StreamingRequestEvent = stream_events.Request;
 const request_failure = @import("runtime/receive/request_failure.zig");
 pub const RequestFailure = request_failure.Failure;
 pub const RequestEventResult = request_failure.Result;
+const response_failure = @import("runtime/receive/response_failure.zig");
+pub const ResponseFailure = response_failure.Failure;
+pub const ResponseEventResult = response_failure.Result;
 test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
+    _ = @import("runtime/receive/response_failure_retry_tests.zig");
 }
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
@@ -7174,7 +7178,7 @@ pub const HandshakeServerSession = struct {
             if (request_failure.capture(failure_out, stream_id, err)) return err;
             if (RequestFailure.fromError(stream_id, err)) |failure| {
                 self.pending_request_failures.append(failure);
-                self.streaming_requests.suspendFailedRequest(failure.stream_id);
+                self.streaming_requests.suspendFailedMessage(failure.stream_id);
                 try self.progressRequestPollFailures(target_stream_id, null);
                 return err;
             }
@@ -7203,7 +7207,7 @@ pub const HandshakeServerSession = struct {
                 if (request_failure.capture(failure_out, value.entry.reader.streamId(), err)) return err;
                 if (RequestFailure.fromError(value.entry.reader.streamId(), err)) |failure| {
                     self.pending_request_failures.append(failure);
-                    self.streaming_requests.suspendFailedRequest(failure.stream_id);
+                    self.streaming_requests.suspendFailedMessage(failure.stream_id);
                     try self.progressRequestPollFailures(target_stream_id, null);
                     return err;
                 }
@@ -11831,6 +11835,7 @@ pub const HandshakeClient = struct {
     qpack_decoder_prefix_sent: bool = false,
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
+    pending_response_failures: response_failure.Pending = .{},
     push_streams: PushStreamSet,
     push_aggregate: ClientPushAggregateState = .{},
     receive_packets: ConnectionPacketCursor = .{},
@@ -14153,6 +14158,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn deinit(self: *HandshakeClient) void {
+        self.pending_response_failures.deinit(self.allocator);
         self.critical_stream_send_scratch.deinit(self.allocator);
         self.stream_send_scratch.deinit(self.allocator);
         self.ticket_receiver.deinit();
@@ -16794,6 +16800,10 @@ pub const HandshakeClient = struct {
         single_attempt: bool,
     ) Error!?StreamingEvent {
         if (self.callback_reader_active) return error.ConcurrentRead;
+        try self.progressResponsePollFailures(stream_id, null);
+        if (self.streaming_responses.find(stream_id)) |entry| {
+            if (entry.message_failure_pending) return null;
+        }
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -16853,21 +16863,9 @@ pub const HandshakeClient = struct {
             &entry.reader,
         );
         try self.qpack_decode.prepareSectionAcknowledgments(1);
+        try self.pending_response_failures.reserve(self.allocator);
         const event = (entry.reader.next(self.qpack_decode.table) catch |err| {
-            if (single_attempt)
-                self.failReceivedResponseOnce(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {}
-            else
-                self.failReceivedResponse(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {};
+            try self.retainResponsePollFailure(stream_id, err, null);
             return err;
         }) orelse return null;
         const owned_event = event;
@@ -16883,20 +16881,7 @@ pub const HandshakeClient = struct {
             owned_event,
             single_attempt,
         ) catch |err| {
-            if (single_attempt)
-                self.failReceivedResponseOnce(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {}
-            else
-                self.failReceivedResponse(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {};
+            try self.retainResponsePollFailure(stream_id, err, null);
             return err;
         };
         if (!committed) return null;
@@ -18320,6 +18305,7 @@ pub const HandshakeClient = struct {
     fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
         var index: usize = 0;
         while (self.streaming_responses.entryAt(index)) |entry| : (index += 1) {
+            if (entry.message_failure_pending) continue;
             try releaseStreamingReaderCapacity(
                 &self.established.connection,
                 &entry.reader,
@@ -18332,6 +18318,7 @@ pub const HandshakeClient = struct {
     ) Error!bool {
         var index: usize = 0;
         while (self.streaming_responses.entryAt(index)) |entry| : (index += 1) {
+            if (entry.message_failure_pending) continue;
             releaseStreamingReaderCapacityOnce(
                 &self.established.connection,
                 &entry.reader,
@@ -18904,7 +18891,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
     ) Error!?StreamingResponseEvent {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        return self.pollNextResponseEventInternal(false);
+        return self.pollNextResponseEventInternal(false, null);
     }
 
     /// Return one buffered event from any response stream without waiting for
@@ -18912,14 +18899,29 @@ pub const HandshakeClient = struct {
     pub fn pollNextResponseEventOnce(
         self: *HandshakeClient,
     ) Error!?StreamingResponseEvent {
-        return self.pollNextResponseEventInternal(true);
+        return self.pollNextResponseEventInternal(true, null);
+    }
+
+    /// Transfer a stream-local response failure to the caller, including a
+    /// failure retained by default polling. The caller owns cancellation and
+    /// retry; local operations and connection protocol errors still propagate.
+    pub fn pollNextResponseEventOnceWithFailure(self: *HandshakeClient) Error!?ResponseEventResult {
+        var failure: ?ResponseFailure = null;
+        const event = self.pollNextResponseEventInternal(true, &failure) catch |err| {
+            if (failure) |owned| return .{ .failure = owned };
+            return err;
+        } orelse return null;
+        return .{ .event = event };
     }
 
     fn pollNextResponseEventInternal(
         self: *HandshakeClient,
         single_attempt: bool,
+        failure_out: ?*?ResponseFailure,
     ) Error!?StreamingResponseEvent {
         if (self.callback_reader_active) return error.ConcurrentRead;
+        if (failure_out) |output| output.* = null;
+        try self.progressResponsePollFailures(null, failure_out);
         if (self.request_lifecycle.isEmpty()) {
             return null;
         }
@@ -18934,6 +18936,7 @@ pub const HandshakeClient = struct {
             if (!try self.releaseStreamingResponseCapacityOnce()) return null;
             var index: usize = 0;
             while (self.streaming_responses.entryAt(index)) |entry| : (index += 1) {
+                if (entry.message_failure_pending) continue;
                 if (!entry.reader.finished()) continue;
                 const stream_id = entry.reader.streamId();
                 try self.finishStreamingResponse(stream_id);
@@ -18963,25 +18966,13 @@ pub const HandshakeClient = struct {
         }
         try self.request_lifecycle.prepareFinish();
         try self.qpack_decode.prepareSectionAcknowledgments(1);
+        if (failure_out == null) try self.pending_response_failures.reserve(self.allocator);
         const ready_value = self.streaming_responses.nextResponse(
             &self.response_streams,
             self.qpack_decode.table,
             self.options.local_settings.qpack_blocked_streams,
         ) catch |err| {
-            if (single_attempt)
-                self.failReceivedResponseOnce(
-                    self.streaming_responses.lastErrorStreamId(),
-                    null,
-                    err,
-                    false,
-                ) catch {}
-            else
-                self.failReceivedResponse(
-                    self.streaming_responses.lastErrorStreamId(),
-                    null,
-                    err,
-                    false,
-                ) catch {};
+            try self.retainResponsePollFailure(self.streaming_responses.lastErrorStreamId(), err, failure_out);
             return err;
         } orelse return null;
         var ready = ready_value;
@@ -19003,20 +18994,7 @@ pub const HandshakeClient = struct {
             ready.entry.reader.applyDecodedResponseHead(
                 &ready.event.head.response,
             ) catch |err| {
-                if (single_attempt)
-                    self.failReceivedResponseOnce(
-                        stream_id,
-                        null,
-                        err,
-                        false,
-                    ) catch {}
-                else
-                    self.failReceivedResponse(
-                        stream_id,
-                        null,
-                        err,
-                        false,
-                    ) catch {};
+                try self.retainResponsePollFailure(stream_id, err, failure_out);
                 return err;
             };
         }
@@ -19026,20 +19004,7 @@ pub const HandshakeClient = struct {
             owned_event,
             single_attempt,
         ) catch |err| {
-            if (single_attempt)
-                self.failReceivedResponseOnce(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {}
-            else
-                self.failReceivedResponse(
-                    stream_id,
-                    null,
-                    err,
-                    false,
-                ) catch {};
+            try self.retainResponsePollFailure(stream_id, err, failure_out);
             return err;
         };
         if (!committed) return null;
@@ -19591,6 +19556,9 @@ pub const HandshakeClient = struct {
     ) Error!void {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        defer if (!self.request_lifecycle.contains(stream_id)) {
+            _ = self.pending_response_failures.take(stream_id);
+        };
         return self.cancelRequestInternal(
             stream_id,
             application_error_code,
@@ -19605,6 +19573,9 @@ pub const HandshakeClient = struct {
         application_error_code: u64,
     ) Error!void {
         if (self.callback_reader_active) return error.ConcurrentRead;
+        defer if (!self.request_lifecycle.contains(stream_id)) {
+            _ = self.pending_response_failures.take(stream_id);
+        };
         return self.cancelRequestInternalOnce(
             stream_id,
             application_error_code,
@@ -20175,6 +20146,42 @@ pub const HandshakeClient = struct {
         // timer: a short-lived peer draining reliable bytes would otherwise
         // retransmit until its application deadline.
         _ = self.established.connection.tryFlushPendingAck() catch {};
+    }
+
+    fn submitResponsePollFailure(self: *HandshakeClient, failure: ResponseFailure) Error!void {
+        try self.request_lifecycle.prepareFinish();
+        try self.cancelRequestInternalOnce(failure.stream_id, failure.application_error_code, false);
+    }
+
+    fn progressResponsePollFailures(self: *HandshakeClient, target: ?u62, failure_out: ?*?ResponseFailure) Error!void {
+        if (self.pending_response_failures.count() == 0) return;
+        const connection = &self.established.connection;
+        if (connection.closing() or connection.draining() or connection.closed()) {
+            self.pending_response_failures.clear();
+            return error.ConnectionClosed;
+        }
+        if (failure_out) |output| {
+            if (self.pending_response_failures.take(target)) |failure| {
+                output.* = failure;
+                return failure.err;
+            }
+        } else if (try self.pending_response_failures.poll(self, target, submitResponsePollFailure)) |failure| {
+            return failure.err;
+        }
+    }
+
+    fn retainResponsePollFailure(self: *HandshakeClient, id: ?u62, err: Error, failure_out: ?*?ResponseFailure) Error!void {
+        if (ResponseFailure.fromError(id, err)) |failure| {
+            if (failure_out) |output| {
+                output.* = failure;
+                return;
+            }
+            self.pending_response_failures.append(failure);
+            self.streaming_responses.suspendFailedMessage(failure.stream_id);
+            try self.progressResponsePollFailures(failure.stream_id, null);
+            return;
+        }
+        try closeConnectionForHttp3Error(&self.established.connection, err);
     }
 
     fn failReceivedResponse(
