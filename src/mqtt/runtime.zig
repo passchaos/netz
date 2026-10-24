@@ -4125,7 +4125,7 @@ pub const Connection = struct {
     }
 
     pub fn readConnect(self: *Connection) Error!OwnedConnect {
-        const packet = try self.readPacket();
+        const packet = try TypedReceive.read(self, .connect, null);
         return self.finishReadConnect(packet);
     }
 
@@ -4159,7 +4159,7 @@ pub const Connection = struct {
             self.transport.ioHandle(),
             deadline,
         );
-        const packet = try self.readPacketWithDeadline(deadline);
+        const packet = try TypedReceive.read(self, .connect, deadline);
         return self.finishReadConnect(packet);
     }
 
@@ -4316,9 +4316,8 @@ pub const Connection = struct {
     }
 
     pub fn readConnAck(self: *Connection) Error!OwnedConnAck {
-        var packet = try self.readPacket();
+        var packet = try TypedReceive.read(self, .connack, null);
         errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .connack) return error.UnexpectedPacket;
         var connack = try mqtt.ConnAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer connack.deinit(self.allocator);
         try self.validateIncomingProperties(connack.properties);
@@ -4828,9 +4827,8 @@ pub const Connection = struct {
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
-        var packet = try self.readPacket();
+        var packet = try TypedReceive.read(self, .publish, null);
         errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
         var publish_packet = try mqtt.Publish.parsePayload(
             self.allocator,
             self.protocol,
@@ -5161,9 +5159,8 @@ pub const Connection = struct {
     }
 
     pub fn readSubscribe(self: *Connection) Error!OwnedSubscribe {
-        var packet = try self.readPacket();
+        var packet = try TypedReceive.read(self, .subscribe, null);
         errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .subscribe) return error.UnexpectedPacket;
         var subscribe_packet = try mqtt.Subscribe.parse(self.allocator, self.protocol, packet.bytes);
         errdefer subscribe_packet.deinit(self.allocator);
         try self.validateIncomingSubscriptionsUtf8(
@@ -5241,9 +5238,8 @@ pub const Connection = struct {
     }
 
     pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
-        var packet = try self.readPacket();
+        var packet = try TypedReceive.read(self, .unsubscribe, null);
         errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .unsubscribe) return error.UnexpectedPacket;
         var unsubscribe_packet = try mqtt.Unsubscribe.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsubscribe_packet.deinit(self.allocator);
         try self.validateIncomingTopicFiltersUtf8(
@@ -5356,9 +5352,8 @@ pub const Connection = struct {
     }
 
     pub fn readPingReq(self: *Connection) Error!void {
-        var packet = try self.readPacket();
+        var packet = try TypedReceive.read(self, .pingreq, null);
         defer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .pingreq) return error.UnexpectedPacket;
         try mqtt.validatePing(packet.bytes, false);
     }
 
@@ -5487,13 +5482,21 @@ pub const Connection = struct {
         }
     }
 
+    /// Read the peer's terminal diagnostic, including one retained by a typed
+    /// reader expecting a different packet. Local decoding allocation failure
+    /// leaves the complete packet available for retry.
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
-        var packet = try self.readPacket();
-        errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != .disconnect) return error.UnexpectedPacket;
-        const disconnect_packet = try self.parseIncomingDisconnect(
-            packet.bytes,
-        );
+        const ready = try TypedReceive.front(self, .disconnect, null);
+        const disconnect_packet = self.decodeIncomingDisconnect(ready.packet.bytes) catch |err| {
+            if (err != error.OutOfMemory) {
+                var packet = self.pending_packets.?.takeMatch(ready.index);
+                packet.deinit(self.allocator);
+            }
+            return err;
+        };
+        const packet = self.pending_packets.?.takeMatch(ready.index);
+        termination.receivedDisconnect(self);
+        self.clearPendingPacketState();
         return .{ .packet = packet, .disconnect = disconnect_packet };
     }
 
@@ -5937,10 +5940,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedAuth {
-        var packet = if (deadline) |absolute|
-            try self.readPacketWithDeadline(absolute)
-        else
-            try self.readPacket();
+        var packet = try TypedReceive.read(self, .auth, deadline);
         errdefer packet.deinit(self.allocator);
         return self.parseReadAuth(packet);
     }
@@ -6937,6 +6937,17 @@ pub const Connection = struct {
         }
     });
 
+    const TypedReceive = @import("runtime/receive/retained.zig").Reader(struct {
+        pub const ConnectionType = Connection;
+        pub const PacketType = OwnedPacket;
+        pub const ErrorType = Error;
+        pub const canReadBuffered = termination.canReadBuffered;
+        pub const prepareStorage = Connection.ensurePendingPacketStorage;
+        pub const readPacket = Connection.readTransportPacket;
+        pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
+        pub const observeDisconnect = Connection.observeDisconnectPacket;
+    });
+
     const ReauthenticationReader = @import("runtime/auth_receive.zig").Controller(struct {
         pub const ConnectionType = Connection;
         pub const PacketType = OwnedPacket;
@@ -7145,11 +7156,7 @@ pub const Connection = struct {
     }
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
-        var packet = try self.readPacket();
-        if (packet.fixed.packet_type != packet_type) {
-            packet.deinit(self.allocator);
-            return error.UnexpectedPacket;
-        }
+        const packet = try TypedReceive.read(self, packet_type, null);
         return self.finishReadAck(packet);
     }
 
@@ -7835,7 +7842,6 @@ test "MQTT runtime counts complete control packets and wire bytes" {
     );
     defer client_stream.close(io);
     const server_stream = try listener.accept(io);
-    defer server_stream.close(io);
 
     var counters: TrafficCounters = .{};
     var connection = Connection{
@@ -7844,6 +7850,7 @@ test "MQTT runtime counts complete control packets and wire bytes" {
         .traffic_sink = &counters,
         .protocol = .v5,
     };
+    defer connection.close();
 
     var ping_req: [mqtt.ping_packet_len]u8 = undefined;
     const request = mqtt.writePingInto(&ping_req, false);
@@ -11793,4 +11800,5 @@ test {
     _ = @import("runtime/acknowledgement/publish_deadline_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
     _ = @import("runtime/disconnect_tests.zig");
+    _ = @import("runtime/receive/termination_tests.zig");
 }

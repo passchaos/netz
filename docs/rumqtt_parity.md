@@ -2616,6 +2616,13 @@ only as raw AUTH packet helpers:
 - Direct synchronous re-authentication uses the same method/state validation
   and Protocol Error DISCONNECT as the event reader. A changed Authentication
   Method retires the connection after its diagnostic write.
+- A typed reader expecting CONNECT, CONNACK, PUBLISH, a QoS acknowledgement,
+  subscription control, PING or AUTH also handles DISCONNECT as a terminal
+  packet. It returns `ConnectionClosed` while retaining the packet for
+  `readDisconnect` or an ordinary event reader. Repeated typed attempts cannot
+  discard that diagnostic or read beyond it. Direct `readDisconnect` decoding
+  retains the exact complete packet on local allocation failure and releases
+  post-terminal queued data only after successful validation and consumption.
 - A live broker policy can reject re-authentication with a validated
   DISCONNECT reason and optional properties. A successful write atomically
   retires the connection, stops its event loop and prevents any later MQTT

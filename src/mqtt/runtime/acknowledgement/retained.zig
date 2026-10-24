@@ -8,20 +8,13 @@ pub fn Reader(comptime Context: type) type {
         const Connection = Context.ConnectionType;
         const Packet = Context.PacketType;
         const Error = Context.ErrorType;
+        const Incoming = @import("../receive/retained.zig").Reader(Context);
 
         /// Typed reads preserve wire order even with a full pending queue.
         /// Storage is prepared before I/O so an OOM while decoding cannot
         /// lose a complete packet that has already left the transport.
         pub fn front(connection: *Connection) Error!Pending.Match {
-            if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
-            if (connection.pending_packets) |pending| {
-                if (pending.findFirstMatching({}, anyPacket)) |ready| return ready;
-            }
-            try Context.prepareStorage(connection);
-            const packet = try Context.readPacket(connection);
-            const pending = connection.pending_packets.?;
-            pending.retainOverflow(packet);
-            return .{ .packet = packet, .index = pending.packets.items.len };
+            return Incoming.front(connection, null, null);
         }
 
         pub fn matching(connection: *Connection, match: anytype, comptime matches: fn (@TypeOf(match), Packet) bool, deadline: ?std.Io.Clock.Timestamp) Error!Pending.Match {
@@ -57,10 +50,6 @@ pub fn Reader(comptime Context: type) type {
                 };
                 owned = false;
             }
-        }
-
-        fn anyPacket(_: void, _: Packet) bool {
-            return true;
         }
     };
 }
