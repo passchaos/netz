@@ -354,6 +354,23 @@ pub const Session = struct {
         );
     }
 
+    const StreamControl = @import("endpoint_client/stream_control.zig").Controller(struct {
+        pub const SessionType = Session;
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const TimeoutErrorType = TimeoutError;
+        pub const validateOwner = Session.validateOwner;
+        pub const ensureConnectionOpen = Client.ensureConnectionOpen;
+    });
+
+    pub const resetStreamWithTimeout = StreamControl.resetStreamWithTimeout;
+    pub const resetStreamWithDeadline = StreamControl.resetStreamWithDeadline;
+    pub const resetStreamReliably = StreamControl.resetStreamReliably;
+    pub const resetStreamReliablyWithTimeout = StreamControl.resetStreamReliablyWithTimeout;
+    pub const resetStreamReliablyWithDeadline = StreamControl.resetStreamReliablyWithDeadline;
+    pub const stopStreamWithTimeout = StreamControl.stopStreamWithTimeout;
+    pub const stopStreamWithDeadline = StreamControl.stopStreamWithDeadline;
+
     pub fn close(
         self: *Session,
         client: *Client,

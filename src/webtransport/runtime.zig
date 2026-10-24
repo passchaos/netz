@@ -103,6 +103,7 @@ test {
     _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_client_tests.zig");
+    _ = @import("runtime/endpoint_client/stream_control_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/development_lifecycle_tests.zig");
     _ = @import("runtime/development_stream_tests.zig");

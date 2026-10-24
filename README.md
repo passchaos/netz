@@ -1594,6 +1594,8 @@ Current protocol coverage includes:
   objects share global QUIC stream IDs, preserve bounded non-2xx admission
   metadata, enforce both peer SETTINGS and a local Session cap, and expose
   targeted DATAGRAM, associated-stream, CLOSE and removal operations, plus
+  timeout/deadline-bounded RESET/STOP and reliable application-prefix reset
+  while preserving sibling traffic through the owning HTTP/3 reader, plus
   stable-key `pollAny`/`receiveAny*` fairness across ready Sessions even after
   hash-map growth or removal of the prior producer,
   modern

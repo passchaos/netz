@@ -489,6 +489,15 @@ reverse-stream events through this whichever-ready path. Both
 endpoint roles also preserve a RESET_STREAM that overtakes its fragmented
 association prefix, so the WebTransport layer reports the mapped terminal
 event instead of the generic HTTP/3 router consuming it.
+Shared-client Sessions also expose `resetStreamWithTimeout/Deadline`,
+`stopStreamWithTimeout/Deadline`, and `resetStreamReliably` with timeout and
+deadline counterparts. Reliable Size counts application bytes; even an
+unwritten unidirectional stream can deliver its association prefix before
+reset with zero Session data credit. Bounded cancellation routes progress
+through the one owning HTTP/3 reader, preserving sibling DATAGRAMs while
+congestion delays submission. Invalid ownership, unnegotiated reliable reset,
+unsent prefixes, and active callback readers fail before cancellation changes
+stream state. Timeout and socket submission failure leave RESET/STOP retryable.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte
