@@ -1507,7 +1507,11 @@ Current protocol coverage includes:
   MQTT 5 Server Reference validation plus opt-in bounded, loop-detecting
   CONNACK redirects for TCP/TLS/WS/WSS with per-hop authorization and fresh
   TLS authority verification, and
-  QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
+  QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation,
+  synchronous QoS completion that correlates Packet Identifiers, retains
+  interleaved application packets and sibling ACKs in bounded wire order,
+  retries queued ACK decoding after allocation failure, and retransmits
+  PUBREL for repeated successful PUBREC while preserving inflight accounting,
 - WebTransport capsules with core and incremental UTF-8/1024-byte close-reason
   enforcement, unidirectional and bidirectional stream headers, and HTTP/3
   DATAGRAM payloads with transactional single-reservation encoding,
@@ -1857,6 +1861,9 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # netz, checking QoS 0/1/2 fanout, retained replay, and MQTT 5
 # Response Topic plus Correlation Data through libmosquitto's decoder.
 zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
+# Run netz's synchronous QoS 1/2 completion against the pinned Mosquitto
+# broker, reversing completion order while retaining self-delivered messages.
+zig build interop-mqtt-publish-mosquitto -Doptimize=ReleaseFast
 # Build locked rumqttc 0.25.1 offline and independently exercise the same
 # MQTT 3.1.1/5 QoS completion/single-delivery, retained, persistent Session
 # recovery with offline QoS 1 delivery, and MQTT 5 property boundaries.

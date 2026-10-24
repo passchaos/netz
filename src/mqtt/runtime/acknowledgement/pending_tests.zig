@@ -8,6 +8,30 @@ const second = "\x30\x05\x00\x01x22";
 const third = "\x30\x06\x00\x01x333";
 const fourth = "\x30\x07\x00\x01x4444";
 
+fn matchesBytes(expected: []const u8, packet: Packet) bool {
+    return std.mem.eql(u8, expected, packet.bytes);
+}
+
+test "MQTT pending correlated removal preserves prefix order and overflow quota" {
+    const allocator = std.testing.allocator;
+    var queue: State = .{};
+    defer queue.deinit(allocator);
+    for ([_][]const u8{ first, second, third }) |bytes| try queue.append(allocator, borrowed(bytes), 3, 100);
+    _ = queue.pop();
+    queue.retainOverflow(borrowed(fourth));
+    const middle = queue.findFirstMatching(@as([]const u8, third), matchesBytes).?;
+    try std.testing.expectEqualStrings(third, middle.packet.bytes);
+    try std.testing.expectEqual(@as(usize, second.len + third.len), queue.queued_bytes);
+    try std.testing.expectEqualStrings(third, queue.takeMatch(middle.index).bytes);
+    try std.testing.expectEqual(@as(usize, second.len), queue.queued_bytes);
+    const overflow = queue.findFirstMatching(@as([]const u8, fourth), matchesBytes).?;
+    try std.testing.expectEqualStrings(fourth, queue.takeMatch(overflow.index).bytes);
+    try std.testing.expectEqual(@as(usize, 1), queue.count());
+    try std.testing.expectEqualStrings(second, queue.pop().?.bytes);
+    try std.testing.expect(queue.pop() == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.queued_bytes);
+}
+
 fn borrowed(bytes: []const u8) Packet {
     return .{ .bytes = @constCast(bytes), .fixed = mqtt.FixedHeader.parse(bytes) catch unreachable, .owns_bytes = false };
 }

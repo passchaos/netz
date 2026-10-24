@@ -1464,6 +1464,23 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_mosquitto_clients_step.dependOn(&mqtt_mosquitto_clients.step);
 
+    const mqtt_publish_client = b.addExecutable(.{
+        .name = "netz-mqtt-publish-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/mqtt_publish_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_publish_interop = b.addSystemCommand(&.{"tools/interop/mqtt_publish_mosquitto.sh"});
+    mqtt_publish_interop.addArtifactArg(mqtt_publish_client);
+    const mqtt_publish_interop_step = b.step(
+        "interop-mqtt-publish-mosquitto",
+        "Run netz synchronous QoS completion and self-delivery against Mosquitto",
+    );
+    mqtt_publish_interop_step.dependOn(&mqtt_publish_interop.step);
+
     const mqtt_rumqttc = b.addSystemCommand(&.{
         "tools/interop/mqtt_rumqttc.sh",
     });

@@ -77,8 +77,8 @@ pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
     /// Maximum interleaved Control Packets retained while a synchronous client
     /// operation waits for its correlated response. MQTT permits the broker to
-    /// send ordinary traffic at any time, so SUBSCRIBE, UNSUBSCRIBE and PING
-    /// preserve those packets for the next typed reader.
+    /// send ordinary traffic at any time, so publishing, SUBSCRIBE,
+    /// UNSUBSCRIBE and PING preserve those packets for the next typed reader.
     /// Reaching the bound fails the operation, with one already-consumed
     /// overflow packet retained separately so wire order remains recoverable.
     max_pending_ping_packets: usize = 256,
@@ -4766,6 +4766,9 @@ pub const Connection = struct {
         } else try self.writePubRel(pubrel.packet_id, 0);
     }
 
+    /// Complete QoS 1/2 without consuming unrelated application packets or
+    /// known sibling acknowledgements. Interleaved packets remain bounded by
+    /// the pending count/byte limits and are available to ordinary readers.
     pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {
         switch (qos) {
             .at_most_once => return,
@@ -4775,19 +4778,7 @@ pub const Connection = struct {
     }
 
     pub fn completePublishPubAck(self: *Connection, packet_id: u16) Error!void {
-        if (packet_id != 0 and !self.packet_identifiers.contains(
-            packet_id,
-            .outgoing_qos1,
-        )) return error.UnexpectedPacket;
-        var ack = try self.readPubAck();
-        defer ack.deinit(self.allocator);
-        if (packet_id != 0 and ack.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        if (!self.packet_identifiers.contains(
-            ack.ack.packet_id,
-            .outgoing_qos1,
-        )) return error.UnexpectedPacket;
-        self.releaseOutgoingPublish(ack.ack.packet_id, .at_least_once);
-        if (!ack.ack.accepted()) return error.PublishRefused;
+        return PublishCompletion.puback(self, packet_id);
     }
 
     pub fn completePublishQoS2(self: *Connection, packet_id: u16) Error!void {
@@ -4796,40 +4787,11 @@ pub const Connection = struct {
     }
 
     pub fn completePublishPubRec(self: *Connection, packet_id: u16) Error!u16 {
-        if (packet_id != 0 and !self.packet_identifiers.contains(
-            packet_id,
-            .outgoing_qos2,
-        )) return error.UnexpectedPacket;
-        var pubrec = try self.readPubRec();
-        defer pubrec.deinit(self.allocator);
-        if (packet_id != 0 and pubrec.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        if (!self.packet_identifiers.contains(
-            pubrec.ack.packet_id,
-            .outgoing_qos2,
-        )) return error.UnexpectedPacket;
-        if (!pubrec.ack.accepted()) {
-            self.releaseOutgoingPublish(pubrec.ack.packet_id, .exactly_once);
-            return error.PublishRefused;
-        }
-        try self.writePubRel(pubrec.ack.packet_id, 0);
-        std.debug.assert(self.packet_identifiers.transition(
-            pubrec.ack.packet_id,
-            .outgoing_qos2,
-            .outgoing_qos2_pubrel,
-        ));
-        return pubrec.ack.packet_id;
+        return PublishCompletion.pubrec(self, packet_id);
     }
 
     pub fn completePublishPubComp(self: *Connection, packet_id: u16) Error!void {
-        if (!self.packet_identifiers.contains(
-            packet_id,
-            .outgoing_qos2_pubrel,
-        )) return error.UnexpectedPacket;
-        var pubcomp = try self.readPubComp();
-        defer pubcomp.deinit(self.allocator);
-        if (pubcomp.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        self.releaseOutgoingPublish(packet_id, .exactly_once);
-        if (!pubcomp.ack.accepted()) return error.PublishRefused;
+        return PublishCompletion.pubcomp(self, packet_id);
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
@@ -4939,7 +4901,7 @@ pub const Connection = struct {
             // prior PUBREL. Retransmit it without changing inflight accounting
             // or the already-advanced QoS 2 stage.
             if (!ack.accepted()) return error.UnexpectedPacket;
-            try self.writePubRel(ack.packet_id, 0);
+            try self.writePubRelWithDup(ack.packet_id, 0, self.protocol == .v3_1);
             return;
         }
         if (!self.packet_identifiers.contains(
@@ -6852,6 +6814,25 @@ pub const Connection = struct {
         }
     });
 
+    const PublishCompletion = @import("runtime/acknowledgement/publish.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const PacketType = OwnedPacket;
+        pub const AckType = OwnedAck;
+        pub const ErrorType = Error;
+        pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
+        pub const readPacket = Connection.readTransportPacket;
+        pub const queuePacket = Connection.queuePendingPacket;
+        pub const parseAck = Connection.parseReadAck;
+        pub const hasOutgoing = Connection.hasOutgoingPacketIdentifier;
+        pub const applyPubAck = Connection.applyPubAck;
+        pub const applyPubRec = Connection.applyPubRec;
+        pub const applyPubComp = Connection.applyPubComp;
+
+        pub fn contains(connection: *const Connection, packet_id: u16, stage: packet_identifiers.State.Stage) bool {
+            return connection.packet_identifiers.contains(packet_id, stage);
+        }
+    });
+
     const ControlExchange = @import("runtime/acknowledgement/exchange.zig").Controller(struct {
         pub const ConnectionType = Connection;
         pub const ErrorType = Error;
@@ -6960,8 +6941,21 @@ pub const Connection = struct {
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
         var packet = try self.readPacket();
+        if (packet.fixed.packet_type != packet_type) {
+            packet.deinit(self.allocator);
+            return error.UnexpectedPacket;
+        }
+        return self.finishReadAck(packet);
+    }
+
+    fn finishReadAck(self: *Connection, packet_value: OwnedPacket) Error!OwnedAck {
+        var packet = packet_value;
         errdefer packet.deinit(self.allocator);
-        if (packet.fixed.packet_type != packet_type) return error.UnexpectedPacket;
+        return self.parseReadAck(packet);
+    }
+
+    /// Parse borrowed packet storage; the caller retains it on failure.
+    fn parseReadAck(self: *Connection, packet: OwnedPacket) Error!OwnedAck {
         var ack = try mqtt.AckPacket.parsePayload(
             self.allocator,
             self.protocol,
@@ -11641,5 +11635,6 @@ test {
     _ = @import("runtime/acknowledgement/subscribe_tests.zig");
     _ = @import("runtime/acknowledgement/reconnect_tests.zig");
     _ = @import("runtime/acknowledgement/byte_limit_tests.zig");
+    _ = @import("runtime/acknowledgement/publish_tests.zig");
     _ = @import("runtime/acceptance_tests.zig");
 }

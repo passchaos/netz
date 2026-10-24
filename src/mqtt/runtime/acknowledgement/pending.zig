@@ -68,6 +68,39 @@ pub const State = struct {
         return null;
     }
 
+    pub const Match = struct { index: usize, packet: Packet };
+
+    /// Borrow a correlated response before detaching it, so a decoder's local
+    /// allocation failure leaves the packet at its exact queued position.
+    pub fn findFirstMatching(self: *State, context: anytype, comptime matches: fn (@TypeOf(context), Packet) bool) ?Match {
+        for (self.packets.items[self.head..], self.head..) |packet, index| {
+            if (!matches(context, packet)) continue;
+            return .{ .index = index, .packet = packet };
+        }
+        if (self.overflow) |packet| {
+            if (matches(context, packet)) {
+                return .{ .index = self.packets.items.len, .packet = packet };
+            }
+        }
+        return null;
+    }
+
+    /// Detach an index returned by findFirstMatching, with no intervening
+    /// queue mutation. Stable removal retains the other packets' wire order.
+    pub fn takeMatch(self: *State, index: usize) Packet {
+        if (index == self.packets.items.len) {
+            const packet = self.overflow.?;
+            self.overflow = null;
+            return packet;
+        }
+        std.debug.assert(index >= self.head and index < self.packets.items.len);
+        const packet = self.packets.items[index];
+        @memmove(self.packets.items[index .. self.packets.items.len - 1], self.packets.items[index + 1 ..]);
+        self.packets.items.len -= 1;
+        self.queued_bytes -= packet.bytes.len;
+        return packet;
+    }
+
     fn compact(self: *State) void {
         const remaining = self.packets.items.len - self.head;
         @memmove(self.packets.items[0..remaining], self.packets.items[self.head..]);
