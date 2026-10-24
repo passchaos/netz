@@ -9,6 +9,20 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Typed subscriptions now share `mqtt.validateSubscription` across Router direct,
+prepared and batch updates, Session storage, local-consumer preflight and
+SUBSCRIBE writing. Invalid filters, reserved QoS/Retain Handling values,
+Shared Subscription No Local and identifiers outside `1..268435455` are
+rejected before allocation or subscription mutation. This closes the Router's
+previous acceptance of Retain Handling 3, which Mosquitto's
+`src/handle_subscribe.c` rejects. Failed new routes and replacements preserve
+live routing, stored metadata, batch state and existing writer output. The
+wire writer also retains version-specific option validation for MQTT 3.1 and
+3.1.1; incoming packet parsing retains its Malformed Packet/Protocol Error
+classification. Legal MQTT 5 ordinary/shared option and identifier boundaries
+are checked through Router, Session storage and encode/parse round trips in
+`src/mqtt/subscription/validation_tests.zig`.
+
 Router subscription churn now reuses detached entry/node slots and prunes
 empty literal and `+` branches without changing any live route or shared-group
 index. Trie ownership lives in `src/mqtt/router/tree.zig`; parent links make

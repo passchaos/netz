@@ -1676,21 +1676,7 @@ pub const Store = struct {
         subscription: mqtt.Subscription,
         subscription_identifier: ?usize,
     ) Error!bool {
-        try mqtt.validateTopicFilter(subscription.topic_filter);
-        if (subscription.retain_handling > 2 or
-            (subscription.no_local and std.mem.startsWith(
-                u8,
-                subscription.topic_filter,
-                "$share/",
-            )))
-        {
-            return error.InvalidSubscription;
-        }
-        if (subscription_identifier) |identifier| {
-            if (identifier == 0 or identifier > 268_435_455) {
-                return error.InvalidProperty;
-            }
-        }
+        try mqtt.validateSubscription(subscription, subscription_identifier);
         const session = try self.getSession(handle);
         for (session.subscriptions.items) |*maybe_subscription| {
             if (maybe_subscription.*) |*existing| {

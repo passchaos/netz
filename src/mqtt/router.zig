@@ -183,14 +183,7 @@ pub const Router = struct {
         subscription: mqtt.Subscription,
         subscription_identifier: ?usize,
     ) Error!bool {
-        try mqtt.validateTopicFilter(subscription.topic_filter);
-        if (subscription_identifier) |identifier| {
-            if (identifier == 0 or identifier > 268_435_455) {
-                return error.InvalidProperty;
-            }
-        }
-        const parsed_input = parseFilter(subscription.topic_filter) orelse return error.InvalidSubscription;
-        if (parsed_input.group != null and subscription.no_local) return error.InvalidSubscription;
+        try mqtt.validateSubscription(subscription, subscription_identifier);
         if (self.findEntry(subscriber_id, subscription.topic_filter)) |entry_index| {
             // MQTT requires a repeated SUBSCRIBE for the same client/filter to
             // replace the prior subscription options. The routing path and

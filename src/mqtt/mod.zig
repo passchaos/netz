@@ -3,6 +3,7 @@ const wire = @import("../internal/wire.zig");
 const ack_reason = @import("ack_reason.zig");
 
 pub const validateAckReasonCode = ack_reason.validate;
+pub const validateSubscription = @import("subscription/validation.zig").validate;
 
 pub const runtime = @import("runtime.zig");
 pub const reconnect = @import("reconnect.zig");
@@ -26,6 +27,7 @@ pub const testing = @import("testing/mod.zig");
 
 test {
     _ = ack_reason;
+    _ = @import("subscription/validation_tests.zig");
     _ = listener_namespace;
     _ = broker_config;
     _ = password_file;
@@ -2241,13 +2243,12 @@ pub const Subscribe = struct {
             remainingLengthEncodedLen(properties_len) + properties_len,
         );
         for (subscriptions) |subscription| {
-            try validateTopicFilter(subscription.topic_filter);
+            try validateSubscription(subscription, null);
             const options: u8 = @intFromEnum(subscription.qos) |
                 (if (subscription.no_local) @as(u8, 0x04) else 0) |
                 (if (subscription.retain_as_published) @as(u8, 0x08) else 0) |
                 (@as(u8, subscription.retain_handling) << 4);
             try validateSubscriptionOptions(protocol, options);
-            try validateSharedSubscriptionOptions(protocol, subscription.topic_filter, options);
             remaining_len = try addEncodedComponent(
                 remaining_len,
                 1 + try encodedLengthPrefixedLen(

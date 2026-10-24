@@ -183,16 +183,7 @@ pub fn Operations(comptime Context: type) type {
                 return error.SubscriptionLimitExceeded;
             }
             for (options.subscriptions, 0..) |subscription, index| {
-                try mqtt.validateTopicFilter(subscription.topic_filter);
-                if (subscription.retain_handling > 2 or
-                    (subscription.no_local and std.mem.startsWith(
-                        u8,
-                        subscription.topic_filter,
-                        "$share/",
-                    )))
-                {
-                    return error.InvalidSubscription;
-                }
+                try mqtt.validateSubscription(subscription, null);
                 for (options.subscriptions[0..index]) |previous| {
                     if (std.mem.eql(
                         u8,
