@@ -19136,6 +19136,8 @@ test {
     _ = @import("runtime/session_control/connect_termination_tests.zig");
     _ = @import("runtime/session_control/connect_sibling_tests.zig");
     _ = @import("runtime/session_control/lightweight_termination_tests.zig");
+    _ = @import("runtime/session_control/receive_termination_tests.zig");
+    _ = @import("runtime/session_control/receive_sibling_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
     _ = @import("runtime/flow/receive.zig");
     _ = @import("runtime/flow/write.zig");

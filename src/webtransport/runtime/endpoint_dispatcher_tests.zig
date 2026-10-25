@@ -930,7 +930,10 @@ test "WebTransport endpoint reads defer paced receive credit" {
         )) == null,
     );
     try std.testing.expect(!accepted.control.terminal_reported);
-    try std.testing.expect(!accepted.control.state.closed);
+    // FIN already ended application use. The paced receive-credit transaction
+    // still leaves Capsule parsing and the original close bytes pending.
+    try std.testing.expect(accepted.control.state.closed);
+    try std.testing.expectError(error.InvalidSessionState, accepted.control.ensureOpen());
     try std.testing.expect(!accepted.close_response_pending);
     try std.testing.expectEqual(
         control_len,
@@ -2303,17 +2306,6 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
     );
     var framed: [4 + session_control.max_close_reason + 32]u8 = undefined;
     const framed_len = try writeDataFrame(&framed, capsule);
-    try quic.one_rtt.testing.applyReceivedFrames(
-        &session.h3.established.connection,
-        1,
-        &.{.{ .stream = .{
-            .stream_id = 0,
-            .data = framed[0..framed_len],
-            .fin = true,
-        } }},
-        4_000_000,
-        .not_ect,
-    );
 
     var fixed_io = FixedClockIo{
         .delegate = endpoint.io,
@@ -2353,6 +2345,24 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
     try session.drain();
     try std.testing.expect(session.control.local_drain_sent);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    // Exercise advisory DRAIN while the Session is open, then receive the
+    // terminal peer CLOSE/FIN and defer its response cleanup independently.
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &session.h3.established.connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = framed[0..framed_len],
+            .fin = true,
+        } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
 
     const event = (try session.pollSessionEvent()) orelse
         return error.TestUnexpectedResult;

@@ -19,7 +19,7 @@ pub fn prepare(target: anytype, code: u32, reason: []const u8) Error!void {
         if (!try pending.matches(code, reason)) return error.InvalidSessionState;
         return;
     }
-    try lifecycle.ensureOpen(&target.control, target.h3, &target.streams);
+    try lifecycle.ensureCloseOpen(&target.control, target.h3, &target.streams);
     var pending = try pending_close.Pending.init(target.h3.established.connection.endpoint.allocator, code, reason);
     errdefer pending.deinit();
     try target.control.beginLocalClose();

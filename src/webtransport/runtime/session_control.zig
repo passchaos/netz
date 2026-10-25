@@ -275,6 +275,17 @@ pub const Control = struct {
         }
     }
 
+    /// An observed receive termination stops application use immediately.
+    /// Until its peer event is decoded, a still-open send direction can finish
+    /// an explicit local CLOSE under the ordinary retained-write contract.
+    pub fn ensureCloseOpen(self: Control) Error!void {
+        if (self.state.closed and !self.terminal_reported and
+            !self.connection_terminated and !self.local_close_sent and
+            !self.local_close_failed and !self.local_close_started and
+            !self.local_drain_started and !self.capsule_error_pending) return;
+        try self.ensureOpen();
+    }
+
     pub fn ensureDatagramReceiveOpen(self: *const Control) Error!void {
         if (self.connection_terminated) return error.ConnectionClosed;
         if (self.state.closed) return error.ConnectDatagramAssociationClosed;
@@ -296,8 +307,12 @@ pub const Control = struct {
         return connect_termination.observe(self, connection);
     }
 
+    pub fn observeConnectReceive(self: *Control, connection: *const quic.one_rtt.Connection) bool {
+        return connect_termination.observeReceive(self, connection);
+    }
+
     pub fn beginLocalClose(self: *Control) Error!void {
-        try self.ensureOpen();
+        try self.ensureCloseOpen();
         self.local_close_started = true;
     }
 
@@ -328,10 +343,10 @@ pub const Control = struct {
             return;
         }
         if (!self.state.established or self.state.closed) {
-            return error.InvalidSessionState;
+            try self.ensureCloseOpen();
         }
         self.local_close_sent = true;
-        self.state.close(code);
+        if (!self.state.closed) self.state.close(code);
     }
 
     pub fn recordLocalCloseFailure(
@@ -404,6 +419,7 @@ pub const Control = struct {
     ) Error!?Event {
         if (self.observeConnection(connection)) return error.ConnectionClosed;
         _ = self.observeConnectSend(connection);
+        _ = self.observeConnectReceive(connection);
         const available = connection.availableReceivedStream(
             self.session_id.value,
         ) orelse &.{};

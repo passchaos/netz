@@ -23,6 +23,16 @@ pub fn observeConnectSend(control: *control_mod.Control, h3: anytype) void {
     h3.connect_datagrams.markTerminal(control.session_id.value, .peer_fin);
 }
 
+pub fn observeConnectReceive(control: *control_mod.Control, h3: anytype) void {
+    const connection = &h3.established.connection;
+    if (!control.observeConnectReceive(connection)) return;
+    if (connection.recvStreamStats(control.session_id.value).?.reset) |reset| {
+        h3.connect_datagrams.markTerminal(control.session_id.value, .{ .peer_reset = reset.application_error_code });
+    } else {
+        h3.connect_datagrams.markTerminal(control.session_id.value, .peer_fin);
+    }
+}
+
 pub fn activate(control: *control_mod.Control, h3: anytype, registry: anytype) void {
     control.bindFlow(registry.flow);
     h3.connect_datagrams.discardOnConnectionClose(control.session_id.value);
@@ -48,6 +58,7 @@ pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: an
 
 fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
     observeConnectSend(control, h3);
+    observeConnectReceive(control, h3);
     // DATAGRAM-only consumers and send-side flow waits still own Session
     // maintenance. Settle terminal receive bytes without consuming the RESET
     // notification, so they can return WT_MAX_DATA before another stream read.
@@ -72,6 +83,12 @@ pub fn ensureOpen(control: *control_mod.Control, h3: anytype, registry: anytype)
     control.bindFlow(registry.flow);
     if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
     try control.ensureOpen();
+}
+
+pub fn ensureCloseOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {
+    control.bindFlow(registry.flow);
+    if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
+    try control.ensureCloseOpen();
 }
 
 pub fn ensureDatagramReceiveOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {

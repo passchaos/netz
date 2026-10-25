@@ -1,4 +1,4 @@
-//! CONNECT send termination closes only its owning WebTransport Session.
+//! CONNECT termination closes only its owning WebTransport Session.
 //! Retain the transport notification separately from Capsule events so an
 //! already-buffered peer CLOSE keeps its application code and reason.
 
@@ -42,4 +42,15 @@ pub fn observe(control: anytype, connection: *const quic.one_rtt.Connection) boo
         return true;
     }
     return false;
+}
+
+pub fn observeReceive(control: anytype, connection: *const quic.one_rtt.Connection) bool {
+    const stats = connection.recvStreamStats(control.session_id.value) orelse return false;
+    if (stats.reset == null and (stats.final_size == null or stats.bytes_received != stats.final_size.?)) return false;
+    // A reordered FIN only announces the final size. Wait for its missing
+    // bytes before treating the receive direction as cleanly terminated.
+    // Parsing remains pending so buffered CLOSE metadata can still win over
+    // a synthesized code-zero close or a transport reset notification.
+    if (!control.state.closed) control.state.close(0);
+    return true;
 }

@@ -445,6 +445,7 @@ pub const Client = struct {
         while (sessions.next()) |session_ptr| {
             if (!terminating) {
                 connection_lifecycle.observeConnectSend(&session_ptr.*.control, &self.h3);
+                connection_lifecycle.observeConnectReceive(&session_ptr.*.control, &self.h3);
                 continue;
             }
             _ = connection_lifecycle.observe(&session_ptr.*.control, &self.h3, &session_ptr.*.streams);

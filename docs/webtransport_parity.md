@@ -27,7 +27,7 @@ Sessions, control-only wakeups, DATAGRAM/stream reuse, duplicate advisory
 signals and exact later CLOSE metadata; the pending CONNECT regression checks
 that backpressure resumes its committed suffix after GOAWAY.
 
-## CONNECT send termination
+## CONNECT transport termination
 
 Authenticated Session owners observe CONNECT send-side STOP_SENDING, RESET
 and FIN in the shared lifecycle, including before application sends and stream
@@ -43,6 +43,17 @@ synthesized termination are discarded; bytes beyond an actually decoded
 WT_CLOSE_SESSION still require H3_MESSAGE_ERROR. Regression coverage lives in
 `src/webtransport/runtime/session_control/connect_termination_tests.zig` and
 `connect_sibling_tests.zig`, using real UDP/H3 traffic in both endpoint roles.
+
+Peer CONNECT RESET and fully received FIN also close application state before
+stream opens, writes or DATAGRAM operations, including when Session opening
+credit is already available or Session flow control is unnegotiated. A FIN
+whose control bytes still have gaps waits for those bytes. Capsule events stay
+pending, so a buffered CLOSE preserves its code/reason even when reason
+allocation first fails. Explicit local CLOSE can still finish the open send
+direction before that peer event is decoded. Registered associated streams
+receive WT_SESSION_GONE cleanup, and shared client/server siblings keep their
+streams and DATAGRAMs. Protected-UDP coverage is in
+`session_control/receive_termination_tests.zig` and `receive_sibling_tests.zig`.
 
 ## Current direct evidence
 
