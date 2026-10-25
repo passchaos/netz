@@ -9,8 +9,22 @@ from unittest import mock
 
 import mqtt_broker_config_bridge
 import mqtt_broker_config
+from mqtt_broker_config_include import connack_policy
 from mqtt_scenarios import subscription_lifecycle
 from mqtt_broker_config import wait_process_line
+
+
+class IncludeConnackOracleTest(unittest.TestCase):
+    def test_decodes_properties_at_their_wire_boundaries(self) -> None:
+        self.assertEqual(
+            connack_policy(bytes.fromhex("20 0e 00 00 0b 12 00 01 24 24 01 22 00 05 29 01")),
+            {0x12: "$", 0x24: 1, 0x22: 5, 0x29: 1},
+        )
+
+    def test_rejects_duplicate_or_truncated_policy(self) -> None:
+        for packet in ("20 07 00 00 04 24 01 24 00", "20 05 00 00 02 22 00"):
+            with self.subTest(packet=packet), self.assertRaises(AssertionError):
+                connack_policy(bytes.fromhex(packet))
 
 
 class WaitProcessLineTest(unittest.TestCase):

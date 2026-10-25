@@ -1737,6 +1737,19 @@ pub fn build(b: *std.Build) void {
     mqtt_broker_config_step.dependOn(&mqtt_broker_config.step);
     test_step.dependOn(&mqtt_broker_config.step);
 
+    const mqtt_broker_includes = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_broker_includes.addArtifactArg(mqtt_vectors_broker);
+    mqtt_broker_includes.addArg("--only-include-directory");
+    if (b.args) |args| mqtt_broker_includes.addArgs(args);
+    const mqtt_broker_includes_step = b.step(
+        "interop-mqtt-broker-includes",
+        "Verify ordered include_dir startup, live reload, rollback, and file changes",
+    );
+    mqtt_broker_includes_step.dependOn(&mqtt_broker_includes.step);
+
     const mqtt_broker_tls12_ticket = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_tls12_ticket.py",

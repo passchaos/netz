@@ -17,6 +17,9 @@ import tempfile
 import time
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
+from mqtt_broker_config_include import (
+    run_include_directory_case, run_include_directory_reload_case,
+)
 from mqtt_broker_config_bridge import (
     run_bidirectional_bridge_case,
     run_inbound_bridge_case,
@@ -123,6 +126,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "3ed5230d2bf1284ced12f0afa4e162ebd170cf6185389e161b4b972f9eefe4e0",
     "broker/15-persist-client-drop-expired-messages.py":
         "57ccce9ffecef64400e7d0a438c973ede0f94cac9519fec65cc149137b90abb8",
+    "broker/16-config-includedir.py":
+        "95bc1c8e8fc7a73513b8b53960a60c88b859cc73180bd52e024ab9e997bbda9c",
     "broker/16-config-missing.py":
         "458f98d3ff70df4c52b8878660a28217a3b626474799787ebb2279b371f5fabe",
     "broker/16-config-huge.py":
@@ -149,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
+    selected.add_argument("--only-include-directory", action="store_true")
     selected.add_argument("--only-tls-identity-reload", action="store_true")
     selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
@@ -1128,109 +1134,6 @@ def run_per_listener_security_case(broker: Path, directory: Path) -> None:
             raise AssertionError(
                 "listener bound before every local security file was loaded"
             )
-
-
-def run_include_directory_case(broker: Path, directory: Path) -> None:
-    include_directory = directory / "listeners.d"
-    include_directory.mkdir()
-    first_port = free_port()
-    second_port = free_port()
-    while second_port == first_port:
-        second_port = free_port()
-    (include_directory / "ignored.txt").write_text("unsupported value\n")
-    (include_directory / "a.conf").write_text(
-        f"listener {second_port} 127.0.0.1\n"
-        "listener_allow_anonymous true\n"
-        "max_connections 1\n"
-    )
-    (include_directory / "A.conf").write_text(
-        f"listener {first_port} 127.0.0.1\n"
-        "listener_allow_anonymous true\n"
-        "max_connections 1\n"
-    )
-    config = directory / "include-main.conf"
-    config.write_text(f"include_dir {include_directory}\n")
-    process = subprocess.Popen(
-        [str(broker), f"--config={config}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    assert process.stdout is not None
-    startup_lines: list[str] = []
-    while True:
-        line = process.stdout.readline()
-        if line == "":
-            raise RuntimeError(
-                "include_dir broker failed to start: "
-                + "".join(startup_lines)
-            )
-        startup_lines.append(line)
-        if "configured 2 listeners for 2 clients" in line:
-            break
-    listener_lines: list[str] = []
-    while len(listener_lines) != 2:
-        line = process.stdout.readline()
-        if line == "":
-            raise RuntimeError(
-                "include_dir broker omitted listener records: "
-                + "".join(startup_lines + listener_lines)
-            )
-        if "mqtt " in line and "max_connections=" in line:
-            listener_lines.append(line.strip())
-    if str(first_port) not in listener_lines[0] or str(second_port) not in listener_lines[1]:
-        raise AssertionError(
-            "include_dir did not use Mosquitto filename order: "
-            + repr(listener_lines)
-        )
-    for index, port in enumerate((first_port, second_port)):
-        client = socket.create_connection(("127.0.0.1", port), timeout=5)
-        client.settimeout(5)
-        try:
-            client.sendall(connect_packet(f"include-dir-{index}"))
-            if connack_reason(read_mqtt_packet(client)) != 0:
-                raise AssertionError("include_dir listener rejected CONNECT")
-            client.sendall(bytes.fromhex("e000"))
-        finally:
-            client.close()
-    if process.wait(timeout=5) != 0:
-        raise RuntimeError("include_dir broker exited with an error")
-
-    invalid_port = free_port()
-    invalid_directory = directory / "invalid-listeners.d"
-    invalid_directory.mkdir()
-    (invalid_directory / "10-listener.conf").write_text(
-        f"listener {free_port()} 127.0.0.1\nlistener_allow_anonymous true\n"
-    )
-    (invalid_directory / "20-invalid.conf").write_text(
-        "unsupported_directive true\n"
-    )
-    invalid_config = directory / "invalid-include-main.conf"
-    invalid_config.write_text(
-        f"listener {invalid_port} 127.0.0.1\n"
-        "listener_allow_anonymous true\n"
-        f"include_dir {invalid_directory}\n"
-    )
-    result = subprocess.run(
-        [str(broker), f"--config={invalid_config}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    if result.returncode == 0 or "UnsupportedDirective" not in result.stdout:
-        raise AssertionError(
-            "invalid included config did not fail closed: " + result.stdout
-        )
-    with socket.socket() as probe:
-        probe.settimeout(1)
-        if probe.connect_ex(("127.0.0.1", invalid_port)) == 0:
-            raise AssertionError(
-                "listener bound before every included config was validated"
-            )
-
-
 def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
     packet_port = free_port()
     websocket_port = free_port()
@@ -7554,13 +7457,27 @@ def run_optional_client_certificate_case(
 def main() -> None:
     args = parse_args()
     source_count = 0
-    if args.mosquitto_test_root is not None:
+    test_root = args.mosquitto_test_root
+    if test_root is None and args.only_include_directory:
+        test_root = Path.home() / "Work/mosquitto/test"
+    if test_root is not None:
         source_count = verify_mosquitto_process_sources(
-            args.mosquitto_test_root,
+            test_root,
         )
     os.environ[FINITE_TEST_ENV] = "1"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
+        if args.only_include_directory:
+            run_include_directory_case(args.broker, directory)
+            run_include_directory_reload_case(args.broker, directory)
+            print(
+                "MQTT include directory integration passed: "
+                "upstream=config-includedir protocols=mqttv311+mqttv5 "
+                "ordered-files=true reload=true rollback=true "
+                "file-add-remove=true live-delivery=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
         if args.only_subscription_lifecycle:
             run_subscription_lifecycle_case(args.broker, directory)
             print(
@@ -7790,6 +7707,7 @@ def main() -> None:
         run_websocket_origins_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
+        run_include_directory_reload_case(args.broker, directory)
         run_inbound_bridge_case(args.broker, directory)
         run_bridge_reload_case(args.broker, directory)
         run_outbound_bridge_reload_case(args.broker, directory)

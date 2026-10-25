@@ -1957,6 +1957,10 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
 # bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
+
+# Ordered include_dir files, policy reload and rollback with existing clients.
+zig build interop-mqtt-broker-includes -Doptimize=ReleaseFast -- \
+  --mosquitto-test-root="$HOME/Work/mosquitto/test"
 # Prove that a one-byte memory_limit fails before listen, then lower a live
 # broker's hard allocation ceiling without interrupting an admitted client.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

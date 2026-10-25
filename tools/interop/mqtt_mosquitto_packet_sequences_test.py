@@ -32,6 +32,10 @@ class ProcessSourceIdentityTests(unittest.TestCase):
         self.assertEqual(
             set(broker_config.MOSQUITTO_PROCESS_SOURCES),
             {
+                "broker/02-subscribe-persistence-flipflop.py",
+                "broker/11-persistent-subscription.py",
+                "broker/11-persistent-subscription-no-local.py",
+                "broker/11-subscription-id.py",
                 "broker/01-connect-listener-allow-anonymous.py",
                 "broker/01-connect-uname-or-anon.py",
                 "broker/01-connect-uname-password-denied-no-will.py",
@@ -52,6 +56,7 @@ class ProcessSourceIdentityTests(unittest.TestCase):
                 "broker/15-persist-client-drop-expired-messages.py",
                 "broker/16-config-missing.py",
                 "broker/16-config-huge.py",
+                "broker/16-config-includedir.py",
                 "broker/23-security-password-file-reload.py",
                 "broker/23-security-acl-file-reload.py",
             },

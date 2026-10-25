@@ -5455,11 +5455,12 @@ proxy evidence for the entire suite.
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 294 curated
-   scenarios. The strict broker configuration adapter now locks twenty-six
+   scenarios. The strict broker configuration adapter now locks twenty-seven
    upstream process sources:
    persistent subscription self-delivery, persisted No Local, queued
    Subscription Identifiers, persistent/clean-session flipflop,
-   Windows-CRLF configuration, missing root configuration, the Unix listener,
+   Windows-CRLF configuration, missing root configuration, include-directory
+   loading, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
    refusals, mTLS identity reload, change-count autosave, listener anonymous
    policy, username-or-anonymous policy, authentication-before-takeover
@@ -5493,7 +5494,21 @@ proxy evidence for the entire suite.
    supersession, add/remove, cross-subsystem preparation failure rollback, and
    live local-client continuity. The gate also verifies a complete Unix process
    lifecycle and proves Netz's transactional reload rollback divergence through
-   a real SIGHUP broker process. The nineteen
+   a real SIGHUP broker process. The independent
+   `interop-mqtt-broker-includes` target locks Mosquitto's
+   `16-config-includedir.py` and exercises ordered `A.conf`/`a.conf` files across
+   two include directories, paths with spaces, ignored extensions and nested
+   files, and three listener policies. Exact CONNACK properties and SUBACK QoS
+   prove each source's effect. The root file remains byte-identical while
+   included files change authentication, assigned-ID prefixes, Maximum QoS and
+   Topic Alias policy. A later malformed source or missing password dependency
+   rolls back earlier policy changes; removing the fault permits another
+   successful SIGHUP. Adding/deleting a policy fragment changes payload limits
+   on the already connected publisher, while MQTT 3.1.1/5 peers retain PING and
+   exact publication delivery across those reloads. Startup cases also reject
+   malformed, missing-security, symlink and nested-include sources before any
+   listener opens. This target runs in the default config gate as well. The
+   nineteen
    behavior-bearing broker packet JSON files are
    already included completely; the only unselected JSON file is
    `ZZ-broker-check.json`, whose sole test is an empty end-of-suite sentinel.
