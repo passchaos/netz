@@ -38,6 +38,7 @@ const stream_association = @import("runtime/stream_association.zig");
 const early_streams = @import("runtime/association/early_streams.zig");
 const server_terminal = @import("runtime/endpoint_server/terminal.zig");
 const server_close = @import("runtime/endpoint_server/close.zig");
+const server_stream_control = @import("runtime/endpoint_server/stream_control.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 pub const EndpointClient = endpoint_client.Client;
@@ -2700,20 +2701,15 @@ pub const EndpointAcceptedSession = struct {
     }
 
     /// Attempt RESET_STREAM once without waiting for pacing or reading the
-    /// shared endpoint socket. Retry after dispatcher transport progress.
+    /// shared endpoint socket. Buffered CONNECT control is checked first;
+    /// pending CLOSE metadata stays available to the application. Retry after
+    /// dispatcher transport progress.
     pub fn resetStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
         application_error_code: u32,
     ) EndpointServerError!void {
-        const result = incremental_stream.resetOnce(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
-        try self.refreshTimer();
-        try result;
+        return server_stream_control.cancel(self, stream_id, application_error_code, .reset);
     }
 
     /// Attempt RESET_STREAM_AT once. `reliable_size` counts WebTransport
@@ -2724,15 +2720,7 @@ pub const EndpointAcceptedSession = struct {
         application_error_code: u32,
         reliable_size: u64,
     ) EndpointServerError!void {
-        const result = incremental_stream.resetReliablyOnce(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            reliable_size,
-        );
-        try self.refreshTimer();
-        try result;
+        return server_stream_control.cancel(self, stream_id, application_error_code, .{ .reliable = reliable_size });
     }
 
     /// Attempt STOP_SENDING once without waiting for pacing or reading the
@@ -2742,14 +2730,7 @@ pub const EndpointAcceptedSession = struct {
         stream_id: u62,
         application_error_code: u32,
     ) EndpointServerError!void {
-        const result = incremental_stream.stopOnce(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
-        try self.refreshTimer();
-        try result;
+        return server_stream_control.cancel(self, stream_id, application_error_code, .stop);
     }
 
     pub fn drain(self: *EndpointAcceptedSession) EndpointServerError!void {
@@ -19134,6 +19115,8 @@ test {
 
 test {
     _ = @import("runtime/endpoint_server/close_tests.zig");
+    _ = @import("runtime/endpoint_server/stream_control_tests.zig");
+    _ = @import("runtime/endpoint_server/stream_control_terminal_tests.zig");
     _ = @import("runtime/flow/progress/wait_tests.zig");
     _ = @import("runtime/flow/progress/delivery_tests.zig");
     _ = @import("runtime/flow/progress/stream_wait_tests.zig");

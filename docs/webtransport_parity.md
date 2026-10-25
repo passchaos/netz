@@ -29,6 +29,21 @@ that backpressure resumes its committed suffix after GOAWAY.
 
 ## CONNECT transport termination
 
+Shared-server RESET_STREAM, reliable RESET_STREAM_AT and STOP_SENDING now
+inspect buffered CONNECT control before submitting an application cancellation.
+A received CLOSE or CONNECT FIN/reset/stop prevents that submission, retains
+the exact Session event for polling, and leaves associated-stream cleanup to
+WT_SESSION_GONE. DRAIN remains advisory and permits the requested cancellation;
+a buffered DRAIN followed by CLOSE keeps both events in order. Parser allocation
+failure leaves the control bytes and stream cancellation state untouched.
+Malformed Capsules keep CONNECT-scoped rejection, while prohibited HTTP/3 frames
+retain connection-scoped handling. These one-attempt methods share their
+preflight in `runtime/endpoint_server/stream_control.zig`, refresh the dispatcher
+timer after control/cancellation progress, and preserve retry state under
+congestion or socket failure. Real protected-UDP tests cover all three APIs,
+terminal-code ordering, event ownership, and continued sibling stream/DATAGRAM
+use.
+
 Authenticated Session owners observe CONNECT send-side STOP_SENDING, RESET
 and FIN in the shared lifecycle, including before application sends and stream
 opens. STOP_SENDING closes the Session even while QUIC's mandatory RESET
