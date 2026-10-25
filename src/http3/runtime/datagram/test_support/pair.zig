@@ -12,13 +12,20 @@ pub const Pair = struct {
     server: runtime.HandshakeServerSession,
 
     pub fn init(self: *Pair, io: std.Io) !void {
+        return self.initWithSettings(io, .{ .enable_connect_protocol = true, .h3_datagram = true });
+    }
+
+    pub fn initWithSettings(self: *Pair, io: std.Io, settings: http3.Settings) !void {
+        return self.initWithClientDetached(io, settings, true);
+    }
+
+    pub fn initWithClientDetached(self: *Pair, io: std.Io, settings: http3.Settings, detached: bool) !void {
         const allocator = std.testing.allocator;
         self.endpoint = try .bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
         errdefer self.endpoint.deinit();
         const keys = quic.protection.deriveAes128Keys([_]u8{0x59} ** quic.protection.secret_len);
         var parameters = quic.practical_transport_parameters;
         parameters.max_datagram_frame_size = 1200;
-        const settings = http3.Settings{ .enable_connect_protocol = true, .h3_datagram = true };
         self.client = try runtime.HandshakeClient.initPreconfigured(allocator, io, .{ .ip4 = .loopback(0) }, self.endpoint.address(), .{ .quic = .{ .max_datagram_size = 4096 } }, .{ .local_settings = settings }, .{
             .receive_keys = keys,
             .send_keys = keys,
@@ -52,10 +59,14 @@ pub const Pair = struct {
         self.client.qpack_decoder_prefix_sent = true;
         self.server.qpack_encoder_prefix_sent = true;
         self.server.qpack_decoder_prefix_sent = true;
-        try self.addConnect();
+        try self.addConnectWithClientDetached(detached);
     }
 
     pub fn addConnect(self: *Pair) !void {
+        return self.addConnectWithClientDetached(true);
+    }
+
+    fn addConnectWithClientDetached(self: *Pair, detached: bool) !void {
         const id = try self.client.startRequest(.{
             .method = "CONNECT",
             .scheme = "https",
@@ -63,6 +74,7 @@ pub const Pair = struct {
             .path = "/datagram",
             .headers = &.{.{ .name = ":protocol", .value = "test-datagram" }},
         }, null);
+        if (!detached) try self.client.registerPendingConnectDatagramAssociation(id);
         var request = try self.server.receiveRequestEventWithTimeout(.fromSeconds(1));
         defer request.deinit(std.testing.allocator);
         try std.testing.expect(request == .message and request.message.value == .head);
@@ -72,7 +84,7 @@ pub const Pair = struct {
         defer response.deinit(std.testing.allocator);
         try std.testing.expect(response == .head and response.head == .response);
         try std.testing.expectEqual(@as(u16, 200), response.head.response.status);
-        try self.client.detachResponseStream(id);
+        if (detached) try self.client.detachResponseStream(id);
     }
 
     pub fn deinit(self: *Pair) void {

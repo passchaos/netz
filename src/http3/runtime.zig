@@ -12,6 +12,7 @@ const client_uri = @import("runtime/client/uri.zig");
 const connect_datagram = @import("runtime/datagram.zig");
 const connect_datagram_routing = @import("runtime/datagram/routing.zig");
 const connect_datagram_send = @import("runtime/datagram/send.zig");
+const connect_datagram_progress = @import("runtime/datagram/progress.zig");
 const connect_udp_dispatcher_relay =
     @import("runtime/connect_udp_dispatcher_relay.zig");
 const connect_ip_session = @import("runtime/connect_ip_session.zig");
@@ -6400,6 +6401,14 @@ pub const HandshakeServer = struct {
 };
 
 pub const HandshakeServerSession = struct {
+    const ConnectDatagramProgress = connect_datagram_progress.Pump(.{
+        .Error = ReceiveTimeoutError,
+        .check_callback = false,
+        .io = connectionIo,
+        .receive = receiveDetachedRequestPacketInto,
+        .receiveAttached = receiveAttachedConnectDatagramPacket,
+        .feedback = flushRequestPacketFeedbackOnce,
+    });
     const ConnectDatagramSend = connect_datagram_send.Controller(.{
         .Error = ReceiveTimeoutError,
         .check_callback = false,
@@ -7819,10 +7828,7 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
         datagram_target: ?*connect_datagram.ReceiveIntoTarget,
     ) ReceiveTimeoutError!void {
-        try self.receiveDetachedRequestPacketInto(detached_stream_id, deadline, datagram_target);
-        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
-            try self.sendQpackFeedback();
-        }
+        return ConnectDatagramProgress.run(self, detached_stream_id, deadline, datagram_target);
     }
 
     fn receiveDetachedRequestPacketInto(
@@ -11474,20 +11480,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (deadline) |absolute| {
-            try self.receive_packets.visitWithDeadline(
-                &self.established.connection,
-                absolute,
-                self,
-                visitStreamingServerRequestPacket,
-            );
-        } else {
-            try self.receive_packets.visit(
-                &self.established.connection,
-                self,
-                visitStreamingServerRequestPacket,
-            );
-        }
+        try self.receiveAttachedConnectDatagramPacket(deadline);
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
         // remain artificially blocked until another HEADERS event appears.
@@ -11502,7 +11495,27 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        return self.receiveRequestPacketUntil(deadline);
+        return ConnectDatagramProgress.run(self, null, deadline, @as(?*connect_datagram.ReceiveIntoTarget, null));
+    }
+
+    fn receiveAttachedConnectDatagramPacket(
+        self: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try self.receive_packets.visitWithDeadline(
+                &self.established.connection,
+                absolute,
+                self,
+                visitStreamingServerRequestPacket,
+            );
+        } else {
+            try self.receive_packets.visit(
+                &self.established.connection,
+                self,
+                visitStreamingServerRequestPacket,
+            );
+        }
     }
 
     fn flushRequestPacketFeedback(self: *HandshakeServerSession) Error!void {
@@ -11779,6 +11792,14 @@ test "HTTP/3 response scheduler delay respects caller deadline" {
 }
 
 pub const HandshakeClient = struct {
+    const ConnectDatagramProgress = connect_datagram_progress.Pump(.{
+        .Error = ReceiveTimeoutError,
+        .check_callback = true,
+        .io = connectionIo,
+        .receive = receiveDetachedResponsePacketInto,
+        .receiveAttached = receiveAttachedConnectDatagramPacket,
+        .feedback = flushResponsePacketFeedbackOnce,
+    });
     const ConnectDatagramSend = connect_datagram_send.Controller(.{
         .Error = ReceiveTimeoutError,
         .check_callback = true,
@@ -17110,8 +17131,7 @@ pub const HandshakeClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
         datagram_target: ?*connect_datagram.ReceiveIntoTarget,
     ) ReceiveTimeoutError!void {
-        try self.receiveDetachedResponsePacketInto(detached_stream_id, deadline, datagram_target);
-        try self.flushResponsePacketFeedback();
+        return ConnectDatagramProgress.run(self, detached_stream_id, deadline, datagram_target);
     }
 
     fn receiveDetachedResponsePacketInto(
@@ -17172,6 +17192,13 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        return ConnectDatagramProgress.run(self, null, deadline, @as(?*connect_datagram.ReceiveIntoTarget, null));
+    }
+
+    fn receiveAttachedConnectDatagramPacket(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         try receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
@@ -17189,7 +17216,6 @@ pub const HandshakeClient = struct {
             &self.established,
             deadline,
         );
-        try self.flushResponsePacketFeedback();
     }
 
     pub fn connectDatagramsNegotiated(self: HandshakeClient) bool {

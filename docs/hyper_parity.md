@@ -1810,6 +1810,18 @@ timeout, close diagnostics, feedback recovery without new peer traffic,
 sibling isolation, and an exact partial-batch prefix at `STOP_SENDING`.
 WebTransport now supplies only session-control maintenance to
 this shared controller, so both protocols use the same pacing-wait policy.
+Owning CONNECT DATAGRAM receives and detached CONNECT progress also share a
+receive pump that attempts pending QPACK feedback one packet at a time. Pacing,
+congestion, and flow-control backpressure retain the unsent instruction prefix
+while allowing fresh owned and caller-buffer payloads to return. Earlier
+feedback pacing wakes keep the same caller deadline and resume partial decoder
+stream writes without requiring another peer packet. A receive batch reports
+its exact delivered prefix before timeout, and an undersized buffer retains the
+payload for retry. Tests exercise both endpoint roles, ordinary and bounded
+receives, attached client associations, fresh encoder instructions beside a
+DATAGRAM, sibling payloads and detached DATA, and a direct delivery before a
+following connection close. Feedback is skipped after terminal connection
+state, so it cannot overwrite that already fulfilled receive result.
 
 RFC 9298 CONNECT-UDP now has typed HTTP/1.1, HTTP/2, and HTTP/3 surfaces above
 the existing generic Upgrade, Extended CONNECT, HTTP Datagram, and Capsule

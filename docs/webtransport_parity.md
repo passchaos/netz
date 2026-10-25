@@ -671,6 +671,13 @@ absolute application deadline spans unrelated QUIC packets while earlier PTO,
 delayed-ACK, keep-alive, path-validation, idle and close timers continue to
 run; neither transport maintenance nor control traffic renews the caller's
 budget.
+The owning HTTP/3 receive pump submits QPACK decoder feedback one packet at a
+time and retains its unsent prefix on pacing, congestion, or stream-credit
+backpressure. A ready WebTransport DATAGRAM therefore remains deliverable
+through both owning and caller-buffer APIs even while feedback is blocked.
+Active receives resume pending feedback at its pacing wake under the original
+application deadline, including a decoder-stream prefix that needs its own
+packet; they do not require an extra peer packet to trigger that retry.
 Authenticated standalone sessions now expose symmetric
 `sendDatagramWithTimeout` / `sendDatagramWithDeadline` calls. They wait for
 QUIC congestion and pacing capacity while using the existing HTTP/3 packet

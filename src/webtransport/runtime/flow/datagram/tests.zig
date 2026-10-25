@@ -3,6 +3,7 @@ const std = @import("std");
 test {
     _ = @import("send_wait_tests.zig");
     _ = @import("unbounded_send_tests.zig");
+    _ = @import("receive_feedback_tests.zig");
 }
 const webtransport = @import("../../../mod.zig");
 const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;

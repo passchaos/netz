@@ -8,6 +8,7 @@ test {
     _ = @import("datagram/tests/registry.zig");
     _ = @import("datagram/tests/pacing.zig");
     _ = @import("datagram/tests/feedback.zig");
+    _ = @import("datagram/tests/receive_feedback.zig");
 }
 
 pub const EarlyLimits = early.Limits;
