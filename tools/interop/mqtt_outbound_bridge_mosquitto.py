@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
 
 from mqtt_outbound_bridge_harness import (
     Case,
@@ -32,6 +33,7 @@ from mqtt_outbound_bridge_support import (
 from mqtt_outbound_bridge_session_loss import run_session_loss_cases
 from mqtt_outbound_bridge_negative import run_negative_pubrec_case
 from mqtt_outbound_bridge_bootstrap import run_bootstrap_cases
+from mqtt_outbound_bridge_message_expiry import run_message_expiry
 
 
 RUNTIME = (
@@ -380,13 +382,17 @@ def run_resumed_target_reconnect(
 
 
 def run_qos2_pubcomp_restart(
-    bridge_executable: Path, mosquitto: Path, mqtt_packets
+    bridge_executable: Path, mosquitto: Path, mqtt_packets, *, message_expiry: bool = False
 ) -> None:
-    case = Case("qos2-pubcomp-restart", 5, 5, 2, False)
+    case = Case("qos2-pubcomp-expiry-restart" if message_expiry else "qos2-pubcomp-restart", 5, 5, 2, False)
     source_port, target_port, proxy_port, first_control_port, second_control_port = (
         distinct_ports(5)
     )
     payload = b"qos2-target-once-across-bridge-restart"
+    expiry_properties = b""
+    if message_expiry:
+        import mqtt5_props
+        expiry_properties = mqtt5_props.gen_uint32_prop(mqtt5_props.MESSAGE_EXPIRY_INTERVAL, 1)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         processes: list[ManagedProcess] = []
@@ -421,6 +427,7 @@ def run_qos2_pubcomp_restart(
                 mqtt_packets.gen_publish(
                     "local/sensors/room", qos=2, mid=7,
                     retain=False, payload=payload, proto_ver=5,
+                    properties=expiry_properties,
                 )
             )
             source_pubrec = read_packet(publisher)
@@ -459,9 +466,7 @@ def run_qos2_pubcomp_restart(
                 proxy.first_pubcomp_dropped,
                 "first target PUBCOMP drop",
             )
-            bridge_source_id = (
-                "netz-outbound-source-qos2-pubcomp-restart"
-            )
+            bridge_source_id = f"netz-outbound-source-{case.name}"
             assert_log_absent(
                 source.log,
                 f"Received PUBREC from {bridge_source_id}",
@@ -472,6 +477,8 @@ def run_qos2_pubcomp_restart(
                 proxy.ready_for_recovery,
                 "first bridge transport closure",
             )
+            if message_expiry:
+                time.sleep(1.2)
             restored_bridge = start_bridge(
                 bridge_executable, source_port, proxy_port,
                 second_control_port, case, directory, "restore",
@@ -832,6 +839,8 @@ def main() -> None:
     run_resumed_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_pre_target_wire_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
+    run_qos2_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets, message_expiry=True)
+    run_message_expiry(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_source_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_session_loss_cases(args.bridge, args.mosquitto, mqtt_packets)
     run_negative_pubrec_case(args.bridge, args.mosquitto, mqtt_packets)
@@ -846,6 +855,7 @@ def main() -> None:
         "durable source-PUBCOMP-loss restart after journal clear, "
         "source/target Session-loss fail-closed recovery, "
         "source/target Session-expiry journal recovery before network replay, "
+        "Message Expiry completion and accepted PUBREL recovery after restart, "
         "negative PUBREC propagation without target delivery, "
         "delayed bridge ACK, topic remap "
         + RUNTIME

@@ -23,6 +23,7 @@ const delivery_values = @import("outbound_delivery.zig");
 const keepStableProperty = delivery_values.keepStableProperty;
 const stablePropertiesEqual = delivery_values.stablePropertiesEqual;
 const publishRetryMatches = delivery_values.publishRetryMatches;
+const durablePublishMatches = @import("outbound_retry.zig").durablePublishMatches;
 
 const net = std.Io.net;
 
@@ -1249,6 +1250,7 @@ pub fn Engine(comptime Source: type) type {
                 try self.validateDurableSourceState();
                 try self.validateDurableTargetState();
                 if (try self.commitCompletedTargetDelivery()) continue;
+                if (try @import("outbound_expiry.zig").completeExpiredTarget(self)) continue;
                 if (try self.reconcileDurableTargetState()) continue;
                 if (try self.completeDurableSourceIfReady()) continue;
                 if (self.poll_source_next) {
@@ -1272,6 +1274,7 @@ pub fn Engine(comptime Source: type) type {
             bounded: reconnect.PollOptions,
         ) (Error || std.Io.Cancelable)!void {
             if (try self.commitCompletedTargetDelivery()) return;
+            if (try @import("outbound_expiry.zig").completeExpiredTarget(self)) return;
             if (self.once and self.target.connection() == null) return error.ConnectionClosed;
             var event = self.pollTarget(bounded) catch |err| {
                 if (err == error.PublishRefused) {
@@ -2188,29 +2191,6 @@ fn persistentSession(connect: runtime.ConnectOptions) bool {
         .v3_1, .v3_1_1 => true,
         .v5 => (mqtt.sessionExpiryInterval(connect.properties) orelse 0) != 0,
     };
-}
-
-fn durablePublishMatches(
-    transaction: coordinator_mod.Transaction,
-    publish: mqtt.Publish,
-) bool {
-    if (publish.qos != .exactly_once or
-        publish.packet_id != transaction.source_packet_id or
-        publish.retain != transaction.source_retain or
-        !std.mem.eql(u8, publish.topic, transaction.source_topic) or
-        !std.mem.eql(u8, publish.payload, transaction.source_payload) or
-        !stablePropertiesEqual(
-            transaction.source_properties,
-            publish.properties,
-        ))
-    {
-        return false;
-    }
-    const retry_expiry = mqtt.messageExpiryInterval(publish.properties);
-    return if (transaction.source_expiry_interval) |original|
-        retry_expiry != null and retry_expiry.? <= original
-    else
-        retry_expiry == null;
 }
 
 pub fn refreshMessageExpiry(

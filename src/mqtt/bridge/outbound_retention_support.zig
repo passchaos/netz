@@ -1,5 +1,6 @@
 //! Small journal fixtures shared by coordinator and real-wire expiry tests.
 const std = @import("std");
+const mqtt = @import("../mod.zig");
 const reconnect = @import("../reconnect.zig");
 const coordinator = @import("outbound_coordinator.zig");
 const codec = @import("../persistence/codec.zig");
@@ -16,10 +17,17 @@ pub fn client(allocator: std.mem.Allocator, io: std.Io, shutdown: *std.Io.Event,
 }
 
 pub fn stage(source: *reconnect.Client, target: *reconnect.Client, store: *coordinator.Store, phase: coordinator.Phase) !void {
+    return stageWithExpiry(source, target, store, phase, null);
+}
+
+pub fn stageWithExpiry(source: *reconnect.Client, target: *reconnect.Client, store: *coordinator.Store, phase: coordinator.Phase, expiry: ?u32) !void {
+    const expiry_property = [_]mqtt.Property{.{ .four_byte = .{ .id = .message_expiry_interval, .value = expiry orelse 0 } }};
+    const properties: []const mqtt.Property = if (expiry != null) &expiry_property else &.{};
     _ = try source.outgoing.recordIncomingQoS2(source.outgoing_handle, 77);
     const publish = try target.outgoing.beginImmediatePublish(target.outgoing_handle, "target/topic", "old", .{
         .qos = .exactly_once,
         .now = std.Io.Clock.awake.now(target.io),
+        .properties = properties,
     }, 8);
     const reason: u8 = if (phase == .target_rejected) 0x87 else 0;
     if (phase != .target_await_pubrec) _ = try target.outgoing.handleAck(target.outgoing_handle, .pubrec, publish.packet_id, reason);
@@ -34,8 +42,8 @@ pub fn stage(source: *reconnect.Client, target: *reconnect.Client, store: *coord
         .source_retain = false,
         .source_topic = "source/topic",
         .source_payload = "old",
-        .source_properties = &.{},
-        .source_expiry_interval = null,
+        .source_properties = properties,
+        .source_expiry_interval = expiry,
     });
 }
 

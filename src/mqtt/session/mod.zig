@@ -2288,6 +2288,17 @@ pub const Store = struct {
         return inflight.state;
     }
 
+    /// Inspect Message Expiry without pruning ownership. Durable coordinators
+    /// can commit the resulting terminal state before discarding the PUBLISH.
+    /// Accepted QoS 2 PUBREL/PUBCOMP state is independent of Message Expiry.
+    pub fn outgoingPublishExpired(self: *Store, handle: Handle, packet_id: u16, now: std.Io.Timestamp) Error!bool {
+        const current = try self.getSession(handle);
+        const index = current.packet_index.get(packet_id) orelse return false;
+        const inflight = current.inflight.items[index];
+        if (inflight.state == .await_pubcomp) return false;
+        return publishRemainingExpiryNs(inflight.publish, now.nanoseconds) == 0;
+    }
+
     /// Emit all pending retransmissions that fit `out`, then move unsent
     /// queued messages into the available Receive Maximum window.
     pub fn drainInto(
@@ -4069,4 +4080,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("ack_tests.zig");
     _ = @import("open_tests.zig");
+    _ = @import("expiry_inspection_tests.zig");
 }

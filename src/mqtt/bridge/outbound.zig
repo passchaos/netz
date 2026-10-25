@@ -26,4 +26,7 @@ test {
     _ = @import("bootstrap_tests.zig");
     _ = @import("outbound_retention_tests.zig");
     _ = @import("outbound_terminal_tests.zig");
+    _ = @import("outbound_message_expiry_tests.zig");
+    _ = @import("outbound_message_wire_tests.zig");
+    _ = @import("outbound_retry.zig");
 }

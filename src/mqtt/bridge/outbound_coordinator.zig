@@ -252,6 +252,19 @@ pub const Store = struct {
             now,
             realtime,
         );
+        var message_expired = false;
+        if (decoded.transaction) |*transaction| {
+            if (transaction.phase == .target_await_pubrec and
+                (try target.outgoingQoSState(transaction.target_packet_id)) == null)
+            {
+                // Checkpoint validation proved the original marker existed,
+                // and target Session expiry was already rejected. The normal
+                // restore could remove it only through Message Expiry.
+                transaction.phase = .target_complete;
+                transaction.target_reason_code = 0;
+                message_expired = true;
+            }
+        }
         const retire_transaction = decoded.transaction != null and retention.source_expired;
         if (retire_transaction) {
             // The target outcome is terminal and its source Session is gone.
@@ -260,8 +273,8 @@ pub const Store = struct {
             decoded.transaction = null;
         }
         try validateState(if (decoded.transaction) |*transaction| transaction.view() else @as(?Transaction, null), decoded.source_session_epoch, decoded.target_session_epoch, source, target);
-        if (retire_transaction) {
-            const encoded = try encode(allocator, identity, decoded.source_session_epoch, decoded.target_session_epoch, null, source, target, now, realtime);
+        if (retire_transaction or message_expired) {
+            const encoded = try encode(allocator, identity, decoded.source_session_epoch, decoded.target_session_epoch, if (decoded.transaction) |*transaction| transaction.view() else @as(?Transaction, null), source, target, now, realtime);
             defer allocator.free(encoded);
             _ = try log.append(encoded);
         }
@@ -308,7 +321,7 @@ pub const Store = struct {
         else
             null;
         errdefer if (owned) |*value| value.deinit(self.allocator);
-        const canonical_transaction = if (owned) |*value|
+        var canonical_transaction = if (owned) |*value|
             value.view()
         else
             null;
@@ -319,6 +332,20 @@ pub const Store = struct {
             source,
             target,
         );
+        const now = std.Io.Clock.awake.now(source.io);
+        var expired_packet_id: ?u16 = null;
+        if (owned) |*value| {
+            if (value.phase == .target_await_pubrec and
+                try target.outgoing.outgoingPublishExpired(target.outgoing_handle, value.target_packet_id, now))
+            {
+                // Snapshot filtering uses this same time. Encode a coherent
+                // terminal outcome, but keep live ownership until fsync.
+                expired_packet_id = value.target_packet_id;
+                value.phase = .target_complete;
+                value.target_reason_code = 0;
+                canonical_transaction = value.view();
+            }
+        }
         const encoded = try encode(
             self.allocator,
             self.identity,
@@ -327,11 +354,15 @@ pub const Store = struct {
             canonical_transaction,
             source,
             target,
-            std.Io.Clock.awake.now(source.io),
+            now,
             std.Io.Clock.real.now(source.io),
         );
         defer self.allocator.free(encoded);
         const sequence = try self.log.append(encoded);
+        if (expired_packet_id) |packet_id| {
+            const dropped = target.outgoing.dropOutgoingPublish(target.outgoing_handle, packet_id) catch unreachable;
+            std.debug.assert(dropped == .dropped);
+        }
         if (self.transaction) |*previous| previous.deinit(self.allocator);
         self.transaction = owned;
         owned = null;

@@ -822,6 +822,22 @@ with a mismatched source Packet Identifier. Real TCP verifies source completion
 after target expiry; the two-Mosquitto gate independently expires one-second
 source and target Sessions after a pre-wire crash and requires the corresponding
 ownership-loss error without any target reconnect or replay.
+Message Expiry during bridge downtime is handled independently of Session
+expiry. A saved target PUBLISH still awaiting PUBREC is durably recorded as a
+completed delivery when its message expires, so recovery can finish the source
+handshake without replaying stale application bytes. A target transaction
+already awaiting PUBCOMP remains at PUBREL even after Message Expiry. Live
+coordinator commits use one expiry timestamp and retain PUBLISH ownership until
+the coherent terminal record is synced; expiry encountered during replay is
+reconciled before source acknowledgement. Real TCP and two-Mosquitto crash
+cases cover expired PUBLISH suppression, source PUBREC/PUBCOMP completion and
+accepted PUBREL-only recovery; clock-controlled cases verify repeat restoration,
+all QoS 2 phases, unchanged corruption checks and failed-fsync retry.
+Once target PUBREC or a terminal target outcome is durable, an otherwise identical source
+retransmission may omit Message Expiry, matching Mosquitto's expired-message
+retry. Targets still awaiting PUBREC require a nonincreasing expiry value;
+changed payload, topic, Packet Identifier, retain flag or stable properties
+remain invalid, and the accepted-transaction retry cannot create a new target delivery.
 
 A bidirectional configured bridge uses one remote Session, with local-source
 exclusion and MQTT 5 No Local or mandatory MQTT 3.1.1 private-bridge semantics

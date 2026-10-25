@@ -372,9 +372,11 @@ class TargetPublishDropProxy(SessionProxy):
     def __init__(
         self, listen_port: int, target_port: int, payload: bytes, *,
         recovery_session_present: bool = True,
+        expire_before_recovery: bool = False,
     ):
         self.payload = payload
         self.recovery_session_present = recovery_session_present
+        self.expire_before_recovery = expire_before_recovery
         self.first_publish_dropped = threading.Event()
         self.ready_for_recovery = threading.Event()
         self.recovery_connected = threading.Event()
@@ -406,6 +408,21 @@ class TargetPublishDropProxy(SessionProxy):
                 resumed, session_present=self.recovery_session_present
             ) as target:
                 self.recovery_connected.set()
+                if self.expire_before_recovery:
+                    # No application/control delivery is permitted after the
+                    # expirable PUBLISH was durably completed by the bridge.
+                    while not self.stop_requested.is_set():
+                        try:
+                            packet = read_packet(resumed)
+                        except socket.timeout:
+                            continue
+                        if packet[0] >> 4 not in (12, 14):
+                            raise AssertionError("bridge replayed an expired target transaction")
+                        target.sendall(packet)
+                        if packet[0] >> 4 == 14:
+                            return
+                        resumed.sendall(read_packet(target))
+                    return
                 if not self.recovery_session_present:
                     self._expect_close_without_publish(resumed)
                     return
