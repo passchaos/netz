@@ -6263,8 +6263,9 @@ pub const AcceptedHandshakeSession = struct {
         // recovery remains responsible for retransmission until peer ACK.
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.finish(
-            &self.h3.established.connection,
+        return flow_write.finish(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -6297,8 +6298,9 @@ pub const AcceptedHandshakeSession = struct {
         );
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return handshake_stream.finishWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.finishWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10097,8 +10099,9 @@ pub const HandshakeClientSession = struct {
             try result;
             return;
         }
-        return handshake_stream.finish(
-            &self.h3.established.connection,
+        return flow_write.finish(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -10132,8 +10135,9 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return handshake_stream.finishWithDeadline(
-            &self.h3.established.connection,
+        return flow_write.finishWithDeadline(
+            &self.control,
+            &self.h3,
             &self.streams,
             self.session_id,
             stream_id,
@@ -19204,4 +19208,9 @@ test {
     _ = @import("runtime/flow/progress/wait_tests.zig");
     _ = @import("runtime/flow/progress/delivery_tests.zig");
     _ = @import("runtime/flow/progress/stream_wait_tests.zig");
+    _ = @import("runtime/stream/wait/tests.zig");
+    _ = @import("runtime/stream/wait/lifecycle_tests.zig");
+    _ = @import("runtime/stream/wait/timer_tests.zig");
+    _ = @import("runtime/stream/wait/shared_tests.zig");
+    _ = @import("runtime/stream/wait/deadline_tests.zig");
 }

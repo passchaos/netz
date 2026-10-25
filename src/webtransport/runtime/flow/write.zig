@@ -11,6 +11,22 @@ const batch = @import("../stream/batch.zig");
 pub const Error = stream.Error;
 pub const TimeoutError = stream.TimeoutError;
 
+pub fn finish(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, stream_id: u62) Error!void {
+    return finishUntil(control, h3, registry, session_id, stream_id, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
+}
+
+pub fn finishWithDeadline(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, stream_id: u62, deadline: std.Io.Clock.Timestamp) TimeoutError!void {
+    return finishUntil(control, h3, registry, session_id, stream_id, deadline);
+}
+
+fn finishUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, stream_id: u62, deadline: ?std.Io.Clock.Timestamp) TimeoutError!void {
+    var bound = context(control, h3, registry);
+    return stream.finishWithProgress(&h3.established.connection, registry, session_id, stream_id, deadline, bound.progress());
+}
+
 fn context(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry) progress_mod.Context(@TypeOf(h3)) {
     return .{ .control = control, .h3 = h3, .registry = registry };
 }

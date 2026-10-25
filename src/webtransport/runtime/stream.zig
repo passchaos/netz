@@ -26,6 +26,7 @@ const association_prefix = @import("stream/prefix.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_send = @import("flow/send.zig");
 const flow_progress = @import("flow/progress.zig");
+const send_wait = @import("stream/wait.zig");
 const flow_receive = @import("flow/receive.zig");
 pub fn initRegistry(
     allocator: std.mem.Allocator,
@@ -410,13 +411,15 @@ pub fn sendSlicesWithProgress(
         var stream = try writableStream(registry, stream_id);
         try sendPrefixIfNeededUntil(
             connection,
-            stream,
+            registry,
             session_id,
             stream_id,
             deadline,
+            progress,
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        try ensureDeadline(connection, deadline);
         // Maintenance can swap-remove a retired sibling from this registry.
         stream = try writableStream(registry, stream_id);
         const packet_payload = @max(
@@ -439,7 +442,7 @@ pub fn sendSlicesWithProgress(
             flow_send.available(registry),
         );
         if (available == 0) {
-            try receiveSendProgressUntil(connection, deadline);
+            try send_wait.receive(connection, deadline, progress);
             continue;
         }
         // Preflight the largest state transition before constructing frame
@@ -518,11 +521,11 @@ pub fn sendSlicesWithProgress(
             sent_time_ns,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -555,12 +558,13 @@ pub fn sendSlicesWithProgress(
         committed_out.* = cursor.committed;
         if (result.send_error) |err| return err;
     }
-    if (fin) try finishUntil(
+    if (fin) try finishWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         deadline,
+        progress,
     );
 }
 
@@ -582,13 +586,15 @@ pub fn sendWithProgress(
         var stream = try writableStream(registry, stream_id);
         try sendPrefixIfNeededUntil(
             connection,
-            stream,
+            registry,
             session_id,
             stream_id,
             deadline,
+            progress,
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        try ensureDeadline(connection, deadline);
         // Maintenance can swap-remove a retired sibling from this registry.
         stream = try writableStream(registry, stream_id);
         const packet_payload = @max(
@@ -615,7 +621,7 @@ pub fn sendWithProgress(
             flow_send.available(registry),
         );
         if (available == 0) {
-            try receiveSendProgressUntil(connection, deadline);
+            try send_wait.receive(connection, deadline, progress);
             continue;
         }
         const packet_count = @min(
@@ -653,11 +659,11 @@ pub fn sendWithProgress(
             sent_time_ns,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -685,12 +691,13 @@ pub fn sendWithProgress(
         committed_out.* = offset;
         if (result.send_error) |err| return err;
     }
-    if (fin) try finishUntil(
+    if (fin) try finishWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         deadline,
+        progress,
     );
 }
 
@@ -805,13 +812,15 @@ pub fn writeSlicesWithProgress(
     while (true) {
         try sendPrefixIfNeededUntil(
             connection,
-            stream,
+            registry,
             session_id,
             stream_id,
             deadline,
+            progress,
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        try ensureDeadline(connection, deadline);
         // Maintenance can swap-remove a retired sibling from this registry.
         stream = try writableStream(registry, stream_id);
         const credit = connection.streamSendCredit(stream_id);
@@ -824,7 +833,7 @@ pub fn writeSlicesWithProgress(
             @min(packet_payload, credit.available(), flow_send.available(registry)),
         );
         if (available == 0) {
-            try receiveSendProgressUntil(connection, deadline);
+            try send_wait.receive(connection, deadline, progress);
             continue;
         }
         _ = std.math.add(u64, stream.send_offset, available) catch
@@ -879,11 +888,11 @@ pub fn writeSlicesWithProgress(
         if (frame_count == 0) return error.DatagramTooLarge;
         connection.trySend(frames[0..frame_count]) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -911,13 +920,15 @@ pub fn writeWithProgress(
     while (true) {
         try sendPrefixIfNeededUntil(
             connection,
-            stream,
+            registry,
             session_id,
             stream_id,
             deadline,
+            progress,
         );
         try ensureDeadline(connection, deadline);
         try flow_send.wait(registry, progress, deadline);
+        try ensureDeadline(connection, deadline);
         // Maintenance can swap-remove a retired sibling from this registry.
         stream = try writableStream(registry, stream_id);
         const credit = connection.streamSendCredit(stream_id);
@@ -930,7 +941,7 @@ pub fn writeWithProgress(
             @min(max_frame_data, credit.available(), flow_send.available(registry)),
         );
         if (count == 0) {
-            try receiveSendProgressUntil(connection, deadline);
+            try send_wait.receive(connection, deadline, progress);
             continue;
         }
         const frames = [_]quic.Frame{.{ .stream = .{
@@ -951,11 +962,11 @@ pub fn writeWithProgress(
         ) catch return error.IntegerOverflow;
         connection.trySend(&frames) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -1154,11 +1165,12 @@ pub fn finish(
     session_id: webtransport.SessionId,
     stream_id: u62,
 ) Error!void {
-    return finishUntil(
+    return finishWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -1176,32 +1188,38 @@ pub fn finishWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimeoutError!void {
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-    return finishUntil(
+    return finishWithProgress(
         connection,
         registry,
         session_id,
         stream_id,
         deadline,
+        null,
     );
 }
 
-fn finishUntil(
+pub fn finishWithProgress(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     stream_id: u62,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!void {
-    const stream = try writableStream(registry, stream_id);
+    _ = try writableStream(registry, stream_id);
     try sendPrefixIfNeededUntil(
         connection,
-        stream,
+        registry,
         session_id,
         stream_id,
         deadline,
+        progress,
     );
     while (true) {
         try ensureDeadline(connection, deadline);
+        if (progress) |owner| try owner.maintain(deadline);
+        try ensureDeadline(connection, deadline);
+        const stream = try writableStream(registry, stream_id);
         const frames = [_]quic.Frame{.{ .stream = .{
             .stream_id = stream_id,
             .offset = stream.send_offset,
@@ -1210,11 +1228,11 @@ fn finishUntil(
         } }};
         connection.trySend(&frames) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -1246,9 +1264,8 @@ pub fn prepare(
     session_id: webtransport.SessionId,
     stream_id: u62,
 ) Error!*webtransport.StreamState {
-    const stream = try writableStream(registry, stream_id);
-    try sendPrefixIfNeeded(connection, stream, session_id, stream_id);
-    return stream;
+    try sendPrefixIfNeeded(connection, registry, session_id, stream_id);
+    return writableStream(registry, stream_id);
 }
 
 /// Validate a stream and submit its association prefix once, without waiting
@@ -1286,15 +1303,16 @@ fn writableStream(
 
 fn sendPrefixIfNeeded(
     connection: *quic.one_rtt.Connection,
-    stream: *webtransport.StreamState,
+    registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     stream_id: u62,
 ) Error!void {
     return sendPrefixIfNeededUntil(
         connection,
-        stream,
+        registry,
         session_id,
         stream_id,
+        null,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -1304,23 +1322,27 @@ fn sendPrefixIfNeeded(
 
 fn sendPrefixIfNeededUntil(
     connection: *quic.one_rtt.Connection,
-    stream: *webtransport.StreamState,
+    registry: *webtransport.StreamRegistry,
     session_id: webtransport.SessionId,
     stream_id: u62,
     deadline: ?std.Io.Clock.Timestamp,
+    progress: ?flow_progress.Progress,
 ) TimeoutError!void {
-    if (stream.prefix_sent) return;
-    var prefix_storage: [16]u8 = undefined;
-    const prefix = try association_prefix.header(session_id, stream.direction, &prefix_storage);
     while (true) {
         try ensureDeadline(connection, deadline);
+        if (progress) |owner| try owner.maintain(deadline);
+        try ensureDeadline(connection, deadline);
+        const stream = try writableStream(registry, stream_id);
+        if (stream.prefix_sent) return;
+        var prefix_storage: [16]u8 = undefined;
+        const prefix = try association_prefix.header(session_id, stream.direction, &prefix_storage);
         sendPrefixOnce(connection, stream, stream_id, prefix) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => return err,
@@ -1447,26 +1469,6 @@ fn monotonicNowNs(connection: *const quic.one_rtt.Connection) u64 {
     const timestamp = std.Io.Clock.awake.now(connection.endpoint.io).nanoseconds;
     if (timestamp <= 0) return 0;
     return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
-}
-
-fn receiveSendProgressUntil(
-    connection: *quic.one_rtt.Connection,
-    deadline: ?std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    if (deadline) |absolute| {
-        return connection.servicePacketServicingTimersDeadline(absolute);
-    }
-    return connection.servicePacketServicingTimers();
-}
-
-fn waitForPacingUntil(
-    connection: *quic.one_rtt.Connection,
-    deadline: ?std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    if (deadline) |absolute| {
-        return connection.waitForPacingAvailabilityWithDeadline(absolute);
-    }
-    return connection.waitForPacingAvailability();
 }
 
 pub fn receive(

@@ -7,6 +7,7 @@ const quic = @import("../../../quic/mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const flow_progress = @import("progress.zig");
 const association_prefix = @import("../stream/prefix.zig");
+const send_wait = @import("../stream/wait.zig");
 
 pub fn prepare(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, direction: webtransport.StreamDirection, deadline: ?std.Io.Clock.Timestamp) (control_mod.Error || quic.runtime.ReceiveTimeoutError)!u62 {
     return prepareInternal(control, h3, registry, null, direction, deadline, false);
@@ -25,6 +26,7 @@ pub fn open(control: *control_mod.Control, h3: anytype, registry: *webtransport.
         if (deadline != null and h3.callback_reader_active) return error.ConcurrentRead;
     }
     const connection = &h3.established.connection;
+    var context = flow_progress.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .one_attempt = one_attempt };
     while (true) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
         const expected: u62 = @intCast(switch (direction) {
@@ -32,6 +34,7 @@ pub fn open(control: *control_mod.Control, h3: anytype, registry: *webtransport.
             .unidirectional => connection.nextLocalUnidirectionalStreamId(),
         });
         _ = try prepareInternal(control, h3, registry, expected, direction, deadline, one_attempt);
+        try control.ensureOpen();
         var storage: [16]u8 = undefined;
         const prefix = try association_prefix.header(registry.session_id, direction, &storage);
         const actual = reserve(h3, direction, prefix) catch |err| switch (err) {
@@ -39,19 +42,12 @@ pub fn open(control: *control_mod.Control, h3: anytype, registry: *webtransport.
                 if (one_attempt) return err;
                 const absolute = deadline orelse return err;
                 if (h3.dispatcherBound()) return error.InvalidDispatcherState;
-                const H3 = @typeInfo(@TypeOf(h3)).pointer.child;
-                if (comptime @hasDecl(H3, "receiveDetachedRequestProgressWithDeadline"))
-                    try h3.receiveDetachedRequestProgressWithDeadline(control.session_id.value, absolute)
-                else
-                    try h3.receiveDetachedResponseProgressWithDeadline(control.session_id.value, absolute);
+                try send_wait.receive(connection, absolute, context.progress());
                 continue;
             },
             error.PacingLimited => {
                 if (one_attempt or h3.dispatcherBound()) return err;
-                if (deadline) |absolute|
-                    try connection.waitForPacingAvailabilityWithDeadline(absolute)
-                else
-                    try connection.waitForPacingAvailability();
+                try send_wait.pacing(connection, deadline, context.progress());
                 continue;
             },
             else => return err,
@@ -120,13 +116,7 @@ fn prepareInternal(control: *control_mod.Control, h3: anytype, registry: *webtra
                 if (one_attempt) return error.FlowControlBlocked;
                 const absolute = deadline orelse return error.FlowControlBlocked;
                 if (h3.dispatcherBound()) return error.InvalidDispatcherState;
-                const H3 = @typeInfo(@TypeOf(h3)).pointer.child;
-                if (comptime @hasDecl(H3, "receiveDetachedRequestProgressWithDeadline")) {
-                    try h3.receiveDetachedRequestProgressWithDeadline(control.session_id.value, absolute);
-                } else {
-                    try h3.receiveDetachedResponseProgressWithDeadline(control.session_id.value, absolute);
-                }
-                try context.progress().maintain(deadline);
+                try send_wait.receive(&h3.established.connection, absolute, context.progress());
                 try control.ensureOpen();
                 continue;
             },

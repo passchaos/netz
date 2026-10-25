@@ -36,6 +36,7 @@ pub const Progress = struct {
     // Owning stream reads must drain the same H3 packet cursor used by
     // maintenance, including any retained UDP/GRO batch suffix.
     receiveFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
+    waitForPacingFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
     // Ready DATAGRAMs need stream accounting without advancing buffered CLOSE
     // capsules or requiring another socket wait.
     inspectFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
@@ -57,6 +58,12 @@ pub const Progress = struct {
         try function(self.context, deadline);
         return true;
     }
+
+    pub fn pacing(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!bool {
+        const function = self.waitForPacingFn orelse return false;
+        try function(self.context, deadline);
+        return true;
+    }
 };
 
 pub fn Context(comptime H3Pointer: type) type {
@@ -71,7 +78,7 @@ pub fn Context(comptime H3Pointer: type) type {
         target: ?u62 = null,
 
         pub fn progress(self: *@This()) Progress {
-            return .{ .context = self, .runFn = run, .maintainFn = maintain, .inspectFn = inspect, .receiveFn = receiveProgress };
+            return .{ .context = self, .runFn = run, .maintainFn = maintain, .inspectFn = inspect, .receiveFn = receiveProgress, .waitForPacingFn = pacingProgress };
         }
 
         fn inspect(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
@@ -181,6 +188,12 @@ pub fn Context(comptime H3Pointer: type) type {
         fn receiveProgress(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             return self.receive(deadline);
+        }
+
+        fn pacingProgress(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            _ = try self.waitForPacing(deadline);
+            try self.maintainBuffered();
         }
 
         fn run(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {

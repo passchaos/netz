@@ -368,6 +368,21 @@ absolute deadline across Capsule fragments, QUIC credit, congestion and pacing.
 Deadline-bound complete sends report the exact committed application prefix on
 failure so callers can resume without duplication. Dispatcher-bound operations
 retain their one-attempt contract and leave socket receives to the shared owner.
+That owner now covers association-prefix submission, contiguous/scatter-gather
+and fair cross-stream writes, FIN, and blocked stream reservation. Congestion
+and stream-credit waits drain the existing HTTP/3 packet cursor; pacing waits
+receive until the earlier transport wake or application deadline. Each retry
+rechecks session control and stream state before another submission, including
+after a sibling registry entry is retired. CLOSE stops the remaining suffix,
+STOP ends only its stream, and DRAIN remains available as an advisory event.
+Protected-UDP tests exercise ordinary/bounded calls with and without an already
+sent prefix, verify partial application counts against peer-visible STREAM
+bytes, preserve CLOSE in a retained receive-batch suffix, keep sibling Sessions
+readable/writable, and prove timeout followed by safe prefix/FIN retry.
+The application deadline is checked again after protocol maintenance and before
+association-prefix, body, batch, or FIN submission. A grant that uses the last
+budget cannot make another application packet visible; the caller retains a
+zero application count and retryable prefix/FIN state.
 
 Negotiated flow-control sessions now replenish WT_MAX_STREAMS as peer streams
 are retired. Full registry records are reclaimed only after both applicable

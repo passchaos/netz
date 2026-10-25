@@ -11,6 +11,7 @@ const deadline_policy = @import("../../../internal/deadline.zig");
 const stream_runtime = @import("../stream.zig");
 const flow_send = @import("../flow/send.zig");
 const flow_progress = @import("../flow/progress.zig");
+const send_wait = @import("wait.zig");
 
 pub const Error = stream_runtime.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -139,6 +140,7 @@ pub fn writeWithProgress(
     while (true) {
         try ensureDeadline(connection, deadline);
         if (hasApplicationData(writes)) try flow_send.wait(registry, progress, deadline);
+        try ensureDeadline(connection, deadline);
         const result = writeOnceUntil(
             connection,
             registry,
@@ -148,11 +150,11 @@ pub fn writeWithProgress(
             deadline,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveSendProgressUntil(connection, deadline);
+                try send_wait.receive(connection, deadline, progress);
                 continue;
             },
             error.PacingLimited => {
-                try waitForPacingUntil(connection, deadline);
+                try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
             else => |other| return other,
@@ -163,7 +165,7 @@ pub fn writeWithProgress(
         {
             return result;
         }
-        try receiveSendProgressUntil(connection, deadline);
+        try send_wait.receive(connection, deadline, progress);
     }
 }
 
@@ -318,26 +320,6 @@ fn ensureDeadline(
     if (deadline) |absolute| {
         _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
     }
-}
-
-fn receiveSendProgressUntil(
-    connection: *quic.one_rtt.Connection,
-    deadline: ?std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    if (deadline) |absolute| {
-        return connection.servicePacketServicingTimersDeadline(absolute);
-    }
-    return stream_runtime.receiveSendProgress(connection);
-}
-
-fn waitForPacingUntil(
-    connection: *quic.one_rtt.Connection,
-    deadline: ?std.Io.Clock.Timestamp,
-) TimeoutError!void {
-    if (deadline) |absolute| {
-        return connection.waitForPacingAvailabilityWithDeadline(absolute);
-    }
-    return connection.waitForPacingAvailability();
 }
 
 fn monotonicNowNs(connection: *const quic.one_rtt.Connection) u64 {
