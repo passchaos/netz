@@ -33,6 +33,9 @@ pub const Progress = struct {
     context: *anyopaque,
     runFn: *const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void,
     maintainFn: *const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void,
+    // Owning stream reads must drain the same H3 packet cursor used by
+    // maintenance, including any retained UDP/GRO batch suffix.
+    receiveFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
     // Ready DATAGRAMs need stream accounting without advancing buffered CLOSE
     // capsules or requiring another socket wait.
     inspectFn: ?*const fn (*anyopaque, ?std.Io.Clock.Timestamp) Error!void = null,
@@ -48,6 +51,12 @@ pub const Progress = struct {
     pub fn inspect(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.inspectFn) |function| try function(self.context, deadline);
     }
+
+    pub fn receive(self: Progress, deadline: ?std.Io.Clock.Timestamp) Error!bool {
+        const function = self.receiveFn orelse return false;
+        try function(self.context, deadline);
+        return true;
+    }
 };
 
 pub fn Context(comptime H3Pointer: type) type {
@@ -56,9 +65,13 @@ pub fn Context(comptime H3Pointer: type) type {
         h3: H3Pointer,
         registry: *webtransport.StreamRegistry,
         one_attempt: bool = false,
+        // Yield only for input this operation can deliver. A partial whole
+        // stream or a ready sibling must not suppress a pending grant timer.
+        input: enum { none, datagram, incremental, whole } = .none,
+        target: ?u62 = null,
 
         pub fn progress(self: *@This()) Progress {
-            return .{ .context = self, .runFn = run, .maintainFn = maintain, .inspectFn = inspect };
+            return .{ .context = self, .runFn = run, .maintainFn = maintain, .inspectFn = inspect, .receiveFn = receiveProgress };
         }
 
         fn inspect(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
@@ -79,6 +92,29 @@ pub fn Context(comptime H3Pointer: type) type {
 
         fn maintain(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            while (true) {
+                try self.maintainBuffered();
+                if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
+                credits.sendPending(self.control, self.h3, self.registry) catch |err| switch (err) {
+                    error.PacingLimited => {
+                        if (self.one_attempt or self.h3.dispatcherBound()) return;
+                        if (try self.hasBufferedInput()) return;
+                        if (try self.waitForPacing(deadline)) {
+                            // Give the caller a turn to deliver newly ready
+                            // data after processing control from this packet.
+                            try self.maintainBuffered();
+                            if (try self.hasBufferedInput()) return;
+                        }
+                        continue;
+                    },
+                    error.CongestionLimited, error.FlowControlBlocked => return,
+                    else => return err,
+                };
+                return;
+            }
+        }
+
+        fn maintainBuffered(self: *@This()) Error!void {
             self.control.bindFlow(self.registry.flow);
             lifecycle.observeGoAway(self.control, self.h3);
             if (self.registry.flow_violation) {
@@ -89,31 +125,45 @@ pub fn Context(comptime H3Pointer: type) type {
             try self.control.ensureOpen();
             try self.inspectBuffered();
             try self.control.ensureOpen();
-            while (true) {
-                if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, absolute);
-                credits.sendPending(self.control, self.h3, self.registry) catch |err| switch (err) {
-                    error.PacingLimited => {
-                        if (self.one_attempt or self.h3.dispatcherBound()) return;
-                        if (deadline) |absolute|
-                            try self.h3.established.connection.waitForPacingAvailabilityWithDeadline(absolute)
-                        else
-                            try self.h3.established.connection.waitForPacingAvailability();
-                        continue;
-                    },
-                    error.CongestionLimited, error.FlowControlBlocked => return,
-                    else => return err,
-                };
-                return;
-            }
         }
 
-        fn run(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
-            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        fn hasBufferedInput(self: *@This()) Error!bool {
+            if (self.input == .none) return false;
+            if (self.input == .datagram) return try self.h3.connect_datagrams.queuedCount(self.control.session_id.value) != 0;
+            const connection = &self.h3.established.connection;
+            for (self.registry.registered()) |stream| {
+                if (self.target) |id| if (stream.stream_id != id) continue;
+                if (stream.locally_initiated and stream.direction == .unidirectional) continue;
+                if (self.input == .whole and stream.receive_mode == .incremental) continue;
+                if (self.input == .incremental and stream.receive_mode == .whole) continue;
+                if ((stream.receive_reset != null and !stream.reset_reported) or
+                    (stream.stopped != null and !stream.stopped_reported)) return true;
+                if (stream.stop_sent != null) continue;
+                const available = connection.availableReceivedStream(stream.stream_id) orelse &.{};
+                const prefix = if (stream.receive_mode == .incremental) 0 else stream.receive_prefix_len;
+                if (self.input == .incremental and available.len > prefix) return true;
+                const stats = connection.recvStreamStats(stream.stream_id) orelse continue;
+                if (!stream.peer_fin and stats.final_size != null and stats.bytes_read + available.len == stats.final_size.?) return true;
+            }
+            return false;
+        }
+
+        /// True when an inbound packet arrived, false at a local pacing wake.
+        fn waitForPacing(self: *@This(), deadline: ?std.Io.Clock.Timestamp) Error!bool {
             const connection = &self.h3.established.connection;
             if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-            try maintain(context_ptr, deadline);
-            if (self.registry.flow == null or self.registry.flow.?.sendDataAvailable() != 0) return;
-            if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+            const wake_ns = connection.pendingPacingDeadline() orelse return error.PacingLimited;
+            const wake: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(@intCast(wake_ns)) };
+            const until = deadline_policy.earlier(wake, deadline).?;
+            if (until.durationFromNow(connection.endpoint.io).raw.nanoseconds <= 0) return false;
+            self.receive(until) catch |err| {
+                if (err == error.Timeout and (deadline == null or std.Io.Clock.Timestamp.compare(until, .lt, deadline.?))) return false;
+                return err;
+            };
+            return true;
+        }
+
+        fn receive(self: *@This(), deadline: ?std.Io.Clock.Timestamp) Error!void {
             const H3 = @typeInfo(H3Pointer).pointer.child;
             if (comptime @hasDecl(H3, "receiveDetachedRequestProgress")) {
                 if (deadline) |absolute|
@@ -126,6 +176,21 @@ pub fn Context(comptime H3Pointer: type) type {
                 else
                     try self.h3.receiveDetachedResponseProgress(self.control.session_id.value);
             }
+        }
+
+        fn receiveProgress(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            return self.receive(deadline);
+        }
+
+        fn run(context_ptr: *anyopaque, deadline: ?std.Io.Clock.Timestamp) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            const connection = &self.h3.established.connection;
+            if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
+            try maintain(context_ptr, deadline);
+            if (self.registry.flow == null or self.registry.flow.?.sendDataAvailable() != 0) return;
+            if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+            try self.receive(deadline);
             try maintain(context_ptr, deadline);
         }
     };

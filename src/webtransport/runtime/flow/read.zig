@@ -31,7 +31,7 @@ pub fn readIdWithDeadline(control: *control_mod.Control, h3: anytype, registry: 
 }
 
 fn readUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, target: ?u62, out: []u8, deadline: ?std.Io.Clock.Timestamp) incremental.TimeoutError!incremental.Read {
-    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .incremental, .target = target };
     return incremental.readWithProgress(&h3.established.connection, registry, session_id, target, out, deadline, context.progress());
 }
 
@@ -47,6 +47,6 @@ pub fn receiveWithDeadline(control: *control_mod.Control, h3: anytype, registry:
 }
 
 fn receiveUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, maximum: usize, deadline: ?std.Io.Clock.Timestamp) stream.TimeoutError!stream.OwnedHandshakeStream {
-    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .whole };
     return stream.receiveWithProgress(&h3.established.connection, registry, session_id, maximum, deadline, context.progress());
 }

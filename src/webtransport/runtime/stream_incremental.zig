@@ -119,6 +119,9 @@ pub fn readWithProgress(
         } else {
             if (try poll(connection, registry, session_id, out)) |event| return event;
         }
+        if (progress) |owner| {
+            if (try owner.receive(deadline)) continue;
+        }
         if (deadline) |absolute|
             try serviceReceiveWithDeadline(connection, absolute)
         else

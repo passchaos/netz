@@ -63,7 +63,7 @@ pub fn receiveWithDeadline(control: *control_mod.Control, h3: anytype, registry:
 }
 
 pub fn receiveUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62, deadline: ?std.Io.Clock.Timestamp) TimeoutError!http3.runtime.OwnedConnectDatagram {
-    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .datagram };
     return h3.receiveConnectDatagramWithProgress(stream_id, deadline, context.progress());
 }
 
@@ -84,7 +84,7 @@ pub fn receiveIntoWithDeadline(control: *control_mod.Control, h3: anytype, regis
 }
 
 fn receiveIntoUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62, output: []u8, deadline: ?std.Io.Clock.Timestamp) TimeoutError![]u8 {
-    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .datagram };
     return h3.receiveConnectDatagramIntoWithProgress(stream_id, output, deadline, context.progress());
 }
 
@@ -106,7 +106,7 @@ pub fn receiveManyIntoWithDeadline(control: *control_mod.Control, h3: anytype, r
 }
 
 fn receiveManyIntoUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62, outputs: [][]u8, received: *usize, deadline: ?std.Io.Clock.Timestamp) TimeoutError!void {
-    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
+    var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .datagram };
     return h3.receiveConnectDatagramsIntoWithProgress(stream_id, outputs, received, deadline, context.progress());
 }
 

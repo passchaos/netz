@@ -1524,6 +1524,9 @@ pub fn receiveWithProgress(
             max_stream_bytes,
         )) |stream| return stream;
 
+        if (progress) |owner| {
+            if (try owner.receive(deadline)) continue;
+        }
         if (deadline) |absolute| {
             try connection.servicePacketServicingTimersDeadline(absolute);
         } else {

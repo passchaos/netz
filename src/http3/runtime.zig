@@ -486,6 +486,9 @@ fn receiveConnectDatagramFromSession(
             return datagram;
         }
         try progress.maintain(deadline);
+        // Protocol maintenance may receive while waiting for outbound grants.
+        // Deliver its queued input before beginning another socket wait.
+        if (try session.pollConnectDatagram(stream_id)) |datagram| return datagram;
         if (deadline) |absolute| {
             if (@TypeOf(session) == *HandshakeServerSession) {
                 if (session.connect_datagrams.streamDetached(stream_id))
@@ -537,6 +540,7 @@ fn receiveConnectDatagramIntoFromSession(
             return payload;
         }
         try progress.maintain(deadline);
+        if (try session.pollConnectDatagramInto(stream_id, output)) |payload| return payload;
         var target = connect_datagram.ReceiveIntoTarget.init(
             stream_id,
             output,

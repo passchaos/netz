@@ -19201,4 +19201,7 @@ test {
 
 test {
     _ = @import("runtime/endpoint_server/close_tests.zig");
+    _ = @import("runtime/flow/progress/wait_tests.zig");
+    _ = @import("runtime/flow/progress/delivery_tests.zig");
+    _ = @import("runtime/flow/progress/stream_wait_tests.zig");
 }

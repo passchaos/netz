@@ -338,6 +338,21 @@ not wait for a peer BLOCKED capsule. Explicit data grants can enlarge the policy
 window, and zero initial data credit stays zero until explicitly granted.
 Shared dispatcher adapters refresh their recovery/pacing timer after deferred
 grant or rejection submission, including operations that otherwise send no data.
+Owning automatic-grant pacing waits now receive through the existing HTTP/3
+owner until either control/input arrives, pacing wakes, or the caller deadline
+expires. CLOSE interrupts the wait before a grant is submitted and retains its
+code/reason; DRAIN remains advisory. Already buffered application input and input
+received during the wait are delivered before another socket wait. The readiness
+check follows the active API: a whole-stream reader waits for FIN, and a
+targeted reader leaves ready siblings to their owner. Unrelated packets and
+partial streams therefore cannot suppress grant pacing timers. Incremental
+and whole-stream readers also continue through that HTTP/3 packet cursor, so
+its retained UDP/GRO batch suffix cannot be skipped by a separate receive path.
+Pending grants remain derivable after an early return and resume at a pacing
+wake without fresh peer traffic. Protected-UDP regressions cover both roles,
+ordinary/bounded data receives, exact batch prefixes, DRAIN/CLOSE, fresh and
+buffered stream input, peer-visible timer-only grant recovery, and single-attempt
+or dispatcher-bound maintenance that never takes over the shared socket.
 
 Send-side body quotas now cover contiguous and scatter/gather writes, complete
 multi-packet sends, and cross-stream batches. Fair writes truncate to available
