@@ -5525,6 +5525,16 @@ proxy evidence for the entire suite.
    and continued PING traffic. MQTT state and traffic accounting advance only
    after a complete packet arrives; Keep Alive still renews only while the
    outstanding body exceeds the existing 1,000-byte progress threshold.
+   WS/WSS also retain one complete decoded WebSocket message if appending it
+   to MQTT's byte stream fails allocation. Retry consumes that retained message
+   before reading another, preserving split/coalesced packet order and the
+   already-committed permessage-deflate receive context. Pending bytes remain
+   bounded by the existing message/packet windows, use the WebSocket allocator
+   for release, and are freed after append, rejection, or transport close.
+   Focused OOM regressions cover first-message append, growth after a partial
+   MQTT header, packet allocation, repeated failures, invalid text/oversize
+   input, and closing with pending ownership. Real WS/WSS compressed exchanges
+   prove exact first and following packets under context takeover after retry.
    Connection traffic counters now follow their actual ownership boundary too.
    The single protocol reader and externally serialized writer update private
    atomic snapshots with load/store instead of multi-writer RMW. Broker

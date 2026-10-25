@@ -36,6 +36,9 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
 const WebSocketTransport = struct {
     connection: websocket_runtime.Connection,
     input: std.ArrayList(u8) = .empty,
+    /// Decoded by WebSocket but not yet appended to MQTT's byte stream.
+    /// Allocated by connection.allocator; retained only across append OOM.
+    pending_payload: ?[]u8 = null,
 };
 
 const tcp_read_ahead_capacity = 448;
@@ -357,6 +360,7 @@ pub const Transport = union(enum) {
                 transport.connection.deinit();
             },
             .websocket => |ws| {
+                WebSocketPacketReader.discardPending(ws);
                 ws.input.deinit(allocator);
                 ws.connection.close();
                 allocator.destroy(ws);
@@ -1344,110 +1348,16 @@ fn readWebSocketPacketWithDeadline(
     );
 }
 
-fn readWebSocketPacketWithPolicy(
-    allocator: std.mem.Allocator,
-    ws: *WebSocketTransport,
-    max_packet_size: usize,
-    inactivity_timeout: ?std.Io.Clock.Duration,
-    absolute_deadline: ?std.Io.Clock.Timestamp,
-    owned_prefix_len: usize,
-) Error!OwnedPacket {
-    var deadline: std.Io.Clock.Timestamp = if (inactivity_timeout) |timeout|
-        inactivityDeadline(ws.connection.io, timeout)
-    else if (absolute_deadline) |value|
-        value
-    else
-        undefined;
-    var large_progress_bytes: usize = 0;
-    var frame = try parsePacketFraming(ws.input.items);
-    while (true) {
-        if (frame) |parsed| {
-            if (parsed.packet_len > max_packet_size) {
-                return error.PacketTooLarge;
-            }
-            // Once Remaining Length is decoded, `packet_len` is the expected
-            // size rather than evidence that all bytes have arrived. MQTT
-            // packets commonly span several WebSocket messages.
-            if (parsed.packet_len <= ws.input.items.len) {
-                const allocated = try allocatePacketBytes(
-                    allocator,
-                    parsed.packet_len,
-                    owned_prefix_len,
-                );
-                errdefer freePacketBytes(
-                    allocator,
-                    allocated.bytes,
-                    allocated.prefix_len,
-                );
-                @memcpy(
-                    allocated.bytes,
-                    ws.input.items[0..parsed.packet_len],
-                );
-                discardPacketPrefix(&ws.input, parsed.packet_len);
-                return .{
-                    .bytes = allocated.bytes,
-                    .fixed = parsed.fixed,
-                    .prefix_len = allocated.prefix_len,
-                };
-            }
-        }
-        if (ws.input.items.len >= max_packet_size) {
-            return error.PacketTooLarge;
-        }
-
-        var message = if (inactivity_timeout != null or
-            absolute_deadline != null)
-            try ws.connection.receiveMessageWithDeadline(deadline)
-        else
-            try ws.connection.receiveMessage();
-        defer message.deinit(allocator);
-        if (message.opcode != .binary) {
-            return error.InvalidWebSocketMessage;
-        }
-        const next_len = std.math.add(
-            usize,
-            ws.input.items.len,
-            message.payload.len,
-        ) catch return error.PacketTooLarge;
-        // A message may finish one bounded packet and carry bytes from the
-        // next. Each message is itself capped at max_packet_size by the MQTT
-        // adapter, so two packet-size windows are the maximum needed here.
-        const max_buffered = std.math.mul(
-            usize,
-            max_packet_size,
-            2,
-        ) catch std.math.maxInt(usize);
-        if (next_len > max_buffered) {
-            return error.PacketTooLarge;
-        }
-        try ws.input.appendSlice(allocator, message.payload);
-        frame = try parsePacketFraming(ws.input.items);
-
-        // MQTT packets are a byte stream independent of WebSocket message
-        // boundaries. Move the one packet deadline only after MQTT bytes have
-        // arrived and the decoded Remaining Length proves that more than the
-        // bounded progress threshold is still outstanding. Ping/Pong frames
-        // are consumed inside receiveMessageWithDeadline and never reach this
-        // renewal point.
-        if (message.payload.len != 0) {
-            if (frame) |parsed| {
-                if (parsed.packet_len > max_packet_size) {
-                    return error.PacketTooLarge;
-                }
-                if (inactivity_timeout) |timeout| {
-                    if (ws.input.items.len > large_progress_bytes and
-                        parsed.packet_len > ws.input.items.len and
-                        parsed.packet_len - ws.input.items.len >
-                            keep_alive_reader.progress_threshold)
-                    {
-                        deadline = inactivityDeadline(ws.connection.io, timeout);
-                        large_progress_bytes = ws.input.items.len;
-                    }
-                }
-            }
-        }
-    }
-}
+const WebSocketPacketReader = @import("transport/websocket_receive.zig").Reader(struct {
+    pub const ErrorType = Error;
+    pub const PacketType = OwnedPacket;
+    pub const allocate = allocatePacketBytes;
+    pub const free = freePacketBytes;
+    pub const parse = parsePacketFraming;
+    pub const discard = discardPacketPrefix;
+    pub const fromInactivity = inactivityDeadline;
+});
+const readWebSocketPacketWithPolicy = WebSocketPacketReader.read;
 
 const PacketFrame = struct {
     fixed: mqtt.FixedHeader,
@@ -2094,4 +2004,6 @@ test "TCP packet receive rejects oversize before allocating" {
 
 test {
     _ = @import("transport/read_interruption_tests.zig");
+    _ = @import("transport/websocket_receive_tests.zig");
+    _ = @import("transport/websocket_compression_handoff_tests.zig");
 }
