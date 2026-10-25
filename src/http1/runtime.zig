@@ -11,6 +11,7 @@ const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
 const message_reuse = @import("runtime/message/reuse.zig");
 const message_head = @import("runtime/message/head.zig");
+const buffered_input = @import("runtime/message/buffered_input.zig");
 const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
@@ -5721,6 +5722,8 @@ pub const Connection = struct {
     /// Read one request using a caller-owned absolute request-head deadline.
     /// A timeout does not poison the persistent connection, allowing the same
     /// owner to resume the partially buffered head with a later deadline.
+    /// Allocation failures also retain input and decoded message bytes for
+    /// retry without allowing a later pipelined request to overtake them.
     pub fn readRequestWithDeadline(
         self: *Connection,
         options: http1.ParseOptions,
@@ -7632,6 +7635,12 @@ const EofBodyReader = close_delimited.Reader(struct {
     pub const readUntil = readTransportUntil;
 });
 
+const BufferedInputReader = buffered_input.Reader(struct {
+    pub const TransportType = RuntimeTransport;
+    pub const ErrorType = Error;
+    pub const readUntil = readTransportUntil;
+});
+
 fn readHttp09Body(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -7795,6 +7804,8 @@ pub fn readRequestFromStreamWithTimeout(
     );
 }
 
+/// Read one buffered request. Allocation failures retain accepted input,
+/// including a complete message whose metadata decoder must be retried.
 pub fn readRequestFromStreamBuffered(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -7804,7 +7815,7 @@ pub fn readRequestFromStreamBuffered(
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedRequest {
     const bytes = try readRequestMessageBytesBuffered(allocator, io, stream, limits, options, inbuf);
-    errdefer allocator.free(bytes);
+    errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
     return .{ .bytes = bytes, .request = request };
@@ -7837,7 +7848,7 @@ pub fn readRequestFromStreamBufferedWithDeadline(
         deadline,
         null,
     );
-    errdefer allocator.free(bytes);
+    errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
     return .{ .bytes = bytes, .request = request };
@@ -7901,7 +7912,7 @@ fn readRequestFromTransportBufferedWithStage(
         return err;
     };
     if (failure_stage) |stage| stage.* = .body;
-    errdefer allocator.free(bytes);
+    errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
     return .{ .bytes = bytes, .request = request };
@@ -8227,7 +8238,7 @@ pub fn readResponseFromStreamBufferedObserved(
             null,
             null,
         );
-        errdefer allocator.free(bytes);
+        errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
         if (informationalResponseToSkip(response.status)) {
@@ -8405,7 +8416,7 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             null,
             null,
         );
-        errdefer allocator.free(bytes);
+        errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
         if (informationalResponseToSkip(response.status)) {
@@ -8987,6 +8998,8 @@ fn readRequestMessageBytesBuffered(
             try headReadDeadline(transport, timeout)
         else
             null,
+        null,
+        null,
     );
 }
 
@@ -9127,7 +9140,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         body_deadline,
         null,
     );
-    errdefer allocator.free(bytes);
+    errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var response = try parseResponseForRuntime(
         allocator,
         bytes,
@@ -9173,11 +9186,7 @@ fn readMessageBytesBufferedWithContext(
         };
         head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
         if (head_end != null) break;
-        const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - inbuf.items.len)];
-        const n = if (head_deadline) |deadline|
-            try transport.readWithDeadline(read_buf, deadline)
-        else
-            try transport.read(read_buf);
+        const n = try BufferedInputReader.append(allocator, transport, inbuf, @min(scratch.len, limits.max_head_bytes - inbuf.items.len), head_deadline);
         if (n == 0) {
             if (allow_http_0_9_response and
                 (request_method == null or request_method.? == .GET) and
@@ -9195,7 +9204,6 @@ fn readMessageBytesBufferedWithContext(
             }
             return error.ConnectionClosed;
         }
-        try inbuf.appendSlice(allocator, scratch[0..n]);
     }
     const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
     if (request_stage) |stage| stage.* = .body;
@@ -9218,13 +9226,8 @@ fn readMessageBytesBufferedWithContext(
             limits.max_body_bytes,
         ) catch |err| switch (err) {
             error.BufferTooShort => {
-                const n = try readTransportUntil(
-                    transport,
-                    &scratch,
-                    body_deadline,
-                );
+                const n = try BufferedInputReader.append(allocator, transport, inbuf, scratch.len, body_deadline);
                 if (n == 0) return error.ConnectionClosed;
-                try inbuf.appendSlice(allocator, scratch[0..n]);
                 continue;
             },
             else => |e| return e,
@@ -9238,13 +9241,8 @@ fn readMessageBytesBufferedWithContext(
     // fully buffered yet.
     try inbuf.ensureTotalCapacity(allocator, target_len);
     while (inbuf.items.len < target_len) {
-        const n = try readTransportUntil(
-            transport,
-            &scratch,
-            body_deadline,
-        );
+        const n = try BufferedInputReader.append(allocator, transport, inbuf, scratch.len, body_deadline);
         if (n == 0) return error.ConnectionClosed;
-        try inbuf.appendSlice(allocator, scratch[0..n]);
     }
 
     if (inbuf.items.len == target_len) {
@@ -14270,6 +14268,8 @@ test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
 }
 
 test {
+    _ = @import("runtime/message/allocation_retry_tests.zig");
+    _ = @import("runtime/message/tls_allocation_retry_tests.zig");
     _ = runtime_write;
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");

@@ -2256,6 +2256,20 @@ reconstructed.
 All public HTTP/1 and HTTP/2 request/response and pool deadline entry points
 reject timestamps outside the awake-clock domain before parsing, writing, or
 reserving pool capacity, matching the constructor deadline contract.
+
+Buffered HTTP/1 aggregate input now reserves storage before each head/body
+socket read, then commits only its returned byte count. Allocation failure
+therefore cannot consume bytes without retaining them. Complete messages
+detached before request/response metadata decoding are restored ahead of their
+pipeline suffix on decoder OOM; restoration reuses the existing allocation or
+read-ahead capacity and cannot itself allocate. Direct buffered APIs and
+connection request readers can retry empty/fixed/chunked/folded requests with
+exact body, trailers and following-request order. Real TLS 1.2/1.3 tests cover
+16-KiB bodies crossing record boundaries. Direct buffered response tests cover
+chunked trailer allocation and following-response order. The plain buffered
+request wrapper also now forwards both optional deadline/context arguments to
+its shared reader. Complete client exchanges and callback-streaming failures
+retain their existing connection-retirement policy.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` and
 `Connection.pingWithDeadline(data, deadline)` for a bounded HTTP/2
