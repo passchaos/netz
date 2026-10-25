@@ -126,52 +126,57 @@ test "WebTransport shared server application operations retain CLOSE input acros
     }
 }
 
-test "WebTransport application preflight cannot bypass CLOSE under receive credit backpressure" {
+test "WebTransport application preflight observes CLOSE before blocked receive feedback" {
     for (std.enums.values(Operation)) |operation| {
-        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-        defer threaded.deinit();
-        var fixture: Fixture = undefined;
-        try fixture.init(threaded.io());
-        defer fixture.deinit();
-        const session = try fixture.addSession();
-        const id = try session.openBidirectionalStream();
-        var storage: [64]u8 = undefined;
-        try buffer(&fixture, session, try control.writeCloseInto(&storage, 99, "credit blocked"));
-        const connection = &fixture.connectionSession().established.connection;
-        // Consuming the CLOSE now owes MAX_DATA. Congestion prevents that
-        // transaction from committing, so the Capsule bytes remain unread.
-        connection.recv_flow.limit = connection.recv_flow.highest_received;
-        const before = connection.recvStreamStats(session.session_id.value).?.bytes_read;
-        const limit = connection.recv_flow.limit;
-        const window = connection.congestion.congestion_window;
-        const bidi = connection.nextLocalBidirectionalStreamId();
-        const uni = connection.nextLocalUnidirectionalStreamId();
-        connection.congestion.congestion_window = 0;
-        var counts = [_]usize{99};
-        try std.testing.expectError(error.CongestionLimited, apply(session, id, operation, &counts));
-        try std.testing.expectEqual(before, connection.recvStreamStats(session.session_id.value).?.bytes_read);
-        try std.testing.expectEqual(limit, connection.recv_flow.limit);
-        try std.testing.expectEqual(bidi, connection.nextLocalBidirectionalStreamId());
-        try std.testing.expectEqual(uni, connection.nextLocalUnidirectionalStreamId());
-        connection.congestion.congestion_window = window;
-        const original_io = connection.endpoint.io;
-        var observed = ObservedSend{ .delegate = original_io, .fail_on_call = 1 };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = ObservedSend.netSend;
-        connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
-        {
+        for ([_]bool{ false, true }) |socket_failure| {
+            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+            defer threaded.deinit();
+            var fixture: Fixture = undefined;
+            try fixture.init(threaded.io());
+            defer fixture.deinit();
+            const session = try fixture.addSession();
+            const id = try session.openBidirectionalStream();
+            var storage: [64]u8 = undefined;
+            try buffer(&fixture, session, try control.writeCloseInto(&storage, 99, "credit blocked"));
+            const connection = &fixture.connectionSession().established.connection;
+            connection.recv_flow.limit = connection.recv_flow.highest_received;
+            const before = connection.recvStreamStats(session.session_id.value).?.bytes_read;
+            const buffered = connection.availableReceivedStream(session.session_id.value).?.len;
+            const bidi = connection.nextLocalBidirectionalStreamId();
+            const uni = connection.nextLocalUnidirectionalStreamId();
+            const window = connection.congestion.congestion_window;
+            const original_io = connection.endpoint.io;
+            var observed = ObservedSend{ .delegate = original_io, .fail_after_prefix = 0 };
+            var vtable = original_io.vtable.*;
+            vtable.netSend = ObservedSend.netSend;
+            if (socket_failure) connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable } else connection.congestion.congestion_window = 0;
             defer connection.endpoint.io = original_io;
-            try std.testing.expectError(error.NetworkDown, apply(session, id, operation, &counts));
+            var counts = [_]usize{99};
+            try std.testing.expectError(error.InvalidSessionState, apply(session, id, operation, &counts));
+            try std.testing.expectEqual(before + buffered, connection.recvStreamStats(session.session_id.value).?.bytes_read);
+            try std.testing.expectEqual(bidi, connection.nextLocalBidirectionalStreamId());
+            try std.testing.expectEqual(uni, connection.nextLocalUnidirectionalStreamId());
+            try std.testing.expectEqual(@as(u64, 0), session.streams.get(id).?.bytes_sent);
+            try std.testing.expect(!session.streams.get(id).?.local_fin);
+            try std.testing.expect(connection.receive_credit_retry_deadline_ns != null);
+            if (socket_failure) try std.testing.expect(observed.calls != 0);
+            if (operation == .batch) try std.testing.expectEqual(@as(usize, 0), counts[0]);
+            try std.testing.expectError(error.InvalidSessionState, apply(session, id, operation, &counts));
+            var output: [16]u8 = undefined;
+            const event = (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(session, &output)).?;
+            try std.testing.expect(event == .session and event.session == .closed);
+            try std.testing.expectEqual(@as(u32, 99), event.session.closed.code);
+            try std.testing.expectEqualStrings("credit blocked", event.session.closed.reason);
+            connection.endpoint.io = original_io;
+            connection.congestion.congestion_window = window;
+            for (0..16) |_| {
+                if (connection.receive_credit_retry_deadline_ns == null) break;
+                const timer = connection.nextTimerDeadline().?;
+                _ = try connection.serviceNextTimerAt(timer.deadline_ns);
+            }
+            try std.testing.expect(connection.receive_credit_retry_deadline_ns == null);
+            try std.testing.expectEqual(before + buffered, connection.recvStreamStats(session.session_id.value).?.bytes_read);
         }
-        try std.testing.expectEqual(before, connection.recvStreamStats(session.session_id.value).?.bytes_read);
-        try std.testing.expectEqual(limit, connection.recv_flow.limit);
-        try std.testing.expectEqual(bidi, connection.nextLocalBidirectionalStreamId());
-        try std.testing.expectEqual(uni, connection.nextLocalUnidirectionalStreamId());
-        try std.testing.expectError(error.InvalidSessionState, apply(session, id, operation, &counts));
-        var output: [16]u8 = undefined;
-        const event = (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(session, &output)).?;
-        try std.testing.expect(event == .session and event.session == .closed);
-        try std.testing.expectEqualStrings("credit blocked", event.session.closed.reason);
     }
 }
 

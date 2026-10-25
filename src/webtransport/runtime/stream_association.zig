@@ -1,6 +1,7 @@
 //! WebTransport stream association over QUIC stream prefixes.
 
 const std = @import("std");
+const receive_credit = @import("stream/receive_credit.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -283,21 +284,10 @@ fn identifyInternal(
                 }
             }
             if (!reset_consumed_prefix) {
-                const release_result = if (single_attempt)
-                    connection.tryReleaseReceivedCapacity(
-                        stream_id,
-                        prefix_len,
-                    )
-                else
-                    connection.releaseReceivedCapacity(
-                        stream_id,
-                        prefix_len,
-                    );
-                release_result catch |err| {
-                    // Registry insertion must be transactional with prefix-
-                    // credit consumption. Otherwise a failed MAX_* send leaves
-                    // a peer stream registered while its prefix remains at the
-                    // front of transport storage.
+                receive_credit.commit(connection, stream_id, prefix_len) catch |err| {
+                    // Failed local consumption cannot leave a registry entry
+                    // interpreting the association bytes as application data.
+                    // QUIC retains outbound MAX_* failures independently.
                     registry.removeLastPeer(stream_id);
                     return err;
                 };
@@ -325,11 +315,7 @@ fn identifyInternal(
             const prefix_len = stream.?.receive_prefix_len;
             const already_consumed = if (connection.recvStreamStats(stream_id)) |stats| stats.bytes_read >= prefix_len else true;
             if (!already_consumed) {
-                const release_result = if (single_attempt)
-                    connection.tryReleaseReceivedCapacity(stream_id, prefix_len)
-                else
-                    connection.releaseReceivedCapacity(stream_id, prefix_len);
-                try release_result;
+                try receive_credit.commit(connection, stream_id, prefix_len);
             }
             stream.?.receive_prefix_len = 0;
         }

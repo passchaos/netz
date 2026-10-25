@@ -722,7 +722,7 @@ test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
     try std.testing.expect(h3.established.connection.peerStreamClosed(2));
 }
 
-test "WebTransport endpoint reads defer paced receive credit" {
+test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -853,50 +853,23 @@ test "WebTransport endpoint reads defer paced receive credit" {
     );
 
     var buffer: [64]u8 = undefined;
-    try std.testing.expect(
-        (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
-            &accepted,
-            &buffer,
-        )) == null,
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    const stream_state = accepted.streams.get(2) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(stream_state.prefix_received);
-    try std.testing.expectEqual(@as(u64, 0), stream_state.bytes_received);
-    try std.testing.expectEqual(
-        payload.len,
-        quic.one_rtt.testing.receiveStreamAvailableLen(
-            &h3.established.connection,
-            2,
-        ).?,
-    );
-    try std.testing.expectEqual(
-        prefix_len + payload.len,
-        stream_bytes.items.len,
-    );
-
-    var timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
-        return error.TestUnexpectedResult;
-    const stream_event = (try runtime.EndpointServer.testing
-        .pollAcceptedSessionEntry(&accepted, &buffer)) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(stream_event == .stream);
-    try std.testing.expect(stream_event.stream == .data);
+    const stream_event = (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(&accepted, &buffer)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stream_event == .stream and stream_event.stream == .data);
     try std.testing.expect(!stream_event.stream.data.fin);
-    try std.testing.expectEqualStrings(&payload, buffer[0..payload.len]);
-    try std.testing.expectEqual(
-        @as(u64, payload.len),
-        accepted.streams.get(2).?.bytes_received,
-    );
+    try std.testing.expectEqualStrings(&payload, buffer[0..stream_event.stream.data.bytes]);
+    try std.testing.expectEqual(@as(u64, payload.len), accepted.streams.get(2).?.bytes_received);
+    try std.testing.expectEqual(@as(usize, 0), quic.one_rtt.testing.receiveStreamAvailableLen(&h3.established.connection, 2).?);
+    try std.testing.expectEqual(prefix_len + payload.len, stream_bytes.items.len);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns != null);
+    for (0..16) |_| {
+        if (h3.established.connection.receive_credit_retry_deadline_ns == null) break;
+        const timer = dispatcher.nextTimerDeadline().?;
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns == null);
+    try std.testing.expect((try runtime.EndpointServer.testing.pollAcceptedSessionEntry(&accepted, &buffer)) == null);
 
     var close_capsule: [4 + session_control.max_close_reason + 16]u8 =
         undefined;
@@ -923,45 +896,27 @@ test "WebTransport endpoint reads defer paced receive credit" {
         &h3.established.connection,
         @intCast(fixed_io.now_ns),
     );
-    try std.testing.expect(
-        (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
-            &accepted,
-            &buffer,
-        )) == null,
-    );
-    try std.testing.expect(!accepted.control.terminal_reported);
-    // FIN already ended application use. The paced receive-credit transaction
-    // still leaves Capsule parsing and the original close bytes pending.
-    try std.testing.expect(accepted.control.state.closed);
-    try std.testing.expectError(error.InvalidSessionState, accepted.control.ensureOpen());
-    try std.testing.expect(!accepted.close_response_pending);
-    try std.testing.expectEqual(
-        control_len,
-        quic.one_rtt.testing.receiveStreamAvailableLen(
-            &h3.established.connection,
-            0,
-        ).?,
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-
-    timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
-        return error.TestUnexpectedResult;
-    var close_event = (try runtime.EndpointServer.testing
-        .pollAcceptedSessionEntry(&accepted, &buffer)) orelse
-        return error.TestUnexpectedResult;
+    // CLOSE is observed immediately; response FIN and receive feedback remain
+    // pending transport work and cannot hide its original code or reason.
+    try std.testing.expectError(error.InvalidSessionState, accepted.openBidirectionalStream());
+    var close_event = (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(&accepted, &buffer)) orelse return error.TestUnexpectedResult;
     defer close_event.deinit(allocator);
-    try std.testing.expect(close_event == .session);
-    try std.testing.expect(close_event.session == .closed);
+    try std.testing.expect(close_event == .session and close_event.session == .closed);
     try std.testing.expectEqual(@as(u32, 89), close_event.session.closed.code);
-    try std.testing.expect(accepted.control.terminal_reported);
+    try std.testing.expectEqualStrings("paced control credit rollback", close_event.session.closed.reason);
+    try std.testing.expect(accepted.control.state.closed and accepted.control.terminal_reported);
     try std.testing.expect(accepted.close_response_pending);
+    try std.testing.expectEqual(@as(u64, control_len), h3.established.connection.recvStreamStats(0).?.bytes_read);
+    try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns != null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    for (0..16) |_| {
+        if (h3.established.connection.receive_credit_retry_deadline_ns == null) break;
+        const timer = dispatcher.nextTimerDeadline().?;
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns == null);
+    try std.testing.expect((try runtime.EndpointServer.testing.pollAcceptedSessionEntry(&accepted, &buffer)) == null);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
@@ -3815,45 +3770,23 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
     );
     const packet_number = session.h3.established.connection.next_packet_number;
     var buffer: [64]u8 = undefined;
-    try std.testing.expect((try session.pollStream(&buffer)) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        packet_number,
-        session.h3.established.connection.next_packet_number,
-    );
-    const deferred_incremental = session.streams.get(3) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(deferred_incremental.prefix_received);
-    try std.testing.expectEqual(
-        @as(u64, 0),
-        deferred_incremental.bytes_received,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 40),
-        quic.one_rtt.testing.receiveStreamAvailableLen(
-            &session.h3.established.connection,
-            3,
-        ).?,
-    );
-
-    var timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
-        return error.TestUnexpectedResult;
-    const incremental = (try session.pollStream(&buffer)) orelse
-        return error.TestUnexpectedResult;
+    const incremental = (try session.pollStream(&buffer)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(incremental == .data);
     try std.testing.expectEqual(@as(u62, 3), incremental.data.stream_id);
-    try std.testing.expectEqualStrings(
-        &([_]u8{'i'} ** 40),
-        buffer[0..incremental.data.bytes],
-    );
+    try std.testing.expectEqualStrings(&([_]u8{'i'} ** 40), buffer[0..incremental.data.bytes]);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(packet_number, session.h3.established.connection.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 40), session.streams.get(3).?.bytes_received);
+    try std.testing.expectEqual(@as(usize, 0), quic.one_rtt.testing.receiveStreamAvailableLen(&session.h3.established.connection, 3).?);
+    try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns != null);
+    for (0..16) |_| {
+        if (session.h3.established.connection.receive_credit_retry_deadline_ns == null) break;
+        const timer = dispatcher.nextTimerDeadline().?;
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns == null);
+    try std.testing.expect((try session.pollStream(&buffer)) == null);
 
     var whole_bytes: std.ArrayList(u8) = .empty;
     defer whole_bytes.deinit(allocator);
@@ -3878,34 +3811,21 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         &session.h3.established.connection,
         @intCast(fixed_io.now_ns),
     );
-    try std.testing.expect((try session.pollCompleteStream()) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    const deferred_whole = session.streams.get(7) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(deferred_whole.prefix_received);
-    try std.testing.expectEqual(
-        @as(u64, 0),
-        deferred_whole.bytes_received,
-    );
-    try std.testing.expectEqual(
-        whole_bytes.items.len,
-        quic.one_rtt.testing.receiveStreamAvailableLen(
-            &session.h3.established.connection,
-            7,
-        ).?,
-    );
-
-    timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
-        return error.TestUnexpectedResult;
-    var whole = (try session.pollCompleteStream()) orelse
-        return error.TestUnexpectedResult;
+    var whole = (try session.pollCompleteStream()) orelse return error.TestUnexpectedResult;
     defer whole.deinit();
     try std.testing.expectEqual(@as(u62, 7), whole.stream_id);
     try std.testing.expectEqualStrings(&([_]u8{'w'} ** 40), whole.payload);
+    try std.testing.expectEqual(@as(u64, 40), session.streams.get(7).?.bytes_received);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns != null);
+    for (0..16) |_| {
+        if (session.h3.established.connection.receive_credit_retry_deadline_ns == null) break;
+        const timer = dispatcher.nextTimerDeadline().?;
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns == null);
+    try std.testing.expect((try session.pollCompleteStream()) == null);
 
     try std.testing.expectError(
         error.InvalidDispatcherState,

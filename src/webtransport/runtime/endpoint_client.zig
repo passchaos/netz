@@ -1392,6 +1392,7 @@ fn findHeader(
 }
 
 test {
+    _ = @import("endpoint_client/receive_credit_tests.zig");
     _ = @import("endpoint_client/terminal_tests.zig");
     _ = @import("endpoint_client/connection_close_tests.zig");
     _ = @import("endpoint_client/flow_tests.zig");

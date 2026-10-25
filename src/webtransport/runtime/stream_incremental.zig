@@ -8,6 +8,11 @@ const association = @import("stream_association.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_receive = @import("flow/receive.zig");
 const flow_progress = @import("flow/progress.zig");
+const receive_credit = @import("stream/receive_credit.zig");
+
+test {
+    _ = @import("stream/receive_credit_tests.zig");
+}
 
 pub const Error = association.Error || @import("session_control.zig").Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -757,22 +762,9 @@ fn pollStream(
             recv_stats.bytes_read + count == recv_stats.final_size.?;
         const previous_stream = stream.*;
         try registry.recordReceived(stream_id, count, fin);
-        const release_result = if (single_attempt)
-            connection.tryReleaseReceivedCapacity(stream_id, count)
-        else
-            connection.releaseReceivedCapacity(stream_id, count);
-        release_result catch |err| switch (err) {
-            error.PacingLimited,
-            error.CongestionLimited,
-            error.FlowControlBlocked,
-            => {
-                stream.* = previous_stream;
-                return null;
-            },
-            else => {
-                stream.* = previous_stream;
-                return err;
-            },
+        receive_credit.commit(connection, stream_id, count) catch |err| {
+            stream.* = previous_stream;
+            return err;
         };
         flow_receive.consume(registry, stream, count);
         if (fin) {

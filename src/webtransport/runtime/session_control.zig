@@ -7,6 +7,7 @@
 //! 1024-byte UTF-8 reason.
 
 const std = @import("std");
+const receive_credit = @import("stream/receive_credit.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
@@ -388,8 +389,8 @@ pub const Control = struct {
     }
 
     /// Inspect buffered CONNECT-stream capsules without waiting for pacing.
-    /// Parser state and QUIC receive bytes remain unchanged when a required
-    /// MAX_DATA/MAX_STREAM_DATA update cannot be submitted.
+    /// Valid parsed input commits its receive cursor even when outbound
+    /// MAX_DATA/MAX_STREAM_DATA is deferred to the connection timer.
     pub fn pollOnce(
         self: *Control,
         connection: *quic.one_rtt.Connection,
@@ -436,10 +437,7 @@ pub const Control = struct {
                 // after our send direction ends. No peer CLOSE was decoded,
                 // so discard these bytes without inventing H3_MESSAGE_ERROR.
                 if (available.len != 0) {
-                    if (single_attempt)
-                        try connection.tryReleaseReceivedCapacity(self.session_id.value, available.len)
-                    else
-                        try connection.releaseReceivedCapacity(self.session_id.value, available.len);
+                    try receive_credit.commit(connection, self.session_id.value, available.len);
                 }
                 return null;
             }
@@ -460,17 +458,7 @@ pub const Control = struct {
                 self.noteFlowError(err);
                 return err;
             };
-            const release_result = if (single_attempt)
-                connection.tryReleaseReceivedCapacity(
-                    self.session_id.value,
-                    result.consumed,
-                )
-            else
-                connection.releaseReceivedCapacity(
-                    self.session_id.value,
-                    result.consumed,
-                );
-            release_result catch |err| {
+            receive_credit.commit(connection, self.session_id.value, result.consumed) catch |err| {
                 self.restoreSnapshot(snapshot);
                 return err;
             };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const receive_credit = @import("stream/receive_credit.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -1556,8 +1557,8 @@ pub fn poll(
 }
 
 /// Take one FIN-complete associated stream without waiting for receive-credit
-/// pacing. Transport bytes and the allocated payload remain uncommitted on
-/// backpressure so a dispatcher can retry the same stream later.
+/// pacing. QUIC retains any pending flow advertisement for its connection
+/// timer after the allocated payload's receive cursor is committed.
 pub fn pollOnce(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
@@ -1728,26 +1729,14 @@ fn takeHandshakeSessionStream(
     );
     var payload_owned = true;
     defer if (payload_owned) connection.endpoint.allocator.free(payload);
-    const release_result = if (single_attempt)
-        connection.tryReleaseReceivedCapacity(
-            stream_id,
-            lengths.wire,
-        )
-    else
-        connection.releaseReceivedCapacity(
-            stream_id,
-            lengths.wire,
-        );
-    release_result catch |err| switch (err) {
-        error.PacingLimited,
-        error.CongestionLimited,
-        error.FlowControlBlocked,
-        => return null,
-        else => return err,
-    };
-    _ = try association.requestTransportRetirement(connection, stream);
+    const previous_stream = stream.*;
     try registry.recordReceived(stream_id, lengths.payload, true);
+    receive_credit.commit(connection, stream_id, lengths.wire) catch |err| {
+        stream.* = previous_stream;
+        return err;
+    };
     flow_receive.consume(registry, stream, lengths.payload);
+    _ = try association.requestTransportRetirement(connection, stream);
     payload_owned = false;
     return .{
         .allocator = connection.endpoint.allocator,

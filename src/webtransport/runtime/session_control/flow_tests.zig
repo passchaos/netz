@@ -112,7 +112,7 @@ test "WebTransport runtime flow parses fragmented grants beside DRAIN" {
     try std.testing.expect(event == .draining);
 }
 
-test "WebTransport runtime flow parser rolls shared state back after release failure" {
+test "WebTransport runtime flow parser commits grants and retains failed transport credit" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     var pair: Pair = undefined;
@@ -132,11 +132,21 @@ test "WebTransport runtime flow parser rolls shared state back after release fai
     // Force receive-window replenishment during the control poll.
     const entry = conn.stream_recv_index.get(0).?;
     conn.stream_recv_flows.items[entry].flow.limit = conn.stream_recv_flows.items[entry].flow.highest_received;
-    try std.testing.expectError(error.NetworkDown, pair.client.control.pollOnce(conn));
-    try std.testing.expectEqual(original_limit, pair.client.streams.flow.?.send_limit.data);
-    observed.fail_on_call = null;
     try std.testing.expect((try pair.client.control.pollOnce(conn)) == null);
     try std.testing.expectEqual(original_limit + 1024, pair.client.streams.flow.?.send_limit.data);
+    try std.testing.expect(observed.calls != 0);
+    try std.testing.expect(conn.receive_credit_retry_deadline_ns != null);
+    observed.fail_on_call = null;
+    const read_offset = conn.recvStreamStats(0).?.bytes_read;
+    try std.testing.expect((try pair.client.control.pollOnce(conn)) == null);
+    try std.testing.expectEqual(original_limit + 1024, pair.client.streams.flow.?.send_limit.data);
+    try std.testing.expectEqual(read_offset, conn.recvStreamStats(0).?.bytes_read);
+    for (0..16) |_| {
+        if (conn.receive_credit_retry_deadline_ns == null) break;
+        const timer = conn.nextTimerDeadline().?;
+        _ = try conn.serviceNextTimerAt(timer.deadline_ns);
+    }
+    try std.testing.expect(conn.receive_credit_retry_deadline_ns == null);
 }
 
 test "WebTransport runtime flow duplicate grant closes CONNECT with protocol flow error" {

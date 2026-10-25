@@ -36,10 +36,10 @@ FIN, priority updates, explicit Session DATA, DRAIN and flow grants. CLOSE stops
 the operation before stream-ID, byte-count or FIN commits; DRAIN remains
 advisory, and its notification remains available to the application. The common
 preflight lives in `runtime/application.zig` and also serves DATAGRAM and stream
-cancellation paths. If consuming buffered control requires a QUIC receive-credit
-update that is paced, congestion-blocked or fails at the socket, application
-admission returns that error with the parser and receive cursor rolled back.
-This prevents fresh stream credit from bypassing a still-buffered CLOSE.
+cancellation paths. Valid buffered control commits its receive cursor while
+QUIC retains paced, congestion-blocked or failed receive-credit advertisements
+for its connection timer. A buffered CLOSE therefore stops admission without
+waiting for outbound flow feedback.
 Long close-reason allocation failure similarly preserves input for retry.
 Batch output counts are cleared before Session preflight, while insufficient
 count storage fails before consuming peer control. Real protected-UDP tests
@@ -332,13 +332,31 @@ shared dispatcher sessions use nonblocking progress through their sole reader.
 
 Session `grantData` and `grantStreams` APIs atomically submit one Capsule and
 commit the advertised receive limit only after successful socket submission.
-They are one-attempt operations that callers retry on backpressure. Parser and
-shared-state snapshots also roll back peer grants when returning QUIC receive
-credit fails. Duplicate, decreasing or excessive peer limits and incoming
-stream-limit violations cancel the affected CONNECT with WT_FLOW_CONTROL_ERROR,
+They are one-attempt operations that callers retry on backpressure. Received
+peer grants commit with the parsed CONNECT cursor; pending QUIC receive-credit
+advertisements remain connection-owned for timer retry. Duplicate, decreasing
+or excessive peer limits and incoming stream-limit violations cancel the
+affected CONNECT with WT_FLOW_CONTROL_ERROR,
 without terminating sibling sessions. Runtime tests cover both roles, zero
 initial credit, failed submissions, fragmented grants, deadline waits and
 shared-session isolation.
+
+Ready WebTransport stream reads now use QUIC's `commitReceivedThrough`
+ownership boundary for both incremental and whole-stream APIs. Association
+headers and valid CONNECT capsules use the same boundary. Local receive
+cursors and Session consumption commit without waiting for MAX_DATA or
+MAX_STREAM_DATA to reach the socket; QUIC coalesces the latest absolute limits
+and retries them from its existing connection timer. This prevents an otherwise
+ready bounded read from entering an unbounded pacing sleep. Outbound Session
+grants and cancellation retain their socket-commit semantics.
+Focused tests block pacing, fill the congestion window and fail socket sends
+across both stream directions, whole/incremental polls and discovered-stream
+takeover. They verify exact data, no duplicate delivery, deferred credit on the
+wire after timer recovery, and continued stream data. Whole-stream allocation
+failure still leaves application bytes unconsumed. Shared-client tests retain
+sibling ownership and independent Session byte counters during failed feedback;
+buffered CLOSE and peer-grant tests preserve exact metadata and commit each
+capsule once.
 
 Receive-side stream data is now charged by each stream's highest QUIC offset,
 including out-of-order gaps, before copying application bytes or retiring
@@ -1039,9 +1057,10 @@ route, so a later endpoint turn can finish feedback, promotion, or rejection.
 Malformed request cleanup submits RESET_STREAM and STOP_SENDING atomically in
 one packet; if pacing rejects that packet, the parser state remains available
 for the next endpoint turn instead of blocking or exposing partial cleanup.
-Accepted-session polling applies the same rule to CONNECT capsules and
-associated stream data: receive-credit backpressure rolls back parser/registry
-state and delays the application event until a later dispatcher turn.
+Accepted-session polling commits valid CONNECT capsules and associated stream
+data without waiting for receive-credit backpressure. Failed advertisements
+remain pending for the connection timer while application events are delivered
+once with committed parser/registry cursors.
 At the QUIC layer, a received STOP_SENDING records its mandatory RESET_STREAM
 response and attempts it once. Pacing or transient send failure arms a distinct
 dispatcher timer, so packet routing never waits and the reset is not forgotten.
@@ -1307,8 +1326,9 @@ DATAGRAM, Capsule, reset/stop, drain/close, and stream-open operations select
 single-attempt transport primitives and refresh the dispatcher timer after
 success, backpressure, or parse failure. Blocking receive/service helpers fail
 with `InvalidDispatcherState` on this object rather than competing for the
-shared UDP socket. Incremental and whole-stream reads preserve transport bytes
-until receive credit commits, while terminal cleanup advances at most one FIN,
+shared UDP socket. Incremental and whole-stream reads commit transport bytes
+with application ownership while QUIC retains pending receive-credit feedback;
+terminal cleanup advances at most one FIN,
 RESET_STREAM, or STOP_SENDING packet per endpoint turn.
 Dispatcher-driven CONNECT polling now binds that invariant before parsing the
 response. Abandoning a returned attempt performs at most one cancellation send
