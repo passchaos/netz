@@ -2281,6 +2281,20 @@ behavior. Focused tests verify repeated OOM, unchanged absolute deadlines
 across local read interruptions, buffered HTTP/1 and opt-in HTTP/0.9 responses,
 and 20-KiB bodies over native TLS 1.2/1.3 and standard TLS 1.3. Authenticated
 TLS EOF requirements and high-level client/pool retirement remain unchanged.
+
+Connection-owned request reads retain a successful automatic `100 Continue`
+across body allocation failure, request metadata OOM and canceled body reads.
+The interim response commits only after its whole write succeeds, so an
+ambiguous partial write still retires the connection. Retrying the retained
+request, including a switch to callback streaming or borrowed batch reads,
+does not replay the response. Successful decoding or nonempty batch consumption
+clears the marker for the next request; zero-byte batch consumption preserves
+it. A complete request rejected by semantic decoding also clears its consumed
+marker. Tests cover fixed, chunked and folded heads, repeated allocation failure,
+exact subsequent Expect responses and final-response order over TCP and native
+TLS 1.2/1.3. The marker fits the existing Connection alignment padding. Raw
+stream helpers remain operation-scoped; retryable Expect exchanges should use
+the connection-owned reader so their interim-response state remains available.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` and
 `Connection.pingWithDeadline(data, deadline)` for a bounded HTTP/2

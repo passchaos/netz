@@ -11,6 +11,7 @@ const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
 const message_reuse = @import("runtime/message/reuse.zig");
 const message_head = @import("runtime/message/head.zig");
+const message_continue = @import("runtime/message/continue.zig");
 const buffered_input = @import("runtime/message/buffered_input.zig");
 const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
@@ -5574,6 +5575,9 @@ pub const Connection = struct {
     /// The flag is monotonic because HTTP/1 has no protocol-level mechanism
     /// for retracting a Connection: close decision already exposed to a peer.
     graceful_shutdown_requested: bool = false,
+    /// A committed interim response survives retries of the current request.
+    /// Cleared when that request is decoded or consumed by a batch reader.
+    request_continue: message_continue.State = .{},
 
     fn transport(self: *Connection) RuntimeTransport {
         if (self.tls_server_conn) |connection| {
@@ -5694,6 +5698,7 @@ pub const Connection = struct {
             &self.inbuf,
             self.request_head_deadline,
             &stage,
+            &self.request_continue,
         ) catch |read_err| {
             if (failure_stage) |out| out.* = stage;
             if (read_err == error.Timeout or stage == .continue_write) {
@@ -5724,6 +5729,8 @@ pub const Connection = struct {
     /// owner to resume the partially buffered head with a later deadline.
     /// Allocation failures also retain input and decoded message bytes for
     /// retry without allowing a later pipelined request to overtake them.
+    /// An automatic 100 Continue already committed for this request is not
+    /// sent again when its body or metadata allocation is retried.
     pub fn readRequestWithDeadline(
         self: *Connection,
         options: http1.ParseOptions,
@@ -5740,6 +5747,7 @@ pub const Connection = struct {
             &self.inbuf,
             deadline,
             &stage,
+            &self.request_continue,
         ) catch |err| {
             if (stage == .continue_write) {
                 self.writer_state.phase = .unusable;
@@ -6011,6 +6019,7 @@ pub const Connection = struct {
             self.writer_state.failRead();
             return err;
         };
+        self.request_continue.reset();
         self.writer_state.finishRead();
         return streamingRequestFromReader(result);
     }
@@ -6238,6 +6247,7 @@ pub const Connection = struct {
     ) Error!void {
         if (consumed > self.inbuf.items.len) return error.InvalidResponse;
         discardPrefix(&self.inbuf, consumed);
+        if (consumed != 0) self.request_continue.reset();
     }
 
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
@@ -7698,7 +7708,7 @@ fn connectionMaybeWriteContinue(
     head: http1.RequestHead,
 ) Error!void {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
-    if (message_head.shouldContinue(head)) try connection.transport().writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+    try message_continue.send(Error, connection.transport(), RuntimeTransport.writeAll, &connection.request_continue, message_head.shouldContinue(head));
 }
 
 fn connectionWriteSlices(
@@ -7847,6 +7857,7 @@ pub fn readRequestFromStreamBufferedWithDeadline(
         deadline,
         deadline,
         null,
+        null,
     );
     errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
@@ -7883,6 +7894,7 @@ fn readRequestFromTransportBufferedWithStage(
     inbuf: *std.ArrayList(u8),
     head_deadline: ?std.Io.Clock.Timestamp,
     failure_stage: ?*RequestReadStage,
+    continue_state: *message_continue.State,
 ) Error!OwnedRequest {
     if (failure_stage) |stage| stage.* = .head;
     const bytes = readMessageBytesBufferedWithContext(
@@ -7898,6 +7910,7 @@ fn readRequestFromTransportBufferedWithStage(
         head_deadline,
         null,
         failure_stage,
+        continue_state,
     ) catch |err| {
         if (failure_stage) |stage| {
             if (err == error.HeadersTooLarge) {
@@ -7912,9 +7925,15 @@ fn readRequestFromTransportBufferedWithStage(
         return err;
     };
     if (failure_stage) |stage| stage.* = .body;
-    errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
+    errdefer |err| if (err == error.OutOfMemory) {
+        buffered_input.restore(allocator, inbuf, bytes);
+    } else {
+        continue_state.reset();
+        allocator.free(bytes);
+    };
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
+    continue_state.reset();
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -8237,6 +8256,7 @@ pub fn readResponseFromStreamBufferedObserved(
             response_head_deadline,
             null,
             null,
+            null,
         );
         errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
@@ -8413,6 +8433,7 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             true,
             options.allow_http_0_9_responses,
             response_head_deadline,
+            null,
             null,
             null,
         );
@@ -9000,6 +9021,7 @@ fn readRequestMessageBytesBuffered(
             null,
         null,
         null,
+        null,
     );
 }
 
@@ -9139,6 +9161,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         head_deadline,
         body_deadline,
         null,
+        null,
     );
     errdefer |err| if (err == error.OutOfMemory) buffered_input.restore(allocator, inbuf, bytes) else allocator.free(bytes);
     var response = try parseResponseForRuntime(
@@ -9164,6 +9187,7 @@ fn readMessageBytesBufferedWithContext(
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
     request_stage: ?*RequestReadStage,
+    continue_state: ?*message_continue.State,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = null;
@@ -9210,7 +9234,7 @@ fn readMessageBytesBufferedWithContext(
     try plan.validateBodyLimit(limits.max_body_bytes);
     if (auto_continue and plan.send_continue) {
         if (request_stage) |stage| stage.* = .continue_write;
-        try transport.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+        try message_continue.send(Error, transport, RuntimeTransport.writeAll, continue_state, true);
         if (request_stage) |stage| stage.* = .body;
     }
     if (close_delimited_when_unknown and plan.body_framing == .close_delimited) {
@@ -9269,6 +9293,7 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         false,
         true,
         false,
+        null,
         null,
         null,
         null,
@@ -13996,6 +14021,7 @@ test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
         null,
         null,
         null,
+        null,
     );
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings(first, bytes);
@@ -14268,6 +14294,8 @@ test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
 }
 
 test {
+    _ = @import("runtime/message/continue_retry_tests.zig");
+    _ = @import("runtime/message/continue_body_retry_tests.zig");
     _ = @import("runtime/message/allocation_retry_tests.zig");
     _ = @import("runtime/message/tls_allocation_retry_tests.zig");
     _ = @import("runtime/message/eof_allocation_tests.zig");
