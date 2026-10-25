@@ -26,6 +26,10 @@ const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 
+test {
+    _ = @import("reconnect/keep_alive_write_tests.zig");
+}
+
 pub const CommandQueue = command_queue.CommandQueue;
 pub const CommandQueueError = command_queue.Error;
 pub const CommandEnqueueTimeoutError = command_queue.EnqueueTimeoutError;
@@ -2943,6 +2947,7 @@ pub const Client = struct {
             }
 
             const now = std.Io.Clock.awake.now(self.io);
+            if (now.nanoseconds >= call_deadline.nanoseconds) return null;
             if (self.ping_response_deadline) |deadline| {
                 if (now.nanoseconds >= deadline.nanoseconds) {
                     self.disconnectTransport();
@@ -2952,7 +2957,7 @@ pub const Client = struct {
             } else if (self.keepAliveDeadline()) |deadline| {
                 if (now.nanoseconds >= deadline.nanoseconds) {
                     const active = self.connection().?;
-                    active.writePingReq() catch |err| {
+                    active.writePingReqWithDeadline(call_deadline.withClock(.awake)) catch |err| {
                         const retryable = retryableConnectError(err);
                         self.retireConnectionAfterOperationError(err);
                         if (!retryable) return err;
@@ -2970,10 +2975,6 @@ pub const Client = struct {
                     return .{ .pingreq = {} };
                 }
             }
-            if (now.nanoseconds >= call_deadline.nanoseconds) {
-                return null;
-            }
-
             const read_deadline = self.nextPollDeadline(
                 call_deadline,
                 now,

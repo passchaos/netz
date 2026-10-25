@@ -3727,6 +3727,16 @@ interleaved PUBLISH packets.
 
 ## Remaining work before broad superiority
 
+Automatic Keep Alive output from the reconnecting client's bounded poll now
+uses that poll's original deadline. Expired polls return before sending a probe
+or retiring a still-live transport, and blocked PINGREQ writes retire only the
+current Network Connection while preserving owned QoS messages for reconnect.
+PING response timing starts after the full request write succeeds. Public split
+PINGREQ/PINGRESP writers expose timeout and deadline forms through
+`runtime/ping.zig`, retaining packet-direction checks and shared transport
+retirement on ambiguous output. Real TCP blocked-write tests cover MQTT 3.1,
+3.1.1 and 5, both budget forms, server/client output, and pending QoS ownership.
+
 The shared `fuzz-parsers` target dispatches every bounded input through the
 MQTT Fixed Header and MQTT 3.1/3.1.1/5 CONNECT, CONNACK, PUBLISH, ACK,
 SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, DISCONNECT and AUTH parsers. Default

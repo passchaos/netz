@@ -5286,12 +5286,10 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        const bytes = mqtt.writePingInto(&encoded, false);
         if (deadline) |absolute|
-            try self.writeGeneratedPacketWithDeadline(bytes, .pingreq, absolute)
+            try self.writePingReqWithDeadline(absolute)
         else
-            try self.writeGeneratedPacket(bytes, .pingreq);
+            try self.writePingReq();
         var packet = try AckReader.read(self, .pingresp, deadline);
         defer packet.deinit(self.allocator);
         try mqtt.validatePing(packet.bytes, true);
@@ -5303,26 +5301,24 @@ pub const Connection = struct {
         try mqtt.validatePing(packet.bytes, false);
     }
 
-    pub fn writePingResp(self: *Connection) Error!void {
-        try self.validateOutgoingPacketType(.pingresp);
-        var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writeGeneratedPacket(
-            mqtt.writePingInto(&encoded, true),
-            .pingresp,
-        );
-    }
+    const PingSender = @import("runtime/ping.zig").Sender(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const validate = Connection.validateOutgoingPacketType;
+        pub const write = Connection.writeGeneratedPacket;
+        pub const writeDeadline = Connection.writeGeneratedPacketWithDeadline;
+    });
+
+    pub const writePingResp = PingSender.writePingResp;
+    pub const writePingRespWithTimeout = PingSender.writePingRespWithTimeout;
+    pub const writePingRespWithDeadline = PingSender.writePingRespWithDeadline;
 
     /// Emit a PINGREQ without consuming the socket. Event-loop owners use
     /// this split operation so the same receive path can continue delivering
     /// application packets while it waits for PINGRESP.
-    pub fn writePingReq(self: *Connection) Error!void {
-        try self.validateOutgoingPacketType(.pingreq);
-        var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writeGeneratedPacket(
-            mqtt.writePingInto(&encoded, false),
-            .pingreq,
-        );
-    }
+    pub const writePingReq = PingSender.writePingReq;
+    pub const writePingReqWithTimeout = PingSender.writePingReqWithTimeout;
+    pub const writePingReqWithDeadline = PingSender.writePingReqWithDeadline;
 
     /// Drop connection-local acknowledgement bookkeeping while preserving all
     /// negotiated limits. Durable clients keep QoS state in their Session
@@ -11592,6 +11588,7 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 test {
     _ = @import("runtime/receive/event_allocation_tests.zig");
     _ = @import("reconnect/replay_deadline_tests.zig");
+    _ = @import("runtime/ping_write_tests.zig");
     _ = @import("reconnect/flush_deadline_tests.zig");
     _ = @import("reconnect/identifier_tests.zig");
     _ = @import("reconnect/identifier_resume_tests.zig");
