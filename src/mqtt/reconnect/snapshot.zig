@@ -11,10 +11,12 @@ const persistence = @import("../persistence/codec.zig");
 const durability = @import("../../internal/durability.zig");
 const session = @import("../session/mod.zig");
 pub const subscriptions = @import("snapshot_subscriptions.zig");
+const retention = @import("retention.zig");
 
 const magic = "netz-mqtt-reconnect\x00";
 const version: u32 = 1;
 const subscription_version: u32 = 2;
+const retention_version: u32 = 3;
 pub const max_snapshot_bytes: usize = 2 * persistence.max_blob_bytes;
 
 pub const Error = session.Error || persistence.Error || subscriptions.Error || error{
@@ -34,6 +36,7 @@ pub const Restored = struct {
     handle: session.Handle,
     subscription_state: subscriptions.State = .{},
     has_subscription_state: bool = false,
+    retention_state: ?retention.State = null,
 
     pub fn deinit(self: *Restored) void {
         self.subscription_state.deinit(self.allocator);
@@ -53,23 +56,29 @@ pub fn encode(
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!void {
-    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, null);
+    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, null, null);
 }
 
 /// Write version two, including deep-owned desired subscriptions and recovery
 /// progress. On failure, retain the caller's existing output prefix.
 pub fn encodeWithSubscriptions(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: subscriptions.View) Error!void {
-    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, state);
+    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, state, null);
 }
 
-fn encodeState(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: ?subscriptions.View) Error!void {
+/// Version three retains the effective Session lifetime alongside QoS and
+/// desired subscriptions. Existing coordinator formats remain unchanged.
+pub fn encodeWithRetention(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: subscriptions.View, lifetime: retention.View) Error!void {
+    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, state, lifetime);
+}
+
+fn encodeState(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: ?subscriptions.View, lifetime: ?retention.View) Error!void {
     if (!std.mem.eql(u8, try store.clientId(handle), client_id)) {
         return error.SnapshotClientMismatch;
     }
     const start = out.items.len;
     errdefer out.shrinkRetainingCapacity(start);
     try out.appendSlice(allocator, magic);
-    try persistence.appendInt(out, allocator, u32, if (state != null) subscription_version else version);
+    try persistence.appendInt(out, allocator, u32, if (lifetime != null) retention_version else if (state != null) subscription_version else version);
     try persistence.appendInt(
         out,
         allocator,
@@ -86,6 +95,7 @@ fn encodeState(store: *session.Store, handle: session.Handle, protocol: mqtt.Pro
     try store.writeSnapshot(out, allocator, monotonic_now);
     try store.writeIncomingQoS2Snapshot(handle, out, allocator);
     if (state) |value| try subscriptions.encode(out, allocator, protocol, value);
+    if (lifetime) |value| try retention.encode(out, allocator, protocol, value);
     try persistence.appendInt(
         out,
         allocator,
@@ -107,7 +117,7 @@ pub fn decode(
     return decodeWithSubscriptionLimit(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, store_options.max_subscriptions_per_session);
 }
 
-/// Read either version. Reconnect subscription limits are independent of the
+/// Read every supported version. Reconnect subscription limits are independent of the
 /// QoS Store's subscription capacity because desired filters live in Client.
 pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: []const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
     return decodeState(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, maximum_subscriptions);
@@ -141,7 +151,7 @@ fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: s
         return error.CorruptSnapshot;
     }
     const found_version = try cursor.readInt(u32);
-    if (found_version != version and found_version != subscription_version) {
+    if (found_version != version and found_version != subscription_version and found_version != retention_version) {
         return error.UnsupportedSnapshotVersion;
     }
     const saved_realtime_ns = try cursor.readInt(i64);
@@ -176,16 +186,28 @@ fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: s
     {
         return error.SnapshotSessionCountMismatch;
     }
-    const handle = store.find(client_id, monotonic_now) orelse
+    var handle = store.find(client_id, monotonic_now) orelse
         return error.SnapshotSessionCountMismatch;
     try store.restoreIncomingQoS2Snapshot(handle, &cursor);
-    var subscription_state = if (found_version == subscription_version)
+    var subscription_state = if (found_version >= subscription_version)
         try subscriptions.decode(&cursor, allocator, protocol, maximum_subscriptions)
     else
         subscriptions.State{};
     errdefer subscription_state.deinit(allocator);
+    const lifetime = if (found_version == retention_version)
+        try retention.decode(&cursor, protocol, persistence.elapsedDowntimeNs(saved_realtime_ns, clampI96ToI64(realtime_now.nanoseconds)), monotonic_now)
+    else
+        null;
     try cursor.finish();
-    return .{ .allocator = allocator, .store = store, .handle = handle, .subscription_state = subscription_state, .has_subscription_state = found_version == subscription_version };
+    if (lifetime) |value| if (value.expired(monotonic_now)) {
+        // Validate the entire image before dropping both QoS directions. The
+        // desired filters outlive Session expiry and need fresh replay.
+        store.discardHandle(handle) catch unreachable;
+        handle = (try store.open(client_id, false, std.math.maxInt(u32), monotonic_now)).handle;
+        try store.disconnect(handle, null, monotonic_now);
+        subscription_state.replay_index = 0;
+    };
+    return .{ .allocator = allocator, .store = store, .handle = handle, .subscription_state = subscription_state, .has_subscription_state = found_version >= subscription_version, .retention_state = lifetime };
 }
 
 pub fn saveAtomic(

@@ -735,7 +735,7 @@ test "MQTT reconnect Session snapshot stages QoS2 before first wire write" {
     defer restored.deinit();
     try restored.restoreSessionSnapshotAt(
         encoded.items,
-        std.Io.Timestamp.fromNanoseconds(2 * std.time.ns_per_s),
+        std.Io.Clock.awake.now(io),
         std.Io.Timestamp.fromNanoseconds(101 * std.time.ns_per_s),
     );
     try std.testing.expectEqual(
@@ -1214,7 +1214,7 @@ test "MQTT reconnect Session snapshot resumes deferred inbound QoS2" {
     defer restored.deinit();
     try restored.restoreSessionSnapshotAt(
         encoded.items,
-        std.Io.Timestamp.fromNanoseconds(2 * std.time.ns_per_s),
+        std.Io.Clock.awake.now(io),
         std.Io.Timestamp.fromNanoseconds(101 * std.time.ns_per_s),
     );
     try std.testing.expectEqual(

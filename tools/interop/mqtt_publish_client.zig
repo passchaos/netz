@@ -60,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try exerciseDurableSubscriptions(init.gpa, backend.io(), port);
     try @import("mqtt_publish_client/assigned_identity.zig").exercise(init.gpa, backend.io(), port);
+    try @import("mqtt_publish_client/retention.zig").exercise(init.gpa, backend.io(), port);
     std.debug.print("netz synchronous publish interop passed: protocols=mqtt31,mqtt311,mqtt5 qos=1,2 reverse-completion=true self-delivery=true wire-order=true split-subscriptions=true reverse-control-completion=true budgets=ordinary,timeout,deadline client_io=zio-std-io server_io=mosquitto\n", .{});
 }
 

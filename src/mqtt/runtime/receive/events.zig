@@ -55,7 +55,7 @@ pub fn Reader(comptime Context: type) type {
                 return err;
             };
             _ = connection.retained_disconnect.take();
-            Context.finishDisconnect(connection);
+            Context.finishDisconnect(connection, value);
             return .{ .packet = packet, .disconnect = value };
         }
 
@@ -68,7 +68,7 @@ pub fn Reader(comptime Context: type) type {
                 return err;
             };
             const packet = connection.pending_packets.?.takeMatch(ready.index);
-            Context.finishDisconnect(connection);
+            Context.finishDisconnect(connection, value);
             return .{ .packet = packet, .disconnect = value };
         }
 

@@ -13,6 +13,7 @@ pub const Prepared = struct {
     byte_len: usize = 0,
     max_incoming_inflight: u16,
     keep_alive_seconds: u16,
+    session_expiry_interval: u32,
     incoming_topic_alias_maximum: u16,
     local_maximum_qos: mqtt.QoS,
     local_retain_available: bool,
@@ -29,6 +30,7 @@ pub const Prepared = struct {
         std.debug.assert(self.owner == connection);
         connection.max_incoming_inflight = self.max_incoming_inflight;
         connection.keep_alive_seconds = self.keep_alive_seconds;
+        connection.session_expiry_interval = self.session_expiry_interval;
         connection.incoming_topic_alias_maximum = self.incoming_topic_alias_maximum;
         connection.capabilities.local_maximum_qos = self.local_maximum_qos;
         connection.capabilities.local_retain_available = self.local_retain_available;
@@ -65,6 +67,7 @@ fn prepareMode(self: *runtime.Connection, options: runtime.ConnAckOptions, reuse
         .owner = self,
         .max_incoming_inflight = self.max_incoming_inflight,
         .keep_alive_seconds = self.keep_alive_seconds,
+        .session_expiry_interval = self.session_expiry_interval,
         .incoming_topic_alias_maximum = self.incoming_topic_alias_maximum,
         .local_maximum_qos = self.capabilities.local_maximum_qos,
         .local_retain_available = self.capabilities.local_retain_available,
@@ -78,6 +81,9 @@ fn prepareMode(self: *runtime.Connection, options: runtime.ConnAckOptions, reuse
         prepared.deinit();
     }
     const accepted = options.reason_code == 0;
+    if (accepted and self.protocol == .v5) if (mqtt.sessionExpiryInterval(options.properties)) |interval| {
+        prepared.session_expiry_interval = interval;
+    };
     const accepted_v5 = accepted and self.protocol == .v5;
     const add_receive_maximum = accepted_v5 and
         mqtt.receiveMaximum(options.properties) == null and
@@ -238,4 +244,22 @@ fn prepareMode(self: *runtime.Connection, options: runtime.ConnAckOptions, reuse
             ) orelse options.shared_subscription_available;
     }
     return prepared;
+}
+
+test "MQTT prepared CONNACK expiry applies only after the wire transaction commits" {
+    var connection = runtime.Connection{ .allocator = std.testing.allocator, .transport = undefined, .session_expiry_interval = 60 };
+    const properties = [_]mqtt.Property{.{ .four_byte = .{ .id = .session_expiry_interval, .value = 3 } }};
+    {
+        var abandoned = try prepare(&connection, .{ .properties = &properties });
+        defer abandoned.deinit();
+        try std.testing.expectEqual(@as(u32, 60), connection.sessionExpiryInterval());
+    }
+    try std.testing.expectEqual(@as(u32, 60), connection.sessionExpiryInterval());
+    var accepted = try prepare(&connection, .{ .properties = &properties });
+    defer accepted.deinit();
+    accepted.apply(&connection);
+    try std.testing.expectEqual(@as(u32, 3), connection.sessionExpiryInterval());
+    var refused = try prepare(&connection, .{ .reason_code = 0x87, .properties = &properties });
+    defer refused.deinit();
+    try std.testing.expectEqual(@as(u32, 3), connection.sessionExpiryInterval());
 }

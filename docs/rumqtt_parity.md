@@ -3836,6 +3836,30 @@ the assigned identity on every replacement CONNECT before QoS or subscription
 recovery. The Mosquitto publish gate independently checks server assignment,
 snapshot reconstruction, QoS 1/2 delivery and persisted No Local subscriptions.
 
+MQTT reconnect Session lifetime now follows the effective CONNACK Session
+Expiry and successful client DISCONNECT overrides. `sessionExpiryInterval()`
+exposes that value on the reconnect owner and packet Connection, while copied
+CONNECT properties retain the requested interval for future attempts. Offline
+expiry begins once when the connection is retired; repeated retirement does
+not renew it. Expiry is checked before each connection attempt, so waiting for
+the CONNACK of a successfully resumed Session does not expire it again.
+An elapsed lifetime prevents old Packet Identifiers and both
+QoS 2 directions from replaying even if a later peer reports Session Present.
+Desired subscriptions remain available for fresh recovery.
+Version-three reconnect images additionally persist the effective interval
+and remaining lifetime, subtract wall-clock downtime on restore, and keep
+the remaining duration across repeated save/restore. Online images
+conservatively start the expiry budget at their saved time. Expired images restore subscriptions
+with an empty QoS Store; zero-interval images omit obsolete QoS state, and the
+0xffffffff lifetime remains unlimited. Version-one/two images retain their
+prior lifetime behavior. Snapshot restore remains transactional for malformed
+metadata, configured subscription conflicts and allocation failures.
+Server-selected persistence can be restored with the same Clean Start=false CONNECT configuration,
+while a transient configuration without negotiated persistence still cannot
+write a Session snapshot. The Mosquitto publish gate independently expires a
+one-second DISCONNECT override, reconstructs the client, and verifies fresh
+subscription replay and delivery without the old staged QoS 2 publication.
+
 Reconnect clients can also encode an identity-bound Session snapshot while
 online under their single-owner API and transactionally restore it only while
 no Network Connection is active. The versioned CRC envelope binds protocol and

@@ -18,6 +18,7 @@ const owned_subscription = @import("reconnect/subscription.zig");
 const subscription_replay = @import("reconnect/subscription_replay.zig");
 const session_snapshot = @import("reconnect/snapshot.zig");
 const session_identity = @import("reconnect/session_identity.zig");
+const session_retention = @import("reconnect/retention.zig");
 const reconnect_target = @import("reconnect/target.zig");
 const backoff = @import("reconnect/backoff.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -1207,6 +1208,7 @@ pub const Client = struct {
     // A lost broker Session stays lost if preparing its replacement fails.
     // Retain the old Store for inspection, but never replay or snapshot it.
     outgoing_session_lost: bool = false,
+    retention: session_retention.State = .{ .interval = std.math.maxInt(u32) },
     client_options: ClientOptions,
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
     // A fresh broker Session needs all desired filters restored. Preserve the
@@ -1427,6 +1429,7 @@ pub const Client = struct {
             .client_options = client_options,
             .outgoing = outgoing.store,
             .outgoing_handle = outgoing.handle,
+            .retention = session_retention.State.configured(options.protocol, options.clean_start, options.properties),
         };
     }
 
@@ -1455,6 +1458,12 @@ pub const Client = struct {
     /// slice is borrowed until identity assignment, restore, or deinit.
     pub fn clientId(self: *const Client) []const u8 {
         return self.options.value.client_id;
+    }
+
+    /// Effective Session lifetime from the latest successful CONNECT/CONNACK
+    /// or DISCONNECT. Requested CONNECT options remain unchanged for retries.
+    pub fn sessionExpiryInterval(self: *const Client) u32 {
+        return self.retention.interval;
     }
 
     /// Borrow the most recent failed CONNACK. The view remains valid until
@@ -1534,6 +1543,7 @@ pub const Client = struct {
         else
             .strict;
         self.options.value.properties = &.{};
+        self.retention = session_retention.State.configured(fallback, self.options.value.clean_start, &.{});
         self.clearLastConnectRefusal();
         return true;
     }
@@ -1594,6 +1604,7 @@ pub const Client = struct {
             try self.waitForScheduledAttempt(deadline);
 
             const tls_tickets = self.usableTlsSessionTickets();
+            const expired_before_attempt = self.retention.expired(std.Io.Clock.awake.now(self.io));
             var attempt = self.connectAttemptBefore(
                 deadline,
                 tls_tickets,
@@ -1635,7 +1646,7 @@ pub const Client = struct {
             // Record known Session loss before ticket, identity or Store
             // allocation can fail. A later preserved Session cannot revive
             // the Packet Identifiers belonging to the lost one.
-            if (!session_present and !identity_assigned) {
+            if ((!session_present or expired_before_attempt) and !identity_assigned) {
                 self.subscription_replay_index = 0;
                 self.outgoing_session_lost = true;
             }
@@ -1648,6 +1659,10 @@ pub const Client = struct {
                     return err;
                 };
             }
+            self.retention.connected(result.connection.sessionExpiryInterval());
+            errdefer if (self.connection_state == null and self.retention.expires_at == null) {
+                self.retention.disconnected(std.Io.Clock.awake.now(self.io));
+            };
             self.rememberTls12SessionTicketFromConnection(&result.connection);
             self.rememberTls13SessionTicketFromConnection(
                 &result.connection,
@@ -1859,6 +1874,8 @@ pub const Client = struct {
     /// successful connection.
     pub fn disconnectTransport(self: *Client) void {
         if (self.connection_state) |*active| {
+            self.retention.interval = active.sessionExpiryInterval();
+            self.retention.disconnected(std.Io.Clock.awake.now(self.io));
             self.rememberTls13SessionTicketFromConnection(
                 active,
                 false,
@@ -1914,6 +1931,7 @@ pub const Client = struct {
             return err;
         };
         self.noteControlSent();
+        if (mqtt.sessionExpiryInterval(properties)) |interval| self.retention.interval = interval;
         self.disconnectTransport();
     }
 
@@ -1975,14 +1993,20 @@ pub const Client = struct {
         monotonic_now: std.Io.Timestamp,
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
-        if (!configuredPersistentSession(self.options.value)) {
+        if (self.options.value.clean_start or
+            (!configuredPersistentSession(self.options.value) and self.retention.interval == 0))
+        {
             return error.SessionPersistenceDisabled;
         }
         if (self.options.value.client_id.len == 0) return error.InvalidClientId;
         if (self.outgoing_session_lost) return error.SessionLost;
-        return session_snapshot.encodeWithSubscriptions(
-            &self.outgoing,
-            self.outgoing_handle,
+        var fresh: ?session_identity.FreshSession = null;
+        defer if (fresh) |*value| value.deinit();
+        const lifetime = self.retention.view(monotonic_now);
+        if (lifetime.remaining_ns == 0) fresh = try session_identity.FreshSession.init(self.allocator, self.clientId(), monotonic_now);
+        return session_snapshot.encodeWithRetention(
+            if (fresh) |*value| &value.store else &self.outgoing,
+            if (fresh) |value| value.handle else self.outgoing_handle,
             self.options.value.protocol,
             self.options.value.client_id,
             out,
@@ -1990,6 +2014,7 @@ pub const Client = struct {
             monotonic_now,
             realtime_now,
             .{ .values = self.subscriptions.items, .replay_index = self.subscription_replay_index },
+            lifetime,
         );
     }
 
@@ -2036,6 +2061,8 @@ pub const Client = struct {
     /// Saved subscriptions merge with compatible caller-seeded filters within
     /// the configured limit; conflicting options or properties reject restore.
     /// Version-one snapshots preserve the caller's desired subscriptions.
+    /// Version three deducts offline Session expiry before restoring either
+    /// QoS direction; desired subscriptions remain available after expiry.
     /// An unassigned MQTT 5 client also adopts the validated saved identity;
     /// a client with an explicit identity requires an exact match.
     /// The next successful CONNACK must report Session Present before any
@@ -2080,6 +2107,7 @@ pub const Client = struct {
                 self.client_options.max_subscriptions,
             );
         defer restored.deinit();
+        if (!configuredPersistentSession(self.options.value) and restored.retention_state == null) return error.SessionPersistenceDisabled;
         if (restored.has_subscription_state) {
             try restored.subscription_state.merge(self.allocator, self.subscriptions.items, self.options.value.protocol, self.client_options.max_subscriptions);
         }
@@ -2091,6 +2119,7 @@ pub const Client = struct {
         self.outgoing_handle = restored.handle;
         self.outgoing_open = false;
         self.outgoing_session_lost = false;
+        if (restored.retention_state) |value| self.retention = value;
         if (assigned_id) |value| session_identity.install(self, value);
         if (restored.has_subscription_state) {
             std.mem.swap(std.ArrayList(OwnedSubscription), &self.subscriptions, &restored.subscription_state.values);
@@ -2102,7 +2131,7 @@ pub const Client = struct {
         self: *Client,
     ) SessionSnapshotError!void {
         if (self.connection_state != null) return error.SnapshotBusy;
-        if (!configuredPersistentSession(self.options.value)) {
+        if (self.options.value.clean_start) {
             return error.SessionPersistenceDisabled;
         }
         const current = try self.outgoing.stats(self.outgoing_handle);
@@ -3927,6 +3956,11 @@ fn retryableConnectError(err: anyerror) bool {
 }
 
 test {
+    _ = @import("reconnect/retention_tests.zig");
+    _ = @import("reconnect/retention_codec_tests.zig");
+    _ = @import("reconnect/retention_snapshot_tests.zig");
+    _ = @import("reconnect/retention_lifecycle_tests.zig");
+    _ = @import("reconnect/retention_attempt_tests.zig");
     _ = @import("reconnect/assigned_identity_tests.zig");
     _ = @import("reconnect/assigned_identity_snapshot_tests.zig");
     _ = @import("reconnect/session_identity_tests.zig");

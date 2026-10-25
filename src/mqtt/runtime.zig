@@ -2961,6 +2961,9 @@ fn applyConnAckNegotiation(
     connack: mqtt.ConnAck,
     options: ConnectOptions,
 ) void {
+    connection.session_expiry_interval = if (connection.protocol == .v5)
+        mqtt.sessionExpiryInterval(connack.properties) orelse mqtt.sessionExpiryInterval(options.properties) orelse 0
+    else if (options.clean_start) 0 else std.math.maxInt(u32);
     if (mqtt.receiveMaximum(connack.properties)) |receive_maximum| {
         connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(
             connection.max_outgoing_inflight,
@@ -3118,6 +3121,7 @@ pub const Connection = struct {
     strict_utf8: bool = false,
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
+    session_expiry_interval: u32 = 0,
     incoming_connect_level_value: u8 = undefined,
     limits: ConnectionLimits = .{},
     next_packet_id: u16 = 1,
@@ -3643,6 +3647,13 @@ pub const Connection = struct {
     /// Client-side Maximum QoS advertised by the connected broker.
     pub fn peerMaximumQoS(self: *const Connection) mqtt.QoS {
         return self.capabilities.peer_maximum_qos;
+    }
+
+    /// Effective lifetime after the Network Connection ends. A successful
+    /// MQTT 5 CONNACK can replace CONNECT's requested interval; DISCONNECT
+    /// validation still uses the original CONNECT value.
+    pub fn sessionExpiryInterval(self: *const Connection) u32 {
+        return self.session_expiry_interval;
     }
 
     pub fn peerRetainAvailable(self: *const Connection) bool {
@@ -4208,6 +4219,7 @@ pub const Connection = struct {
         self.connect_session_expiry = mqtt.sessionExpiryInterval(
             connect.properties,
         ) orelse 0;
+        self.session_expiry_interval = if (connect.protocol == .v5) self.connect_session_expiry else if (connect.clean_start) 0 else std.math.maxInt(u32);
         self.keep_alive_seconds = connect.keep_alive_seconds;
         return .{ .packet = packet, .connect = connect };
     }
@@ -5353,6 +5365,7 @@ pub const Connection = struct {
             properties,
         );
         try self.writeGeneratedPacket(self.write_scratch.items, .disconnect);
+        if (mqtt.sessionExpiryInterval(properties)) |interval| self.session_expiry_interval = interval;
     }
 
     fn validateOutgoingDisconnect(
@@ -5426,7 +5439,8 @@ pub const Connection = struct {
         return EventReceive.disconnect(self, ready);
     }
 
-    fn finishIncomingDisconnect(self: *Connection) void {
+    fn finishIncomingDisconnect(self: *Connection, disconnect_packet: mqtt.Disconnect) void {
+        if (mqtt.sessionExpiryInterval(disconnect_packet.properties)) |interval| self.session_expiry_interval = interval;
         termination.receivedDisconnect(self);
         // Ordinary readers have consumed the wire prefix. Only packets
         // following this terminal packet remain in the pending queue.
@@ -5875,6 +5889,7 @@ pub const Connection = struct {
     fn observeDisconnectPacket(self: *Connection, packet: OwnedPacket) Error!bool {
         if (packet.fixed.packet_type != .disconnect) return false;
         var value = try self.decodeIncomingDisconnect(packet.bytes);
+        if (mqtt.sessionExpiryInterval(value.properties)) |interval| self.session_expiry_interval = interval;
         value.deinit(self.allocator);
         termination.receivedDisconnect(self);
         return true;
@@ -6824,6 +6839,7 @@ pub const Connection = struct {
         pub const queuePacket = Connection.queuePendingPacket;
         pub fn validateDisconnect(connection: *Connection, bytes: []const u8) Error!void {
             var packet = try connection.decodeIncomingDisconnect(bytes);
+            if (mqtt.sessionExpiryInterval(packet.properties)) |interval| connection.session_expiry_interval = interval;
             packet.deinit(connection.allocator);
             termination.receivedDisconnect(connection);
         }
