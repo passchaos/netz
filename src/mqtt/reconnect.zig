@@ -1933,7 +1933,8 @@ pub const Client = struct {
     }
 
     /// Append an identity-bound snapshot of this client's durable MQTT Session
-    /// state. The client is single-owner, so an online caller can stage state,
+    /// state, desired subscriptions and partial subscription recovery progress.
+    /// The client is single-owner, so an online caller can stage state,
     /// append it to a larger durable record, and only then select network work.
     /// This in-memory form keeps atomic composition with higher-level
     /// coordinator state under caller control; `saveSessionSnapshotFile` owns
@@ -1958,7 +1959,7 @@ pub const Client = struct {
         if (!configuredPersistentSession(self.options.value)) {
             return error.SessionPersistenceDisabled;
         }
-        return session_snapshot.encode(
+        return session_snapshot.encodeWithSubscriptions(
             &self.outgoing,
             self.outgoing_handle,
             self.options.value.protocol,
@@ -1967,6 +1968,7 @@ pub const Client = struct {
             self.allocator,
             monotonic_now,
             realtime_now,
+            .{ .values = self.subscriptions.items, .replay_index = self.subscription_replay_index },
         );
     }
 
@@ -2010,6 +2012,9 @@ pub const Client = struct {
     /// Transactionally replace an empty offline reconnect Session from a
     /// snapshot written by `writeSessionSnapshot`. Protocol and Client ID are
     /// validated by the envelope before the temporary Store is swapped in.
+    /// Saved subscriptions merge with compatible caller-seeded filters within
+    /// the configured limit; conflicting options or properties reject restore.
+    /// Version-one snapshots preserve the caller's desired subscriptions.
     /// The next successful CONNACK must report Session Present before any
     /// restored Packet Identifier can be replayed; a fresh Session discards it
     /// through the existing reconnect path.
@@ -2031,7 +2036,7 @@ pub const Client = struct {
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
         try self.validateSessionSnapshotRestore();
-        var restored = try session_snapshot.decode(
+        var restored = try session_snapshot.decodeWithSubscriptionLimit(
             self.allocator,
             bytes,
             reconnectSessionOptions(),
@@ -2039,11 +2044,19 @@ pub const Client = struct {
             self.options.value.client_id,
             monotonic_now,
             realtime_now,
+            self.client_options.max_subscriptions,
         );
         defer restored.deinit();
+        if (restored.has_subscription_state) {
+            try restored.subscription_state.merge(self.allocator, self.subscriptions.items, self.options.value.protocol, self.client_options.max_subscriptions);
+        }
         self.outgoing.swap(&restored.store);
         self.outgoing_handle = restored.handle;
         self.outgoing_open = false;
+        if (restored.has_subscription_state) {
+            std.mem.swap(std.ArrayList(OwnedSubscription), &self.subscriptions, &restored.subscription_state.values);
+            self.subscription_replay_index = restored.subscription_state.replay_index;
+        }
     }
 
     fn validateSessionSnapshotRestore(
@@ -3894,4 +3907,6 @@ fn retryableConnectError(err: anyerror) bool {
 
 test {
     _ = @import("reconnect/subscription_replay_tests.zig");
+    _ = @import("reconnect/subscription_snapshot_tests.zig");
+    _ = @import("reconnect/snapshot_subscriptions_tests.zig");
 }

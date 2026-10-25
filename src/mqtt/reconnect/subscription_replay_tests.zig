@@ -8,15 +8,25 @@ const Failure = enum { refused, timeout, closed };
 test "MQTT reconnect resumes unfinished subscription replay on a preserved Session" {
     for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
         for (std.enums.values(Failure)) |failure| {
-            for ([_]bool{ false, true }) |accepted| try exercise(protocol, failure, true, accepted);
+            for ([_]bool{ false, true }) |accepted| try exercise(protocol, failure, true, accepted, false);
         }
     }
 }
 
 test "MQTT reconnect restarts unfinished subscription replay when the broker Session is lost" {
     for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| {
-        try exercise(protocol, .refused, false, false);
-        try exercise(protocol, .timeout, false, true);
+        try exercise(protocol, .refused, false, false, false);
+        try exercise(protocol, .timeout, false, true, false);
+    }
+}
+
+test "MQTT reconnect snapshot resumes partial subscription recovery after client reconstruction" {
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        try exercise(protocol, .refused, true, true, true);
+        try exercise(protocol, .timeout, true, false, true);
+    }
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |protocol| {
+        try exercise(protocol, .closed, false, true, true);
     }
 }
 
@@ -59,7 +69,7 @@ fn pingBarrier(connection: *runtime.Connection) !void {
     try connection.writePingResp();
 }
 
-fn exercise(protocol: mqtt.ProtocolVersion, failure: Failure, preserved: bool, accepted: bool) !void {
+fn exercise(protocol: mqtt.ProtocolVersion, failure: Failure, preserved: bool, accepted: bool, reconstructed: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -188,6 +198,21 @@ fn exercise(protocol: mqtt.ProtocolVersion, failure: Failure, preserved: bool, a
     // Desired filters appended while disconnected join an already pending
     // recovery suffix; confirming earlier filters must not skip the new one.
     if (failure == .timeout) try client.seedSubscription(subscription(protocol, "replay/added"), properties(protocol));
+    if (reconstructed) {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try client.writeSessionSnapshot(&encoded);
+        var replacement = try reconnect.Client.init(allocator, io, server.address(), .{
+            .protocol = protocol,
+            .client_id = "subscription-replay",
+            .clean_start = false,
+            .properties = if (protocol == .v5) &connect_properties else &.{},
+        }, .{ .initial_delay = .fromMilliseconds(1), .max_delay = .fromMilliseconds(1) }, &shutdown);
+        errdefer replacement.deinit();
+        try replacement.restoreSessionSnapshot(encoded.items);
+        client.deinit();
+        client = replacement;
+    }
     const resumed = try client.connectWithTimeout(.fromSeconds(1));
     try std.testing.expectEqual(preserved, resumed.session_present);
     try std.testing.expectEqual(@as(usize, if (failure == .timeout) 3 else 2), client.subscriptionCount());

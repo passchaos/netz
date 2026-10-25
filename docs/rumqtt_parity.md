@@ -3823,7 +3823,15 @@ no Network Connection is active. The versioned CRC envelope binds protocol and
 Client ID, deducts wall-clock downtime from
 Message Expiry, restores outgoing QoS 1/2 at the exact PUBLISH/PUBREL stage,
 and preserves deferred inbound QoS 2 `await_pubrel`/`release_pending` markers.
-Decode uses a temporary one-Session store and swaps only after full validation;
+Version two also restores deep-owned desired subscription filters, QoS/options,
+MQTT 5 SUBSCRIBE properties, and the first unconfirmed recovery filter. After
+client reconstruction, a preserved broker Session resumes only that suffix;
+a lost Session restarts all desired subscriptions. Compatible caller-seeded
+filters merge within `max_subscriptions`, while conflicting saved and configured
+options or properties reject the entire restore. Version-one QoS-only images
+remain readable and preserve the caller's seeded subscriptions.
+Decode uses a temporary one-Session store and owned subscription list and swaps
+only after full validation;
 online restore attempts, transient CONNECT configurations, non-empty
 destination state, foreign identities, trailing bytes, and corrupt checksums
 fail without changing the current Session. Standalone reconnect clients now

@@ -10,12 +10,14 @@ const mqtt = @import("../mod.zig");
 const persistence = @import("../persistence/codec.zig");
 const durability = @import("../../internal/durability.zig");
 const session = @import("../session/mod.zig");
+pub const subscriptions = @import("snapshot_subscriptions.zig");
 
 const magic = "netz-mqtt-reconnect\x00";
 const version: u32 = 1;
+const subscription_version: u32 = 2;
 pub const max_snapshot_bytes: usize = 2 * persistence.max_blob_bytes;
 
-pub const Error = session.Error || persistence.Error || error{
+pub const Error = session.Error || persistence.Error || subscriptions.Error || error{
     SnapshotClientMismatch,
     SnapshotProtocolMismatch,
     SnapshotSessionCountMismatch,
@@ -27,15 +29,20 @@ pub const FileError = Error || error{SnapshotNotFound} ||
     std.Io.Dir.ReadFileAllocError;
 
 pub const Restored = struct {
+    allocator: std.mem.Allocator,
     store: session.Store,
     handle: session.Handle,
+    subscription_state: subscriptions.State = .{},
+    has_subscription_state: bool = false,
 
     pub fn deinit(self: *Restored) void {
+        self.subscription_state.deinit(self.allocator);
         self.store.deinit();
         self.* = undefined;
     }
 };
 
+/// Write the original QoS-only version-one format for receipt coordinators.
 pub fn encode(
     store: *session.Store,
     handle: session.Handle,
@@ -46,13 +53,23 @@ pub fn encode(
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!void {
+    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, null);
+}
+
+/// Write version two, including deep-owned desired subscriptions and recovery
+/// progress. On failure, retain the caller's existing output prefix.
+pub fn encodeWithSubscriptions(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: subscriptions.View) Error!void {
+    return encodeState(store, handle, protocol, client_id, out, allocator, monotonic_now, realtime_now, state);
+}
+
+fn encodeState(store: *session.Store, handle: session.Handle, protocol: mqtt.ProtocolVersion, client_id: []const u8, out: *std.ArrayList(u8), allocator: std.mem.Allocator, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, state: ?subscriptions.View) Error!void {
     if (!std.mem.eql(u8, try store.clientId(handle), client_id)) {
         return error.SnapshotClientMismatch;
     }
     const start = out.items.len;
     errdefer out.shrinkRetainingCapacity(start);
     try out.appendSlice(allocator, magic);
-    try persistence.appendInt(out, allocator, u32, version);
+    try persistence.appendInt(out, allocator, u32, if (state != null) subscription_version else version);
     try persistence.appendInt(
         out,
         allocator,
@@ -68,12 +85,14 @@ pub fn encode(
     try persistence.appendBlob(out, allocator, client_id);
     try store.writeSnapshot(out, allocator, monotonic_now);
     try store.writeIncomingQoS2Snapshot(handle, out, allocator);
+    if (state) |value| try subscriptions.encode(out, allocator, protocol, value);
     try persistence.appendInt(
         out,
         allocator,
         u32,
         std.hash.crc.Crc32.hash(out.items[start..]),
     );
+    if (out.items.len - start > max_snapshot_bytes) return error.SnapshotLimitExceeded;
 }
 
 pub fn decode(
@@ -85,6 +104,13 @@ pub fn decode(
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!Restored {
+    return decodeWithSubscriptionLimit(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, store_options.max_subscriptions_per_session);
+}
+
+/// Read either version. Reconnect subscription limits are independent of the
+/// QoS Store's subscription capacity because desired filters live in Client.
+pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: []const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
+    if (bytes.len > max_snapshot_bytes) return error.SnapshotLimitExceeded;
     const minimum_len = magic.len + 5 * @sizeOf(u32) +
         @sizeOf(i64) + @sizeOf(u8);
     if (bytes.len < minimum_len) return error.CorruptSnapshot;
@@ -104,7 +130,8 @@ pub fn decode(
     if (!std.mem.eql(u8, found_magic, magic)) {
         return error.CorruptSnapshot;
     }
-    if (try cursor.readInt(u32) != version) {
+    const found_version = try cursor.readInt(u32);
+    if (found_version != version and found_version != subscription_version) {
         return error.UnsupportedSnapshotVersion;
     }
     const saved_realtime_ns = try cursor.readInt(i64);
@@ -139,8 +166,13 @@ pub fn decode(
     const handle = store.find(expected_client_id, monotonic_now) orelse
         return error.SnapshotSessionCountMismatch;
     try store.restoreIncomingQoS2Snapshot(handle, &cursor);
+    var subscription_state = if (found_version == subscription_version)
+        try subscriptions.decode(&cursor, allocator, protocol, maximum_subscriptions)
+    else
+        subscriptions.State{};
+    errdefer subscription_state.deinit(allocator);
     try cursor.finish();
-    return .{ .store = store, .handle = handle };
+    return .{ .allocator = allocator, .store = store, .handle = handle, .subscription_state = subscription_state, .has_subscription_state = found_version == subscription_version };
 }
 
 pub fn saveAtomic(
