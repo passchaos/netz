@@ -14270,6 +14270,8 @@ test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
 test {
     _ = @import("runtime/message/allocation_retry_tests.zig");
     _ = @import("runtime/message/tls_allocation_retry_tests.zig");
+    _ = @import("runtime/message/eof_allocation_tests.zig");
+    _ = @import("runtime/message/eof_tls_allocation_tests.zig");
     _ = runtime_write;
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");

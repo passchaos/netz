@@ -2270,6 +2270,17 @@ chunked trailer allocation and following-response order. The plain buffered
 request wrapper also now forwards both optional deadline/context arguments to
 its shared reader. Complete client exchanges and callback-streaming failures
 retain their existing connection-retirement policy.
+
+EOF-delimited aggregate bodies use the same reserve-before-read boundary.
+Below the body limit, each returned prefix is committed directly into owned
+input; an OOM leaves subsequent transport bytes unread and the saved body
+available to an explicit buffered-reader retry. At the exact limit, a single
+stack byte distinguishes EOF from overflow without allocating or retaining
+the excess byte. Zero-length and maximum word-sized limits keep the same
+behavior. Focused tests verify repeated OOM, unchanged absolute deadlines
+across local read interruptions, buffered HTTP/1 and opt-in HTTP/0.9 responses,
+and 20-KiB bodies over native TLS 1.2/1.3 and standard TLS 1.3. Authenticated
+TLS EOF requirements and high-level client/pool retirement remain unchanged.
 Netz also exposes
 `Connection.pingWithTimeout(data, timeout)` and
 `Connection.pingWithDeadline(data, deadline)` for a bounded HTTP/2
