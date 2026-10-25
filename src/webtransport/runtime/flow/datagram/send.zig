@@ -17,9 +17,9 @@ fn Context(comptime H3Pointer: type) type {
             return self.base.progress().maintain(deadline);
         }
 
-        pub fn waitForPacing(self: @This(), deadline: std.Io.Clock.Timestamp) Error!void {
+        pub fn waitForPacing(self: @This(), deadline: ?std.Io.Clock.Timestamp) Error!void {
             const connection = &self.base.h3.established.connection;
-            _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+            if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
             const wake_ns = connection.pendingPacingDeadline() orelse return error.PacingLimited;
             const wake: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(@intCast(wake_ns)) };
             const until = deadline_policy.earlier(wake, deadline).?;
@@ -32,19 +32,21 @@ fn Context(comptime H3Pointer: type) type {
             else
                 self.base.h3.receiveDetachedResponseProgressWithDeadline(self.base.control.session_id.value, until);
             result catch |err| {
-                if (err == error.Timeout and std.Io.Clock.Timestamp.compare(until, .lt, deadline)) return;
+                // A local pacing wake is not a caller timeout. Ordinary sends
+                // also use that wake while allowing peer CLOSE to interrupt it.
+                if (err == error.Timeout and (deadline == null or std.Io.Clock.Timestamp.compare(until, .lt, deadline.?))) return;
                 return err;
             };
         }
     };
 }
 
-pub fn single(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payload: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
+pub fn single(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payload: []const u8, deadline: ?std.Io.Clock.Timestamp) Error!void {
     var base = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .one_attempt = true };
     return h3.sendConnectDatagramWithProgress(id, payload, deadline, Context(@TypeOf(h3)){ .base = &base });
 }
 
-pub fn batch(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payloads: []const []const u8, committed: *usize, deadline: std.Io.Clock.Timestamp) Error!void {
+pub fn batch(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payloads: []const []const u8, committed: *usize, deadline: ?std.Io.Clock.Timestamp) Error!void {
     var base = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .one_attempt = true };
     return h3.sendConnectDatagramsWithProgress(id, payloads, committed, deadline, Context(@TypeOf(h3)){ .base = &base });
 }

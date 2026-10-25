@@ -6406,6 +6406,7 @@ pub const HandshakeServerSession = struct {
         .validate = validateConnectDatagramSend,
         .io = connectionIo,
         .receive = receiveDetachedRequestProgressWithDeadline,
+        .receiveUnbounded = receiveDetachedRequestProgress,
     });
     established: quic.handshake.EstablishedConnection,
     /// True while an endpoint dispatcher is the sole UDP receive owner.
@@ -8156,10 +8157,10 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         payload: []const u8,
     ) Error!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        try self.validateConnectDatagramSend(stream_id, payload);
-        const encoded = try self.connect_datagrams.encode(stream_id, payload);
-        try self.established.connection.sendDatagram(encoded);
+        return self.sendConnectDatagramWithProgress(stream_id, payload, null, NoConnectProgress{}) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn sendConnectDatagrams(
@@ -8168,43 +8169,10 @@ pub const HandshakeServerSession = struct {
         payloads: []const []const u8,
         committed_count: *usize,
     ) Error!void {
-        committed_count.* = 0;
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        for (payloads) |payload| {
-            try self.validateConnectDatagramSend(stream_id, payload);
-        }
-        const encoded = try self.connect_datagrams.encodeBatch(
-            stream_id,
-            payloads,
-        );
-        try self.established.connection.validateDatagrams(encoded.datagrams);
-        while (committed_count.* < encoded.datagrams.len) {
-            try self.validateConnectDatagramSend(
-                stream_id,
-                payloads[committed_count.*],
-            );
-            var batch_committed: usize = 0;
-            self.established.connection.trySendDatagrams(
-                encoded.datagrams[committed_count.*..],
-                &batch_committed,
-            ) catch |err| {
-                committed_count.* += batch_committed;
-                switch (err) {
-                    error.CongestionLimited => {
-                        try self.receiveDetachedRequestProgress(stream_id);
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailability();
-                        continue;
-                    },
-                    else => |other| return @errorCast(other),
-                }
-            };
-            if (batch_committed == 0) return error.Unexpected;
-            committed_count.* += batch_committed;
-        }
+        return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, null, NoConnectProgress{}) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
@@ -8245,13 +8213,13 @@ pub const HandshakeServerSession = struct {
         return self.sendConnectDatagramWithProgress(stream_id, payload, deadline, NoConnectProgress{});
     }
 
-    /// Receive application-protocol progress before every bounded send retry.
-    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    /// Advance application-protocol progress before every send retry.
+    /// The progress owner shares the HTTP/3 reader and optional deadline.
     pub fn sendConnectDatagramWithProgress(
         self: *HandshakeServerSession,
         stream_id: u62,
         payload: []const u8,
-        deadline: std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
         progress: anytype,
     ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
         return ConnectDatagramSend.single(self, stream_id, payload, deadline, progress);
@@ -8291,14 +8259,14 @@ pub const HandshakeServerSession = struct {
         return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, deadline, NoConnectProgress{});
     }
 
-    /// Receive application-protocol progress before every bounded send retry.
-    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    /// Advance application-protocol progress before every send retry.
+    /// The progress owner shares the HTTP/3 reader and optional deadline.
     pub fn sendConnectDatagramsWithProgress(
         self: *HandshakeServerSession,
         stream_id: u62,
         payloads: []const []const u8,
         committed_count: *usize,
-        deadline: std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
         progress: anytype,
     ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
         return ConnectDatagramSend.batch(self, stream_id, payloads, committed_count, deadline, progress);
@@ -11808,6 +11776,7 @@ pub const HandshakeClient = struct {
         .validate = validateConnectDatagramSend,
         .io = connectionIo,
         .receive = receiveDetachedResponseProgressWithDeadline,
+        .receiveUnbounded = receiveDetachedResponseProgress,
     });
     endpoint: *quic.runtime.Endpoint,
     owns_endpoint: bool,
@@ -17388,10 +17357,10 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         payload: []const u8,
     ) Error!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        try self.validateConnectDatagramSend(stream_id, payload);
-        const encoded = try self.connect_datagrams.encode(stream_id, payload);
-        try self.established.connection.sendDatagram(encoded);
+        return self.sendConnectDatagramWithProgress(stream_id, payload, null, NoConnectProgress{}) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn sendConnectDatagrams(
@@ -17400,44 +17369,10 @@ pub const HandshakeClient = struct {
         payloads: []const []const u8,
         committed_count: *usize,
     ) Error!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
-        committed_count.* = 0;
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        for (payloads) |payload| {
-            try self.validateConnectDatagramSend(stream_id, payload);
-        }
-        const encoded = try self.connect_datagrams.encodeBatch(
-            stream_id,
-            payloads,
-        );
-        try self.established.connection.validateDatagrams(encoded.datagrams);
-        while (committed_count.* < encoded.datagrams.len) {
-            try self.validateConnectDatagramSend(
-                stream_id,
-                payloads[committed_count.*],
-            );
-            var batch_committed: usize = 0;
-            self.established.connection.trySendDatagrams(
-                encoded.datagrams[committed_count.*..],
-                &batch_committed,
-            ) catch |err| {
-                committed_count.* += batch_committed;
-                switch (err) {
-                    error.CongestionLimited => {
-                        try self.receiveDetachedResponseProgress(stream_id);
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailability();
-                        continue;
-                    },
-                    else => |other| return other,
-                }
-            };
-            if (batch_committed == 0) return error.Unexpected;
-            committed_count.* += batch_committed;
-        }
+        return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, null, NoConnectProgress{}) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
@@ -17478,13 +17413,13 @@ pub const HandshakeClient = struct {
         return self.sendConnectDatagramWithProgress(stream_id, payload, deadline, NoConnectProgress{});
     }
 
-    /// Receive application-protocol progress before every bounded send retry.
-    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    /// Advance application-protocol progress before every send retry.
+    /// The progress owner shares the HTTP/3 reader and optional deadline.
     pub fn sendConnectDatagramWithProgress(
         self: *HandshakeClient,
         stream_id: u62,
         payload: []const u8,
-        deadline: std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
         progress: anytype,
     ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
         return ConnectDatagramSend.single(self, stream_id, payload, deadline, progress);
@@ -17522,14 +17457,14 @@ pub const HandshakeClient = struct {
         return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, deadline, NoConnectProgress{});
     }
 
-    /// Receive application-protocol progress before every bounded send retry.
-    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    /// Advance application-protocol progress before every send retry.
+    /// The progress owner shares the HTTP/3 reader and optional deadline.
     pub fn sendConnectDatagramsWithProgress(
         self: *HandshakeClient,
         stream_id: u62,
         payloads: []const []const u8,
         committed_count: *usize,
-        deadline: std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
         progress: anytype,
     ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
         return ConnectDatagramSend.batch(self, stream_id, payloads, committed_count, deadline, progress);

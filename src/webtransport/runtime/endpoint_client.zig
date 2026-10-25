@@ -176,7 +176,7 @@ pub const Session = struct {
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
         try flow_datagram.prepareSend(&self.control, &client.h3, &self.streams);
-        try client.h3.sendConnectDatagram(self.session_id.value, payload);
+        try flow_datagram.sendDatagram(&self.control, &client.h3, &self.streams, self.session_id.value, payload);
     }
 
     pub fn sendDatagramWithTimeout(

@@ -26,6 +26,20 @@ pub fn prepareSend(control: *control_mod.Control, h3: anytype, registry: *webtra
 pub const sendWithDeadline = send.single;
 pub const sendManyWithDeadline = send.batch;
 
+pub fn sendDatagram(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payload: []const u8) Error!void {
+    return send.single(control, h3, registry, id, payload, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
+}
+
+pub fn sendDatagrams(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, id: u62, payloads: []const []const u8, committed: *usize) Error!void {
+    return send.batch(control, h3, registry, id, payloads, committed, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
+}
+
 pub fn poll(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62) Error!?http3.runtime.OwnedConnectDatagram {
     var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };
     try context.inspectBuffered();

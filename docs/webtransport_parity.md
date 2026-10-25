@@ -676,7 +676,18 @@ Authenticated standalone sessions now expose symmetric
 QUIC congestion and pacing capacity while using the existing HTTP/3 packet
 visitor, so ACK progress cannot bypass control/QPACK, associated DATAGRAM, or
 detached CONNECT routing. Timeout retains no hidden application queue and does
-not increment the sent-DATAGRAM count; callers may retry explicitly. The
+not increment the sent-DATAGRAM count; callers may retry explicitly. Ordinary
+single sends still return `CongestionLimited` without reading UDP when the
+congestion window is full, while ordinary batches wait for congestion relief.
+Both ordinary and bounded sends advance buffered CONNECT control before each
+retry. Pacing waits use the existing HTTP/3 receive owner until the earlier
+pacing wake or application deadline, so a peer CLOSE interrupts a waiting send
+with `InvalidSessionState` before another DATAGRAM is submitted. The close event
+retains its exact code/reason, a batch reports its exact committed prefix, and
+sibling Session events remain available. A pacing wake alone retries an ordinary
+send without exposing an application timeout. Real protected-UDP regressions
+cover both endpoint roles, zero and nonzero batch prefixes, queued CLOSE during
+single-send congestion backpressure, and shared-client sibling delivery. The
 stateful protected client facade forwards the same API. Shared-endpoint
 sessions instead expose `trySendDatagramWithTimeout` /
 `trySendDatagramWithDeadline`: these never read the shared UDP socket and

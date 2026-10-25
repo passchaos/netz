@@ -5591,7 +5591,7 @@ pub const AcceptedHandshakeSession = struct {
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        try self.h3.sendConnectDatagram(self.session_id.value, payload);
+        try flow_datagram.sendDatagram(&self.control, &self.h3, &self.streams, self.session_id.value, payload);
     }
 
     /// Wait for QUIC congestion and pacing capacity while retaining one total
@@ -5636,7 +5636,10 @@ pub const AcceptedHandshakeSession = struct {
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        return self.h3.sendConnectDatagrams(
+        return flow_datagram.sendDatagrams(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
             payloads,
             committed_count,
@@ -9015,7 +9018,7 @@ pub const HandshakeClientSession = struct {
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagram(self.session_id.value, payload)
         else
-            self.h3.sendConnectDatagram(self.session_id.value, payload);
+            flow_datagram.sendDatagram(&self.control, &self.h3, &self.streams, self.session_id.value, payload);
         try self.refreshDispatcherTimer();
         try result;
     }
@@ -9080,7 +9083,10 @@ pub const HandshakeClientSession = struct {
                 committed_count,
             )
         else
-            self.h3.sendConnectDatagrams(
+            flow_datagram.sendDatagrams(
+                &self.control,
+                &self.h3,
+                &self.streams,
                 self.session_id.value,
                 payloads,
                 committed_count,
