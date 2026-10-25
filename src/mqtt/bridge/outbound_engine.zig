@@ -1510,17 +1510,17 @@ pub fn Engine(comptime Source: type) type {
             connected: reconnect.ConnectEvent,
         ) Error!void {
             self.target_session_present = connected.session_present;
-            if (self.target_session_epoch == 0 and self.coordinator != null and connected.session_present) {
+            if (self.target_session_epoch == 0 and self.coordinator != null and connected.session_resumed) {
                 self.target_session_epoch = 1;
             }
-            if (!connected.session_present) {
+            if (!connected.session_resumed) {
                 self.target_session_epoch +%= 1;
                 if (self.target_session_epoch == 0) self.target_session_epoch = 1;
             }
             if (self.durableTransaction()) |transaction| {
                 if (transaction.phase != .target_complete and
                     transaction.phase != .target_rejected and
-                    (!connected.session_present or
+                    (!connected.session_resumed or
                         transaction.target_session_epoch !=
                             self.target_session_epoch))
                 {
@@ -1810,7 +1810,7 @@ pub fn Engine(comptime Source: type) type {
         ) Error!void {
             self.source_session_present = connected.session_present;
             self.source_pubrec_flushed = false;
-            if (connected.session_present) {
+            if (connected.session_resumed) {
                 // A new coordinator may attach to an existing broker-local
                 // subscription. Its first observed Session still needs a
                 // nonzero epoch before staging any cross-broker transaction.

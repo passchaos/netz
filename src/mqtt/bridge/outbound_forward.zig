@@ -148,7 +148,7 @@ pub fn Operations(comptime Self: type) type {
                     switch (target_event) {
                         .connected => |connected| {
                             try self.noteTargetConnected(connected);
-                            if (!connected.session_present) {
+                            if (!connected.session_resumed) {
                                 target_result = publishTarget(
                                     self,
                                     target_topic,

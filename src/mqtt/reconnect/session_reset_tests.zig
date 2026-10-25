@@ -82,7 +82,9 @@ test "MQTT reconnect retries a failed Session reset before replaying any old QoS
     try std.testing.expectEqualStrings("outer", image.items);
     connector.fail_reset = false;
     failing.fail_index = std.math.maxInt(usize);
-    try std.testing.expect((try client.connectWithTimeout(.fromSeconds(2))).session_present);
+    const connected = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(connected.session_present and !connected.session_resumed);
+    try std.testing.expect(!client.sessionResumed());
     try std.testing.expectEqual(@as(usize, 0), (try client.outgoingStats()).inflight_count);
     try client.connection().?.pingWithTimeout(.fromSeconds(2));
     try client.disconnect(0);

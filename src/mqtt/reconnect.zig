@@ -182,7 +182,12 @@ const OwnedConnectOptions = struct {
 };
 
 pub const ConnectEvent = struct {
+    /// Session Present reported by the broker's CONNACK.
     session_present: bool,
+    /// Both endpoints retained the previous Session. False when local expiry
+    /// or an earlier failed Session reset discarded its QoS state, even if
+    /// the broker still reports Session Present.
+    session_resumed: bool = false,
     failed_attempts: usize,
 };
 
@@ -1202,6 +1207,7 @@ pub const Client = struct {
     retry_schedule: backoff.Schedule,
     shutdown: *std.Io.Event,
     connection_state: ?runtime.Connection = null,
+    session_resumed: bool = false,
     outgoing: session.Store,
     outgoing_handle: session.Handle,
     outgoing_open: bool = true,
@@ -1466,6 +1472,12 @@ pub const Client = struct {
         return self.retention.interval;
     }
 
+    /// True only while the active connection resumed the previous Session at
+    /// both endpoints. Durable stores may import peer QoS 2 markers then.
+    pub fn sessionResumed(self: *const Client) bool {
+        return self.connection_state != null and self.session_resumed;
+    }
+
     /// Borrow the most recent failed CONNACK. The view remains valid until
     /// the next connect attempt, explicit adaptation/take, or deinitialization.
     pub fn lastConnectRefusal(self: *const Client) ?mqtt.ConnAck {
@@ -1674,11 +1686,13 @@ pub const Client = struct {
             result.connack.deinit(self.allocator);
             self.connection_state = result.connection;
             self.connection_state.?.resetPacketIdentifiers();
+            self.session_resumed = session_present and !identity_assigned and !self.outgoing_session_lost;
 
             if (self.outgoing_session_lost) {
                 self.resetOutgoingState() catch |err| {
                     if (self.connection_state) |*active| active.close();
                     self.connection_state = null;
+                    self.session_resumed = false;
                     return err;
                 };
             } else if (!self.outgoing_open) {
@@ -1690,6 +1704,7 @@ pub const Client = struct {
                 ) catch |err| {
                     if (self.connection_state) |*active| active.close();
                     self.connection_state = null;
+                    self.session_resumed = false;
                     return err;
                 };
                 self.outgoing_handle = reopened.handle;
@@ -1723,6 +1738,7 @@ pub const Client = struct {
             );
             return .{
                 .session_present = session_present,
+                .session_resumed = self.session_resumed,
                 .failed_attempts = failed_attempts,
             };
         }
@@ -1891,6 +1907,7 @@ pub const Client = struct {
             active.close();
         }
         self.connection_state = null;
+        self.session_resumed = false;
         self.keep_alive_deadline = null;
         self.ping_response_deadline = null;
         if (self.outgoing_open) {
@@ -2437,9 +2454,10 @@ pub const Client = struct {
     }
 
     /// Recreate the protocol marker for an inbound QoS 2 transaction restored
-    /// by an application-owned durable store. Call this only after a CONNECT
-    /// that reported Session Present; a fresh Session has no peer transaction
-    /// to resume. Repeating the call is idempotent.
+    /// by an application-owned durable store. Call this only while
+    /// `sessionResumed()` is true; local expiry or a fresh Session returns
+    /// SessionLost even if the peer reports Session Present. Repeating the
+    /// call is idempotent.
     pub fn restoreIncomingQoS2(
         self: *Client,
         packet_id: u16,
@@ -2453,6 +2471,7 @@ pub const Client = struct {
         if (self.connection_state == null) {
             return error.ConnectionUnavailable;
         }
+        if (!self.sessionResumed()) return error.SessionLost;
         _ = try self.outgoing.recordIncomingQoS2(
             self.outgoing_handle,
             packet_id,
@@ -2736,7 +2755,7 @@ pub const Client = struct {
         const attempt = try self.publishOneAttempt(topic, payload, options);
         if (!attempt.transport_interrupted) return attempt.packet_id;
         const connected = try self.connect();
-        if (!connected.session_present) return error.SessionLost;
+        if (!connected.session_resumed) return error.SessionLost;
         return attempt.packet_id;
     }
 
@@ -3277,7 +3296,7 @@ pub const Client = struct {
                 self.retireUnusableConnection();
                 if (!retryableConnectError(err)) return err;
                 const connected = try self.reconnect();
-                if (!connected.session_present) return error.SessionLost;
+                if (!connected.session_resumed) return error.SessionLost;
                 continue;
             };
             defer event.deinit(self.allocator);
@@ -3956,6 +3975,7 @@ fn retryableConnectError(err: anyerror) bool {
 }
 
 test {
+    _ = @import("reconnect/session_resume_tests.zig");
     _ = @import("reconnect/retention_tests.zig");
     _ = @import("reconnect/retention_codec_tests.zig");
     _ = @import("reconnect/retention_snapshot_tests.zig");

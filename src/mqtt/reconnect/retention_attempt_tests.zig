@@ -66,7 +66,9 @@ test "MQTT retention does not expire an accepted reconnect while waiting for CON
     const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
     var joined = false;
     defer if (!joined) thread.join();
-    try std.testing.expect((try client.connectWithTimeout(.fromSeconds(2))).session_present);
+    const connected = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(connected.session_present and connected.session_resumed);
+    try std.testing.expect(client.sessionResumed());
     try std.testing.expectEqual(old.packet_id, try client.completeNextPublish());
     try client.disconnect(0);
     thread.join();

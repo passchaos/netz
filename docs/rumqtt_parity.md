@@ -3846,6 +3846,17 @@ the CONNACK of a successfully resumed Session does not expire it again.
 An elapsed lifetime prevents old Packet Identifiers and both
 QoS 2 directions from replaying even if a later peer reports Session Present.
 Desired subscriptions remain available for fresh recovery.
+`reconnect.ConnectEvent.session_present` preserves the broker's raw CONNACK
+bit. `session_resumed` and `Client.sessionResumed()` additionally require that
+the local Session survived expiry and any earlier failed reset. Durable inbound
+QoS 2 imports require this actual resumption and return `SessionLost` for a
+fresh or locally expired Session. First attachment to a preserved peer Session
+can still import application-owned durable markers. Publish recovery and bridge
+epochs use the same result: lost source ownership prevents target replay, lost
+target ownership rejects pending outbound QoS 2, and inbound bridges durably
+retire old transactions before accepting a new Session. Real TCP regressions
+cover peer Session Present with local expiry, failed reset, repeated imports,
+fresh bridge epochs, and commit-log restoration after inbound retirement.
 Version-three reconnect images additionally persist the effective interval
 and remaining lifetime, subtract wall-clock downtime on restore, and keep
 the remaining duration across repeated save/restore. Online images

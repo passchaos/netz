@@ -87,10 +87,12 @@ fn exercise(requested: u32, granted: u32, override: ?u32, expired: bool, reconst
     defer if (!joined) thread.join();
     var shutdown: std.Io.Event = .unset;
     const options = runtime.ConnectOptions{ .protocol = .v5, .client_id = "retention-wire", .clean_start = false, .properties = &.{expiry(requested)} };
-    var client = try reconnect.Client.init(allocator, io, server.address(), options, .{}, &shutdown);
+    const client_options = reconnect.ClientOptions{ .manual_acknowledgements = true, .inbound_qos2_release_policy = .deferred };
+    var client = try reconnect.Client.initWithOptions(allocator, io, server.address(), options, .{}, &shutdown, client_options);
     defer client.deinit();
     try client.seedSubscription(.{ .topic_filter = "desired/#" }, &.{});
-    _ = try client.connectWithTimeout(.fromSeconds(2));
+    const first = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(!first.session_present and !first.session_resumed and !client.sessionResumed());
     try std.testing.expectEqual(granted, client.sessionExpiryInterval());
     try std.testing.expectEqual(granted, client.connection().?.sessionExpiryInterval());
     if (requested == 0) {
@@ -100,6 +102,7 @@ fn exercise(requested: u32, granted: u32, override: ?u32, expired: bool, reconst
     }
     const id = try client.stagePublish("pending", "payload", .{ .qos = .at_least_once });
     if (override) |value| try client.disconnectWithProperties(0, &.{expiry(value)}) else try client.disconnect(0);
+    try std.testing.expect(!client.sessionResumed());
     const interval = override orelse granted;
     try std.testing.expectEqual(interval, client.sessionExpiryInterval());
     const initial_deadline = client.retention.expires_at;
@@ -110,14 +113,26 @@ fn exercise(requested: u32, granted: u32, override: ?u32, expired: bool, reconst
         var bytes: std.ArrayList(u8) = .empty;
         defer bytes.deinit(allocator);
         try client.writeSessionSnapshot(&bytes);
-        var replacement = try reconnect.Client.init(allocator, io, server.address(), options, .{}, &shutdown);
+        var replacement = try reconnect.Client.initWithOptions(allocator, io, server.address(), options, .{}, &shutdown, client_options);
         errdefer replacement.deinit();
         try replacement.restoreSessionSnapshot(bytes.items);
         client.deinit();
         client = replacement;
         try std.testing.expectEqual(interval, client.sessionExpiryInterval());
     }
-    _ = try client.connectWithTimeout(.fromSeconds(2));
+    const connected = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(connected.session_present);
+    try std.testing.expectEqual(!expired, connected.session_resumed);
+    try std.testing.expectEqual(connected.session_resumed, client.sessionResumed());
+    if (expired) {
+        try std.testing.expectError(error.SessionLost, client.restoreIncomingQoS2(77, .await_pubrel));
+        try std.testing.expectError(error.SessionLost, client.restoreIncomingQoS2(78, .release_pending));
+    } else {
+        try client.restoreIncomingQoS2(77, .await_pubrel);
+        try client.restoreIncomingQoS2(78, .release_pending);
+        try client.restoreIncomingQoS2(78, .release_pending);
+        try std.testing.expectEqual(@as(usize, 2), (try client.outgoingStats()).incoming_qos2_count);
+    }
     if (!expired) try std.testing.expectEqual(id, try client.completeNextPublish());
     try std.testing.expectEqual(@as(usize, 0), (try client.outgoingStats()).inflight_count);
     try std.testing.expect(client.hasSubscription("desired/#"));

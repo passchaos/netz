@@ -21,4 +21,6 @@ test {
     _ = @import("local_completion_tests.zig");
     _ = @import("local_lazy_recovery_tests.zig");
     _ = @import("local_outbound_tests.zig");
+    _ = @import("session_resume_tests.zig");
+    _ = @import("session_resume_qos1_tests.zig");
 }

@@ -221,7 +221,7 @@ pub fn noteConnected(
 ) Error!void {
     if (qos2_enabled) {
         const id = bridge_id.?;
-        if (!event.session_present) {
+        if (!event.session_resumed) {
             session_epoch.* = local.beginBridgeQoS2Session(id) catch |err| {
                 session_epoch.* = local.latestBridgeQoS2SessionEpoch(id) orelse
                     session_epoch.*;

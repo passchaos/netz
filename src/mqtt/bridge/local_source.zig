@@ -136,7 +136,7 @@ pub const Client = struct {
 
     pub fn connect(self: *Client) Error!reconnect.ConnectEvent {
         if (self.shutdown.isSet()) return error.Canceled;
-        if (self.consumer) |consumer| return .{ .session_present = consumer.session_present, .failed_attempts = 0 };
+        if (self.consumer) |consumer| return .{ .session_present = consumer.session_present, .session_resumed = consumer.session_present, .failed_attempts = 0 };
         const values = try self.allocator.alloc(mqtt.Subscription, self.subscriptions.items.len);
         defer self.allocator.free(values);
         for (values, self.subscriptions.items) |*value, owned| value.* = owned.value();
@@ -150,7 +150,7 @@ pub const Client = struct {
         });
         errdefer self.broker.closeLocalConsumer(&consumer);
         self.consumer = consumer;
-        return .{ .session_present = consumer.session_present, .failed_attempts = 0 };
+        return .{ .session_present = consumer.session_present, .session_resumed = consumer.session_present, .failed_attempts = 0 };
     }
 
     pub fn pendingCount(self: *Client) Error!usize {

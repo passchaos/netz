@@ -3300,7 +3300,7 @@ pub const Broker = struct {
     }
 
     /// Retire every durable transaction and advance the stable bridge epoch
-    /// after the upstream CONNACK reports Session Present=false. Both changes
+    /// after the upstream Session is lost at either endpoint. Both changes
     /// enter one commit-log record before the Bridge accepts a new PUBLISH.
     pub fn beginBridgeQoS2Session(
         self: *Broker,
