@@ -47,6 +47,7 @@ const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
+const response_trailers = @import("runtime/response/trailers.zig");
 const header_block_limits = @import("runtime/headers/block_limits.zig");
 const flow_credit = @import("runtime/flow/credit.zig");
 const validateDeclaredRequestLength =
@@ -7005,17 +7006,9 @@ pub const Connection = struct {
             },
             .headers => {
                 if (state.headers != null) {
-                    if (state.forbids_body) {
-                        if (streaming_response) {
-                            return error.UnexpectedFrame;
-                        }
-                        return error.InvalidContentLength;
-                    }
-                    if ((frame.header.flags & flag_end_stream) == 0) {
-                        return error.UnexpectedFrame;
-                    }
-                    state.trailers = self.readHeaderBlockUntil(
+                    state.trailers = self.readResponseTrailersUntil(
                         frame,
+                        state.forbids_body,
                         deadline,
                     ) catch |err| {
                         read_timed_out.* =
@@ -7027,10 +7020,6 @@ pub const Connection = struct {
                         freeHeaders(self.allocator, state.trailers);
                         state.trailers = &.{};
                     };
-                    try validateHeaderBlock(
-                        state.trailers,
-                        .response_trailers,
-                    );
                     try validateResponseContentLength(state.content_length, if (streaming_response)
                         state.body_bytes
                     else
@@ -7592,6 +7581,9 @@ pub const Connection = struct {
         observer: IndividualBatchObserver,
         err: anyerror,
     ) void {
+        if (self.serve_read_connection_error != null and !self.terminal_write_failed) {
+            self.sendServeReadError(err);
+        }
         var unreleased: usize = 0;
         for (controls) |control| {
             if (!control.reported) {
@@ -8063,19 +8055,10 @@ pub const Connection = struct {
                 },
                 .headers => {
                     if (state.headers != null) {
-                        if (state.forbids_body) {
-                            return error.InvalidContentLength;
-                        }
-                        if ((frame.header.flags & flag_end_stream) == 0) {
-                            return error.UnexpectedFrame;
-                        }
-                        state.trailers = try self.readHeaderBlockUntil(
+                        state.trailers = try self.readResponseTrailersUntil(
                             frame,
+                            state.forbids_body,
                             deadline,
-                        );
-                        try validateHeaderBlock(
-                            state.trailers,
-                            .response_trailers,
                         );
                         try validateResponseContentLength(state.content_length, state.body.items.len, !state.forbids_body);
                         state.done = true;
@@ -8276,13 +8259,9 @@ pub const Connection = struct {
                 },
                 .headers => {
                     if (state.headers != null) {
-                        if (state.forbids_body or
-                            (frame.header.flags & flag_end_stream) == 0)
-                        {
-                            return error.UnexpectedFrame;
-                        }
-                        state.trailers = self.readHeaderBlockUntil(
+                        state.trailers = self.readResponseTrailersUntil(
                             frame,
+                            state.forbids_body,
                             deadline,
                         ) catch |err| {
                             read_timed_out.* =
@@ -8293,16 +8272,6 @@ pub const Connection = struct {
                         errdefer if (trailers_owned) {
                             freeHeaders(self.allocator, state.trailers);
                             state.trailers = &.{};
-                        };
-                        validateHeaderBlock(
-                            state.trailers,
-                            .response_trailers,
-                        ) catch |err| {
-                            self.recordResponseStreamReadError(
-                                state.stream_id,
-                                .protocol_error,
-                            );
-                            return err;
                         };
                         validateResponseContentLength(state.content_length, state.body_bytes, !state.forbids_body) catch |err| {
                             self.recordResponseStreamReadError(
@@ -16370,6 +16339,18 @@ pub const Connection = struct {
 
     fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
         return self.readHeaderBlockUntil(first, null);
+    }
+
+    fn readResponseTrailersUntil(self: *Connection, frame: http2.Frame, forbids_body: bool, deadline: ?std.Io.Clock.Timestamp) Error![]http2.Hpack.HeaderField {
+        errdefer |err| if (self.serve_read_connection_error == null) {
+            const code = if (err == error.UnexpectedFrame) http2.ErrorCode.protocol_error else responseStreamErrorCode(err);
+            if (code) |value| self.recordResponseStreamReadError(frame.header.stream_id, value);
+        };
+        return response_trailers.read(self, frame, forbids_body, deadline, .{
+            .ErrorType = Error,
+            .readHeaders = readHeaderBlockUntil,
+            .freeHeaders = freeHeaders,
+        });
     }
 
     fn readHeaderBlockUntil(
@@ -38174,6 +38155,8 @@ test {
     _ = @import("runtime/response/credit_failure_tests.zig");
     _ = @import("runtime/response/allocation_failure_tests.zig");
     _ = @import("runtime/response/forbidden_body_tests.zig");
+    _ = @import("runtime/response/batch_trailer_sync_tests.zig");
+    _ = @import("runtime/response/batch_trailer_failure_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
     _ = @import("runtime/request/allocation_failure_tests.zig");

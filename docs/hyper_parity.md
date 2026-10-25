@@ -2400,6 +2400,16 @@ compression/CONTINUATION errors, and partially written refunds. Wire assertions
 check exact WINDOW_UPDATE and RST_STREAM values, while four-byte-window TCP and
 TLS 1.2/1.3 tests require a real refund before the peer can send the final DATA;
 later responses reference the rejected trailers' dynamic-table entries.
+The same decode-before-rejection rule now applies to aggregate, callback,
+body-upload, and independent-deadline response batches. Their shared trailer
+reader completes HPACK before checking forbidden-body or END_STREAM semantics,
+so valid dynamic entries remain usable by a healthy sibling after rejection.
+Complete field-count/list-size failures retain stream-level limits and shared
+table synchronization; decode OOM retires reuse. Independent batch teardown
+also sends the classified connection GOAWAY for compression or CONTINUATION
+errors. Buffered and real-TCP tests cover HEAD/204/304, both END_STREAM states,
+fragmented trailers, exact reset/GOAWAY codes, output limits, allocation faults,
+and bounded/unbounded readers across all eight batch forms.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives
