@@ -184,7 +184,10 @@ def launch_bridge(
     executable: Path, source_port: int, target_port: int,
     control_port: int, case: Case, directory: Path,
     coordinator_mode: str | None = None,
+    *, session_present: tuple[bool, bool] | None = None,
 ) -> ManagedProcess:
+    if session_present is not None and coordinator_mode is None:
+        raise ValueError("explicit Session flags require a coordinator")
     log = directory / (
         "bridge.log" if coordinator_mode is None
         else f"bridge-{coordinator_mode}.log"
@@ -197,6 +200,8 @@ def launch_bridge(
     ]
     if coordinator_mode is not None:
         command.extend((str(directory), coordinator_mode))
+    if session_present is not None:
+        command.extend(str(int(value)) for value in session_present)
     return ManagedProcess(
         "bridge",
         subprocess.Popen(
@@ -213,10 +218,11 @@ def start_bridge(
     executable: Path, source_port: int, target_port: int,
     control_port: int, case: Case, directory: Path,
     coordinator_mode: str | None = None,
+    *, session_present: tuple[bool, bool] | None = None,
 ) -> ManagedProcess:
     managed = launch_bridge(
         executable, source_port, target_port, control_port, case, directory,
-        coordinator_mode,
+        coordinator_mode, session_present=session_present,
     )
     try:
         wait_for_log(

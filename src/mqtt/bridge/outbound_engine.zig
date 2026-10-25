@@ -1811,10 +1811,10 @@ pub fn Engine(comptime Source: type) type {
             self.source_session_present = connected.session_present;
             self.source_pubrec_flushed = false;
             if (connected.session_resumed) {
-                // A new coordinator may attach to an existing broker-local
-                // subscription. Its first observed Session still needs a
+                // A new coordinator can attach to an existing network or
+                // broker-local Session. Its first observed Session needs a
                 // nonzero epoch before staging any cross-broker transaction.
-                if (Source == local_source.Client and self.source_session_epoch == 0) {
+                if (self.source_session_epoch == 0) {
                     self.source_session_epoch = 1;
                     if (self.coordinator != null) try self.commitDurable(null);
                 }

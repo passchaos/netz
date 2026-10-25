@@ -780,6 +780,16 @@ directory/path, and persistent source and target CONNECT settings.
 validates the bridge ID, protocols, Client IDs, rules, prefixes, requested QoS,
 and retain policy before restoring either Session. QoS 2 rules without this
 coordinator, or with either transient Session, fail during construction.
+Creating a coordinator can also attach to an existing persistent source
+Session. Network and broker-local sources initialize their first nonzero
+Session epoch before staging a transaction, and restored Sessions retain the
+committed epoch. Real TCP cases cover the complete MQTT 3.1.1/5 source-target
+matrix with fresh and preserved targets, stopping both before any transaction
+is staged and before the first target wire write, then restoring through
+source PUBCOMP without changing the Session epochs.
+The two-Mosquitto gate separately seeds the source subscription, queues an
+offline QoS 2 message, creates the coordinator on the preserved source Session,
+and requires one target delivery and no second delivery after journal restore.
 
 The coordinator stores one bounded transaction with both reconnect snapshots
 and both Session epochs. It commits the source receive marker and target staged

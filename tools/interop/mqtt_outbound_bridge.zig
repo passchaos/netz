@@ -10,7 +10,7 @@ const session_expiry = [_]netz.mqtt.Property{.{ .four_byte = .{
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 8 and args.len != 10) return error.InvalidArguments;
+    if (args.len != 8 and args.len != 10 and args.len != 12) return error.InvalidArguments;
     const source_port = try parsePort(args[1]);
     const target_port = try parsePort(args[2]);
     const control_port = try parsePort(args[3]);
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const qos = try parseQos(args[6]);
     const case_id = args[7];
     if (case_id.len == 0) return error.InvalidArguments;
-    if ((qos == .exactly_once) != (args.len == 10)) {
+    if ((qos == .exactly_once) != (args.len >= 10)) {
         return error.InvalidArguments;
     }
 
@@ -27,13 +27,13 @@ pub fn main(init: std.process.Init) !void {
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
-    const coordinator_dir: ?std.Io.Dir = if (args.len == 10)
+    const coordinator_dir: ?std.Io.Dir = if (args.len >= 10)
         try std.Io.Dir.openDirAbsolute(io, args[8], .{})
     else
         null;
     defer if (coordinator_dir) |dir| dir.close(io);
     const coordinator_mode: netz.mqtt.bridge.outbound.CoordinatorMode =
-        if (args.len == 10)
+        if (args.len >= 10)
             try parseCoordinatorMode(args[9])
         else
             .create;
@@ -111,8 +111,10 @@ pub fn main(init: std.process.Init) !void {
     const connected = try bridge.connect();
     const expect_resume = coordinator_dir != null and
         coordinator_mode == .restore;
-    if (connected.source_session_present != expect_resume or
-        connected.target_session_present != expect_resume)
+    const expect_source_resume = if (args.len == 12) try parseSessionPresent(args[10]) else expect_resume;
+    const expect_target_resume = if (args.len == 12) try parseSessionPresent(args[11]) else expect_resume;
+    if (connected.source_session_present != expect_source_resume or
+        connected.target_session_present != expect_target_resume)
     {
         return error.UnexpectedSessionResume;
     }
@@ -191,6 +193,12 @@ fn parseCoordinatorMode(
 ) !netz.mqtt.bridge.outbound.CoordinatorMode {
     if (std.mem.eql(u8, value, "create")) return .create;
     if (std.mem.eql(u8, value, "restore")) return .restore;
+    return error.InvalidArguments;
+}
+
+fn parseSessionPresent(value: []const u8) !bool {
+    if (std.mem.eql(u8, value, "1")) return true;
+    if (std.mem.eql(u8, value, "0")) return false;
     return error.InvalidArguments;
 }
 

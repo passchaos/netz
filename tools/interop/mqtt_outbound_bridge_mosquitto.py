@@ -31,6 +31,7 @@ from mqtt_outbound_bridge_support import (
 )
 from mqtt_outbound_bridge_session_loss import run_session_loss_cases
 from mqtt_outbound_bridge_negative import run_negative_pubrec_case
+from mqtt_outbound_bridge_bootstrap import run_bootstrap_cases
 
 
 RUNTIME = (
@@ -826,6 +827,7 @@ def main() -> None:
 
     for case in CASES:
         run_case(args.bridge, args.mosquitto, mqtt_packets, case)
+    run_bootstrap_cases(args.bridge, args.mosquitto, mqtt_packets)
     run_fresh_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     run_resumed_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_pre_target_wire_restart(args.bridge, args.mosquitto, mqtt_packets)
@@ -837,6 +839,7 @@ def main() -> None:
         "MQTT OutboundBridge two-Mosquitto interop passed: "
         "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, "
         "complete v3.1.1/v5 QoS2 matrix, "
+        "new coordinator on preserved source Sessions with fresh/preserved targets, "
         "fresh-target republish, resumed-target same-ID DUP replay, "
         "durable pre-target-wire restart with same-ID DUP PUBLISH, "
         "durable QoS2 PUBCOMP-loss process restart without target republish, "
