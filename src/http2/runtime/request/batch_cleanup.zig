@@ -1,11 +1,12 @@
 const http2 = @import("../../mod.zig");
+const cleanup = @import("cleanup.zig");
 
 pub const Failure = struct {
     cause: anyerror,
     stream_id: ?u31,
     stream_code: ?http2.ErrorCode,
     uninitialized_stream_id: ?u31,
-    read_timed_out: bool,
+    read_lost_state: bool,
     callback_failed: bool,
 };
 
@@ -17,18 +18,23 @@ pub fn abort(connection: anytype, requests: anytype, failure: Failure, comptime 
         Hooks.sendConnectionError(connection, failure.cause);
     }
     const connection_failed = connection.serve_read_connection_error != null or
-        (connection.aggregate_timeout_unusable and !failure.read_timed_out);
-    if (failure.read_timed_out) connection.aggregate_timeout_unusable = true;
+        (connection.aggregate_timeout_unusable and !failure.read_lost_state);
+    if (failure.read_lost_state) connection.aggregate_timeout_unusable = true;
+    var resets_possible = !connection_failed;
 
-    const stream_code = if (!connection_failed and !failure.callback_failed and !failure.read_timed_out and failure.stream_id != null)
+    const stream_code = if (!connection_failed and !failure.callback_failed and !failure.read_lost_state and failure.stream_id != null)
         failure.stream_code orelse Hooks.streamErrorCode(failure.cause)
     else
         null;
     if (stream_code) |code| {
         if (code == .refused_stream) {
-            Hooks.reset(connection, failure.stream_id.?, code) catch {};
+            Hooks.reset(connection, failure.stream_id.?, code) catch {
+                resets_possible = false;
+            };
         } else {
-            Hooks.errorReset(connection, failure.stream_id.?, code) catch {};
+            Hooks.errorReset(connection, failure.stream_id.?, code) catch {
+                resets_possible = false;
+            };
         }
     }
 
@@ -36,18 +42,37 @@ pub fn abort(connection: anytype, requests: anytype, failure: Failure, comptime 
     // its output slot. The inner admission guard may already have released the
     // stream, but its peer still needs the appropriate terminal frame.
     if (failure.uninitialized_stream_id) |id| {
-        if (!connection_failed and (stream_code == null or failure.stream_id.? != id)) {
-            Hooks.reset(connection, id, .cancel) catch {};
+        if (resets_possible and (stream_code == null or failure.stream_id.? != id)) {
+            resets_possible = cancel(connection, id, failure.read_lost_state, Hooks);
         }
         release(connection, id, Hooks);
     }
     for (requests) |*request| {
-        if (!connection_failed and (stream_code == null or failure.stream_id.? != request.stream_id)) {
-            Hooks.reset(connection, request.stream_id, .cancel) catch {};
+        if (resets_possible and (stream_code == null or failure.stream_id.? != request.stream_id)) {
+            resets_possible = cancel(connection, request.stream_id, failure.read_lost_state, Hooks);
         }
         release(connection, request.stream_id, Hooks);
         request.deinit(connection.allocator);
     }
+    if (!resets_possible) connection.aggregate_timeout_unusable = true;
+    if (connection.aggregate_timeout_unusable) {
+        cleanup.discardPending(connection, resets_possible, .{
+            .reset = Hooks.terminalReset,
+            .releasePeer = Hooks.releasePeer,
+            .forgetWindows = Hooks.forgetWindows,
+            .pendingId = Hooks.pendingId,
+            .deinitPending = Hooks.deinitPending,
+        });
+    }
+}
+
+fn cancel(connection: anytype, id: u31, terminal: bool, comptime Hooks: anytype) bool {
+    if (terminal) {
+        Hooks.terminalReset(connection, id, .cancel) catch return false;
+    } else {
+        Hooks.reset(connection, id, .cancel) catch return false;
+    }
+    return true;
 }
 
 fn release(connection: anytype, id: u31, comptime Hooks: anytype) void {

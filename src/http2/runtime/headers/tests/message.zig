@@ -380,7 +380,8 @@ test "HTTP/2 message headers validate names status and lookup fields" {
         .{ .name = "priority", .value = "u=1" },
     });
     try std.testing.expectEqual(@as(?usize, 5), lookup_with_length.content_length);
-    try std.testing.expectEqualStrings("u=1", lookup_with_length.priority.?);
+    try std.testing.expectEqual(@as(u3, 1), lookup_with_length.priority.urgency);
+    try std.testing.expect(!lookup_with_length.priority.incremental);
 
     try std.testing.expect(headers.responseForbidsBody(200, "HEAD", false));
     try std.testing.expect(!headers.responseForbidsBody(200, "head", false));

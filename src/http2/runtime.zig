@@ -44,6 +44,7 @@ const validateResponseContentLength = message_headers.validateResponseContentLen
 const checkedResponseBodyLength = message_headers.checkedResponseBodyLength;
 const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
+const request_cleanup = @import("runtime/request/cleanup.zig");
 const header_block_limits = @import("runtime/headers/block_limits.zig");
 const flow_credit = @import("runtime/flow/credit.zig");
 const validateDeclaredRequestLength =
@@ -3824,12 +3825,13 @@ pub const Connection = struct {
         complete,
         failed,
     } = .open,
-    /// An aggregate timeout or indeterminate transport write may leave a
-    /// partially decoded HPACK block, DATA sequence, or frame prefix whose
+    /// Request allocation failure, aggregate timeout, or an indeterminate write
+    /// may leave a partially decoded HPACK block, DATA sequence, or frame prefix whose
     /// ownership cannot be reconstructed by a later call. Fail closed instead
     /// of allowing subsequent operations or pooled reuse against ambiguous
     /// connection state.
     aggregate_timeout_unusable: bool = false,
+    terminal_write_failed: bool = false,
     /// Several frame and HPACK parsers share low-level errors such as
     /// BufferTooShort. Preserve only protocol failures whose RFC connection
     /// error mapping is known, rather than guessing from the public error tag.
@@ -9644,16 +9646,16 @@ pub const Connection = struct {
                 }
             }
         };
-        errdefer |err| if (err == error.Timeout) {
+        errdefer |err| if (err == error.Timeout or err == error.OutOfMemory) {
             // Request headers/body/trailers are stack-owned during aggregation.
             // Once a stream has been admitted, a retry cannot reconstruct that
             // state, so cancel it and fail the connection closed.
             if (active_stream_id) |stream_id| {
-                self.failTimedOutRequest(stream_id);
+                self.failDiscardedRequest(stream_id);
             }
         };
         var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseConnectionCapacity(receive_credit.unreleased_connection_bytes) catch {};
+        errdefer self.releaseDiscardedRequestCapacity(receive_credit.unreleased_connection_bytes);
         while (true) {
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
@@ -9775,7 +9777,7 @@ pub const Connection = struct {
                                                 self.limits.max_body_bytes,
                                                 (owned.frame.header.flags & flag_end_stream) != 0,
                                             ) catch |err| {
-                                                self.releaseConnectionCapacity(owned.frame.payload.len) catch {};
+                                                self.releaseDiscardedRequestCapacity(owned.frame.payload.len);
                                                 return @errorCast(err);
                                             };
                                             try body.appendSlice(
@@ -10157,7 +10159,7 @@ pub const Connection = struct {
                     StreamingRequestHead.fromOwned(pending),
                 ) catch |err| {
                     self.cancelPeerRequest(pending.stream_id);
-                    return err;
+                    return @as(anyerror!StreamingRequest, err);
                 };
             }
             if (pending.body.len != 0) {
@@ -10166,7 +10168,7 @@ pub const Connection = struct {
                     defer self.endBorrowedReadCallback();
                     consume(context, pending.body) catch |err| {
                         self.cancelPeerRequest(pending.stream_id);
-                        return err;
+                        return @as(anyerror!StreamingRequest, err);
                     };
                 }
             }
@@ -10178,17 +10180,19 @@ pub const Connection = struct {
 
         var active_stream_id: ?u31 = null;
         var read_timed_out = false;
-        // Callbacks may themselves return error.Timeout. Record Timeout only at
-        // deadline-bearing reads so application rejection remains stream-local,
-        // while discarded decoder/body progress after an actual read timeout
-        // still makes the connection fail closed.
-        errdefer if (read_timed_out) {
+        var callback_failed = false;
+        // Callbacks may themselves return Timeout or OutOfMemory. Keep their
+        // stream-local rejection policy separate from internal failures that
+        // discard decoder/body progress and prevent connection reuse.
+        errdefer |failure| if (read_timed_out or
+            (failure == error.OutOfMemory and !callback_failed))
+        {
             if (active_stream_id) |stream_id| {
-                self.failTimedOutRequest(stream_id);
+                self.failDiscardedRequest(stream_id);
             }
         };
         var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseConnectionCapacity(receive_credit.unreleased_connection_bytes) catch {};
+        errdefer self.releaseDiscardedRequestCapacity(receive_credit.unreleased_connection_bytes);
         while (true) {
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
@@ -10197,12 +10201,12 @@ pub const Connection = struct {
             const first = (if (self.pendingApplicationFrameCount() != 0) blk: {
                 pending_owned = self.readOwnedFrameWithDeadline(deadline) catch |err| {
                     read_timed_out = deadline != null and err == error.Timeout;
-                    return err;
+                    return @as(anyerror!StreamingRequest, err);
                 };
                 break :blk pending_owned.?.frame;
             } else (self.readBufferedFrameWithDeadline(deadline) catch |err| {
                 read_timed_out = deadline != null and err == error.Timeout;
-                return err;
+                return @as(anyerror!StreamingRequest, err);
             }).frame);
             if (try self.handleConnectionFrameUntil(first, deadline)) continue;
             if (first.header.frame_type == .goaway) continue;
@@ -10229,7 +10233,7 @@ pub const Connection = struct {
                 deadline,
             ) catch |err| {
                 read_timed_out = deadline != null and err == error.Timeout;
-                return err;
+                return @as(anyerror!StreamingRequest, err);
             };
             var headers_owned = true;
             errdefer if (headers_owned) freeHeaders(self.allocator, headers);
@@ -10269,8 +10273,9 @@ pub const Connection = struct {
                     // but this server still owns the response half. Cancel
                     // the whole stream so a rejected head cannot leave the
                     // client waiting.
+                    callback_failed = true;
                     self.cancelPeerRequest(stream_id);
-                    return err;
+                    return @as(anyerror!StreamingRequest, err);
                 };
             }
 
@@ -10289,7 +10294,7 @@ pub const Connection = struct {
                     ) catch |err| {
                         read_timed_out =
                             deadline != null and err == error.Timeout;
-                        return err;
+                        return @as(anyerror!StreamingRequest, err);
                     }).frame;
                     if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
                     if (frame.header.stream_id != stream_id) {
@@ -10308,7 +10313,7 @@ pub const Connection = struct {
                         ) catch |err| {
                             read_timed_out =
                                 deadline != null and err == error.Timeout;
-                            return err;
+                            return @as(anyerror!StreamingRequest, err);
                         }) {
                             continue;
                         }
@@ -10328,14 +10333,15 @@ pub const Connection = struct {
                                 self.limits.max_body_bytes,
                                 (frame.header.flags & flag_end_stream) != 0,
                             ) catch |err| {
-                                self.releaseConnectionCapacity(frame.payload.len) catch {};
-                                return err;
+                                self.releaseDiscardedRequestCapacity(frame.payload.len);
+                                return @as(anyerror!StreamingRequest, err);
                             };
                             if (data.data.len != 0) {
                                 {
                                     try self.beginBorrowedReadCallback();
                                     defer self.endBorrowedReadCallback();
                                     consume(context, data.data) catch |err| {
+                                        callback_failed = true;
                                         // Mirror the response-side callback
                                         // contract: once DATA has been
                                         // consumed from the receive window,
@@ -10350,7 +10356,7 @@ pub const Connection = struct {
                                         // it when the application rejects the
                                         // body.
                                         self.cancelPeerRequest(stream_id);
-                                        return err;
+                                        return @as(anyerror!StreamingRequest, err);
                                     };
                                 }
                             }
@@ -10372,7 +10378,7 @@ pub const Connection = struct {
                             ) catch |err| {
                                 read_timed_out =
                                     deadline != null and err == error.Timeout;
-                                return err;
+                                return @as(anyerror!StreamingRequest, err);
                             };
                             trailers_owned = true;
                             try validateHeaderBlock(
@@ -10538,20 +10544,25 @@ pub const Connection = struct {
             .stream_id = current_stream_id,
             .stream_code = stream_error_code,
             .uninitialized_stream_id = active_uninitialized_stream_id,
-            .read_timed_out = timeout_lost_state,
+            .read_lost_state = timeout_lost_state or
+                (err == error.OutOfMemory and !callback_failed and
+                    (initialized != 0 or active_uninitialized_stream_id != null)),
             .callback_failed = callback_failed,
         }, .{
             .sendConnectionError = sendServeReadError,
             .streamErrorCode = serveRequestStreamErrorCode,
             .reset = writeResetStreamFrame,
+            .terminalReset = writeTerminalResetStream,
             .errorReset = writeLocalErrorResetStream,
             .releasePeer = releasePeerStream,
             .forgetWindows = forgetStreamWindows,
+            .pendingId = PendingRequest.streamId,
+            .deinitPending = PendingRequest.deinit,
         });
         // All batch members are discarded on failure. Reclaim the DATA still
         // held by each member before abort() removes its stream windows.
         errdefer for (credits[0..initialized]) |credit| {
-            self.releaseConnectionCapacity(credit.unreleased_connection_bytes) catch {};
+            self.releaseDiscardedRequestCapacity(credit.unreleased_connection_bytes);
         };
 
         while (completed < requests.len) {
@@ -10709,7 +10720,7 @@ pub const Connection = struct {
                     defer flow_credit.account(credits[0..initialized], index, connection_before, self.recv_connection_window.value, data.adaptive_connection_increment) catch unreachable;
                     defer self.releaseDataFrameBudget(data);
                     if (done[index]) {
-                        self.releaseConnectionCapacity(frame.payload.len) catch {};
+                        self.releaseDiscardedRequestCapacity(frame.payload.len);
                         stream_error_code = .stream_closed;
                         return error.UnexpectedFrame;
                     }
@@ -10720,7 +10731,7 @@ pub const Connection = struct {
                         self.limits.max_body_bytes,
                         (frame.header.flags & flag_end_stream) != 0,
                     ) catch |err| {
-                        self.releaseConnectionCapacity(frame.payload.len) catch {};
+                        self.releaseDiscardedRequestCapacity(frame.payload.len);
                         return @errorCast(err);
                     };
                     if (data.data.len != 0) {
@@ -11641,7 +11652,7 @@ pub const Connection = struct {
         defer receive_credit.observe(connection_before, self.recv_connection_window.value, data.adaptive_connection_increment);
         defer self.releaseDataFrameBudget(data);
         _ = checkedBodyLength(expected_length, body.items.len, data.data.len, self.limits.max_body_bytes, (header.flags & flag_end_stream) != 0) catch |err| {
-            self.releaseConnectionCapacity(borrowed.frame.payload.len) catch {};
+            self.releaseDiscardedRequestCapacity(borrowed.frame.payload.len);
             return @errorCast(err);
         };
         try body.appendSlice(self.allocator, data.data);
@@ -11678,8 +11689,12 @@ pub const Connection = struct {
             return false;
         }
         var release_stream_on_error = true;
-        errdefer if (release_stream_on_error) {
-            self.releasePeerStream(stream_id);
+        errdefer |failure| if (release_stream_on_error) {
+            if (failure == error.OutOfMemory) {
+                self.failDiscardedRequest(stream_id);
+            } else {
+                self.releasePeerStream(stream_id);
+            }
         };
 
         const headers = self.readHeaderBlockUntil(frame, deadline) catch |err| {
@@ -11691,15 +11706,17 @@ pub const Connection = struct {
                 self.cancelPeerRequest(stream_id);
                 release_stream_on_error = false;
             }
-            return err;
+            return @as(Error!bool, err);
         };
-        errdefer freeHeaders(self.allocator, headers);
+        var headers_owned = true;
+        errdefer if (headers_owned) freeHeaders(self.allocator, headers);
         try validateHeaderBlock(headers, .request);
         const empty_body = try self.allocator.alloc(u8, 0);
         var body_owned_by_request = false;
         errdefer if (!body_owned_by_request) self.allocator.free(empty_body);
         const queued_request = try self.requestFromHeadersAndBody(stream_id, headers, empty_body, &.{});
         body_owned_by_request = true;
+        headers_owned = false;
         errdefer {
             var owned = queued_request;
             owned.deinit(self.allocator);
@@ -13950,6 +13967,18 @@ pub const Connection = struct {
         );
     }
 
+    /// Once reuse is forbidden, no reset-history allocation is needed to
+    /// tolerate later input. Keep terminal cancellation possible under OOM.
+    fn writeTerminalResetStream(self: *Connection, stream_id: u31, code: http2.ErrorCode) Error!void {
+        std.debug.assert(self.aggregate_timeout_unusable);
+        if (self.terminal_write_failed) return error.ConnectionClosed;
+        var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
+        self.transportForIo().writeAll(try http2.ResetStreamPayload.writeInto(&storage, stream_id, code)) catch |err| {
+            self.terminal_write_failed = true;
+            return err;
+        };
+    }
+
     fn writeResetStreamFrameUntil(
         self: *Connection,
         stream_id: u31,
@@ -14751,31 +14780,24 @@ pub const Connection = struct {
         self.abandonPeerRequestInternal(stream_id, .cancel, true);
     }
 
-    fn failTimedOutRequest(self: *Connection, stream_id: u31) void {
-        // Aggregate request state is not retained across calls. Once HEADERS
-        // admits a peer stream, abandoning its decoded fields or received DATA
-        // makes resumption ambiguous, so terminate both the stream and future
-        // connection use rather than exposing partially consumed state.
-        self.aggregate_timeout_unusable = true;
-        // The reader's ordinary error cleanup may already have removed the
-        // active marker before this outer timeout handler runs. The stream was
-        // nevertheless admitted on the wire and must receive CANCEL.
-        self.writeResetStreamFrame(stream_id, .cancel) catch {};
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+    fn failDiscardedRequest(self: *Connection, stream_id: u31) void {
+        request_cleanup.failClosed(self, stream_id, .{
+            .reset = writeTerminalResetStream,
+            .releasePeer = releasePeerStream,
+            .forgetWindows = forgetStreamWindows,
+            .pendingId = PendingRequest.streamId,
+            .deinitPending = PendingRequest.deinit,
+        });
+    }
 
-        // Complete siblings may already have been decoded and queued while
-        // this request's body was in progress. Poisoning the connection makes
-        // those requests unreachable, so cancel and free them as part of the
-        // same fail-closed transition. Entries before the head transferred
-        // ownership to earlier callers and must not be deinitialized here.
-        for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
-            self.cancelPeerRequest(pending.streamId());
-            pending.deinit(self.allocator);
-        }
-        self.pending_requests.items.len = 0;
-        self.pending_request_head = 0;
-        self.pending_accept_reset_streams = 0;
+    fn releaseDiscardedRequestCapacity(self: *Connection, amount: usize) void {
+        if (self.terminal_write_failed) return;
+        self.releaseConnectionCapacity(amount) catch {
+            // An indeterminate WINDOW_UPDATE prefix forbids any subsequent
+            // refund or cancellation from extending the damaged byte stream.
+            self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
+        };
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
@@ -38171,6 +38193,7 @@ test {
     _ = @import("runtime/response/credit_failure_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
+    _ = @import("runtime/request/allocation_failure_tests.zig");
     _ = @import("runtime/response/body_length_tests.zig");
     _ = @import("runtime/frame/tests/io.zig");
     _ = @import("runtime/frame/tests/wire.zig");

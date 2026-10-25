@@ -2357,6 +2357,20 @@ through borrowed reads transfer their original owner without another copy;
 direct copy retries also retire the retry span once ownership succeeds.
 Tests include repeated OOM, coalesced frames,
 real TCP/FIN and an application frame encountered while waiting for PING ACK.
+Server aggregate, streaming, and batch request readers now retire connection
+reuse when an internal allocation failure discards admitted headers, body,
+trailers, or an unfinished HPACK section. Their DATA credit is returned before
+stream windows are removed, and queued sibling requests are canceled and freed.
+Complete siblings transfer header ownership before enqueueing, so a failed
+queue allocation releases fields exactly once. Terminal cancellation uses
+stack-encoded RST_STREAM without allocating reset history; a failed cancellation
+or credit-refund write prevents later cleanup frames from extending a partial prefix.
+Frame-buffer allocation failure before consuming HEADERS preserves input for retry,
+while an application's streaming callback returning OutOfMemory retains the
+existing stream-local rejection policy. Exhaustive allocator faults cover
+bounded and unbounded readers, declared and growing bodies, padded DATA,
+fragmented headers, trailers, sibling handoff, real TCP input, exact cancellation
+frames, connection-credit refunds, and partial reset writes.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives
