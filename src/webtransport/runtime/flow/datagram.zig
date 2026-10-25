@@ -7,9 +7,18 @@ const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const control_mod = @import("../session_control.zig");
 const progress_mod = @import("progress.zig");
+const lifecycle = @import("../connection_lifecycle.zig");
 
 pub const Error = control_mod.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
+
+/// Process already received session control before sending new DATAGRAMs.
+/// This performs no socket read and retains CLOSE/DRAIN events for the owner.
+pub fn prepareSend(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry) Error!void {
+    try lifecycle.ensureOpen(control, h3, registry);
+    try progress_mod.buffered(control, &h3.established.connection);
+    try control.ensureOpen();
+}
 
 pub fn poll(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62) Error!?http3.runtime.OwnedConnectDatagram {
     var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };

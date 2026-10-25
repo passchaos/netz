@@ -55,6 +55,17 @@ receive WT_SESSION_GONE cleanup, and shared client/server siblings keep their
 streams and DATAGRAMs. Protected-UDP coverage is in
 `session_control/receive_termination_tests.zig` and `receive_sibling_tests.zig`.
 
+DATAGRAM send preflight also processes control bytes already buffered on an
+accepted CONNECT before submitting new application packets. A buffered CLOSE
+prevents single and batch sends without consuming another UDP packet; its
+code/reason stays available as one Session event, and sibling Sessions remain
+usable. Buffered DRAIN remains advisory and still permits DATAGRAMs. Invalid
+deadlines leave the control input untouched, and a close-reason allocation
+failure rolls parsing back for retry. Bounded batches retain one deadline
+across this preflight and socket submission. Protected-UDP tests cover owning
+client/server sessions, both shared endpoint roles, exact zero batch progress,
+event retention, and sibling DATAGRAM/stream continuation.
+
 ## Current direct evidence
 
 Run:

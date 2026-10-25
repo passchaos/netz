@@ -2367,8 +2367,8 @@ pub const EndpointAcceptedSession = struct {
         self: *EndpointAcceptedSession,
         payload: []const u8,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try flow_datagram.prepareSend(&self.control, self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagram(
             self.session_id.value,
@@ -2399,8 +2399,9 @@ pub const EndpointAcceptedSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try flow_datagram.prepareSend(&self.control, self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagramWithDeadline(
             self.session_id.value,
@@ -2419,8 +2420,8 @@ pub const EndpointAcceptedSession = struct {
         committed_count: *usize,
     ) EndpointServerError!void {
         committed_count.* = 0;
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try flow_datagram.prepareSend(&self.control, self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = self.h3.trySendConnectDatagrams(
             self.session_id.value,
@@ -5587,8 +5588,8 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
-        try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
     }
@@ -5612,8 +5613,9 @@ pub const AcceptedHandshakeSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        try self.ensureApplicationSendOpen();
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         try self.h3.sendConnectDatagramWithDeadline(
             self.session_id.value,
@@ -5628,8 +5630,8 @@ pub const AcceptedHandshakeSession = struct {
         committed_count: *usize,
     ) Error!void {
         committed_count.* = 0;
-        try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagrams(
             self.session_id.value,
@@ -5646,15 +5648,10 @@ pub const AcceptedHandshakeSession = struct {
     ) ReceiveTimeoutError!void {
         committed_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try self.ensureApplicationSendOpen();
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try connect_negotiation.ensure(&self.h3);
-        return self.h3.sendConnectDatagramsWithTimeout(
-            self.session_id.value,
-            payloads,
-            committed_count,
-            timeout,
-        );
+        return self.sendDatagramsWithDeadline(payloads, committed_count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn sendDatagramsWithDeadline(
@@ -5668,8 +5665,8 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
-        try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithDeadline(
             self.session_id.value,
@@ -9006,8 +9003,8 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
-        try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagram(self.session_id.value, payload)
@@ -9036,8 +9033,9 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        try self.ensureApplicationSendOpen();
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagramWithDeadline(
@@ -9063,8 +9061,8 @@ pub const HandshakeClientSession = struct {
         committed_count: *usize,
     ) Error!void {
         committed_count.* = 0;
-        try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagrams(
@@ -9090,16 +9088,10 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!void {
         committed_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try self.ensureApplicationSendOpen();
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        try connect_negotiation.ensure(&self.h3);
-        return self.h3.sendConnectDatagramsWithTimeout(
-            self.session_id.value,
-            payloads,
-            committed_count,
-            timeout,
-        );
+        return self.sendDatagramsWithDeadline(payloads, committed_count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn sendDatagramsWithDeadline(
@@ -9114,8 +9106,8 @@ pub const HandshakeClientSession = struct {
             deadline,
         );
         if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try self.ensureApplicationSendOpen();
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
+        try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         return self.h3.sendConnectDatagramsWithDeadline(
             self.session_id.value,
@@ -19138,6 +19130,7 @@ test {
     _ = @import("runtime/session_control/lightweight_termination_tests.zig");
     _ = @import("runtime/session_control/receive_termination_tests.zig");
     _ = @import("runtime/session_control/receive_sibling_tests.zig");
+    _ = @import("runtime/session_control/send_buffered_close_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
     _ = @import("runtime/flow/receive.zig");
     _ = @import("runtime/flow/write.zig");

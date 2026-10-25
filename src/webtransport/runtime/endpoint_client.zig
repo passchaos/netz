@@ -25,6 +25,7 @@ const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
 const flow_write = @import("flow/write.zig");
 const close_write = @import("endpoint_client/close.zig");
+const flow_datagram = @import("flow/datagram.zig");
 const drain_write = @import("endpoint_client/drain.zig");
 
 const net = std.Io.net;
@@ -174,7 +175,7 @@ pub const Session = struct {
         try self.validateOwner(client);
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
-        try self.control.ensureOpen();
+        try flow_datagram.prepareSend(&self.control, &client.h3, &self.streams);
         try client.h3.sendConnectDatagram(self.session_id.value, payload);
     }
 
@@ -201,10 +202,11 @@ pub const Session = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) TimeoutError!void {
+        _ = try deadline_policy.usableAwake(client.h3.established.connection.endpoint.io, deadline);
         try self.validateOwner(client);
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
-        try self.control.ensureOpen();
+        try flow_datagram.prepareSend(&self.control, &client.h3, &self.streams);
         try client.h3.sendConnectDatagramWithDeadline(
             self.session_id.value,
             payload,
