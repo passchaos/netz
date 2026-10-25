@@ -16,3 +16,22 @@ pub const dictionaries = [_]Case{
     .{ .field = "u=000000000000007", .urgency = 7 },
     .{ .field = "u=01,\ti=?1", .urgency = 1, .incremental = true },
 };
+
+pub const FieldsCase = struct {
+    values: []const []const u8,
+    urgency: u3 = 3,
+    incremental: bool = false,
+};
+
+pub const field_sections = [_]FieldsCase{
+    .{ .values = &.{ "u=1", "i" }, .urgency = 1, .incremental = true },
+    .{ .values = &.{ "u=1, i", "u=6" }, .urgency = 6, .incremental = true },
+    .{ .values = &.{ "u=1, i", "u=9, i=token" } },
+    .{ .values = &.{ "u=1", "u=0, custom=\"unterminated" } },
+    .{ .values = &.{ "u=0, custom=\"unterminated", "u=1" } },
+    .{ .values = &.{ "u=1,", "i" } },
+    .{ .values = &.{""} },
+    .{ .values = &.{ "", "u=1" } },
+    .{ .values = &.{ "u=1", "" } },
+    .{ .values = &.{ "custom=\"noise, i, tail\"", "u=-0" }, .urgency = 0 },
+};

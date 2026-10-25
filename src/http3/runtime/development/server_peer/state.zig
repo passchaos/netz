@@ -25,12 +25,7 @@ const StreamMessageSendScratch = send_scratch.Message;
 const development_settings: http3.Settings = .{ .enable_connect_protocol = true };
 
 fn requestPriority(headers: []const http3.Qpack.HeaderField) http3.Priority {
-    for (headers) |header| {
-        if (std.mem.eql(u8, header.name, "priority")) {
-            return http3.Priority.parse(header.value);
-        }
-    }
-    return .{};
+    return http3.Priority.parseFields(headers);
 }
 
 pub const Set = struct {

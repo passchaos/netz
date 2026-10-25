@@ -8673,10 +8673,9 @@ pub const Connection = struct {
     fn effectiveRequestPriority(
         self: Connection,
         stream_id: u31,
-        header_value: ?[]const u8,
+        header_priority: http2.ExtensiblePriority,
     ) http2.ExtensiblePriority {
-        return self.peerPriority(stream_id) orelse
-            http2.ExtensiblePriority.parse(header_value orelse "");
+        return self.peerPriority(stream_id) orelse header_priority;
     }
 
     /// Send an HTTP/2 PRIORITY_UPDATE after the peer opted into RFC 9218.
@@ -12806,9 +12805,7 @@ pub const Connection = struct {
             promised_stream_id,
             findHeader(request_headers, ":method") orelse "GET",
             findHeader(request_headers, ":protocol"),
-            http2.ExtensiblePriority.parse(
-                findHeader(request_headers, "priority") orelse "",
-            ),
+            http2.ExtensiblePriority.parseFields(request_headers),
         );
         const encoder = try self.prepareStagedHpackEncoder();
         const block = try encoder.encodeBlockRetained(
@@ -38187,6 +38184,7 @@ test {
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/priority/legacy_tests.zig");
     _ = @import("runtime/priority/dictionary_tests.zig");
+    _ = @import("runtime/priority/metadata_tests.zig");
     _ = @import("runtime/priority/legacy_shutdown_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
     _ = @import("runtime/response_batch_tests.zig");

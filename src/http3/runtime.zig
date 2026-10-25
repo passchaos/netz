@@ -240,6 +240,7 @@ pub const ResponseEventResult = response_failure.Result;
 test {
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/field_value_tests.zig");
+    _ = @import("runtime/receive/priority_metadata_tests.zig");
     _ = @import("runtime/receive/response_failure_retry_tests.zig");
     _ = @import("runtime/receive/message_data_tests.zig");
     _ = @import("runtime/receive/failure_ownership_tests.zig");
@@ -26252,12 +26253,7 @@ fn updateOutboundBodyFlowLimitsFromFrames(
 fn requestPriority(
     headers: []const http3.Qpack.HeaderField,
 ) http3.Priority {
-    for (headers) |header| {
-        if (std.mem.eql(u8, header.name, "priority")) {
-            return http3.Priority.parse(header.value);
-        }
-    }
-    return .{};
+    return http3.Priority.parseFields(headers);
 }
 
 fn requestHasProtocol(

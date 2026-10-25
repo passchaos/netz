@@ -652,7 +652,7 @@ pub const RequestHeaderLookup = struct {
     authority: ?[]const u8 = null,
     host: ?[]const u8 = null,
     protocol: ?[]const u8 = null,
-    priority: ?[]const u8 = null,
+    priority: http2.ExtensiblePriority = .{},
     content_length: ?usize = null,
 
     pub fn requestAuthority(self: RequestHeaderLookup) ?[]const u8 {
@@ -675,12 +675,11 @@ pub fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!Reque
             if (lookup.host == null) lookup.host = header.value;
         } else if (std.ascii.eqlIgnoreCase(header.name, ":protocol")) {
             if (lookup.protocol == null) lookup.protocol = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "priority")) {
-            if (lookup.priority == null) lookup.priority = header.value;
         } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
             try parseContentLengthHeaderValue(header.value, &lookup.content_length);
         }
     }
+    lookup.priority = http2.ExtensiblePriority.parseFields(headers);
     return lookup;
 }
 

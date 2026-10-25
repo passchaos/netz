@@ -1225,6 +1225,18 @@ dictionaries, while HTTP/2 PRIORITY_UPDATE retains strict rejection through
 Real TCP cases compare request metadata and control updates, and HTTP/3 cases
 verify the same values through QPACK decoding, control-state cloning and
 request lifecycle admission.
+Priority metadata is advisory in both protocols. Invalid Dictionary syntax
+discards the complete scheduling hint without rejecting an otherwise valid
+request, response or trailer; the original field values remain available to
+applications and intermediaries. Repeated Priority field lines are interpreted
+in order as one Dictionary, so later duplicate members replace earlier values
+while unrelated members remain in effect. This parsing uses constant auxiliary
+space and rejects members split across field lines, as permitted by RFC 8941.
+HTTP/2 PRIORITY_UPDATE still takes precedence over request metadata, and its
+strict malformed-frame policy remains separate from advisory header handling.
+TCP aggregate and streaming tests plus protected HTTP/3/QPACK cases verify
+multiple fields, whole-hint invalidation, continued sibling progress and normal
+HTTP field and Content-Length validation.
 
 RFC 9218's priority-ignore policy also applies to inbound HEADERS and
 PRIORITY frames. A server honors the client's initial

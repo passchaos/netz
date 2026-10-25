@@ -2573,10 +2573,6 @@ pub const Request = struct {
                 if (host_value != null) return error.InvalidHeader;
                 host_value = header.value;
             }
-            if (std.mem.eql(u8, header.name, "priority")) {
-                _ = priority_field.Priority.parseStrict(header.value) catch
-                    return error.InvalidHeader;
-            }
             if (connectionSpecificHeaderName(header.name)) {
                 return error.InvalidHeader;
             }
@@ -5327,11 +5323,6 @@ fn validateHeaderBlockImpl(
                 }
             }
         }
-        if (std.mem.eql(u8, header.name, "priority")) {
-            _ = priority_field.Priority.parseStrict(header.value) catch {
-                return error.InvalidHeader;
-            };
-        }
         if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "te")) {
             switch (kind) {
@@ -6193,6 +6184,7 @@ test "HTTP/3 generic frame codec rejects WebTransport stream prefix" {
 test {
     _ = @import("qpack/tests.zig");
     _ = @import("priority_dictionary_tests.zig");
+    _ = @import("priority_metadata_tests.zig");
 }
 
 test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
@@ -7972,10 +7964,9 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":authority", .value = "example.com" },
         .{ .name = "priority", .value = "u=1," },
     });
-    try std.testing.expectError(
-        error.InvalidHeader,
-        decodeRequest(allocator, bad_priority.items),
-    );
+    var ignored_priority = try decodeRequest(allocator, bad_priority.items);
+    defer ignored_priority.deinit(allocator);
+    try std.testing.expectEqual(Priority{}, Priority.parseFields(ignored_priority.headers));
 
     var good_priority: std.ArrayList(u8) = .empty;
     defer good_priority.deinit(allocator);
