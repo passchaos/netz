@@ -3026,7 +3026,7 @@ pub const Client = struct {
             );
             defer frame.deinit(connection.allocator);
             if (frame.frame.header.frame_type != .settings) {
-                if (try connection.handleConnectionOrGoAwayFrame(frame.frame)) continue;
+                if (try connection.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) continue;
                 return error.UnexpectedFrame;
             }
             if ((frame.frame.header.flags & flag_ack) != 0) {
@@ -3639,6 +3639,14 @@ const ReceivedDataPayload = struct {
 };
 
 pub const Connection = struct {
+    const LateResetFrames = @import("runtime/reset/late.zig").Handler(.{
+        .Error = Error,
+        .wasReset = wasLocallyResetAt,
+        .readHeaders = readHeaderBlockUntil,
+        .freeHeaders = freeHeaders,
+        .refund = releaseLateResetConnectionCapacityUntil,
+        .preadmitted = gracefulPreadmittedIndex,
+    });
     const DataReceiver = @import("runtime/flow/data.zig").Receiver(.{
         .ErrorType = Error,
         .ResultType = ReceivedDataPayload,
@@ -3660,7 +3668,7 @@ pub const Connection = struct {
         .deinitHeader = DuplexHeaderBlock.deinit,
         .prepareQueued = completeDeferredHeadersBeforePushRead,
         .readRaw = readTransportFrameRawWithDeadline,
-        .handleConnection = handleConnectionFrame,
+        .handleConnection = handleConnectionFrameUntil,
         .recordGoAway = recordPeerGoAway,
         .queueSibling = queueDuplexSiblingFrameUntil,
         .releasePeer = releasePeerStream,
@@ -3668,7 +3676,7 @@ pub const Connection = struct {
         .reset = writeResetStreamFrameUntil,
         .promise = receivePushPromiseUntil,
         .wasReset = wasLocallyReset,
-        .discardReset = discardLateFrameForLocallyResetStream,
+        .discardReset = discardLateFrameForLocallyResetStreamUntil,
         .activate = addActivePeerStream,
         .goAway = sendGoAwayUntil,
         .processed = lastPeerProcessedStreamId,
@@ -6772,7 +6780,7 @@ pub const Connection = struct {
                 read_timed_out.* = deadline != null and err == error.Timeout;
                 return err;
             }).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.recordPeerGoAway(goaway);
@@ -7768,7 +7776,7 @@ pub const Connection = struct {
             .frame => |borrowed| borrowed.frame,
             .wake => return,
         };
-        if (try self.handleConnectionFrame(frame)) return;
+        if (try self.handleConnectionFrameUntil(frame, deadline)) return;
         if (frame.header.frame_type == .goaway) {
             try self.recordPeerGoAway(
                 try http2.GoAwayPayload.parse(frame),
@@ -8012,7 +8020,7 @@ pub const Connection = struct {
         while (remaining != 0) {
             current_stream_id = null;
             const frame = (try self.readBufferedFrameWithDeadline(deadline)).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.recordPeerGoAway(goaway);
@@ -8220,7 +8228,7 @@ pub const Connection = struct {
                 read_timed_out.* = deadline != null and err == error.Timeout;
                 return err;
             }).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.recordPeerGoAway(goaway);
@@ -8770,7 +8778,7 @@ pub const Connection = struct {
             if (frame.frame.header.frame_type == .priority_update) {
                 const update =
                     try http2.PriorityUpdatePayload.parse(frame.frame);
-                if (!try self.handleConnectionFrame(frame.frame)) {
+                if (!try self.handleConnectionFrameUntil(frame.frame, deadline)) {
                     return error.UnexpectedFrame;
                 }
                 if (self.peerPriorityFieldValue(
@@ -8783,7 +8791,7 @@ pub const Connection = struct {
                 }
                 continue;
             }
-            if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
+            if (try self.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) {
                 continue;
             }
             return error.UnexpectedFrame;
@@ -9441,7 +9449,7 @@ pub const Connection = struct {
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
@@ -9646,7 +9654,7 @@ pub const Connection = struct {
                 pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
             } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             switch (frame.header.frame_type) {
                 .headers => {
                     const stream_id = frame.header.stream_id;
@@ -9714,8 +9722,9 @@ pub const Connection = struct {
                                 },
                                 .owned_frame => |*owned| {
                                     defer owned.deinit(self.allocator);
-                                    if (try self.handleConnectionFrame(
+                                    if (try self.handleConnectionFrameUntil(
                                         owned.frame,
+                                        deadline,
                                     )) continue;
                                     if (owned.frame.header.stream_id !=
                                         stream_id)
@@ -10019,7 +10028,7 @@ pub const Connection = struct {
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) continue;
             if (frame.frame.header.frame_type != .headers) {
                 return error.UnexpectedFrame;
@@ -10186,7 +10195,7 @@ pub const Connection = struct {
                 read_timed_out = deadline != null and err == error.Timeout;
                 return err;
             }).frame);
-            if (try self.handleConnectionFrame(first)) continue;
+            if (try self.handleConnectionFrameUntil(first, deadline)) continue;
             if (first.header.frame_type == .goaway) continue;
             if (first.header.frame_type != .headers) {
                 return error.UnexpectedFrame;
@@ -10273,7 +10282,7 @@ pub const Connection = struct {
                             deadline != null and err == error.Timeout;
                         return err;
                     }).frame;
-                    if (try self.handleConnectionFrame(frame)) continue;
+                    if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
                     if (frame.header.stream_id != stream_id) {
                         if (frame.header.frame_type == .rst_stream) {
                             const reset =
@@ -10544,7 +10553,7 @@ pub const Connection = struct {
                     err == error.Timeout and initialized != 0;
                 return @errorCast(err);
             }).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 try self.recordPeerGoAway(
                     try http2.GoAwayPayload.parse(frame),
@@ -13426,7 +13435,7 @@ pub const Connection = struct {
                 },
                 else => return err,
             };
-            try self.handleOrQueueKeepAliveFrame(borrowed);
+            try self.handleOrQueueKeepAliveFrame(borrowed, interval_deadline);
             if (!options.while_idle and !self.hasActiveStreams()) {
                 return .skipped_idle;
             }
@@ -13441,8 +13450,9 @@ pub const Connection = struct {
     fn handleOrQueueKeepAliveFrame(
         self: *Connection,
         borrowed: frame_io.BorrowedFrame,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        if (try self.handleConnectionOrGoAwayFrame(borrowed.frame)) return;
+        if (try self.handleConnectionOrGoAwayFrameUntil(borrowed.frame, deadline)) return;
 
         var frame = try self.copyBorrowedFrame(borrowed);
         var frame_owned = true;
@@ -13507,7 +13517,7 @@ pub const Connection = struct {
                 if (!std.mem.eql(u8, &ack_payload, &data)) continue;
                 return ack_payload;
             }
-            if (try self.handleConnectionOrGoAwayFrame(borrowed.frame)) {
+            if (try self.handleConnectionOrGoAwayFrameUntil(borrowed.frame, deadline)) {
                 continue;
             }
 
@@ -13574,7 +13584,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
-                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
+                if (try self.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) continue;
                 return error.UnexpectedFrame;
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
@@ -13774,7 +13784,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .goaway) {
-                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -13923,7 +13933,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .rst_stream) {
-                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -14000,8 +14010,12 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
-        try self.ensureLocalErrorResetBudget();
-        self.writeResetStreamFrame(stream_id, error_code) catch |err| {
+        return self.writeLocalErrorResetStreamUntil(stream_id, error_code, null);
+    }
+
+    fn writeLocalErrorResetStreamUntil(self: *Connection, stream_id: u31, error_code: http2.ErrorCode, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        try self.ensureLocalErrorResetBudgetUntil(deadline);
+        self.writeResetStreamFrameUntil(stream_id, error_code, deadline) catch |err| {
             // A transport write does not report whether a prefix reached the
             // peer. Never append more HTTP/2 frames to a possibly partial RST.
             self.aggregate_timeout_unusable = true;
@@ -14011,6 +14025,10 @@ pub const Connection = struct {
     }
 
     fn ensureLocalErrorResetBudget(self: *Connection) Error!void {
+        return self.ensureLocalErrorResetBudgetUntil(null);
+    }
+
+    fn ensureLocalErrorResetBudgetUntil(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!void {
         const limit = self.limits.max_local_error_reset_streams orelse return;
         if (self.local_error_reset_streams < limit) return;
 
@@ -14019,7 +14037,7 @@ pub const Connection = struct {
             self.lastPeerProcessedStreamId(),
             .enhance_your_calm,
             "too_many_internal_resets",
-            null,
+            deadline,
         ) catch {};
         return error.ConnectionGoAway;
     }
@@ -14170,16 +14188,17 @@ pub const Connection = struct {
         self: *Connection,
         frame: http2.Frame,
     ) Error!bool {
+        return self.discardLateFrameForLocallyResetStreamUntil(frame, null);
+    }
+
+    fn discardLateFrameForLocallyResetStreamUntil(self: *Connection, frame: http2.Frame, deadline: ?std.Io.Clock.Timestamp) Error!bool {
         if (frame.header.stream_id == 0 or
             self.locally_reset_stream_index.count() == 0 or
             !self.locally_reset_stream_index.contains(frame.header.stream_id))
         {
             return false;
         }
-        return self.discardLateFrameForLocallyResetStreamAt(
-            frame,
-            std.Io.Clock.awake.now(self.io).nanoseconds,
-        );
+        return LateResetFrames.discard(self, frame, std.Io.Clock.awake.now(self.io).nanoseconds, deadline);
     }
 
     fn discardLateFrameForLocallyResetStreamAt(
@@ -14187,46 +14206,7 @@ pub const Connection = struct {
         frame: http2.Frame,
         now_ns: i96,
     ) Error!bool {
-        if (frame.header.stream_id == 0 or
-            !self.wasLocallyResetAt(frame.header.stream_id, now_ns))
-        {
-            return false;
-        }
-        switch (frame.header.frame_type) {
-            .data => {
-                // RST_STREAM makes the stream window unusable, but bytes
-                // already in flight still consumed connection credit before
-                // the reset took effect. Account and immediately restore that
-                // shared credit so discarded bytes cannot starve siblings.
-                _ = try http2.DataPayload.parse(frame);
-                try self.recv_connection_window.receive(frame.payload.len);
-                try self.releaseLateResetConnectionCapacity(
-                    frame.payload.len,
-                );
-            },
-            .headers => {
-                // HPACK state is connection-wide even when the carrying stream
-                // has been reset. Decode the complete block (including any
-                // CONTINUATION frames) before discarding its fields.
-                const headers = try self.readHeaderBlock(frame);
-                freeHeaders(self.allocator, headers);
-                if (self.gracefulPreadmittedIndex(
-                    frame.header.stream_id,
-                )) |index| {
-                    const marker = self.graceful_preadmitted_peer_streams
-                        .items[index];
-                    if (marker.admission == .refused_reset_sent) {
-                        _ = self.graceful_preadmitted_peer_streams
-                            .orderedRemove(index);
-                    }
-                }
-            },
-            .rst_stream => {
-                _ = try http2.ResetStreamPayload.parse(frame);
-            },
-            else => return false,
-        }
-        return true;
+        return LateResetFrames.discard(self, frame, now_ns, null);
     }
 
     /// RFC 9113 permits a peer to race stream creation against the final
@@ -14387,12 +14367,16 @@ pub const Connection = struct {
         self: *Connection,
         amount: usize,
     ) Error!void {
+        return self.releaseLateResetConnectionCapacityUntil(amount, null);
+    }
+
+    fn releaseLateResetConnectionCapacityUntil(self: *Connection, amount: usize, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (amount == 0) return;
         // One inbound DATA payload is bounded by SETTINGS_MAX_FRAME_SIZE,
         // whose protocol maximum fits in a single WINDOW_UPDATE increment.
         const increment = std.math.cast(u31, amount) orelse
             return error.MessageTooLarge;
-        self.sendWindowUpdates(null, increment, null) catch |err| switch (err) {
+        self.sendWindowUpdatesUntil(null, increment, null, deadline) catch |err| switch (err) {
             error.SocketUnconnected,
             error.ConnectionResetByPeer,
             => {
@@ -14833,7 +14817,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .window_update) {
-                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrameUntil(frame.frame, deadline)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -14841,7 +14825,7 @@ pub const Connection = struct {
                 return error.UnexpectedFrame;
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
-            try self.applyWindowUpdate(update);
+            try self.applyWindowUpdateUntil(update, deadline);
             return .{ .frame = frame, .window_update = update };
         }
     }
@@ -14907,7 +14891,7 @@ pub const Connection = struct {
                 pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
             } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
@@ -15186,7 +15170,7 @@ pub const Connection = struct {
                 pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
             } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
@@ -15601,7 +15585,7 @@ pub const Connection = struct {
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
@@ -15916,7 +15900,7 @@ pub const Connection = struct {
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
@@ -16139,17 +16123,25 @@ pub const Connection = struct {
     }
 
     fn handleConnectionOrGoAwayFrame(self: *Connection, frame: http2.Frame) Error!bool {
+        return self.handleConnectionOrGoAwayFrameUntil(frame, null);
+    }
+
+    fn handleConnectionOrGoAwayFrameUntil(self: *Connection, frame: http2.Frame, deadline: ?std.Io.Clock.Timestamp) Error!bool {
         if (frame.header.frame_type == .goaway) {
             try self.recordPeerGoAway(try http2.GoAwayPayload.parse(frame));
             return true;
         }
-        return self.handleConnectionFrame(frame);
+        return self.handleConnectionFrameUntil(frame, deadline);
     }
 
     fn applyWindowUpdate(
         self: *Connection,
         update: http2.WindowUpdatePayload,
     ) Error!void {
+        return self.applyWindowUpdateUntil(update, null);
+    }
+
+    fn applyWindowUpdateUntil(self: *Connection, update: http2.WindowUpdatePayload, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (update.stream_id == 0) {
             self.send_connection_window.update(update.increment) catch |err| {
                 if (err != error.FlowControlViolation) return err;
@@ -16160,7 +16152,7 @@ pub const Connection = struct {
                     self.lastPeerProcessedStreamId(),
                     .flow_control_error,
                     "connection-window-overflow",
-                    null,
+                    deadline,
                 ) catch {};
                 return error.ConnectionGoAway;
             };
@@ -16176,9 +16168,10 @@ pub const Connection = struct {
             update.increment,
         ) catch |err| {
             if (err != error.FlowControlViolation) return err;
-            try self.writeLocalErrorResetStream(
+            try self.writeLocalErrorResetStreamUntil(
                 update.stream_id,
                 .flow_control_error,
+                deadline,
             );
             self.releaseLocalStream(update.stream_id);
             self.releasePeerStream(update.stream_id);
@@ -16187,7 +16180,11 @@ pub const Connection = struct {
     }
 
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
-        if (try self.discardLateFrameForLocallyResetStream(frame)) {
+        return self.handleConnectionFrameUntil(frame, null);
+    }
+
+    fn handleConnectionFrameUntil(self: *Connection, frame: http2.Frame, deadline: ?std.Io.Clock.Timestamp) Error!bool {
+        if (try self.discardLateFrameForLocallyResetStreamUntil(frame, deadline)) {
             return true;
         }
         switch (frame.header.frame_type) {
@@ -16195,12 +16192,12 @@ pub const Connection = struct {
                 if ((frame.header.flags & flag_ack) != 0) {
                     try self.applySettingsAck();
                 } else {
-                    try self.applyPeerSettingsPayload(frame.payload, null);
+                    try self.applyPeerSettingsPayload(frame.payload, deadline);
                     try self.writeControlFrameUntil(
                         .settings,
                         flag_ack,
                         &.{},
-                        null,
+                        deadline,
                     );
                 }
                 return true;
@@ -16212,7 +16209,7 @@ pub const Connection = struct {
                         .ping,
                         flag_ack,
                         &ping_payload.data,
-                        null,
+                        deadline,
                     );
                 } else {
                     try self.applyAdaptivePingAck(ping_payload.data);
@@ -16221,7 +16218,7 @@ pub const Connection = struct {
             },
             .window_update => {
                 const update = try http2.WindowUpdatePayload.parse(frame);
-                try self.applyWindowUpdate(update);
+                try self.applyWindowUpdateUntil(update, deadline);
                 return true;
             },
             .priority => {
@@ -16497,7 +16494,12 @@ pub const Connection = struct {
             var continuation_count: usize = 0;
             const max_continuations = self.maxContinuationFrames();
             while ((flags & flag_end_headers) == 0) {
-                var frame = if (raw_continuations)
+                // Duplex/push owners already selected this block from the
+                // transport. Older queued sibling frames cannot precede its
+                // CONTINUATION, and the ordinary reader rejects duplex use.
+                var frame = if (self.duplex_reader_active or header_mode)
+                    try self.readOwnedFrameForDuplexWithDeadline(deadline)
+                else if (raw_continuations)
                     try self.readOwnedFrameRawWithDeadline(deadline)
                 else
                     try self.readOwnedFrameWithDeadline(deadline);
@@ -16951,7 +16953,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
@@ -17115,7 +17117,7 @@ pub const Connection = struct {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) {
+            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) {
                 if (self.push_state.localStatus(stream_id) ==
                     .canceled)
                 {
@@ -19384,7 +19386,7 @@ pub const ClientDuplexStream = struct {
             var frame = try self.connection.readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
-            if (try self.connection.handleConnectionFrame(frame.frame)) continue;
+            if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
                 try self.connection.handleGoAwayForStream(self.stream_id, goaway);
@@ -20093,7 +20095,7 @@ pub const ServerDuplexStream = struct {
                 .readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
-            if (try self.connection.handleConnectionFrame(frame.frame)) {
+            if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) {
                 continue;
             }
             if (frame.frame.header.frame_type == .goaway) continue;
@@ -20146,7 +20148,7 @@ pub const ServerDuplexStream = struct {
             var frame = try self.connection.readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
-            if (try self.connection.handleConnectionFrame(frame.frame)) continue;
+            if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) continue;
             if (frame.frame.header.stream_id != self.stream_id) {
                 try self.connection.queueDuplexSiblingFrameUntil(frame);
@@ -20872,7 +20874,7 @@ pub const Tunnel = struct {
             defer if (frame_owned) {
                 frame.deinit(self.connection.allocator);
             };
-            if (try self.connection.handleConnectionFrame(frame.frame)) {
+            if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) {
                 frame.deinit(self.connection.allocator);
                 frame_owned = false;
                 continue;
@@ -38154,6 +38156,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 test {
     _ = @import("runtime/frame/retention_tests.zig");
     _ = @import("runtime/headers/limit_reuse_tests.zig");
+    _ = @import("runtime/headers/reset_deadline_tests.zig");
     _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/response/credit_failure_tests.zig");

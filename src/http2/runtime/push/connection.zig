@@ -48,7 +48,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 try hooks.prepareQueued(self, deadline);
                 const borrowed = try hooks.readRaw(self, deadline);
                 if (try receivePushedFrame(self, borrowed.frame, deadline)) continue;
-                if (try hooks.handleConnection(self, borrowed.frame)) continue;
+                if (try hooks.handleConnection(self, borrowed.frame, deadline)) continue;
                 if (borrowed.frame.header.frame_type == .goaway) {
                     try hooks.recordGoAway(self, try http2.GoAwayPayload.parse(borrowed.frame));
                     continue;
@@ -160,7 +160,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
             if (entry.failure != null and hooks.wasReset(self, id)) {
                 self.push_ingress_headers_active = true;
                 defer self.push_ingress_headers_active = false;
-                if (try hooks.discardReset(self, frame)) return true;
+                if (try hooks.discardReset(self, frame, deadline)) return true;
             }
             switch (frame.header.frame_type) {
                 .headers => {

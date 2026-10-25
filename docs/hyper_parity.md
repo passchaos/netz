@@ -2473,6 +2473,16 @@ untracked rather than evicting an older stream before its retention deadline.
 Capacity is reserved before a RST_STREAM becomes visible, including batch
 cancellation, so allocation failure cannot leave wire and local reset state
 inconsistent.
+Bounded reads now carry their original deadline through late reset-stream
+HEADERS/CONTINUATION consumption and control-frame replies, including
+connection-credit refunds. A canceled stream cannot extend a PING, response,
+duplex, or push wait by withholding its continuation. If that deadline loses
+a stack-owned partial HPACK block, the parent becomes unusable instead of
+accepting later frames with ambiguous compression state. Duplex/push ingress
+consumes continuations from its existing transport owner rather than recursively
+entering an ordinary reader or replaying older queued sibling frames. Real-TCP
+tests cover timed-out PING/response/duplex reads and completed late headers whose
+dynamic entries remain usable by a following response on the same connection.
 When a valid peer request exceeds the advertised local concurrent-stream
 limit, every server request reader now consumes and decodes its complete HPACK
 field section, sends `RST_STREAM(REFUSED_STREAM)`, and continues serving the
