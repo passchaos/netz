@@ -11,6 +11,7 @@ const body_batch = @import("runtime/body_batch.zig");
 const client_uri = @import("runtime/client/uri.zig");
 const connect_datagram = @import("runtime/datagram.zig");
 const connect_datagram_routing = @import("runtime/datagram/routing.zig");
+const connect_datagram_send = @import("runtime/datagram/send.zig");
 const connect_udp_dispatcher_relay =
     @import("runtime/connect_udp_dispatcher_relay.zig");
 const connect_ip_session = @import("runtime/connect_ip_session.zig");
@@ -468,8 +469,8 @@ const ensureConnectDatagramsNegotiated =
     connect_datagram_routing.ensureNegotiated;
 
 const NoConnectProgress = struct {
-    const ErrorSet = error{};
-    fn maintain(_: @This(), _: ?std.Io.Clock.Timestamp) ErrorSet!void {}
+    pub const ErrorSet = error{};
+    pub fn maintain(_: @This(), _: ?std.Io.Clock.Timestamp) ErrorSet!void {}
 };
 
 fn receiveConnectDatagramFromSession(
@@ -6399,6 +6400,13 @@ pub const HandshakeServer = struct {
 };
 
 pub const HandshakeServerSession = struct {
+    const ConnectDatagramSend = connect_datagram_send.Controller(.{
+        .Error = ReceiveTimeoutError,
+        .check_callback = false,
+        .validate = validateConnectDatagramSend,
+        .io = connectionIo,
+        .receive = receiveDetachedRequestProgressWithDeadline,
+    });
     established: quic.handshake.EstablishedConnection,
     /// True while an endpoint dispatcher is the sole UDP receive owner.
     dispatcher_bound: bool = false,
@@ -8234,30 +8242,19 @@ pub const HandshakeServerSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        try self.validateConnectDatagramSend(stream_id, payload);
-        const encoded = try self.connect_datagrams.encode(stream_id, payload);
-        while (true) {
-            // A packet processed while waiting can close/reset the detached
-            // CONNECT stream. Recheck before every retry so congestion relief
-            // cannot race a terminal association into a late send.
-            try self.validateConnectDatagramSend(stream_id, payload);
-            self.established.connection.trySendDatagramWithDeadline(
-                encoded,
-                deadline,
-            ) catch |err| switch (err) {
-                error.CongestionLimited => {
-                    try self.receiveDetachedRequestProgressWithDeadline(
-                        stream_id,
-                        deadline,
-                    );
-                    continue;
-                },
-                else => |other| return other,
-            };
-            return;
-        }
+        return self.sendConnectDatagramWithProgress(stream_id, payload, deadline, NoConnectProgress{});
+    }
+
+    /// Receive application-protocol progress before every bounded send retry.
+    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    pub fn sendConnectDatagramWithProgress(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        progress: anytype,
+    ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        return ConnectDatagramSend.single(self, stream_id, payload, deadline, progress);
     }
 
     pub fn sendConnectDatagramsWithTimeout(
@@ -8291,48 +8288,20 @@ pub const HandshakeServerSession = struct {
         committed_count: *usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        committed_count.* = 0;
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        for (payloads) |payload| {
-            try self.validateConnectDatagramSend(stream_id, payload);
-        }
-        const encoded = try self.connect_datagrams.encodeBatch(
-            stream_id,
-            payloads,
-        );
-        try self.established.connection.validateDatagrams(encoded.datagrams);
-        while (committed_count.* < encoded.datagrams.len) {
-            _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-            try self.validateConnectDatagramSend(
-                stream_id,
-                payloads[committed_count.*],
-            );
-            var batch_committed: usize = 0;
-            self.established.connection.trySendDatagrams(
-                encoded.datagrams[committed_count.*..],
-                &batch_committed,
-            ) catch |err| {
-                committed_count.* += batch_committed;
-                switch (err) {
-                    error.CongestionLimited => {
-                        try self.receiveDetachedRequestProgressWithDeadline(
-                            stream_id,
-                            deadline,
-                        );
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailabilityWithDeadline(deadline);
-                        continue;
-                    },
-                    else => |other| return @errorCast(other),
-                }
-            };
-            if (batch_committed == 0) return error.Unexpected;
-            committed_count.* += batch_committed;
-        }
+        return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, deadline, NoConnectProgress{});
+    }
+
+    /// Receive application-protocol progress before every bounded send retry.
+    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    pub fn sendConnectDatagramsWithProgress(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+        progress: anytype,
+    ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        return ConnectDatagramSend.batch(self, stream_id, payloads, committed_count, deadline, progress);
     }
 
     /// One socket-batch attempt for shared endpoint owners.
@@ -11833,6 +11802,13 @@ test "HTTP/3 response scheduler delay respects caller deadline" {
 }
 
 pub const HandshakeClient = struct {
+    const ConnectDatagramSend = connect_datagram_send.Controller(.{
+        .Error = ReceiveTimeoutError,
+        .check_callback = true,
+        .validate = validateConnectDatagramSend,
+        .io = connectionIo,
+        .receive = receiveDetachedResponseProgressWithDeadline,
+    });
     endpoint: *quic.runtime.Endpoint,
     owns_endpoint: bool,
     /// Set while an endpoint dispatcher is the sole UDP receive owner.
@@ -17499,28 +17475,19 @@ pub const HandshakeClient = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        try self.validateConnectDatagramSend(stream_id, payload);
-        const encoded = try self.connect_datagrams.encode(stream_id, payload);
-        while (true) {
-            try self.validateConnectDatagramSend(stream_id, payload);
-            self.established.connection.trySendDatagramWithDeadline(
-                encoded,
-                deadline,
-            ) catch |err| switch (err) {
-                error.CongestionLimited => {
-                    try self.receiveDetachedResponseProgressWithDeadline(
-                        stream_id,
-                        deadline,
-                    );
-                    continue;
-                },
-                else => |other| return other,
-            };
-            return;
-        }
+        return self.sendConnectDatagramWithProgress(stream_id, payload, deadline, NoConnectProgress{});
+    }
+
+    /// Receive application-protocol progress before every bounded send retry.
+    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    pub fn sendConnectDatagramWithProgress(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        progress: anytype,
+    ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        return ConnectDatagramSend.single(self, stream_id, payload, deadline, progress);
     }
 
     pub fn sendConnectDatagramsWithTimeout(
@@ -17552,49 +17519,20 @@ pub const HandshakeClient = struct {
         committed_count: *usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
-        committed_count.* = 0;
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        for (payloads) |payload| {
-            try self.validateConnectDatagramSend(stream_id, payload);
-        }
-        const encoded = try self.connect_datagrams.encodeBatch(
-            stream_id,
-            payloads,
-        );
-        try self.established.connection.validateDatagrams(encoded.datagrams);
-        while (committed_count.* < encoded.datagrams.len) {
-            _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-            try self.validateConnectDatagramSend(
-                stream_id,
-                payloads[committed_count.*],
-            );
-            var batch_committed: usize = 0;
-            self.established.connection.trySendDatagrams(
-                encoded.datagrams[committed_count.*..],
-                &batch_committed,
-            ) catch |err| {
-                committed_count.* += batch_committed;
-                switch (err) {
-                    error.CongestionLimited => {
-                        try self.receiveDetachedResponseProgressWithDeadline(
-                            stream_id,
-                            deadline,
-                        );
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailabilityWithDeadline(deadline);
-                        continue;
-                    },
-                    else => |other| return other,
-                }
-            };
-            if (batch_committed == 0) return error.Unexpected;
-            committed_count.* += batch_committed;
-        }
+        return self.sendConnectDatagramsWithProgress(stream_id, payloads, committed_count, deadline, NoConnectProgress{});
+    }
+
+    /// Receive application-protocol progress before every bounded send retry.
+    /// The progress owner shares the existing HTTP/3 reader and deadline.
+    pub fn sendConnectDatagramsWithProgress(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+        progress: anytype,
+    ) (@TypeOf(progress).ErrorSet || ReceiveTimeoutError)!void {
+        return ConnectDatagramSend.batch(self, stream_id, payloads, committed_count, deadline, progress);
     }
 
     pub fn trySendConnectDatagrams(

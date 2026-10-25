@@ -66,6 +66,15 @@ across this preflight and socket submission. Protected-UDP tests cover owning
 client/server sessions, both shared endpoint roles, exact zero batch progress,
 event retention, and sibling DATAGRAM/stream continuation.
 
+Bounded DATAGRAM sends also recheck owning Session control after congestion
+progress and while waiting for pacing. HTTP/3's shared send loop invokes the
+application progress owner before each retry, and WebTransport waits through
+its existing CONNECT packet router until pacing or the caller deadline allows
+another attempt. A CLOSE that arrives during either wait stops the unsent
+suffix and retains its event; DRAIN remains advisory. Real-UDP tests cover both
+endpoint roles, shared-client sibling events, pacing wakeups without peer data,
+and a batch with exactly one committed datagram before CLOSE interrupts it.
+
 ## Current direct evidence
 
 Run:

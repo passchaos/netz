@@ -8,6 +8,7 @@ const quic = @import("../../../quic/mod.zig");
 const control_mod = @import("../session_control.zig");
 const progress_mod = @import("progress.zig");
 const lifecycle = @import("../connection_lifecycle.zig");
+const send = @import("datagram/send.zig");
 
 pub const Error = control_mod.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -19,6 +20,11 @@ pub fn prepareSend(control: *control_mod.Control, h3: anytype, registry: *webtra
     try progress_mod.buffered(control, &h3.established.connection);
     try control.ensureOpen();
 }
+
+/// One owner services capsules after every congestion/pacing wait. A CLOSE
+/// stops before another application packet without consuming its event.
+pub const sendWithDeadline = send.single;
+pub const sendManyWithDeadline = send.batch;
 
 pub fn poll(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, stream_id: u62) Error!?http3.runtime.OwnedConnectDatagram {
     var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry };

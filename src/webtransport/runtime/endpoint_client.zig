@@ -207,7 +207,10 @@ pub const Session = struct {
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
         try flow_datagram.prepareSend(&self.control, &client.h3, &self.streams);
-        try client.h3.sendConnectDatagramWithDeadline(
+        try flow_datagram.sendWithDeadline(
+            &self.control,
+            &client.h3,
+            &self.streams,
             self.session_id.value,
             payload,
             deadline,

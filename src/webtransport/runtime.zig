@@ -5617,7 +5617,10 @@ pub const AcceptedHandshakeSession = struct {
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        try self.h3.sendConnectDatagramWithDeadline(
+        try flow_datagram.sendWithDeadline(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
             payload,
             deadline,
@@ -5668,7 +5671,10 @@ pub const AcceptedHandshakeSession = struct {
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        return self.h3.sendConnectDatagramsWithDeadline(
+        return flow_datagram.sendManyWithDeadline(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
             payloads,
             committed_count,
@@ -9044,7 +9050,10 @@ pub const HandshakeClientSession = struct {
                 deadline,
             )
         else
-            self.h3.sendConnectDatagramWithDeadline(
+            flow_datagram.sendWithDeadline(
+                &self.control,
+                &self.h3,
+                &self.streams,
                 self.session_id.value,
                 payload,
                 deadline,
@@ -9109,7 +9118,10 @@ pub const HandshakeClientSession = struct {
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
-        return self.h3.sendConnectDatagramsWithDeadline(
+        return flow_datagram.sendManyWithDeadline(
+            &self.control,
+            &self.h3,
+            &self.streams,
             self.session_id.value,
             payloads,
             committed_count,
