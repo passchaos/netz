@@ -13,6 +13,8 @@ const runtime = @import("../runtime.zig");
 const codec = @import("../persistence/codec.zig");
 const commit_log = @import("../persistence/commit_log.zig");
 const owned_properties = @import("../owned_properties.zig");
+const state_validation = @import("outbound_state.zig");
+const validateState = state_validation.validate;
 
 const magic = "netz-mqtt-outbound-bridge\x00";
 const version: u32 = 1;
@@ -123,7 +125,7 @@ pub const OwnedTransaction = struct {
 
 pub const Error = commit_log.Error || reconnect.Error ||
     reconnect.SessionSnapshotError ||
-    codec.Error || @import("local_source.zig").Error || error{
+    codec.Error || @import("local_source.zig").Error || state_validation.Error || error{
     CoordinatorIdentityMismatch,
     CorruptCoordinatorSnapshot,
     OwnedPropertyLimitExceeded,
@@ -153,7 +155,7 @@ pub const Store = struct {
         target: *reconnect.Client,
     ) Error!Store {
         try validateState(
-            null,
+            @as(?Transaction, null),
             0,
             0,
             source,
@@ -201,6 +203,23 @@ pub const Store = struct {
         source: anytype,
         target: *reconnect.Client,
     ) Error!Store {
+        return restoreAt(allocator, io, dir, sub_path, options, identity, source, target, std.Io.Clock.awake.now(io), std.Io.Clock.real.now(io));
+    }
+
+    /// Same restore operation with explicit clocks for deterministic downtime
+    /// accounting. No Network Connection is opened by either restore form.
+    pub fn restoreAt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        options: Options,
+        identity: Identity,
+        source: anytype,
+        target: *reconnect.Client,
+        now: std.Io.Timestamp,
+        realtime: std.Io.Timestamp,
+    ) Error!Store {
         var log = try commit_log.Log.open(
             allocator,
             io,
@@ -213,8 +232,16 @@ pub const Store = struct {
         defer allocator.free(latest);
         var decoded = try decode(allocator, latest, identity);
         defer decoded.deinit(allocator);
-        const now = std.Io.Clock.awake.now(io);
-        const realtime = std.Io.Clock.real.now(io);
+        // Check the original marker/transaction relationship before Session
+        // or Message Expiry can prune it. Corruption must still be rejected
+        // even when all affected state would otherwise expire during restore.
+        const retention = try state_validation.validateCheckpoint(&decoded, source, target, now, realtime);
+        if (decoded.transaction) |transaction| {
+            if (transaction.phase == .target_await_pubrec or transaction.phase == .target_await_pubcomp) {
+                if (retention.source_expired) return error.SourceSessionLost;
+                if (retention.target_expired) return error.TargetSessionLost;
+            }
+        }
         try source.restoreSessionSnapshotAt(
             decoded.source_snapshot,
             now,
@@ -225,7 +252,19 @@ pub const Store = struct {
             now,
             realtime,
         );
-        try validateDecoded(&decoded, source, target);
+        const retire_transaction = decoded.transaction != null and retention.source_expired;
+        if (retire_transaction) {
+            // The target outcome is terminal and its source Session is gone.
+            // Persist the retirement before returning a reusable coordinator.
+            decoded.transaction.?.deinit(allocator);
+            decoded.transaction = null;
+        }
+        try validateState(if (decoded.transaction) |*transaction| transaction.view() else @as(?Transaction, null), decoded.source_session_epoch, decoded.target_session_epoch, source, target);
+        if (retire_transaction) {
+            const encoded = try encode(allocator, identity, decoded.source_session_epoch, decoded.target_session_epoch, null, source, target, now, realtime);
+            defer allocator.free(encoded);
+            _ = try log.append(encoded);
+        }
         const transaction = decoded.transaction;
         decoded.transaction = null;
         return .{
@@ -301,81 +340,6 @@ pub const Store = struct {
         return sequence;
     }
 };
-
-fn validateDecoded(
-    decoded: *const Decoded,
-    source: anytype,
-    target: *reconnect.Client,
-) Error!void {
-    return validateState(
-        if (decoded.transaction) |*transaction| transaction.view() else null,
-        decoded.source_session_epoch,
-        decoded.target_session_epoch,
-        source,
-        target,
-    );
-}
-
-fn validateState(
-    maybe_transaction: ?Transaction,
-    source_session_epoch: u64,
-    target_session_epoch: u64,
-    source: anytype,
-    target: *reconnect.Client,
-) Error!void {
-    const transaction = maybe_transaction orelse {
-        if ((try source.outgoingStats()).incoming_qos2_count != 0 or
-            (try target.outgoingStats()).inflight_count != 0)
-        {
-            return error.CorruptCoordinatorSnapshot;
-        }
-        return;
-    };
-    if (transaction.source_session_epoch != source_session_epoch or
-        transaction.target_session_epoch != target_session_epoch)
-    {
-        return error.CorruptCoordinatorSnapshot;
-    }
-    const target_state = try target.outgoingQoSState(
-        transaction.target_packet_id,
-    );
-    const target_stats = try target.outgoingStats();
-    switch (transaction.phase) {
-        .target_await_pubrec => if (target_state != .await_pubrec or
-            target_stats.inflight_count != 1)
-        {
-            return error.CorruptCoordinatorSnapshot;
-        },
-        .target_await_pubcomp => if (target_state != .await_pubcomp or
-            target_stats.inflight_count != 1)
-        {
-            return error.CorruptCoordinatorSnapshot;
-        },
-        .target_complete => if (target_state != null or
-            target_stats.inflight_count != 0 or
-            transaction.target_reason_code >= 0x80)
-        {
-            return error.CorruptCoordinatorSnapshot;
-        },
-        .target_rejected => if (target_state != null or
-            target_stats.inflight_count != 0 or
-            transaction.target_reason_code < 0x80)
-        {
-            return error.CorruptCoordinatorSnapshot;
-        },
-    }
-    const source_state = try source.incomingQoS2State(
-        transaction.source_packet_id,
-    );
-    if (source_state != .await_pubrel and
-        source_state != .release_pending)
-    {
-        return error.CorruptCoordinatorSnapshot;
-    }
-    if ((try source.outgoingStats()).incoming_qos2_count != 1) {
-        return error.CorruptCoordinatorSnapshot;
-    }
-}
 
 const Decoded = struct {
     source_session_epoch: u64,

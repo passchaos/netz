@@ -120,16 +120,25 @@ pub fn decode(
 /// Read every supported version. Reconnect subscription limits are independent of the
 /// QoS Store's subscription capacity because desired filters live in Client.
 pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: []const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
-    return decodeState(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, maximum_subscriptions);
+    return decodeState(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, maximum_subscriptions, .restore);
 }
 
 /// A fresh MQTT 5 client requesting server assignment can learn its durable
 /// identity from a fully validated image. Named clients use the bound decoder.
 pub fn decodeAssignedClient(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
-    return decodeState(allocator, bytes, store_options, .v5, null, monotonic_now, realtime_now, maximum_subscriptions);
+    return decodeState(allocator, bytes, store_options, .v5, null, monotonic_now, realtime_now, maximum_subscriptions, .restore);
 }
 
-fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: ?[]const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
+/// Decode checkpoint QoS state for cross-record validation before expiry can
+/// remove a marker. The returned Store must never be installed or replayed;
+/// retention_state still records expiry at the supplied restore time.
+pub fn decodeCheckpoint(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: []const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
+    return decodeState(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, maximum_subscriptions, .checkpoint);
+}
+
+const DecodeMode = enum { restore, checkpoint };
+
+fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: ?[]const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize, mode: DecodeMode) Error!Restored {
     if (bytes.len > max_snapshot_bytes) return error.SnapshotLimitExceeded;
     const minimum_len = magic.len + 5 * @sizeOf(u32) +
         @sizeOf(i64) + @sizeOf(u8);
@@ -175,7 +184,7 @@ fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: s
     try store.restoreSnapshot(
         &cursor,
         monotonic_now,
-        persistence.elapsedDowntimeNs(
+        if (mode == .checkpoint) 0 else persistence.elapsedDowntimeNs(
             saved_realtime_ns,
             clampI96ToI64(realtime_now.nanoseconds),
         ),
@@ -199,7 +208,7 @@ fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: s
     else
         null;
     try cursor.finish();
-    if (lifetime) |value| if (value.expired(monotonic_now)) {
+    if (lifetime) |value| if (mode == .restore and value.expired(monotonic_now)) {
         // Validate the entire image before dropping both QoS directions. The
         // desired filters outlive Session expiry and need fresh replay.
         store.discardHandle(handle) catch unreachable;

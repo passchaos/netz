@@ -3979,6 +3979,7 @@ test {
     _ = @import("reconnect/retention_tests.zig");
     _ = @import("reconnect/retention_codec_tests.zig");
     _ = @import("reconnect/retention_snapshot_tests.zig");
+    _ = @import("reconnect/snapshot_checkpoint_tests.zig");
     _ = @import("reconnect/retention_lifecycle_tests.zig");
     _ = @import("reconnect/retention_attempt_tests.zig");
     _ = @import("reconnect/assigned_identity_tests.zig");

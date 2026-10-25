@@ -20,6 +20,8 @@ class Case:
     target_protocol: int
     qos: int
     retain: bool
+    source_session_expiry: int = 60
+    target_session_expiry: int = 60
 
     @property
     def source_label(self) -> str:
@@ -186,6 +188,10 @@ def launch_bridge(
     coordinator_mode: str | None = None,
     *, session_present: tuple[bool, bool] | None = None,
 ) -> ManagedProcess:
+    custom_expiry = (case.source_session_expiry, case.target_session_expiry) != (60, 60)
+    if custom_expiry and session_present is None:
+        resumed = coordinator_mode == "restore"
+        session_present = (resumed, resumed)
     if session_present is not None and coordinator_mode is None:
         raise ValueError("explicit Session flags require a coordinator")
     log = directory / (
@@ -202,6 +208,8 @@ def launch_bridge(
         command.extend((str(directory), coordinator_mode))
     if session_present is not None:
         command.extend(str(int(value)) for value in session_present)
+    if custom_expiry:
+        command.extend((str(case.source_session_expiry), str(case.target_session_expiry)))
     return ManagedProcess(
         "bridge",
         subprocess.Popen(

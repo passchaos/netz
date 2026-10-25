@@ -24,4 +24,6 @@ test {
     _ = @import("session_resume_tests.zig");
     _ = @import("session_resume_qos1_tests.zig");
     _ = @import("bootstrap_tests.zig");
+    _ = @import("outbound_retention_tests.zig");
+    _ = @import("outbound_terminal_tests.zig");
 }

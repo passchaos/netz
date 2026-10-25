@@ -806,6 +806,22 @@ PUBREC is journaled and propagated as the source PUBREC reason without sending
 target PUBREL. If an active transaction reconnects with Session Present false
 on either leg, the bridge returns `SourceSessionLost` or `TargetSessionLost`
 instead of creating a second target Application Message.
+Coordinator recovery validates the saved transaction against both checkpoint
+QoS Stores before applying wall-clock Session expiry. A valid pending
+transaction whose source or target Session expired reports `SourceSessionLost`
+or `TargetSessionLost` before opening a Network Connection; expired state does
+not disguise a malformed transaction binding. Once the target's success or
+rejection is durable, target Session loss no longer blocks upstream completion
+and cannot cause a second target publication. A terminal transaction whose
+source Session expired is retired in the journal before restore succeeds;
+an injected retirement fsync failure propagates without reporting success,
+and a fresh owner can retry without replaying the completed target.
+Clock-controlled regressions cover both pending phases, both terminal results,
+expiry on either or both endpoints, repeat restoration, and a valid-CRC record
+with a mismatched source Packet Identifier. Real TCP verifies source completion
+after target expiry; the two-Mosquitto gate independently expires one-second
+source and target Sessions after a pre-wire crash and requires the corresponding
+ownership-loss error without any target reconnect or replay.
 
 A bidirectional configured bridge uses one remote Session, with local-source
 exclusion and MQTT 5 No Local or mandatory MQTT 3.1.1 private-bridge semantics

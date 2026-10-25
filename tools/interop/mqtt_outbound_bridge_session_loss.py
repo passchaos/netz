@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
 
 from mqtt_outbound_bridge_harness import (
     Case,
@@ -30,12 +31,18 @@ def run_session_loss_cases(
     _run_session_loss(
         bridge_executable, mosquitto, mqtt_packets, lost_side="target"
     )
+    for side in ("source", "target"):
+        _run_session_loss(bridge_executable, mosquitto, mqtt_packets,
+                          lost_side=side, expire=True)
 
 
 def _run_session_loss(
-    bridge_executable: Path, mosquitto: Path, mqtt_packets, *, lost_side: str
+    bridge_executable: Path, mosquitto: Path, mqtt_packets, *, lost_side: str,
+    expire: bool = False,
 ) -> None:
-    case = Case(f"qos2-{lost_side}-session-loss", 5, 5, 2, False)
+    case = Case(f"qos2-{lost_side}-session-{'expiry' if expire else 'loss'}", 5, 5, 2, False,
+                source_session_expiry=1 if expire and lost_side == "source" else 60,
+                target_session_expiry=1 if expire and lost_side == "target" else 60)
     source_port, target_port, proxy_port, first_control_port, second_control_port = (
         distinct_ports(5)
     )
@@ -96,7 +103,10 @@ def _run_session_loss(
             first_bridge.crash()
             proxy.wait(proxy.ready_for_recovery, "first bridge closure")
 
-            if lost_side == "source":
+            if expire:
+                time.sleep(1.2)
+                restarted = target
+            elif lost_side == "source":
                 source.stop()
                 restarted = start_broker(
                     mosquitto, source_port, directory, "source-restarted"
@@ -106,7 +116,8 @@ def _run_session_loss(
                 restarted = start_broker(
                     mosquitto, target_port, directory, "target-restarted"
                 )
-            processes.append(restarted)
+            if not expire:
+                processes.append(restarted)
 
             restored_bridge = launch_bridge(
                 bridge_executable, source_port, proxy_port,
@@ -120,10 +131,10 @@ def _run_session_loss(
             )
             restored_bridge.wait_failure(expected)
 
-            if lost_side == "source":
+            if lost_side == "source" or expire:
                 if proxy.accepted_connection_count != 1:
                     raise AssertionError(
-                        "source-first recovery connected target after source loss"
+                        "recovery connected target after known Session loss"
                     )
             else:
                 proxy.wait(proxy.recovery_connected, "fresh target Session")

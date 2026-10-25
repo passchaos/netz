@@ -845,6 +845,7 @@ def main() -> None:
         "durable QoS2 PUBCOMP-loss process restart without target republish, "
         "durable source-PUBCOMP-loss restart after journal clear, "
         "source/target Session-loss fail-closed recovery, "
+        "source/target Session-expiry journal recovery before network replay, "
         "negative PUBREC propagation without target delivery, "
         "delayed bridge ACK, topic remap "
         + RUNTIME

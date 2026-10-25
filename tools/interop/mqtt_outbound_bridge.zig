@@ -3,14 +3,9 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const session_expiry = [_]netz.mqtt.Property{.{ .four_byte = .{
-    .id = .session_expiry_interval,
-    .value = 60,
-} }};
-
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 8 and args.len != 10 and args.len != 12) return error.InvalidArguments;
+    if (args.len != 8 and args.len != 10 and args.len != 12 and args.len != 14) return error.InvalidArguments;
     const source_port = try parsePort(args[1]);
     const target_port = try parsePort(args[2]);
     const control_port = try parsePort(args[3]);
@@ -18,6 +13,10 @@ pub fn main(init: std.process.Init) !void {
     const target_protocol = try parseProtocol(args[5]);
     const qos = try parseQos(args[6]);
     const case_id = args[7];
+    const source_lifetime = if (args.len == 14) try std.fmt.parseInt(u32, args[12], 10) else 60;
+    const target_lifetime = if (args.len == 14) try std.fmt.parseInt(u32, args[13], 10) else 60;
+    const source_properties = [_]netz.mqtt.Property{.{ .four_byte = .{ .id = .session_expiry_interval, .value = source_lifetime } }};
+    const target_properties = [_]netz.mqtt.Property{.{ .four_byte = .{ .id = .session_expiry_interval, .value = target_lifetime } }};
     if (case_id.len == 0) return error.InvalidArguments;
     if ((qos == .exactly_once) != (args.len >= 10)) {
         return error.InvalidArguments;
@@ -65,14 +64,14 @@ pub fn main(init: std.process.Init) !void {
                 .client_id = source_client_id,
                 .clean_start = false,
                 .keep_alive_seconds = 2,
-                .properties = propertiesFor(source_protocol),
+                .properties = if (source_protocol == .v5) &source_properties else &.{},
             },
             .target_connect = .{
                 .protocol = target_protocol,
                 .client_id = target_client_id,
                 .clean_start = false,
                 .keep_alive_seconds = 2,
-                .properties = propertiesFor(target_protocol),
+                .properties = if (target_protocol == .v5) &target_properties else &.{},
             },
             .source_reconnect_policy = .{
                 .initial_delay = .fromMilliseconds(10),
@@ -111,8 +110,8 @@ pub fn main(init: std.process.Init) !void {
     const connected = try bridge.connect();
     const expect_resume = coordinator_dir != null and
         coordinator_mode == .restore;
-    const expect_source_resume = if (args.len == 12) try parseSessionPresent(args[10]) else expect_resume;
-    const expect_target_resume = if (args.len == 12) try parseSessionPresent(args[11]) else expect_resume;
+    const expect_source_resume = if (args.len >= 12) try parseSessionPresent(args[10]) else expect_resume;
+    const expect_target_resume = if (args.len >= 12) try parseSessionPresent(args[11]) else expect_resume;
     if (connected.source_session_present != expect_source_resume or
         connected.target_session_present != expect_target_resume)
     {
@@ -200,10 +199,4 @@ fn parseSessionPresent(value: []const u8) !bool {
     if (std.mem.eql(u8, value, "1")) return true;
     if (std.mem.eql(u8, value, "0")) return false;
     return error.InvalidArguments;
-}
-
-fn propertiesFor(
-    protocol: netz.mqtt.ProtocolVersion,
-) []const netz.mqtt.Property {
-    return if (protocol == .v5) &session_expiry else &.{};
 }

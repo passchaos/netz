@@ -1526,6 +1526,16 @@ pub fn Engine(comptime Source: type) type {
                 {
                     return error.TargetSessionLost;
                 }
+                if ((transaction.phase == .target_complete or transaction.phase == .target_rejected) and
+                    transaction.target_session_epoch != self.target_session_epoch)
+                {
+                    // The durable result no longer depends on the old target
+                    // Session. Rebind that result to its new epoch before any
+                    // source acknowledgement or subsequent coordinator commit.
+                    var completed = transaction;
+                    completed.target_session_epoch = self.target_session_epoch;
+                    try self.commitDurable(completed);
+                }
             }
             try self.cleanupTargetSubscriptions();
             if (self.inbound_rules.values.len != 0) {
