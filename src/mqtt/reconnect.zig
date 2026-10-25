@@ -28,6 +28,9 @@ const net = std.Io.net;
 
 test {
     _ = @import("reconnect/keep_alive_write_tests.zig");
+    _ = @import("reconnect/event_write_tests.zig");
+    _ = @import("reconnect/qos_write_tests.zig");
+    _ = @import("reconnect/auth_write_tests.zig");
 }
 
 pub const CommandQueue = command_queue.CommandQueue;
@@ -1226,6 +1229,9 @@ pub const Client = struct {
     subscription_replay_index: ?usize = null,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
+    // At most the one PUBLISH consumed by a failed automatic ACK write. Keep
+    // its Application Message even when the peer may already have seen PUBREC.
+    pending_publish: ?runtime.OwnedPublish = null,
     tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
     tls13_session_ticket: ?tls_stream.Tls13SessionTicket = null,
     last_connect_refusal: ?runtime.OwnedConnAck = null,
@@ -1445,6 +1451,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
+        if (self.pending_publish) |*value| value.deinit(self.allocator);
         self.clearLastConnectRefusal();
         if (self.tls12_session_ticket) |*ticket| ticket.deinit();
         if (self.tls13_session_ticket) |*ticket| ticket.deinit();
@@ -2014,6 +2021,7 @@ pub const Client = struct {
         monotonic_now: std.Io.Timestamp,
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
+        if (self.pending_publish != null) return error.SnapshotBusy;
         if (self.options.value.clean_start or
             (!configuredPersistentSession(self.options.value) and self.retention.interval == 0))
         {
@@ -2151,7 +2159,7 @@ pub const Client = struct {
     fn validateSessionSnapshotRestore(
         self: *Client,
     ) SessionSnapshotError!void {
-        if (self.connection_state != null) return error.SnapshotBusy;
+        if (self.connection_state != null or self.pending_publish != null) return error.SnapshotBusy;
         if (self.options.value.clean_start) {
             return error.SessionPersistenceDisabled;
         }
@@ -2890,6 +2898,9 @@ pub const Client = struct {
     /// `reconnect_after_transport_error` is false. The method is the sole
     /// reader and performs all QoS acknowledgements, keep-alive probes, and
     /// enabled retryable reconnects itself.
+    /// An interrupted automatic PUBLISH reply retains that message for the
+    /// next poll, ahead of reconnects or later packets. QoS 2 retries continue
+    /// the existing handshake without a second application delivery.
     /// Applications must not mix it concurrently with typed reads or
     /// `completeNextPublish`.
     pub fn pollWithOptions(
@@ -2939,6 +2950,11 @@ pub const Client = struct {
 
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
+            if (self.pending_publish) |publish_value| {
+                if (std.Io.Clock.awake.now(self.io).nanoseconds >= call_deadline.nanoseconds) return null;
+                self.pending_publish = null;
+                return .{ .publish = publish_value };
+            }
             if (self.reconnect_requested.swap(false, .acq_rel)) {
                 self.disconnectTransport();
             }
@@ -2996,12 +3012,16 @@ pub const Client = struct {
             };
             var packet_owned = true;
             defer if (packet_owned) packet_event.deinit(self.allocator);
-            const client_event = self.applyPacketEvent(&packet_event) catch |err| {
+            const client_event = self.applyPacketEvent(&packet_event, call_deadline.withClock(.awake)) catch |err| {
+                // The automatic ACK writer may have transferred this complete
+                // PUBLISH to the bounded delivery slot before failing. Its
+                // resolved Topic Name also outlives the retired transport.
+                if (self.pending_publish != null) packet_owned = false;
                 // A complete packet has already been consumed. Peer protocol
                 // faults receive an MQTT 5 diagnostic; local state/allocation
-                // and authentication callback failures close silently because
-                // this API has no token with which to replay that packet. A
-                // valid negative publish acknowledgement is the sole terminal
+                // and authentication callback failures close silently. Only
+                // failed automatic PUBLISH replies retain application data.
+                // A valid negative publish acknowledgement is the sole terminal
                 // application result and leaves the connection usable.
                 const valid_publish_refusal = err == error.PublishRefused and
                     (packet_event == .puback or
@@ -3018,6 +3038,7 @@ pub const Client = struct {
                 {
                     self.disconnectTransport();
                 }
+                if (err == error.Timeout and std.Io.Clock.awake.now(self.io).nanoseconds >= call_deadline.nanoseconds) return null;
                 return err;
             };
             if (client_event) |event| {
@@ -3413,221 +3434,18 @@ pub const Client = struct {
         return subscription_replay.run(Error, self, deadline);
     }
 
-    fn applyPacketEvent(
-        self: *Client,
-        packet_event: *runtime.ClientPacketEvent,
-    ) Error!?ClientEvent {
-        const active = self.connection() orelse
-            return error.ConnectionUnavailable;
-        return switch (packet_event.*) {
-            .publish => |owned| blk: {
-                if (owned.publish.packet_id) |packet_id| {
-                    switch (owned.publish.qos) {
-                        .at_most_once => unreachable,
-                        .at_least_once => if (!self.client_options.manual_acknowledgements) {
-                            try active.writePubAck(packet_id, 0);
-                        },
-                        .exactly_once => {
-                            if (self.client_options.manual_acknowledgements) {
-                                // Once the application has accepted a QoS 2
-                                // message, retransmitted PUBLISH packets belong
-                                // to the existing handshake. Re-emit PUBREC and
-                                // suppress a second application delivery.
-                                if (try self.outgoing.containsIncomingQoS2(
-                                    self.outgoing_handle,
-                                    packet_id,
-                                )) {
-                                    const pubrec_may_be_visible =
-                                        (try self.outgoing
-                                            .incomingQoS2PubRecMayBeVisible(
-                                            self.outgoing_handle,
-                                            packet_id,
-                                        )).?;
-                                    if (pubrec_may_be_visible and
-                                        !self.client_options
-                                            .surface_incoming_qos2_retransmissions)
-                                    {
-                                        try active.writePubRec(packet_id, 0);
-                                        self.noteControlSent();
-                                        return null;
-                                    }
-                                }
-                            } else {
-                                const duplicate =
-                                    try self.outgoing.recordIncomingQoS2(
-                                        self.outgoing_handle,
-                                        packet_id,
-                                    );
-                                try active.writePubRec(packet_id, 0);
-                                self.noteControlSent();
-                                if (duplicate) {
-                                    return null;
-                                }
-                            }
-                        },
-                    }
-                    if (!self.client_options.manual_acknowledgements) {
-                        self.noteControlSent();
-                    }
-                }
-                break :blk .{ .publish = owned };
-            },
-            .puback => |owned| blk: {
-                _ = self.applyOutgoingAck(owned.ack) catch |err| {
-                    // The Session store removes a terminal ACK before
-                    // surfacing its rejection. Notify observers while the ACK
-                    // properties are still alive, then preserve the error.
-                    if (err == error.PublishRefused) {
-                        self.finishPublishDelivery(.{
-                            .packet_id = owned.ack.packet_id,
-                            .qos = .at_least_once,
-                            .reason_code = owned.ack.reason_code,
-                            .properties = owned.ack.properties,
-                        });
-                    }
-                    return err;
-                };
-                self.finishPublishDelivery(.{
-                    .packet_id = owned.ack.packet_id,
-                    .qos = .at_least_once,
-                    .reason_code = owned.ack.reason_code,
-                    .properties = owned.ack.properties,
-                });
-                break :blk .{ .puback = owned };
-            },
-            .pubrec => |owned| blk: {
-                const action = try self.applyOutgoingAck(owned.ack);
-                if (action == .send_pubrel and
-                    self.client_options.outbound_qos2_release_policy ==
-                        .automatic)
-                {
-                    try self.replayPending();
-                    self.noteControlSent();
-                } else if (action == .completed) {
-                    // A negative PUBREC terminates the QoS 2 transaction and
-                    // is its protocol-level delivery result.
-                    self.finishPublishDelivery(.{
-                        .packet_id = owned.ack.packet_id,
-                        .qos = .exactly_once,
-                        .reason_code = owned.ack.reason_code,
-                        .properties = owned.ack.properties,
-                    });
-                }
-                break :blk .{ .pubrec = owned };
-            },
-            .pubrel => |owned| blk: {
-                const packet_id = owned.ack.packet_id;
-                const incoming_state = try self.outgoing.incomingQoS2State(
-                    self.outgoing_handle,
-                    packet_id,
-                );
-                if (self.client_options.inbound_qos2_release_policy ==
-                    .deferred)
-                {
-                    if (incoming_state != null) {
-                        try self.outgoing.markIncomingQoS2ReleasePending(
-                            self.outgoing_handle,
-                            packet_id,
-                        );
-                        // The application owns the release boundary. In
-                        // particular, do not clear durable state or expose
-                        // PUBCOMP until it explicitly completes the
-                        // transaction.
-                        break :blk .{ .pubrel = owned };
-                    }
-                    if (active.hasPendingIncomingPublish(
-                        packet_id,
-                        .exactly_once,
-                    )) {
-                        // A PUBLISH that has not reached PUBREC cannot legally
-                        // advance to PUBREL. Do not let an early packet erase
-                        // the receive slot or masquerade as a lost PUBCOMP.
-                        return error.UnexpectedPacket;
-                    }
-                    // A lost PUBCOMP makes the peer repeat PUBREL after local
-                    // completion. Re-acknowledge it, but never manufacture a
-                    // second application release event without a marker.
-                    try active.writePubComp(packet_id, 0);
-                    self.noteControlSent();
-                    return null;
-                }
-                if (incoming_state != null) {
-                    // Session Present can resume a transaction whose receive
-                    // bit lived on the old socket. Recreate only that local
-                    // accounting before the normal PUBCOMP writer clears it.
-                    try active.resumeIncomingQoS2(packet_id);
-                    try self.outgoing.completeIncomingQoS2(
-                        self.outgoing_handle,
-                        packet_id,
-                    );
-                }
-                // Unknown/repeated PUBREL is idempotently acknowledged: the
-                // prior PUBCOMP may have been lost after durable completion.
-                try active.writePubComp(packet_id, 0);
-                self.noteControlSent();
-                break :blk .{ .pubrel = owned };
-            },
-            .pubcomp => |owned| blk: {
-                _ = self.applyOutgoingAck(owned.ack) catch |err| {
-                    if (err == error.PublishRefused) {
-                        self.finishPublishDelivery(.{
-                            .packet_id = owned.ack.packet_id,
-                            .qos = .exactly_once,
-                            .reason_code = owned.ack.reason_code,
-                            .properties = owned.ack.properties,
-                        });
-                    }
-                    return err;
-                };
-                self.finishPublishDelivery(.{
-                    .packet_id = owned.ack.packet_id,
-                    .qos = .exactly_once,
-                    .reason_code = owned.ack.reason_code,
-                    .properties = owned.ack.properties,
-                });
-                break :blk .{ .pubcomp = owned };
-            },
-            .pingresp => |*packet| blk: {
-                if (self.ping_response_deadline == null) {
-                    return error.UnexpectedPacket;
-                }
-                self.ping_response_deadline = null;
-                packet.deinit(self.allocator);
-                break :blk .{ .pingresp = {} };
-            },
-            .disconnect => |owned| blk: {
-                self.disconnectTransport();
-                break :blk .{ .disconnect = owned };
-            },
-            .auth => |owned| blk: {
-                const complete = active.applyAuthenticationEvent(
-                    owned.auth,
-                ) catch |err| {
-                    // The runtime has already attempted the required protocol
-                    // diagnostic for authentication state violations.
-                    self.disconnectTransport();
-                    return err;
-                };
-                if (!complete) {
-                    const handler = self.options.value.authentication orelse
-                        return error.AuthenticationNotConfigured;
-                    const response = try handler.respond(
-                        handler.context,
-                        owned.auth,
-                    );
-                    active.continueReauthenticationWithProperties(
-                        0x18,
-                        response,
-                    ) catch |err| {
-                        self.retireUnusableConnection();
-                        return err;
-                    };
-                    self.noteControlSent();
-                }
-                break :blk .{ .auth = owned };
-            },
-        };
-    }
+    const PacketEvents = @import("reconnect/packet_events.zig").Controller(struct {
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const EventType = ClientEvent;
+        pub const applyOutgoingAck = Client.applyOutgoingAck;
+        pub const finishDelivery = Client.finishPublishDelivery;
+        pub const noteControlSent = Client.noteControlSent;
+        pub const replayPending = Client.replayPendingUntil;
+        pub const retireUnusableConnection = Client.retireUnusableConnection;
+    });
+
+    const applyPacketEvent = PacketEvents.apply;
 
     fn finishPublishDelivery(
         self: *Client,

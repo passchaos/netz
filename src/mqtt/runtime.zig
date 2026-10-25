@@ -4873,6 +4873,10 @@ pub const Connection = struct {
         self.completeIncomingPublish(.puback, packet_id);
     }
 
+    pub fn writePubAckWithDeadline(self: *Connection, packet_id: u16, reason_code: u8, deadline: std.Io.Clock.Timestamp) Error!void {
+        return self.writeIncomingAckWithDeadline(.puback, packet_id, reason_code, deadline);
+    }
+
     /// Whether an inbound QoS PUBLISH with this Packet Identifier is awaiting
     /// its first acknowledgement on this Network Connection. Reconnect clients
     /// use this to reject stale manual-ACK requests without exposing the
@@ -4943,6 +4947,10 @@ pub const Connection = struct {
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacketNoProperties(.pubrec, packet_id, reason_code);
         self.completeIncomingPubRec(packet_id, reason_code);
+    }
+
+    pub fn writePubRecWithDeadline(self: *Connection, packet_id: u16, reason_code: u8, deadline: std.Io.Clock.Timestamp) Error!void {
+        return self.writeIncomingAckWithDeadline(.pubrec, packet_id, reason_code, deadline);
     }
 
     pub fn readPubRec(self: *Connection) Error!OwnedAck {
@@ -5025,6 +5033,19 @@ pub const Connection = struct {
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacketNoProperties(.pubcomp, packet_id, reason_code);
         self.completeIncomingPublish(.pubcomp, packet_id);
+    }
+
+    pub fn writePubCompWithDeadline(self: *Connection, packet_id: u16, reason_code: u8, deadline: std.Io.Clock.Timestamp) Error!void {
+        return self.writeIncomingAckWithDeadline(.pubcomp, packet_id, reason_code, deadline);
+    }
+
+    /// Receive credit changes only after the complete acknowledgement write.
+    fn writeIncomingAckWithDeadline(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
+        const bytes = try mqtt.AckPacket.writeNoPropertiesInto(&encoded, self.protocol, packet_type, packet_id, reason_code);
+        try self.writeGeneratedPacketWithDeadline(bytes, packet_type, deadline);
+        if (packet_type == .pubrec) self.completeIncomingPubRec(packet_id, reason_code) else self.completeIncomingPublish(packet_type, packet_id);
     }
 
     pub fn readPubComp(self: *Connection) Error!OwnedAck {
@@ -5759,6 +5780,16 @@ pub const Connection = struct {
         reason_code: u8,
         properties: []const mqtt.Property,
     ) Error!void {
+        return self.continueReauthenticationUntil(reason_code, properties, null);
+    }
+
+    /// Continue with a complete AUTH property set under one awake-clock budget.
+    pub fn continueReauthenticationWithDeadline(self: *Connection, reason_code: u8, properties: []const mqtt.Property, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return self.continueReauthenticationUntil(reason_code, properties, deadline);
+    }
+
+    fn continueReauthenticationUntil(self: *Connection, reason_code: u8, properties: []const mqtt.Property, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.authentication.phase != .reauthenticating) {
             return error.InvalidAuthenticationState;
         }
@@ -5766,7 +5797,7 @@ pub const Connection = struct {
             return error.InvalidAuthenticationState;
         }
         try self.authentication.validatePeerProperties(properties);
-        try self.writeAuth(reason_code, properties);
+        try self.writeAuthMaybeBefore(reason_code, properties, deadline);
         if (reason_code == 0) {
             try self.authentication.finishReauthentication();
         }
@@ -11590,6 +11621,7 @@ test {
     _ = @import("session/identifier_tests.zig");
     _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
+    _ = @import("runtime/acknowledgement/output_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
     _ = @import("runtime/acknowledgement/control/tests.zig");
     _ = @import("runtime/acknowledgement/control/exchange_tests.zig");

@@ -6,6 +6,8 @@ pub const BlockedWrite = struct {
     delegate: std.Io,
     delay: std.Io.Duration = .fromMilliseconds(300),
     packet_type: ?mqtt.PacketType = null,
+    /// Model an ambiguous failure after the entire packet reached the peer.
+    write_before_delay: bool = false,
     failure: ?std.Io.net.Stream.Writer.Error = null,
     armed: std.atomic.Value(bool) = .init(false),
     entered: std.atomic.Value(bool) = .init(false),
@@ -19,11 +21,13 @@ pub const BlockedWrite = struct {
             (header.len != 0 and header[0] >> 4 == @intFromEnum(self.packet_type.?))))
         {
             self.entered.store(true, .release);
+            const written = if (self.write_before_delay) try self.delegate.vtable.netWrite(userdata, handle, header, data, splat) else null;
             if (self.failure) |err| return err;
             std.Io.sleep(self.delegate, self.delay, .awake) catch |err| {
                 if (err == error.Canceled) self.canceled.store(true, .release);
                 return err;
             };
+            if (written) |count| return count;
         }
         return self.delegate.vtable.netWrite(userdata, handle, header, data, splat);
     }

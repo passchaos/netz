@@ -9,6 +9,26 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Reconnect polling now applies the caller's original deadline to automatic
+PUBACK/PUBREC/PUBCOMP output, outbound PUBREL replay, and authentication callback
+responses. An interrupted first PUBLISH acknowledgement retains one owned
+Application Message for the next poll, before another connection attempt or
+later wire event; known QoS 2 retransmissions never refill that delivery slot.
+The pending message also retains alias-resolved names after transport teardown.
+Session snapshot writes/restores return `SnapshotBusy` until the application
+drains this message, preventing a marker-only snapshot from losing its delivery.
+Automatic PUBREL handling completes its Session marker before PUBCOMP output;
+the Application Message was already delivered. Repeated PUBREL is answered
+idempotently without a marker, so an ambiguously visible PUBCOMP cannot leave
+stale state suppressing a new PUBLISH with the same identifier. Deferred
+application-controlled release retains its existing durable boundary.
+Tests cover blocked and fully visible
+failed writes, both poll budget forms, all three MQTT versions, snapshot
+round trips, identifier reuse, manual duplicate suppression and a callback that
+exhausts the original deadline before its AUTH response is written.
+Authentication callbacks remain synchronous and must return promptly; their
+execution cannot be preempted by this socket deadline.
+
 Received alias-only PUBLISH messages now own their resolved Topic Name
 independently of the connection's Topic Alias table. Typed, client-event,
 broker-event and caller-buffer results retain the old topic after that alias
