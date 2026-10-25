@@ -79,6 +79,8 @@ test "HTTP/1 handoff successful CONNECT retires aggregate clients across 2xx" {
         defer pair.deinit();
         try pair.respond(reply);
         var response = try pair.client.requestWithTimeout(.{ .method = .CONNECT, .target = "example.com:443", .host = "example.com:443" }, .fromSeconds(1));
+        try std.testing.expect(!response.response.keepAlive());
+        try std.testing.expect(response.response.must_close);
         defer response.deinit(allocator);
         try std.testing.expect(response.response.status >= 200 and response.response.status < 300);
         try pair.expectUnavailable();

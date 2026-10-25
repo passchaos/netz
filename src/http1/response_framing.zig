@@ -7,6 +7,10 @@ pub const Metadata = struct {
     has_transfer_encoding: bool,
     must_close: bool,
 
+    pub fn mustClose(self: Metadata, framing: http1.BodyFraming) bool {
+        return self.must_close or framing == .close_delimited;
+    }
+
     pub fn contentLength(self: Metadata, headers: []const http1.Header) http1.Error!?usize {
         if (self.has_transfer_encoding) return null;
         if (self.body_allowed) return http1.contentLength(headers);
@@ -26,6 +30,22 @@ pub fn forbidsBody(status: u16, request_method: ?http1.Method) bool {
     };
 }
 
+pub fn switchesProtocol(method: http1.Method, status: u16) bool {
+    return status == 101 or (method == .CONNECT and status >= 200 and status < 300);
+}
+
+/// Connection fields can opt out of persistence, but cannot override an EOF
+/// boundary or resume HTTP after a protocol switch. CONNECT context is carried
+/// by the parser's must_close flag; HEAD retains ordinary HTTP persistence.
+pub fn keepAlive(response: anytype) bool {
+    return response.version != .http_0_9 and !response.must_close and response.body_framing != .close_delimited and
+        response.status != 101 and http1.headersKeepAlive(response.version, response.headers);
+}
+
+pub fn reusable(response: anytype, method: http1.Method) bool {
+    return keepAlive(response) and !switchesProtocol(method, response.status);
+}
+
 /// A bodyless response always ends at the head, regardless of framing fields.
 /// Preserve a valid representation length for HEAD/304-style consumers; an
 /// unusable numeric value cannot override the known wire boundary. Responses
@@ -38,6 +58,7 @@ pub fn inspect(version: http1.Version, status: u16, request_method: ?http1.Metho
     return .{
         .body_allowed = body_allowed,
         .has_transfer_encoding = transfer,
-        .must_close = transfer and length_present,
+        .must_close = (transfer and length_present) or
+            switchesProtocol(request_method orelse .GET, status),
     };
 }

@@ -8531,18 +8531,10 @@ fn parseResponseForRuntime(
             .consumed = bytes.len,
         };
     }
-    var response = if (request_method) |method|
+    return if (request_method) |method|
         try http1.parseResponseForRequest(allocator, bytes, options, method)
     else
         try http1.parseResponse(allocator, bytes, options);
-    // The transport has already reached EOF for a permitted undelimited body.
-    // Use parsed semantics so compatibility field spelling cannot change it.
-    if (response.body_framing == .none and response.body_allowed) {
-        response.body = bytes[response.consumed..];
-        response.body_framing = .close_delimited;
-        response.consumed = bytes.len;
-    }
-    return response;
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
@@ -14376,6 +14368,7 @@ test {
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/handoff_timeout_tests.zig");
     _ = @import("runtime/handoff_tests.zig");
+    _ = @import("runtime/response_reuse_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

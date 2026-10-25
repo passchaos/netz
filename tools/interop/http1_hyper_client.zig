@@ -576,6 +576,7 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 client followed Hyper redirect: transport={s} status=200 redirects=1 method=POST->GET credentials=same-origin\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+    try @import("http1_hyper_client/response_reuse.zig").exercise(allocator, io, port, if (tls_enabled) .{ .ca_bundle = .{ .bundle = &ca_bundle, .lock = &ca_lock } } else null);
 }
 
 fn connect(

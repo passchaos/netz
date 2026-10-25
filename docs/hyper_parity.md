@@ -2624,6 +2624,21 @@ identical relay source IP/port tuples or crossing TLS/`:authority` state.
 
 ## Remaining evidence
 
+HTTP/1 public response persistence metadata now shares the runtime's framing
+policy. Borrowed/owned heads, complete response images and streaming metadata
+report EOF-delimited entities, 101 responses and successful CONNECT responses
+as non-reusable for HTTP, even when Connection requests keep-alive. HEAD and
+204/304 remain persistent when their connection fields allow it. A complete
+undelimited response image now exposes every body byte through EOF, matching
+the response-head parser's `close_delimited` framing instead of relying on a
+runtime-only correction. Incremental callers use response-head parsing until
+EOF proves the full image. The shared policy lives in
+`src/http1/response_framing.zig`; codec and streaming tests check exact body and
+handoff boundaries, with real TCP checks for client retirement. The Hyper gate
+also emits unknown-length HTTP/1.0 bodies over cleartext and rustls, and verifies
+aggregate/streaming metadata and refusal of subsequent HTTP requests. Existing
+CONNECT and Upgrade gates continue to exchange buffered tunnel bytes.
+
 The shared `fuzz-parsers` target exercises strict borrowed and owned HTTP/1
 request/response parsing and chunked decoding; HTTP/2 frame envelopes, known
 payload shapes, SETTINGS, HPACK blocks, and Huffman input; and HTTP/3 frames,

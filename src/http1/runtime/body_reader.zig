@@ -142,10 +142,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: Response) bool {
-                return !self.must_close and http1.headersKeepAlive(
-                    self.version,
-                    self.headers,
-                );
+                return @import("../response_framing.zig").keepAlive(self);
             }
         };
 
@@ -213,10 +210,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             }
 
             pub fn keepAlive(self: ResponseHead) bool {
-                return !self.must_close and http1.headersKeepAlive(
-                    self.version,
-                    self.headers,
-                );
+                return @import("../response_framing.zig").keepAlive(self);
             }
 
             pub fn streamContentDecoder(

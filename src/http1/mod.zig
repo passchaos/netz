@@ -376,8 +376,7 @@ pub const ResponseHead = struct {
     }
 
     pub fn keepAlive(self: ResponseHead) bool {
-        return !self.must_close and
-            headersKeepAlive(self.version, self.headers);
+        return response_framing.keepAlive(self);
     }
 };
 
@@ -566,9 +565,9 @@ pub const Response = struct {
     header_value_storage: [][]u8 = &.{},
     trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
-    /// True when Transfer-Encoding overrode a received Content-Length. RFC
-    /// 9112 treats that combination as a potential response-splitting signal;
-    /// the current message is parseable, but this connection is one-shot.
+    /// True when EOF framing, mixed TE/CL or a protocol switch ends HTTP
+    /// persistence. A successful CONNECT/Upgrade may still hand the byte
+    /// stream to the selected protocol through the runtime's tunnel APIs.
     must_close: bool = false,
 
     pub fn deinit(self: *Response, allocator: std.mem.Allocator) void {
@@ -619,8 +618,7 @@ pub const Response = struct {
     }
 
     pub fn keepAlive(self: Response) bool {
-        return !self.must_close and
-            headersKeepAlive(self.version, self.headers);
+        return response_framing.keepAlive(self);
     }
 
     /// Return the selected protocol from a valid 101 Switching Protocols
@@ -744,7 +742,7 @@ fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!Resp
         .body_allowed = metadata.body_allowed,
         .content_length = declared_content_length,
         .head_len = parsed.head_len,
-        .must_close = metadata.must_close,
+        .must_close = metadata.mustClose(framing),
     };
 }
 
@@ -1089,6 +1087,9 @@ pub fn validateRequestHead(
     _ = try requestFraming(parsed.headers);
 }
 
+/// Parse a complete response image. For an EOF-delimited entity, bytes must
+/// include the complete body through transport EOF; parseResponseHead exposes
+/// that framing without treating a partial image as a complete entity.
 pub fn parseResponse(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Response {
     return parseResponseWithContext(allocator, bytes, options, .{});
 }
@@ -1181,7 +1182,7 @@ pub fn parseResponseWithContext(
         .header_value_storage = parsed_headers.value_storage,
         .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
-        .must_close = metadata.must_close,
+        .must_close = metadata.mustClose(parsed_body.framing),
     };
 }
 
@@ -1563,7 +1564,7 @@ fn parseResponseBody(
     headers: []const Header,
     options: ParseOptions,
 ) Error!ParsedBody {
-    return parseBody(allocator, bytes, body_start, headers, options) catch |err| switch (err) {
+    const body: ParsedBody = parseBody(allocator, bytes, body_start, headers, options) catch |err| switch (err) {
         error.InvalidTransferEncoding => blk: {
             if (!try responseTransferEncodingIsCloseDelimited(headers)) return error.InvalidTransferEncoding;
             break :blk .{
@@ -1574,6 +1575,12 @@ fn parseResponseBody(
         },
         else => |e| return e,
     };
+    if (body.framing == .none) return .{
+        .framing = .close_delimited,
+        .body = bytes[body_start..],
+        .consumed = bytes.len,
+    };
+    return body;
 }
 
 pub fn bodyFraming(headers: []const Header) Error!BodyFraming {
@@ -5550,6 +5557,7 @@ test "HTTP/1 enforces RFC 8470 Early-Data placement" {
 }
 test {
     _ = runtime;
+    _ = @import("response_framing_tests.zig");
     _ = @import("head/tests.zig");
     _ = @import("head/folded_tests.zig");
 }

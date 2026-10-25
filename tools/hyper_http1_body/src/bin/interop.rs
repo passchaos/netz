@@ -28,6 +28,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 type Body = StreamBody<ThreeFrameBody>;
 
+#[path = "interop/response_reuse.rs"]
+mod response_reuse;
+
 fn main() {
     let mut args = env::args().skip(1);
     let role = args.next().expect("server or client role");
@@ -58,7 +61,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..10 {
+    for connection_index in 0..12 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -162,6 +165,12 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         )
                         .await
                         .expect("serve netz HTTP redirect request");
+                }
+                10 | 11 => {
+                    server_http1::Builder::new()
+                        .serve_connection(TokioIo::new(io), service_fn(response_reuse::handle))
+                        .await
+                        .expect("serve netz EOF response request");
                 }
                 _ => unreachable!(),
             }
