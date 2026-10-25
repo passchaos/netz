@@ -10,6 +10,7 @@ import subprocess
 
 from mqtt_broker_config_bridge import (
     _connect_client,
+    _connect_client_after_restart,
     _distinct_ports,
     _expect_bridge_state,
     _publish_message,
@@ -226,7 +227,7 @@ def run_outbound_bridge_persistent_queue_case(
         )
         _wait_for_log(local, local_log, "configured 1 listeners")
         _wait_for_log(local, local_log, "bridge persistent-queue remote=")
-        local_observer = _connect_client(
+        local_observer = _connect_client_after_restart(
             local_port,
             "persistent-queue-local-observer-restored",
         )
@@ -261,7 +262,7 @@ def run_outbound_bridge_persistent_queue_case(
         )
         _wait_for_log(local, local_log, "configured 1 listeners")
         _wait_for_log(local, local_log, "bridge persistent-queue remote=")
-        local_observer = _connect_client(
+        local_observer = _connect_client_after_restart(
             local_port,
             "persistent-queue-local-observer-final",
         )
@@ -271,6 +272,30 @@ def run_outbound_bridge_persistent_queue_case(
         if _read_packet(subscriber) != b"\xd0\x00":
             raise AssertionError(
                 "drained persistent bridge queue revived after restart"
+            )
+        publisher = _connect_client(
+            local_port,
+            "persistent-queue-local-publisher-final",
+        )
+        _publish_message(
+            publisher,
+            100,
+            b"after-drain-restart",
+            1,
+            topic=_LOCAL_TOPIC,
+        )
+        _expect_bridge_state(local_observer, _STATE_TOPIC, b"1")
+        topic, payload = _read_publish_and_ack(subscriber)
+        if (topic, payload) != (_REMOTE_TOPIC, b"after-drain-restart"):
+            raise AssertionError(
+                "drained persistent bridge did not forward new work: "
+                f"{(topic, payload)!r}"
+            )
+        _expect_bridge_state(local_observer, _STATE_TOPIC, b"0")
+        subscriber.sendall(b"\xc0\x00")
+        if _read_packet(subscriber) != b"\xd0\x00":
+            raise AssertionError(
+                "drained persistent bridge duplicated new post-restart work"
             )
         subscriber.sendall(b"\xe0\x00")
         subscriber.close()

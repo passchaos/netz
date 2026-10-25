@@ -347,7 +347,9 @@ then the local broker checkpoints and is killed. Restoring the target Session
 and local broker drains all sixteen in exact order. The lazy bridge's idle
 state is the completion barrier; a second local checkpoint/restart leaves it
 inactive, while the target subscriber's PING proves no completed delivery was
-resurrected.
+resurrected. The same process scenario then publishes new QoS 1 work after
+that empty-queue restart, requires another online/offline notification cycle,
+and checks exact target delivery followed by an empty PING barrier.
 
 Configured remote connections also expose Mosquitto's
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
