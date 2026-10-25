@@ -9,6 +9,7 @@
 const std = @import("std");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
+const read_interruption = @import("../../internal/read_interruption.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -155,6 +156,8 @@ pub const Stream = struct {
         return self.readInternal(io, stream, out, null);
     }
 
+    /// Local timeout, cancellation and executor admission errors preserve
+    /// partial ciphertext. Retry without advancing the record sequence.
     pub fn readWithDeadline(
         self: *Stream,
         io: std.Io,
@@ -210,7 +213,7 @@ pub const Stream = struct {
             const authenticated_record = record_bytes catch |err| {
                 if (err == error.UnexpectedEof) {
                     self.peer_eof_without_notify = true;
-                } else if (err != error.Timeout and err != error.Canceled) {
+                } else if (!read_interruption.retryable(err)) {
                     self.failed = true;
                 }
                 return err;

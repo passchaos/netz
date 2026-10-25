@@ -1261,6 +1261,22 @@ cover every receive entry point, standard and vail WSS clients, and HTTP/2
 allocating/caller-buffer messages after underlying TLS truncation. Existing
 stream reset tests retain the per-session termination boundary for HTTP/3.
 
+Local bounded-read interruptions (`Timeout`, `Canceled`, and
+`ConcurrencyUnavailable`) retain the incremental receive cursor across TCP,
+WSS, RFC 8441 and RFC 9220. TLS 1.2/1.3 keep partial ciphertext without
+advancing the authenticated record sequence; WebSocket keeps partial frames,
+completed fragments and split UTF-8 state without retiring reads or writes.
+An incomplete caller-buffer message requires the same output pointer and
+length on retry. A replacement output returns `BufferTooShort` while preserving
+the original operation. The standard TLS client's network reader preserves
+executor admission failure through `std.Io.Reader`'s erased `ReadFailed`
+boundary instead of turning it into a terminal `Unexpected` error.
+Socket-backed TLS prefix tests and real WSS/H2/H3 handshake tests cover native
+TLS 1.2/1.3 and standard TLS 1.3 clients, inject cancellation and executor
+admission failure, resume the same message, receive the following message,
+and prove the connection remains writable. Fatal authentication, truncation
+and peer stream failures still follow the terminal policy above.
+
 The shared `fuzz-parsers` target feeds bounded arbitrary bytes through
 WebSocket frame headers, owned frames, Close payloads and permessage-deflate
 extension negotiation. Default tests replay truncations, byte flips and random
@@ -1476,7 +1492,8 @@ masked frame at the peer.
 Its caller-buffer receive APIs likewise assemble uncompressed messages directly
 into application storage, reuse connection-owned compressed input/inflater
 scratch, and preserve partial-frame plus completed-fragment progress across
-timeout retries while requiring the same output buffer for resumed messages.
+timeout, cancellation and executor admission retries while requiring the same
+output buffer for resumed messages.
 RFC 8441 and H3 clients additionally expose `sendBinaryInPlace`: callers
 opting into mutable post-send storage avoid the immutable client's masking
 copy, matching the HTTP/1/reference API while keeping safe `[]const u8`

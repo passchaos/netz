@@ -5,6 +5,7 @@
 //! share the RFC 6455 codec and transactional permessage-deflate engine.
 
 const std = @import("std");
+const read_interruption = @import("../../internal/read_interruption.zig");
 const builtin = @import("builtin");
 const websocket = @import("../mod.zig");
 const common = @import("common.zig");
@@ -2280,21 +2281,23 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn resetMessageIntoAfterError(self: *Self, err: anyerror) void {
-            // Timeout is resumable because `inbuf`, the completed-fragment
-            // offset, and compressed bytes are connection-owned. Decoder OOM
+            // Local read interruptions retain connection-owned `inbuf`,
+            // completed-fragment offsets and compressed bytes. Decoder OOM
             // after a complete compressed message also retains owned input,
             // having already released the caller's output reference. Other
             // failures terminate this caller-buffer operation.
-            if (err != error.Timeout and !self.message_into.canRetryCompletion(err)) {
+            if (!read_interruption.retryable(err) and !self.message_into.canRetryCompletion(err)) {
                 self.message_into.reset();
                 self.message_frame_receive.reset();
             }
         }
 
         /// Receive one complete RFC 9220 message into caller-owned storage.
-        /// The output must cover `limits.max_message_bytes`, allowing timeout
+        /// The output must cover `limits.max_message_bytes`, allowing interrupted
         /// recovery to retain only offsets and compressed scratch rather than
         /// allocating an intermediate uncompressed message.
+        /// Timeout, cancellation and executor admission errors retain progress;
+        /// retry an incomplete message with the same output pointer and length.
         /// A final compressed decode OOM may be retried with a new output.
         pub fn receiveMessageInto(
             self: *Self,

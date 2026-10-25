@@ -2,14 +2,16 @@
 const std = @import("std");
 const tls13_records = @import("../../tls/stream/record_stream.zig");
 const tls12_records = @import("../../tls/stream/tls12_record_stream.zig");
+const read_interruption = @import("../../internal/read_interruption.zig");
 
 /// TLS record failures include authentication, alerts, framing and truncation.
 /// Use the transports' error sets so their terminal errors do not silently
 /// escape WebSocket teardown when a new record validation is added. Local
 /// allocation failures and interrupted operations remain retryable.
 pub fn isTerminalTransportError(err: anyerror) bool {
+    if (read_interruption.retryable(err)) return false;
     switch (err) {
-        error.Timeout, error.Canceled, error.OutOfMemory, error.WriteInProgress, error.KeyUpdateRequestPending => return false,
+        error.OutOfMemory, error.WriteInProgress, error.KeyUpdateRequestPending => return false,
         error.ConnectionClosed, error.StreamReset, error.RequestCancelled, error.RequestRejected, error.ConnectionResetByPeer, error.ReadFailed, error.WriteFailed => return true,
         else => {},
     }

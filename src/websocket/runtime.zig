@@ -1,4 +1,5 @@
 const std = @import("std");
+const read_interruption = @import("../internal/read_interruption.zig");
 const builtin = @import("builtin");
 const websocket = @import("mod.zig");
 const common = @import("runtime/common.zig");
@@ -7226,6 +7227,8 @@ pub const Connection = struct {
     /// from the transport buffer. Control frames retain the same automatic
     /// Pong/Close behavior as `receiveMessage`. Negotiated compressed messages
     /// use reusable connection scratch and inflate directly into `out`.
+    /// Timeout, cancellation and executor admission errors retain progress;
+    /// retry an incomplete message with the same output pointer and length.
     /// A final compressed decode OOM retains its owned input and permits a
     /// later retry with a new output slice.
     pub fn receiveMessageInto(
@@ -10030,6 +10033,8 @@ pub const H2Connection = struct {
     /// HTTP/2 tunnel chunks may split WebSocket frame headers or payloads. This
     /// adapter decodes uncompressed fragments directly into `out`; compressed
     /// input uses only the reusable codec scratch before inflating into `out`.
+    /// Timeout, cancellation and executor admission errors retain progress;
+    /// retry an incomplete message with the same output pointer and length.
     pub fn receiveMessageInto(
         self: *H2Connection,
         out: []u8,
@@ -12128,7 +12133,7 @@ fn receiveMessageIntoDirectConnection(
         return error.BufferTooShort;
     }
     try connection.message_into.validateOutput(out);
-    errdefer |err| if (err != error.Timeout and
+    errdefer |err| if (!read_interruption.retryable(err) and
         err != error.ResponseAvailable and
         !connection.message_into.canRetryCompletion(err))
     {
@@ -17255,6 +17260,8 @@ test {
     _ = @import("runtime/transport_end_tests.zig");
     _ = @import("runtime/transport_end_h2_tests.zig");
     _ = @import("runtime/receive_failure_tests.zig");
+    _ = @import("runtime/read_interruption_tests.zig");
+    _ = @import("runtime/read_interruption_transport_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");

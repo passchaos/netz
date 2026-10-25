@@ -14,6 +14,7 @@ const message_head = @import("runtime/message/head.zig");
 const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const tls_client_reader = @import("runtime/tls_client/reader.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
@@ -1100,6 +1101,9 @@ pub const TlsClientConnection = struct {
     // this field scopes one application read without introducing shared timer
     // state or changing ordinary untimed reads.
     timed_read_deadline: ?std.Io.Clock.Timestamp = null,
+    // std.Io.Reader erases the cause; net.Stream.Reader cannot represent
+    // ConcurrencyUnavailable. Consume this cause once at the public boundary.
+    timed_read_error: ?Error = null,
     /// Plaintext represented by the TLS ciphertext currently buffered in
     /// `net_writer` after a bounded application write timed out.
     pending_timed_plaintext_len: usize = 0,
@@ -1197,7 +1201,7 @@ pub const TlsClientConnection = struct {
             .client = undefined,
         };
         conn.net_reader = net.Stream.reader(stream, io, conn.net_read_buf);
-        conn.net_reader.interface.vtable = &tls_client_reader_vtable;
+        conn.net_reader.interface.vtable = &tls_client_reader.vtable;
         conn.net_writer = net.Stream.writer(stream, io, conn.net_write_buf);
         conn.timed_read_deadline = handshake_deadline;
         defer conn.timed_read_deadline = null;
@@ -1235,7 +1239,9 @@ pub const TlsClientConnection = struct {
             &conn.net_writer.interface,
             client_options,
         ) catch |err| {
-            if (err == error.ReadFailed and conn.net_reader.err != null) {
+            if (err == error.ReadFailed and
+                (conn.timed_read_error != null or conn.net_reader.err != null))
+            {
                 return conn.takeReadError();
             }
             return err;
@@ -1312,6 +1318,10 @@ pub const TlsClientConnection = struct {
     }
 
     fn takeReadError(self: *TlsClientConnection) Error {
+        if (self.timed_read_error) |err| {
+            self.timed_read_error = null;
+            return err;
+        }
         if (self.net_reader.err) |err| {
             self.net_reader.err = null;
             return err;
@@ -1467,109 +1477,6 @@ fn shutdownAfterTlsCloseNotify(
         error.SocketUnconnected => {},
         else => return err,
     };
-}
-
-const tls_client_reader_vtable: std.Io.Reader.VTable = .{
-    .stream = tlsClientReaderStream,
-    .readVec = tlsClientReaderReadVec,
-};
-
-fn tlsClientReaderStream(
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    limit: std.Io.Limit,
-) std.Io.Reader.StreamError!usize {
-    const destination = limit.slice(try writer.writableSliceGreedy(1));
-    var data: [1][]u8 = .{destination};
-    const count = try tlsClientReaderReadVec(reader, &data);
-    writer.advance(count);
-    return count;
-}
-
-fn tlsClientReaderReadVec(
-    reader: *std.Io.Reader,
-    data: [][]u8,
-) std.Io.Reader.Error!usize {
-    const net_reader: *net.Stream.Reader = @alignCast(
-        @fieldParentPtr("interface", reader),
-    );
-    const connection: *TlsClientConnection = @alignCast(
-        @fieldParentPtr("net_reader", net_reader),
-    );
-    var vectors: [8][]u8 = undefined;
-    const vector_count, const direct_bytes = try reader.writableVector(
-        &vectors,
-        data,
-    );
-    const destinations = vectors[0..vector_count];
-    std.debug.assert(destinations.len != 0 and destinations[0].len != 0);
-
-    const count = if (connection.timed_read_deadline) |deadline|
-        readTlsClientTransportWithDeadline(
-            connection,
-            destinations,
-            deadline,
-        ) catch |err| {
-            net_reader.err = mapTimedReadError(err);
-            return error.ReadFailed;
-        }
-    else
-        connection.io.vtable.netRead(
-            connection.io.userdata,
-            connection.stream.socket.handle,
-            destinations,
-        ) catch |err| {
-            net_reader.err = err;
-            return error.ReadFailed;
-        };
-    if (count == 0) return error.EndOfStream;
-    if (count > direct_bytes) {
-        reader.end += count - direct_bytes;
-        return direct_bytes;
-    }
-    return count;
-}
-
-fn mapTimedReadError(err: stream_io.TimedReadError) net.Stream.Reader.Error {
-    // std.Io.Reader deliberately erases transport errors into ReadFailed. Keep
-    // the precise errors representable by net.Stream.Reader; collapse only
-    // file-operation details which cannot be expressed by that public type.
-    return switch (err) {
-        error.AccessDenied => error.AccessDenied,
-        error.Canceled => error.Canceled,
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.NetworkDown => error.NetworkDown,
-        error.SocketUnconnected => error.SocketUnconnected,
-        error.SystemResources,
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        => error.SystemResources,
-        error.Timeout => error.Timeout,
-        else => error.Unexpected,
-    };
-}
-
-fn readTlsClientTransportWithDeadline(
-    connection: *TlsClientConnection,
-    destinations: [][]u8,
-    deadline: std.Io.Clock.Timestamp,
-) stream_io.TimedReadError!usize {
-    var total: usize = 0;
-    for (destinations) |destination| {
-        if (destination.len == 0) continue;
-        const count = try stream_io.readSomeWithDeadline(
-            connection.io,
-            connection.stream,
-            destination,
-            deadline,
-        );
-        total += count;
-        // One read is enough to preserve ordinary stream short-read behavior.
-        // Continue only when it completely filled this vector so a following
-        // TLS-owned buffer can receive bytes already available in the socket.
-        if (count != destination.len) break;
-    }
-    return total;
 }
 
 const RuntimeTransport = union(enum) {
