@@ -2501,6 +2501,16 @@ window, response, priority, callback, or pending-request state. Fragmented
 HEADERS coverage proves that dynamic-table mutations survive refusal and can be
 referenced by a later request after capacity is released; late DATA, trailers,
 and duplicate resets use the same bounded reset-history policy described above.
+Once a capacity-refused section is completely decoded, request field-value and
+Content-Length validation errors send `RST_STREAM(PROTOCOL_ERROR)` for that
+stream. Complete field-count, header-list, and terminal continuation-limit
+rejections retain `REFUSED_STREAM`; their HPACK updates are already synchronized.
+Those stream-local outcomes do not terminate an aggregate, streaming, batch,
+duplex, or Extended CONNECT accept loop, and do not overwrite a sibling's error
+state. Fault tests keep one request active, reject the excess stream, then use
+its dynamic entries in the next healthy request and verify the exact reset on
+the wire. Compression corruption, allocation failure and unfinished assembly
+overflow still prevent connection reuse.
 Remotely reset requests waiting in the server's pending-accept queue are
 tracked separately through `Limits.max_pending_accept_reset_streams`, matching
 Rust h2's defense against reset-after-HEADERS churn that no longer counts

@@ -3639,6 +3639,13 @@ const ReceivedDataPayload = struct {
 };
 
 pub const Connection = struct {
+    const RefusedHeaders = @import("runtime/headers/refusal.zig").Reader(.{
+        .Error = Error,
+        .readHeaders = readHeaderBlockUntil,
+        .freeHeaders = freeHeaders,
+        .validate = validateHeaderBlock,
+        .lookup = requestHeaderLookup,
+    });
     const LateResetFrames = @import("runtime/reset/late.zig").Handler(.{
         .Error = Error,
         .wasReset = wasLocallyResetAt,
@@ -11440,26 +11447,11 @@ pub const Connection = struct {
         // A direct refusal reserves reset-history capacity while claiming the
         // stream; graceful preadmission already sent and recorded its reset.
         // Thus, after HPACK advances, this helper performs no allocation.
-        const headers = self.readHeaderBlockUntil(first, deadline) catch |err| {
-            // The initial HEADERS is already consumed, and decoding can mutate
-            // the dynamic table before reporting malformed input or OOM. No
-            // request API can safely resume after any failure at this point.
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
-        defer freeHeaders(self.allocator, headers);
-        validateHeaderBlock(headers, .request) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
-        _ = requestHeaderLookup(headers) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        const reset_code = try RefusedHeaders.read(self, first, deadline);
         if (!reset_already_sent) {
             self.writeResetStreamFramePrepared(
                 stream_id,
-                .refused_stream,
+                reset_code,
             ) catch |err| {
                 // `writeAll` cannot report how much of the frame reached the
                 // peer. Never permit another API call to append bytes after a

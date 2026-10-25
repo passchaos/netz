@@ -1,4 +1,8 @@
 const std = @import("std");
+
+test {
+    _ = @import("headers/refusal_isolation_tests.zig");
+}
 const http2 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
