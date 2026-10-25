@@ -24,7 +24,7 @@ pub fn Controller(comptime hooks: anytype) type {
                         continue;
                     },
                     error.PacingLimited => {
-                        try waitForPacing(session, deadline, progress);
+                        try waitForPacing(session, stream_id, deadline, progress);
                         continue;
                     },
                     else => return err,
@@ -49,7 +49,7 @@ pub fn Controller(comptime hooks: anytype) type {
                     committed.* += count;
                     switch (err) {
                         error.CongestionLimited => try receive(session, stream_id, deadline),
-                        error.PacingLimited => try waitForPacing(session, deadline, progress),
+                        error.PacingLimited => try waitForPacing(session, stream_id, deadline, progress),
                         else => return err,
                     }
                     continue;
@@ -59,17 +59,41 @@ pub fn Controller(comptime hooks: anytype) type {
             }
         }
 
-        fn waitForPacing(session: anytype, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (hooks.Error || @TypeOf(progress).ErrorSet)!void {
+        fn waitForPacing(session: anytype, stream_id: u62, deadline: ?std.Io.Clock.Timestamp, progress: anytype) (hooks.Error || @TypeOf(progress).ErrorSet)!void {
             if (comptime @hasDecl(@TypeOf(progress), "waitForPacing")) {
                 return progress.waitForPacing(deadline);
             }
-            if (deadline) |absolute| return session.established.connection.waitForPacingAvailabilityWithDeadline(absolute);
-            return session.established.connection.waitForPacingAvailability();
+            try checkDeadline(session, deadline);
+            const connection = &session.established.connection;
+            const wake_ns = connection.pendingPacingDeadline() orelse return error.PacingLimited;
+            const wake: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(@intCast(wake_ns)) };
+            const until = deadline_policy.earlier(wake, deadline).?;
+            if (until.durationFromNow(hooks.io(session)).raw.nanoseconds <= 0) return feedback(session);
+            // Use the HTTP/3 visitor while waiting, so terminal signals and
+            // sibling work are routed before another application submission.
+            receive(session, stream_id, until) catch |err| {
+                // A pacing wake retries; only the caller's bound is a timeout.
+                if (err == error.Timeout and (deadline == null or std.Io.Clock.Timestamp.compare(until, .lt, deadline.?))) {
+                    try checkDeadline(session, deadline);
+                    return feedback(session);
+                }
+                return err;
+            };
         }
 
         fn receive(session: anytype, stream_id: u62, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
-            if (deadline) |absolute| return hooks.receive(session, stream_id, absolute);
-            return hooks.receiveUnbounded(session, stream_id);
+            try hooks.receive(session, stream_id, deadline, null);
+            try feedback(session);
+        }
+
+        fn feedback(session: anytype) hooks.Error!void {
+            // Received termination must reach the next validation without a
+            // feedback writer sleeping beyond this wait's deadline. Failed
+            // attempts retain the exact pending QPACK prefix for later service.
+            hooks.feedback(session) catch |err| switch (err) {
+                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => {},
+                else => return err,
+            };
         }
 
         fn checkDeadline(session: anytype, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {

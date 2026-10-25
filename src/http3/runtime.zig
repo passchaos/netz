@@ -6405,8 +6405,8 @@ pub const HandshakeServerSession = struct {
         .check_callback = false,
         .validate = validateConnectDatagramSend,
         .io = connectionIo,
-        .receive = receiveDetachedRequestProgressWithDeadline,
-        .receiveUnbounded = receiveDetachedRequestProgress,
+        .receive = receiveDetachedRequestPacketInto,
+        .feedback = flushRequestPacketFeedbackOnce,
     });
     established: quic.handshake.EstablishedConnection,
     /// True while an endpoint dispatcher is the sole UDP receive owner.
@@ -7819,6 +7819,18 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
         datagram_target: ?*connect_datagram.ReceiveIntoTarget,
     ) ReceiveTimeoutError!void {
+        try self.receiveDetachedRequestPacketInto(detached_stream_id, deadline, datagram_target);
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
+    }
+
+    fn receiveDetachedRequestPacketInto(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+        datagram_target: ?*connect_datagram.ReceiveIntoTarget,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
@@ -7841,9 +7853,6 @@ pub const HandshakeServerSession = struct {
                 context,
                 visitDetachedServerRequestPacket,
             );
-        }
-        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
-            try self.sendQpackFeedback();
         }
     }
 
@@ -11775,8 +11784,8 @@ pub const HandshakeClient = struct {
         .check_callback = true,
         .validate = validateConnectDatagramSend,
         .io = connectionIo,
-        .receive = receiveDetachedResponseProgressWithDeadline,
-        .receiveUnbounded = receiveDetachedResponseProgress,
+        .receive = receiveDetachedResponsePacketInto,
+        .feedback = flushResponsePacketFeedbackOnce,
     });
     endpoint: *quic.runtime.Endpoint,
     owns_endpoint: bool,
@@ -17101,7 +17110,19 @@ pub const HandshakeClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
         datagram_target: ?*connect_datagram.ReceiveIntoTarget,
     ) ReceiveTimeoutError!void {
+        try self.receiveDetachedResponsePacketInto(detached_stream_id, deadline, datagram_target);
+        try self.flushResponsePacketFeedback();
+    }
+
+    fn receiveDetachedResponsePacketInto(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+        datagram_target: ?*connect_datagram.ReceiveIntoTarget,
+    ) ReceiveTimeoutError!void {
         if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (!self.connect_datagrams.contains(detached_stream_id)) return error.UnexpectedStream;
         var context: ConnectionResponseReceiveContext = .{
             .connection = &self.established.connection,
             .control = &self.control,
@@ -17132,7 +17153,6 @@ pub const HandshakeClient = struct {
                 visitConnectionResponsePacket,
             );
         }
-        try self.flushResponsePacketFeedback();
     }
 
     fn receiveDetachedResponseProgressInto(

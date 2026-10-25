@@ -1796,6 +1796,20 @@ queued application payloads and becomes the effective terminal reason, including
 after an earlier stream FIN. The default retains the explicit FIFO queue-drain
 contract. Scoped-association and caller-buffer regressions verify both policies
 on the same registry and late policy activation after a terminal signal.
+Direct HTTP/3 CONNECT DATAGRAM single and batch sends now service the existing
+HTTP/3 receive visitor during pacing waits, using the earlier pacing wake or
+caller deadline. A received connection close or `STOP_SENDING` stops the next
+application submission; ordinary single sends still expose congestion without
+reading UDP. Both endpoint roles retain sibling DATAGRAMs and detached CONNECT
+DATA for their owners. Feedback in a send wait is one attempt: QPACK congestion,
+pacing, or flow-control backpressure preserves the unsent instruction prefix
+without hiding received termination or extending the caller's budget. The
+next receive or pacing wake resumes pending feedback. Protected-UDP regressions
+cover ordinary/bounded single and batch sends, timer-only wakeup, explicit
+timeout, close diagnostics, feedback recovery without new peer traffic,
+sibling isolation, and an exact partial-batch prefix at `STOP_SENDING`.
+WebTransport now supplies only session-control maintenance to
+this shared controller, so both protocols use the same pacing-wait policy.
 
 RFC 9298 CONNECT-UDP now has typed HTTP/1.1, HTTP/2, and HTTP/3 surfaces above
 the existing generic Upgrade, Extended CONNECT, HTTP Datagram, and Capsule
