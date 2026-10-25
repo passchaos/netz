@@ -49,6 +49,22 @@ pub const State = struct {
         self.overflow = packet;
     }
 
+    /// Move an already-owned event retry before the queue's later packets.
+    /// Ownership and byte accounting transfer only after storage is ready.
+    pub fn prependRetained(self: *State, allocator: std.mem.Allocator, packet: Packet) std.mem.Allocator.Error!void {
+        if (self.head != 0) {
+            self.head -= 1;
+            self.packets.items[self.head] = packet;
+        } else {
+            try self.packets.ensureUnusedCapacity(allocator, 1);
+            const len = self.packets.items.len;
+            self.packets.items.len += 1;
+            @memmove(self.packets.items[1..], self.packets.items[0..len]);
+            self.packets.items[0] = packet;
+        }
+        self.queued_bytes += packet.bytes.len;
+    }
+
     /// Popped packets belong to the caller. Their wire bytes stop consuming
     /// queue quota immediately, while the emergency packet always comes last.
     pub fn pop(self: *State) ?Packet {

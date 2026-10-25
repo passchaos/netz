@@ -56,6 +56,7 @@ const TcpTransport = struct {
     input_end: usize = 0,
     packet: ?[]u8 = null,
     packet_prefix_len: u16 = 0,
+    restored_packet_counted: bool = false,
     packet_read: usize = 0,
 
     fn buffered(self: *const TcpTransport) []const u8 {
@@ -81,6 +82,12 @@ const TcpTransport = struct {
         );
         self.input_start = 0;
         self.input_end = remaining;
+    }
+
+    fn takeRestoredCounted(self: *TcpTransport) bool {
+        const counted = self.restored_packet_counted;
+        self.restored_packet_counted = false;
+        return counted;
     }
 };
 
@@ -604,6 +611,20 @@ pub const Transport = union(enum) {
         };
     }
 
+    /// Return a caller-buffer packet to its connection-owned TCP read-ahead
+    /// after decode OOM. No transport read or allocation can intervene.
+    pub fn restoreBorrowedPacket(self: *Transport, packet: OwnedPacket) void {
+        std.debug.assert(!packet.owns_bytes);
+        const tcp = &self.tcp;
+        std.debug.assert(tcp.packet == null);
+        tcp.compactBuffered();
+        std.debug.assert(packet.bytes.len + tcp.input_end <= tcp.input.len);
+        @memmove(tcp.input[packet.bytes.len..][0..tcp.input_end], tcp.input[0..tcp.input_end]);
+        @memcpy(tcp.input[0..packet.bytes.len], packet.bytes);
+        tcp.input_end += packet.bytes.len;
+        tcp.restored_packet_counted = packet.traffic_recorded;
+    }
+
     /// Broker-oriented variant of `readPacketInto` that reserves an aligned
     /// prefix on an owned TCP fallback. A returned packet exposes that backing
     /// allocation so a longer-lived representation can adopt it. Short TCP
@@ -899,6 +920,9 @@ pub const OwnedPacket = struct {
     fixed: mqtt.FixedHeader,
     /// False for explicit caller-buffer reads and after ownership transfer.
     owns_bytes: bool = true,
+    /// Session receive accounting already consumed this packet. A restored
+    /// caller-buffer retry must not count its wire bytes a second time.
+    traffic_recorded: bool = false,
     /// Non-zero when an aligned broker allocation reserves a transferable
     /// prefix immediately before the packet bytes.
     prefix_len: u16 = 0,
@@ -1161,6 +1185,7 @@ fn readTcpPacketWithPolicy(
                     .bytes = bytes,
                     .fixed = frame.fixed,
                     .owns_bytes = false,
+                    .traffic_recorded = tcp.takeRestoredCounted(),
                 };
             }
         }
@@ -1218,6 +1243,7 @@ fn readTcpPacketWithPolicy(
         // header; the uninterrupted common path reuses the framing parse.
         .fixed = parsed_fixed orelse try mqtt.FixedHeader.parse(packet),
         .prefix_len = packet_prefix_len,
+        .traffic_recorded = tcp.takeRestoredCounted(),
     };
 }
 

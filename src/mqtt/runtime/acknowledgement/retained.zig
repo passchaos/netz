@@ -20,6 +20,9 @@ pub fn Reader(comptime Context: type) type {
         pub fn matching(connection: *Connection, match: anytype, comptime matches: fn (@TypeOf(match), Packet) bool, deadline: ?std.Io.Clock.Timestamp) Error!Pending.Match {
             if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
             if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
+            if (comptime @hasField(Connection, "retained_receive")) {
+                if (connection.retained_receive.bytes != null) try Context.prepareStorage(connection);
+            }
             const terminated = try Context.observeQueuedDisconnect(connection);
             if (connection.pending_packets) |pending| {
                 if (pending.findFirstMatching(match, matches)) |ready| return ready;

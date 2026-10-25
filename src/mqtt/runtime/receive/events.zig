@@ -15,46 +15,75 @@ pub fn Reader(comptime Context: type) type {
         const Connection = Context.ConnectionType;
         const Packet = Context.PacketType;
         const Error = Context.ErrorType;
-        pub const Result = union(enum) {
+        pub const Input = struct {
             packet: Packet,
+            source: union(enum) { retained, queued: usize, caller },
+
+            pub fn commit(self: Input, connection: *Connection) void {
+                switch (self.source) {
+                    .retained => _ = connection.retained_receive.take(),
+                    .queued => |index| _ = connection.pending_packets.?.takeMatch(index),
+                    .caller => {},
+                }
+            }
+
+            pub fn reject(self: Input, connection: *Connection, err: anyerror) void {
+                if (err == error.OutOfMemory) {
+                    if (self.source == .caller) connection.transport.restoreBorrowedPacket(self.packet);
+                    return;
+                }
+                self.commit(connection);
+                var packet = self.packet;
+                packet.deinit(connection.allocator);
+            }
+        };
+        pub const Result = union(enum) {
+            packet: Input,
             disconnect: Context.DisconnectType,
         };
 
         pub fn read(connection: *Connection, options: Options) Error!Result {
             if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
             if (options.deadline) |deadline| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), deadline);
-            if (connection.retained_disconnect.bytes != null) return .{ .disconnect = try retainedDisconnect(connection) };
+            if (connection.retained_receive.packet()) |packet| {
+                if (packet.fixed.packet_type == .disconnect) return .{ .disconnect = try retainedDisconnect(connection) };
+                return .{ .packet = .{ .packet = packet, .source = .retained } };
+            }
             if (connection.pending_packets) |pending| {
                 if (pending.findFirstMatching({}, anyPacket)) |ready| {
                     if (ready.packet.fixed.packet_type == .disconnect) return .{ .disconnect = try disconnect(connection, ready) };
-                    return .{ .packet = pending.takeMatch(ready.index) };
+                    return .{ .packet = .{ .packet = ready.packet, .source = .{ .queued = ready.index } } };
                 }
             }
             if (!connection.isUsable()) return error.ConnectionClosed;
             var packet = try readTransport(connection, options);
             var owned = true;
             errdefer if (owned) packet.deinit(connection.allocator);
-            Context.recordReceived(connection, packet.bytes.len);
+            if (!packet.traffic_recorded) Context.recordReceived(connection, packet.bytes.len);
+            packet.traffic_recorded = true;
             try Context.validate(connection, &packet);
-            if (packet.fixed.packet_type != .disconnect) return .{ .packet = packet };
-            // Terminal packets own their bytes. Retain them without allocating
-            // queue state, preserving ordinary caller-buffer reads' zero-
-            // allocation behavior while diagnostic decoding can be retried.
-            connection.retained_disconnect.retain(packet);
+            if (!packet.owns_bytes) {
+                owned = false;
+                return .{ .packet = .{ .packet = packet, .source = .caller } };
+            }
+            // Inline ownership avoids an event-path queue allocation. Both
+            // ordinary and terminal decoders can retry before transfer.
+            connection.retained_receive.retain(packet);
             owned = false;
+            if (packet.fixed.packet_type != .disconnect) return .{ .packet = .{ .packet = packet, .source = .retained } };
             return .{ .disconnect = try retainedDisconnect(connection) };
         }
 
         pub fn retainedDisconnect(connection: *Connection) Error!Context.DisconnectType {
-            const packet = connection.retained_disconnect.packet().?;
+            const packet = connection.retained_receive.packet().?;
             const value = Context.decodeDisconnect(connection, packet.bytes) catch |err| {
                 if (err != error.OutOfMemory) {
-                    var invalid = connection.retained_disconnect.take();
+                    var invalid = connection.retained_receive.take();
                     invalid.deinit(connection.allocator);
                 }
                 return err;
             };
-            _ = connection.retained_disconnect.take();
+            _ = connection.retained_receive.take();
             Context.finishDisconnect(connection, value);
             return .{ .packet = packet, .disconnect = value };
         }

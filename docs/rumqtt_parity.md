@@ -5535,6 +5535,20 @@ proxy evidence for the entire suite.
    MQTT header, packet allocation, repeated failures, invalid text/oversize
    input, and closing with pending ownership. Real WS/WSS compressed exchanges
    prove exact first and following packets under context takeover after retry.
+   Client and broker event decoders also retain complete MQTT packets until
+   metadata and protocol-state validation commits. Queued packets stay at their
+   original index; new owned packets reuse the existing inline receive slot.
+   A caller-buffer decode OOM copies bytes back into TCP read-ahead without an
+   allocation or retained caller pointer. Restored packets carry prior traffic
+   accounting, so retries never count the same wire bytes twice. Property,
+   Topic Alias and QoS allocation failures preserve the first event and its
+   following packets across repeated retries. Typed PUBLISH/AUTH and correlated
+   ACK readers can adopt that retained prefix ahead of a later queue overflow,
+   including when new interleaving quotas are disabled; allocation failure
+   during adoption leaves ownership intact. Semantic errors still discard the
+   failed packet, and local close releases every retained byte. These changes
+   reuse existing connection padding and the receive slot instead of growing
+   the 64-bit Connection or packet descriptor layouts.
    Connection traffic counters now follow their actual ownership boundary too.
    The single protocol reader and externally serialized writer update private
    atomic snapshots with load/store instead of multi-writer RMW. Broker

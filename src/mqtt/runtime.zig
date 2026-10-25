@@ -3161,11 +3161,11 @@ pub const Connection = struct {
     /// writes while the connection's single-writer boundary is held.
     write_property_overflow: ?[]mqtt.Property = null,
     /// Prepared before typed receive I/O or a correlated-response wait.
-    /// Ordinary event decode retries use the separate terminal slot below.
+    /// Ordinary event decode retries use the separate inline slot below.
     pending_packets: ?*PendingPacketState = null,
-    /// Owned terminal packet detached from event transport input. This inline
-    /// slot preserves decode retries without allocating ordinary event queues.
-    retained_disconnect: @import("runtime/receive/terminal.zig").State = .{},
+    /// One complete packet retained until event decoding commits. This inline
+    /// slot preserves retries without allocating ordinary event queues.
+    retained_receive: @import("runtime/receive/packet_slot.zig").State = .{},
     /// Owned metadata from an explicitly trusted PROXY protocol listener.
     /// Keeping it beside rather than inside the transport allows the same
     /// identity model to span raw TCP, TLS, WS, and WSS adapters.
@@ -3282,7 +3282,7 @@ pub const Connection = struct {
         self.write_scratch.deinit(self.allocator);
         self.clearWritePropertyOverflow();
         self.clearPendingPacketState();
-        self.retained_disconnect.deinit(self.allocator);
+        self.retained_receive.deinit(self.allocator);
         self.clearProxyMetadata();
         self.clearTopicNamespace();
         self.transport.close(self.allocator);
@@ -5434,7 +5434,9 @@ pub const Connection = struct {
     /// leaves the complete packet available for retry.
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
         if (!termination.canReadBuffered(self)) return error.ConnectionClosed;
-        if (self.retained_disconnect.bytes != null) return EventReceive.retainedDisconnect(self);
+        if (self.retained_receive.packet()) |packet| {
+            if (packet.fixed.packet_type == .disconnect) return EventReceive.retainedDisconnect(self);
+        }
         const ready = try TypedReceive.front(self, .disconnect, null);
         return EventReceive.disconnect(self, ready);
     }
@@ -5910,7 +5912,7 @@ pub const Connection = struct {
     }
 
     fn observeRetainedDisconnect(self: *Connection) Error!bool {
-        const packet = self.retained_disconnect.packet() orelse return false;
+        const packet = self.retained_receive.packet() orelse return false;
         return self.observeDisconnectPacket(packet);
     }
 
@@ -5925,6 +5927,8 @@ pub const Connection = struct {
     /// DISCONNECT, TLS and WebSocket packets retain owned behavior so terminal
     /// diagnostics can survive a local decoding failure.
     /// Callers must not reuse `storage` before `BrokerEvent.deinit`.
+    /// On decode allocation failure, the connection restores those bytes to
+    /// its own read-ahead; callers may immediately reuse `storage` and retry.
     pub fn readBrokerEventInto(
         self: *Connection,
         storage: []u8,
@@ -5997,7 +6001,14 @@ pub const Connection = struct {
     fn readClientPacketEventOptions(self: *Connection, options: EventReceiveOptions) Error!ClientPacketEvent {
         return switch (try EventReceive.read(self, options)) {
             .disconnect => |value| .{ .disconnect = value },
-            .packet => |packet| self.finishClientPacketEvent(packet),
+            .packet => |input| blk: {
+                const event = self.finishClientPacketEvent(input.packet) catch |err| {
+                    input.reject(self, err);
+                    return err;
+                };
+                input.commit(self);
+                break :blk event;
+            },
         };
     }
 
@@ -6005,8 +6016,7 @@ pub const Connection = struct {
         self: *Connection,
         packet_value: OwnedPacket,
     ) Error!ClientPacketEvent {
-        var packet = packet_value;
-        errdefer packet.deinit(self.allocator);
+        const packet = packet_value;
         return switch (packet.fixed.packet_type) {
             .auth => blk: {
                 const value = try self.parseIncomingAuth(
@@ -6147,10 +6157,12 @@ pub const Connection = struct {
     fn readBrokerEventOptionsOut(self: *Connection, options: EventReceiveOptions, out: *BrokerEvent) Error!void {
         switch (try EventReceive.read(self, options)) {
             .disconnect => |value| out.* = .{ .disconnect = value },
-            .packet => |value| {
-                var packet = value;
-                errdefer packet.deinit(self.allocator);
-                try self.finishBrokerEventInto(packet, out);
+            .packet => |input| {
+                self.finishBrokerEventInto(input.packet, out) catch |err| {
+                    input.reject(self, err);
+                    return err;
+                };
+                input.commit(self);
             },
         }
     }
@@ -6705,11 +6717,13 @@ pub const Connection = struct {
     ) Error!packet_transport.OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
         if (try self.observeRetainedDisconnect()) return error.ConnectionClosed;
-        const packet = try self.transport.readPacket(
+        if (self.retained_receive.bytes != null) return self.retained_receive.take();
+        var packet = try self.transport.readPacket(
             self.allocator,
             self.limits.max_packet_size,
         );
-        self.recordPacketReceived(packet.bytes.len);
+        if (!packet.traffic_recorded) self.recordPacketReceived(packet.bytes.len);
+        packet.traffic_recorded = true;
         return packet;
     }
 
@@ -6739,12 +6753,14 @@ pub const Connection = struct {
     ) Error!packet_transport.OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
         if (try self.observeRetainedDisconnect()) return error.ConnectionClosed;
-        const packet = try self.transport.readPacketWithDeadline(
+        if (self.retained_receive.bytes != null) return self.retained_receive.take();
+        var packet = try self.transport.readPacketWithDeadline(
             self.allocator,
             self.limits.max_packet_size,
             deadline,
         );
-        self.recordPacketReceived(packet.bytes.len);
+        if (!packet.traffic_recorded) self.recordPacketReceived(packet.bytes.len);
+        packet.traffic_recorded = true;
         return packet;
     }
 
@@ -6773,17 +6789,22 @@ pub const Connection = struct {
         {
             return error.TooManyPendingPackets;
         }
-        if (self.pending_packets) |pending| {
-            return pending.ensureAvailable(self.limits.max_pending_ping_packets, self.limits.max_pending_packet_bytes);
-        }
         try self.ensurePendingPacketStorage();
+        return self.pending_packets.?.ensureAvailable(self.limits.max_pending_ping_packets, self.limits.max_pending_packet_bytes);
     }
 
     fn ensurePendingPacketStorage(self: *Connection) Error!void {
-        if (self.pending_packets != null) return;
-        const pending = try self.allocator.create(PendingPacketState);
-        pending.* = .{};
-        self.pending_packets = pending;
+        if (self.pending_packets == null) {
+            const pending = try self.allocator.create(PendingPacketState);
+            pending.* = .{};
+            self.pending_packets = pending;
+        }
+        if (self.retained_receive.packet()) |packet| {
+            if (packet.fixed.packet_type != .disconnect) {
+                try self.pending_packets.?.prependRetained(self.allocator, packet);
+                _ = self.retained_receive.take();
+            }
+        }
     }
 
     const AckReader = @import("runtime/acknowledgement/wait.zig").Reader(struct {
@@ -6833,6 +6854,7 @@ pub const Connection = struct {
         pub const canReadBuffered = termination.canReadBuffered;
         pub const observeRetainedDisconnect = Connection.observeRetainedDisconnect;
         pub const prepare = Connection.ensurePendingPacketQueueAvailable;
+        pub const prepareStorage = Connection.ensurePendingPacketStorage;
         pub const parse = Connection.parseReadAuth;
         pub const readPacket = Connection.readTransportPacket;
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
@@ -6857,6 +6879,7 @@ pub const Connection = struct {
         pub const observeDisconnect = Connection.observeDisconnectPacket;
         pub const observeQueuedDisconnect = Connection.observeQueuedDisconnect;
         pub const prepareQueue = Connection.ensurePendingPacketQueueAvailable;
+        pub const prepareStorage = Connection.ensurePendingPacketStorage;
         pub const readPacket = Connection.readTransportPacket;
         pub const readPacketWithDeadline = Connection.readTransportPacketWithDeadline;
         pub const queuePacket = Connection.queuePendingPacket;
@@ -6963,6 +6986,9 @@ pub const Connection = struct {
     }
 
     fn popPendingPacket(self: *Connection) ?OwnedPacket {
+        if (self.retained_receive.packet()) |packet| {
+            if (packet.fixed.packet_type != .disconnect) return self.retained_receive.take();
+        }
         const pending = self.pending_packets orelse return null;
         return pending.pop();
     }
@@ -8087,7 +8113,7 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        // Retained terminal bytes add one 24-byte ownership slot; optional
+        // Event retries reuse the existing 24-byte packet ownership slot; optional
         // PROXY metadata remains a pointer instead of an inline descriptor.
         try std.testing.expectEqual(@as(usize, 824), @sizeOf(Connection));
         try std.testing.expectEqual(
@@ -11564,6 +11590,7 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 }
 
 test {
+    _ = @import("runtime/receive/event_allocation_tests.zig");
     _ = @import("reconnect/replay_deadline_tests.zig");
     _ = @import("reconnect/flush_deadline_tests.zig");
     _ = @import("reconnect/identifier_tests.zig");

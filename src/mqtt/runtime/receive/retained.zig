@@ -18,6 +18,9 @@ pub fn Reader(comptime Context: type) type {
         pub fn front(connection: *Connection, expected: ?mqtt.PacketType, deadline: ?std.Io.Clock.Timestamp) Error!Pending.Match {
             if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
             if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.transport.ioHandle(), absolute);
+            if (comptime @hasField(Connection, "retained_receive")) {
+                if (connection.retained_receive.bytes != null) try Context.prepareStorage(connection);
+            }
             if (try Context.observeRetainedDisconnect(connection)) return error.ConnectionClosed;
             const ready = try peek(connection, deadline);
             if (ready.packet.fixed.packet_type == .disconnect and expected != .disconnect) {

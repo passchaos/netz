@@ -7,6 +7,9 @@ pub fn Controller(comptime Context: type) type {
     return struct {
         pub fn read(connection: *Context.ConnectionType, deadline: ?std.Io.Clock.Timestamp) Context.ErrorType!Context.AuthType {
             if (!Context.canReadBuffered(connection)) return error.ConnectionClosed;
+            if (comptime @hasField(Context.ConnectionType, "retained_receive")) {
+                if (connection.retained_receive.bytes != null) try Context.prepareStorage(connection);
+            }
             if (try Context.observeRetainedDisconnect(connection)) return error.ConnectionClosed;
             if (connection.pending_packets) |pending| {
                 if (pending.findFirstMatching({}, matches)) |found| {

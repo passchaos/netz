@@ -240,15 +240,15 @@ test "MQTT event DISCONNECT allocation failure preserves typed and AUTH diagnost
             defer pair.receiver.allocator = std.testing.allocator;
             try std.testing.expectError(error.OutOfMemory, pair.receiver.readClientPacketEvent());
         }
-        try std.testing.expect(pair.receiver.retained_disconnect.bytes != null);
-        const bytes = pair.receiver.retained_disconnect.bytes.?;
+        try std.testing.expect(pair.receiver.retained_receive.bytes != null);
+        const bytes = pair.receiver.retained_receive.bytes.?;
         if (operation == .auth) try std.testing.expectError(error.ConnectionClosed, pair.receiver.receiveReauthenticationWithTimeout(.fromSeconds(1))) else try std.testing.expectError(error.ConnectionClosed, pair.receiver.readPublish());
         try std.testing.expect(!pair.receiver.isUsable());
         var diagnostic = try pair.receiver.readDisconnect();
         defer diagnostic.deinit(std.testing.allocator);
         try std.testing.expectEqual(bytes.ptr, diagnostic.packet.bytes.ptr);
         try std.testing.expectEqualStrings("expired", diagnostic.disconnect.properties[0].utf8.value);
-        try std.testing.expect(pair.receiver.retained_disconnect.bytes == null);
+        try std.testing.expect(pair.receiver.retained_receive.bytes == null);
         try std.testing.expectError(error.ConnectionClosed, pair.receiver.readClientPacketEventWithTimeout(.fromMilliseconds(5)));
     }
 }
