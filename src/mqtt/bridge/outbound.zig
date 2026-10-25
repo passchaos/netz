@@ -19,5 +19,6 @@ test {
     _ = engine;
     _ = @import("local_source.zig");
     _ = @import("local_completion_tests.zig");
+    _ = @import("local_lazy_recovery_tests.zig");
     _ = @import("local_outbound_tests.zig");
 }

@@ -2932,6 +2932,7 @@ pub const Broker = struct {
     pub const closeLocalConsumer = local_consumer_api.closeLocalConsumer;
     pub const pollLocalConsumer = local_consumer_api.pollLocalConsumer;
     pub const localConsumerPendingCount = local_consumer_api.localConsumerPendingCount;
+    pub const localConsumerStats = local_consumer_api.localConsumerStats;
     pub const acknowledgeLocalConsumer = local_consumer_api.acknowledgeLocalConsumer;
     pub const completeLocalConsumerQoS0 = local_consumer_api.completeLocalConsumerQoS0;
     pub const retryLocalConsumerEvent = local_consumer_api.retryLocalConsumerEvent;

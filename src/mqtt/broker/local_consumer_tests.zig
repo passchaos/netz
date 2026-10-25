@@ -146,6 +146,7 @@ test "broker local consumer close restores pending QoS0 and rejects stale handle
     defer broker.closeLocalConsumer(&resumed);
     try std.testing.expect(resumed.session_present);
     try std.testing.expectError(error.LocalConsumerClosed, broker.pollLocalConsumer(&stale));
+    try std.testing.expectError(error.LocalConsumerClosed, broker.localConsumerStats(&stale));
     try std.testing.expectError(error.LocalConsumerClosed, broker.completeLocalConsumerQoS0(&stale));
     try std.testing.expectError(error.LocalConsumerClosed, broker.retryLocalConsumerEvent(&stale, zero));
     try std.testing.expectError(error.LocalConsumerClosed, broker.acknowledgeLocalConsumer(

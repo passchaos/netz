@@ -928,6 +928,7 @@ pub fn Engine(comptime Source: type) type {
             defer if (connected) |state| state.store(false, .release);
             var reactivate_after_disconnect = false;
             while (true) {
+                if (self.source.shutdown.isSet()) return;
                 if (connected) |state| {
                     state.store(self.target.connection() != null, .release);
                 }
@@ -935,7 +936,18 @@ pub fn Engine(comptime Source: type) type {
                     if (pending.load(.acquire) and
                         self.target.connection() == null) return;
                 }
-                if (!reactivate_after_disconnect) {
+                self.activateLocalSource() catch |err| switch (err) {
+                    error.Canceled => return,
+                    else => return err,
+                };
+                _ = self.source.finishPendingCompletion() catch |err| switch (err) {
+                    error.Canceled => return,
+                    else => return err,
+                };
+                if (!reactivate_after_disconnect and
+                    self.target.connection() == null and
+                    !self.hasPendingDurableQoS2())
+                {
                     self.source.waitForPending(
                         threshold,
                     ) catch |err| switch (err) {
@@ -962,6 +974,10 @@ pub fn Engine(comptime Source: type) type {
                         if (pending.load(.acquire) and
                             self.target.connection() == null) return;
                     }
+                    _ = self.source.finishPendingCompletion() catch |err| switch (err) {
+                        error.Canceled => return,
+                        else => return err,
+                    };
                     const pending = try self.source.pendingCount();
                     const generation = self.source.deliveryGeneration();
                     const has_work = pending != 0 or

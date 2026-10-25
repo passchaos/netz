@@ -13,6 +13,7 @@ const runtime = @import("../runtime.zig");
 const session = @import("../session/mod.zig");
 const snapshot = @import("../reconnect/snapshot.zig");
 const subscription = @import("../reconnect/subscription.zig");
+const local_wait = @import("local_wait.zig");
 
 pub const Error = broker_mod.Error || snapshot.Error || error{SourceSessionLost};
 
@@ -161,46 +162,7 @@ pub const Client = struct {
         return self.wake.observe();
     }
 
-    /// Sleep without polling until the durable local queue reaches `threshold`.
-    /// Queue and shutdown Events are awaited concurrently.
-    pub fn waitForPending(
-        self: *Client,
-        threshold: usize,
-    ) Error!void {
-        if (threshold == 0) return error.InvalidProperty;
-        while (true) {
-            if (self.shutdown.isSet()) return error.Canceled;
-            const observed = self.wake.observe();
-            if (try self.pendingCount() >= threshold) return;
-            const WakeResult = union(enum) {
-                ready: std.Io.Cancelable!void,
-                shutdown: std.Io.Cancelable!void,
-            };
-            var wake_buffer: [2]WakeResult = undefined;
-            var select: std.Io.Select(WakeResult) = .init(
-                self.io,
-                &wake_buffer,
-            );
-            defer select.cancelDiscard();
-            try select.concurrent(
-                .ready,
-                broker_mod.LocalConsumerWake.waitForChange,
-                .{ self.wake, self.io, observed },
-            );
-            try select.concurrent(
-                .shutdown,
-                std.Io.Event.wait,
-                .{ self.shutdown, self.io },
-            );
-            switch (try select.await()) {
-                .ready => |result| try result,
-                .shutdown => |result| {
-                    try result;
-                    return error.Canceled;
-                },
-            }
-        }
-    }
+    pub const waitForPending = local_wait.waitForPending;
 
     pub fn disconnectTransport(self: *Client) void {
         if (self.consumer) |*consumer| self.broker.closeLocalConsumer(consumer);
@@ -215,22 +177,16 @@ pub const Client = struct {
     pub fn pollWithOptions(self: *Client, _: reconnect.PollOptions) Error!?Event {
         if (self.shutdown.isSet()) return error.Canceled;
         if (self.consumer == null) return .{ .connected = try self.connect() };
+        if (try self.finishPendingCompletion()) return null;
         // Preserve a selected publication while its target is pending. Once
         // QoS 0 finishes at the target, retry only the broker completion. A
         // selected PUBREL can be replayed after a coordinator commit rollback,
         // or finish an already-staged PUBCOMP whose broker journal write failed.
         if (self.selected) |selected| switch (selected) {
             .publish => return null,
-            .qos0_completion => {
-                try self.completeQoS0();
-                return null;
-            },
+            .qos0_completion => unreachable,
             .pubrel => |packet_id| {
                 const state = try self.receipts.incomingQoS2State(self.receipt_handle, packet_id);
-                if (state == null) {
-                    try self.writeStagedIncomingQoS2Completion(packet_id, .{});
-                    return null;
-                }
                 if (state != .release_pending) return error.InvalidAcknowledgement;
                 return releaseEvent(packet_id);
             },
@@ -259,6 +215,21 @@ pub const Client = struct {
                 break :blk releaseEvent(packet_id);
             },
         };
+    }
+
+    /// Finish local durability after the target has already accepted delivery.
+    /// This never selects a queued publication or writes to the target.
+    pub fn finishPendingCompletion(self: *Client) Error!bool {
+        const selected = self.selected orelse return false;
+        switch (selected) {
+            .publish => return false,
+            .qos0_completion => try self.completeQoS0(),
+            .pubrel => |packet_id| {
+                if (try self.receipts.incomingQoS2State(self.receipt_handle, packet_id) != null) return false;
+                try self.writeStagedIncomingQoS2Completion(packet_id, .{});
+            },
+        }
+        return true;
     }
 
     pub fn completeQoS0(self: *Client) Error!void {

@@ -94,7 +94,7 @@ test "local source QoS2 retries PUBCOMP durability before selecting another deli
     try source.completeQoS0();
 }
 
-test "local source QoS0 retries completion journal failure before next delivery" {
+test "local source QoS0 retries completion journal failure before lazy activation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -119,9 +119,9 @@ test "local source QoS0 retries completion journal failure before next delivery"
     try std.testing.expect(failing.has_induced_failure);
     failing.fail_index = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(usize, 1), try source.pendingCount());
-    // An empty adapter poll must finish the removed delivery's journal write,
-    // without selecting or resending either message in the same call.
-    try std.testing.expect((try source.pollWithOptions(.{ .timeout = .fromMilliseconds(1) })) == null);
+    // Reaching the next batch's threshold must first finish the old delivery's
+    // journal write, without selecting or resending either message.
+    try source.waitForPending(1);
     {
         var restored = try broker_mod.Broker.init(allocator, io, .{ .queue_qos0_messages = true });
         defer restored.deinit();

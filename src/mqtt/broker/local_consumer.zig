@@ -468,14 +468,24 @@ pub fn Operations(comptime Context: type) type {
             self: *Broker,
             consumer: *const LocalConsumer,
         ) Error!usize {
+            const value = try self.localConsumerStats(consumer);
+            return value.queued_count +| value.inflight_count;
+        }
+
+        /// Snapshot delivery state under the same ownership checks as polling.
+        /// In-flight protocol work must resume independently of a lazy queue's
+        /// activation threshold.
+        pub fn localConsumerStats(
+            self: *Broker,
+            consumer: *const LocalConsumer,
+        ) Error!session_mod.Stats {
             if (!consumer.active) return error.LocalConsumerClosed;
             self.state_mutex.lockUncancelable(self.io);
             defer self.state_mutex.unlock(self.io);
             if (!ownsConsumerLocked(self, consumer)) {
                 return error.LocalConsumerClosed;
             }
-            const value = try self.sessions.stats(consumer.session);
-            return value.queued_count +| value.inflight_count;
+            return self.sessions.stats(consumer.session);
         }
 
         pub fn acknowledgeLocalConsumer(

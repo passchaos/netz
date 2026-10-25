@@ -339,6 +339,14 @@ transaction are both empty for the complete idle interval. Configuration
 rejects zero durations/counts, inbound-only lazy bridges, and thresholds above
 a finite `max_queued_messages`, which would otherwise make activation
 unreachable.
+The activation threshold applies to new queued batches. An already connected
+target or a coordinated QoS 2 transaction resumes immediately, and restored
+local in-flight work also bypasses the threshold. Local QoS 0/PUBCOMP journal
+completion is retried before entering the queue wait, even when the target has
+disconnected and no queued message remains. Bounded real-TCP recovery tests
+cover coordinator-clear, broker-PUBCOMP and QoS 0 journal failures, source
+reopening with one in-flight QoS 1 delivery below a threshold of two, and the
+return to idle after completion.
 A bounded source-locked port of Mosquitto's `15-persist-bridge-queue.py`
 extends that evidence across both brokers. After a warmup establishes the
 persistent remote Session, the target checkpoints and stops; sixteen local QoS
