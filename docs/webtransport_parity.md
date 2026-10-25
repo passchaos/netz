@@ -29,6 +29,23 @@ that backpressure resumes its committed suffix after GOAWAY.
 
 ## CONNECT transport termination
 
+Application operations inspect buffered CONNECT control before reserving a new
+stream or submitting associated-stream data. This applies with opening credit
+already available, and covers shared-server contiguous/scatter/batch writes,
+FIN, priority updates, explicit Session DATA, DRAIN and flow grants. CLOSE stops
+the operation before stream-ID, byte-count or FIN commits; DRAIN remains
+advisory, and its notification remains available to the application. The common
+preflight lives in `runtime/application.zig` and also serves DATAGRAM and stream
+cancellation paths. If consuming buffered control requires a QUIC receive-credit
+update that is paced, congestion-blocked or fails at the socket, application
+admission returns that error with the parser and receive cursor rolled back.
+This prevents fresh stream credit from bypassing a still-buffered CLOSE.
+Long close-reason allocation failure similarly preserves input for retry.
+Batch output counts are cleared before Session preflight, while insufficient
+count storage fails before consuming peer control. Real protected-UDP tests
+cover shared/owning client and server opens, all shared-server send forms,
+sibling continuation, event ownership, and receive-credit backpressure.
+
 Shared-server RESET_STREAM, reliable RESET_STREAM_AT and STOP_SENDING now
 inspect buffered CONNECT control before submitting an application cancellation.
 A received CLOSE or CONNECT FIN/reset/stop prevents that submission, retains

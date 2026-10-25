@@ -39,6 +39,7 @@ const early_streams = @import("runtime/association/early_streams.zig");
 const server_terminal = @import("runtime/endpoint_server/terminal.zig");
 const server_close = @import("runtime/endpoint_server/close.zig");
 const server_stream_control = @import("runtime/endpoint_server/stream_control.zig");
+const application = @import("runtime/application.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 pub const EndpointClient = endpoint_client.Client;
@@ -2442,8 +2443,8 @@ pub const EndpointAcceptedSession = struct {
         data: []const u8,
         fin: bool,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = self.h3.trySendResponseBody(
             self.session_id.value,
             data,
@@ -2460,8 +2461,8 @@ pub const EndpointAcceptedSession = struct {
         parts: []const []const u8,
         fin: bool,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = self.h3.trySendResponseBodyParts(
             self.session_id.value,
             parts,
@@ -2476,8 +2477,8 @@ pub const EndpointAcceptedSession = struct {
     pub fn openBidirectionalStream(
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = flow_open.open(&self.control, self.h3, &self.streams, .bidirectional, null, true);
         try self.refreshTimer();
@@ -2492,8 +2493,8 @@ pub const EndpointAcceptedSession = struct {
     pub fn openUnidirectionalStream(
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
         const result = flow_open.open(&self.control, self.h3, &self.streams, .unidirectional, null, true);
         try self.refreshTimer();
@@ -2552,8 +2553,8 @@ pub const EndpointAcceptedSession = struct {
         stream_id: u62,
         payload: []const u8,
     ) EndpointServerError!usize {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = handshake_stream.writeOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2572,8 +2573,8 @@ pub const EndpointAcceptedSession = struct {
         stream_id: u62,
         parts: []const []const u8,
     ) EndpointServerError!usize {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = handshake_stream.writeSlicesOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2595,8 +2596,8 @@ pub const EndpointAcceptedSession = struct {
         payload: []const u8,
         fin: bool,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = handshake_stream.sendOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2617,8 +2618,8 @@ pub const EndpointAcceptedSession = struct {
         parts: []const []const u8,
         fin: bool,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = handshake_stream.sendSlicesOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2636,8 +2637,8 @@ pub const EndpointAcceptedSession = struct {
         stream_id: u62,
         priority: i32,
     ) Error!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         try self.streams.setPriority(stream_id, priority);
     }
 
@@ -2655,8 +2656,10 @@ pub const EndpointAcceptedSession = struct {
         writes: []const StreamWrite,
         counts: []usize,
     ) EndpointServerError!StreamWriteResult {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
+        if (counts.len < writes.len) return error.BufferTooShort;
+        @memset(counts[0..writes.len], 0);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = stream_batch.writeOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2673,8 +2676,8 @@ pub const EndpointAcceptedSession = struct {
         self: *EndpointAcceptedSession,
         stream_id: u62,
     ) EndpointServerError!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const result = handshake_stream.finishOnce(
             &self.h3.established.connection,
             &self.streams,
@@ -2735,8 +2738,8 @@ pub const EndpointAcceptedSession = struct {
 
     pub fn drain(self: *EndpointAcceptedSession) EndpointServerError!void {
         if (self.control.local_drain_sent) return;
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         var encoded: [16]u8 = undefined;
         const capsule = try session_control.writeDrainInto(&encoded);
         const result = self.h3.trySendResponseBody(
@@ -2789,14 +2792,14 @@ pub const EndpointAcceptedSession = struct {
     /// Submit one WT_MAX_DATA grant. Backpressure leaves the advertised limit
     /// unchanged so an endpoint loop can retry this same operation.
     pub fn grantData(self: *EndpointAcceptedSession, maximum: u64) Error!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         return flow_grant.send(&self.control, self.h3, &self.streams, .{ .max_data = maximum });
     }
 
     pub fn grantStreams(self: *EndpointAcceptedSession, direction: webtransport.StreamDirection, maximum: u64) Error!void {
-        try connection_lifecycle.ensureOpen(&self.control, self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, self.h3, &self.streams, self.dispatcher, self.handle);
+        try application.ensureOpen(&self.control, self.h3, &self.streams);
         const capsule: webtransport.Capsule = switch (direction) {
             .bidirectional => .{ .max_streams_bidi = maximum },
             .unidirectional => .{ .max_streams_uni = maximum },
@@ -5229,8 +5232,8 @@ pub const AcceptedHandshakeSession = struct {
     fn ensureApplicationSendOpen(
         self: *AcceptedHandshakeSession,
     ) Error!void {
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
+        try application.ensureOpen(&self.control, &self.h3, &self.streams);
     }
 
     pub fn applicationProtocol(self: AcceptedHandshakeSession) ?application_protocol.String {
@@ -8151,8 +8154,8 @@ pub const HandshakeClientSession = struct {
     fn ensureApplicationSendOpen(
         self: *HandshakeClientSession,
     ) Error!void {
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
+        try application.ensureOpen(&self.control, &self.h3, &self.streams);
     }
 
     /// Open WebTransport on an existing authenticated HTTP/3 connection. The
@@ -19116,6 +19119,8 @@ test {
 test {
     _ = @import("runtime/endpoint_server/close_tests.zig");
     _ = @import("runtime/endpoint_server/stream_control_tests.zig");
+    _ = @import("runtime/endpoint_server/application_tests.zig");
+    _ = @import("runtime/flow/open_control_tests.zig");
     _ = @import("runtime/endpoint_server/stream_control_terminal_tests.zig");
     _ = @import("runtime/flow/progress/wait_tests.zig");
     _ = @import("runtime/flow/progress/delivery_tests.zig");

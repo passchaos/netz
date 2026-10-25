@@ -217,11 +217,18 @@ pub const Control = struct {
     /// Unnegotiated MAX_* capsules are ignored; terminal and prohibited control
     /// messages still use the same parser and scoped error handling.
     pub fn progressFlow(self: *Control, connection: *quic.one_rtt.Connection) Error!void {
+        return self.progressBuffered(connection) catch |err| switch (err) {
+            error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return,
+            else => return err,
+        };
+    }
+
+    /// Application admission cannot advance past a buffered CLOSE whose
+    /// receive-credit transaction is blocked. Retain its parser/input state
+    /// and expose backpressure before allocating IDs or submitting data.
+    pub fn progressBuffered(self: *Control, connection: *quic.one_rtt.Connection) Error!void {
         while (true) {
-            const event = self.pollInternal(connection, true) catch |err| switch (err) {
-                error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => return,
-                else => return err,
-            };
+            const event = try self.pollInternal(connection, true);
             const value = event orelse return;
             switch (value) {
                 .draining => self.pending_draining = true,

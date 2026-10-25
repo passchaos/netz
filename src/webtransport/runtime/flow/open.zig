@@ -8,6 +8,7 @@ const deadline_policy = @import("../../../internal/deadline.zig");
 const flow_progress = @import("progress.zig");
 const association_prefix = @import("../stream/prefix.zig");
 const send_wait = @import("../stream/wait.zig");
+const application = @import("../application.zig");
 
 pub fn prepare(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, direction: webtransport.StreamDirection, deadline: ?std.Io.Clock.Timestamp) (control_mod.Error || quic.runtime.ReceiveTimeoutError)!u62 {
     return prepareInternal(control, h3, registry, null, direction, deadline, false);
@@ -106,6 +107,7 @@ fn prepareInternal(control: *control_mod.Control, h3: anytype, registry: *webtra
     var context = flow_progress.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .one_attempt = one_attempt };
     while (true) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
+        try application.ensureOpen(control, h3, registry);
         return attempt(registry, id, direction) catch |err| switch (err) {
             error.FlowControlBlocked => {
                 try context.progress().maintain(deadline);

@@ -9,6 +9,7 @@ const control_mod = @import("../session_control.zig");
 const progress_mod = @import("progress.zig");
 const lifecycle = @import("../connection_lifecycle.zig");
 const send = @import("datagram/send.zig");
+const application = @import("../application.zig");
 
 pub const Error = control_mod.Error;
 pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
@@ -16,9 +17,7 @@ pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 /// Process already received session control before sending new DATAGRAMs.
 /// This performs no socket read and retains CLOSE/DRAIN events for the owner.
 pub fn prepareSend(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry) Error!void {
-    try lifecycle.ensureOpen(control, h3, registry);
-    try progress_mod.buffered(control, &h3.established.connection);
-    try control.ensureOpen();
+    return application.ensureOpen(control, h3, registry);
 }
 
 /// One owner services capsules after every congestion/pacing wait. A CLOSE

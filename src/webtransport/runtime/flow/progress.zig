@@ -14,7 +14,16 @@ const association = @import("../stream_association.zig");
 pub const Error = control_mod.Error || quic.runtime.ReceiveTimeoutError;
 
 pub fn buffered(control: *control_mod.Control, connection: *quic.one_rtt.Connection) control_mod.Error!void {
-    control.progressFlow(connection) catch |err| {
+    return bufferedInternal(control, connection, false);
+}
+
+pub fn applicationBuffered(control: *control_mod.Control, connection: *quic.one_rtt.Connection) control_mod.Error!void {
+    return bufferedInternal(control, connection, true);
+}
+
+fn bufferedInternal(control: *control_mod.Control, connection: *quic.one_rtt.Connection, strict: bool) control_mod.Error!void {
+    const result = if (strict) control.progressBuffered(connection) else control.progressFlow(connection);
+    result catch |err| {
         switch (err) {
             error.InvalidCapsule, error.FlowControlViolation => {
                 _ = control.tryRejectInvalidCapsule(connection) catch |rejection_err| switch (rejection_err) {
@@ -22,6 +31,7 @@ pub fn buffered(control: *control_mod.Control, connection: *quic.one_rtt.Connect
                     else => return rejection_err,
                 };
             },
+            error.PacingLimited, error.CongestionLimited, error.FlowControlBlocked => {},
             else => try http3.runtime.closeConnectionForProtocolError(connection, err),
         }
         return err;
