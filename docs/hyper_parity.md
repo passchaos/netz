@@ -2371,6 +2371,24 @@ existing stream-local rejection policy. Exhaustive allocator faults cover
 bounded and unbounded readers, declared and growing bodies, padded DATA,
 fragmented headers, trailers, sibling handoff, real TCP input, exact cancellation
 frames, connection-credit refunds, and partial reset writes.
+Single client aggregate and streaming responses, including Extended CONNECT
+attempts, now apply the same terminal policy to internal allocation failure.
+Direct response readers reject reuse after a discarded message instead of
+consuming later buffered HEADERS. Terminal cancellation requires no reset-history
+allocation, and DATA refunds stop after a failed cleanup write. Extended CONNECT
+rejection aggregation tracks the whole operation's unreleased DATA credit,
+including padding, so failure after a later body or trailer allocation restores
+the earlier accepted payload as well. Application callbacks returning OutOfMemory
+retain stream-local cancellation when cleanup succeeds; failed refunds or resets
+retire reuse while returning the original callback error. Fault tests cover
+bounded and unbounded readers, informational responses, dynamic-table entries,
+TCP input, accepted and rejected CONNECT, head/DATA/FIN callbacks, and partial
+refund/reset writes.
+Response trailers are decoded before a short body is rejected, preserving
+their HPACK dynamic-table updates for subsequent streams. Both aggregate and
+Extended CONNECT rejection readers follow the existing streaming order;
+fragmented trailer tests reference the newly inserted dynamic entry from a
+healthy response after the first stream's Content-Length failure.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives
