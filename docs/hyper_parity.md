@@ -2389,6 +2389,17 @@ their HPACK dynamic-table updates for subsequent streams. Both aggregate and
 Extended CONNECT rejection readers follow the existing streaming order;
 fragmented trailer tests reference the newly inserted dynamic entry from a
 healthy response after the first stream's Content-Length failure.
+Single-response HEAD/204/304 drains now refund pure-padding DATA immediately
+because no application body slice exists to release its flow-controlled bytes.
+Nonfinal padding returns connection and stream credit; final padding returns
+connection credit without reopening the ended receive half. Forbidden trailers
+still complete HPACK decoding before stream rejection, and a complete peer reset
+remains reusable in streaming readers. The drain lives in
+`runtime/response/forbidden_body.zig` with fault tests for output allocation,
+compression/CONTINUATION errors, and partially written refunds. Wire assertions
+check exact WINDOW_UPDATE and RST_STREAM values, while four-byte-window TCP and
+TLS 1.2/1.3 tests require a real refund before the peer can send the final DATA;
+later responses reference the rejected trailers' dynamic-table entries.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives

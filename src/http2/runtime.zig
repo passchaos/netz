@@ -46,6 +46,7 @@ const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
+const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
 const header_block_limits = @import("runtime/headers/block_limits.zig");
 const flow_credit = @import("runtime/flow/credit.zig");
 const validateDeclaredRequestLength =
@@ -15336,10 +15337,13 @@ pub const Connection = struct {
                         if (!traditional_connect and
                             (frame.header.flags & flag_end_stream) == 0)
                         {
-                            try self.consumeForbiddenResponseBodyUntil(
+                            self.consumeForbiddenResponseBodyUntil(
                                 stream_id,
                                 deadline,
-                            );
+                            ) catch |err| {
+                                if (err == error.StreamReset) completed = true;
+                                return @as(anyerror!StreamingResponse, err);
+                            };
                         }
                         break;
                     }
@@ -15904,37 +15908,21 @@ pub const Connection = struct {
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        while (true) {
-            var frame = try self.readOwnedFrameWithDeadline(deadline);
-            defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
-            if (frame.frame.header.frame_type == .goaway) {
-                const goaway = try http2.GoAwayPayload.parse(frame.frame);
-                try self.handleGoAwayForStream(stream_id, goaway);
-                continue;
-            }
-            if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
-            switch (frame.frame.header.frame_type) {
-                .data => {
-                    const data = try self.receiveDataPayload(stream_id, frame.frame);
-                    defer self.releaseDataFrameBudget(data);
-                    if (data.data.len != 0) {
-                        self.releaseConnectionCapacity(
-                            frame.frame.payload.len,
-                        ) catch {};
-                        return error.InvalidContentLength;
-                    }
-                    try self.maybeReleaseReceivedCapacity(
-                        stream_id,
-                        (frame.frame.header.flags & flag_end_stream) != 0,
-                    );
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) return;
-                },
-                .headers => return error.InvalidContentLength,
-                .rst_stream => return error.StreamReset,
-                else => return error.UnexpectedFrame,
-            }
-        }
+        return forbidden_response_body.consume(self, stream_id, deadline, .{
+            .ErrorType = Error,
+            .readFrame = readOwnedFrameWithDeadline,
+            .handleConnection = handleConnectionFrameUntil,
+            .goAway = handleGoAwayForStream,
+            .receive = receiveDataPayload,
+            .releaseBudget = releaseDataFrameBudget,
+            .releaseCapacity = releaseDiscardedMessageCapacity,
+            .refund = sendWindowUpdatesUntil,
+            .readHeaders = readHeaderBlockUntil,
+            .freeHeaders = freeHeaders,
+            .reject = recordResponseStreamReadError,
+            .recordReset = recordResetStream,
+            .fail = failDiscardedResponse,
+        });
     }
 
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
@@ -38185,6 +38173,7 @@ test {
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/response/credit_failure_tests.zig");
     _ = @import("runtime/response/allocation_failure_tests.zig");
+    _ = @import("runtime/response/forbidden_body_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
     _ = @import("runtime/request/allocation_failure_tests.zig");
