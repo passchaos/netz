@@ -171,17 +171,6 @@ fn fragmentedWireLen(
 
 const IncomingDataKind = frame_validation.DataKind;
 
-fn isAbruptReceiveEnd(err: anyerror) bool {
-    return switch (err) {
-        error.ConnectionClosed,
-        error.RequestCancelled,
-        error.RequestRejected,
-        error.ConnectionResetByPeer,
-        => true,
-        else => false,
-    };
-}
-
 const MessageFrameReceiveState = struct {
     header: ?websocket.FrameHeader = null,
     payload_start: usize = 0,
@@ -2942,7 +2931,7 @@ pub fn Connection(comptime role: common.Role) type {
                 self.finishReceiveFailure(code, deadline);
                 return;
             }
-            if (!isAbruptReceiveEnd(err) or
+            if (!@import("receive_failure.zig").isTerminalTransportError(err) or
                 self.close_received.load(.acquire))
             {
                 return;

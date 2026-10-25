@@ -21,6 +21,7 @@ const message_buffer = @import("runtime/message/buffer.zig");
 pub const ReceiveBuffer = message_buffer;
 const message_state = @import("runtime/message/state.zig");
 const frame_validation = @import("runtime/message/frame_validation.zig");
+const receive_failure = @import("runtime/receive_failure.zig");
 const handshake_headers = @import("runtime/handshake/headers.zig");
 const handshake_rejection = @import("runtime/handshake/rejection.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
@@ -12490,28 +12491,17 @@ fn closeAfterReceiveError(
         connection.finishReceiveFailure(code, deadline);
         return;
     }
-    if (!isAbruptReceiveEnd(err) or
+    if (!receive_failure.isTerminalTransportError(err) or
         connection.close_received.load(.acquire))
     {
         return;
     }
-    // EOF/END_STREAM/reset without a WebSocket Close is an abnormal closure.
+    // A transport end or fatal TLS record error without a WebSocket Close is
+    // an abnormal closure.
     // It has no RFC 6455 status code to send, but it must still release partial
     // receive state and prevent application data from being written afterward.
     if (!failReceive(connection)) return;
     connection.finishAbruptReceiveEnd(deadline);
-}
-
-fn isAbruptReceiveEnd(err: anyerror) bool {
-    return switch (err) {
-        error.ConnectionClosed,
-        error.StreamReset,
-        error.RequestCancelled,
-        error.RequestRejected,
-        error.ConnectionResetByPeer,
-        => true,
-        else => false,
-    };
 }
 
 fn failReceive(connection: anytype) bool {
@@ -17262,6 +17252,9 @@ test {
     _ = @import("runtime/h3_recovery_tests.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/error_close_tests.zig");
+    _ = @import("runtime/transport_end_tests.zig");
+    _ = @import("runtime/transport_end_h2_tests.zig");
+    _ = @import("runtime/receive_failure_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");

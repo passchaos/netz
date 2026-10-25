@@ -1246,6 +1246,21 @@ Ping/Pong, and Close 1000/`done`, with certificate verification and proxy-side
 
 ## Remaining evidence before a broad completion claim
 
+Fatal stream/TLS receive failures now terminate WebSocket ownership across
+frame, allocating-message, caller-buffer, Ping and Close receive APIs. Bare TLS
+EOF, truncated record headers/payloads, failed record authentication and the
+standard TLS client's corresponding errors preserve their original cause while
+releasing buffered frames, fragmented messages, compression scratch and pending
+outbound state. Later reads, data writes and Ping fail with ConnectionClosed;
+no WebSocket Close is fabricated on a failed TLS channel. An authenticated TLS
+close_notify without a WebSocket Close also ends the WebSocket abnormally.
+`runtime/receive_failure.zig` shares the terminal classification across HTTP/1,
+RFC 8441 and RFC 9220, while timeout, cancellation, local allocation failure and
+retained-write conflicts stay retryable. Real TLS 1.2/1.3 client/server tests
+cover every receive entry point, standard and vail WSS clients, and HTTP/2
+allocating/caller-buffer messages after underlying TLS truncation. Existing
+stream reset tests retain the per-session termination boundary for HTTP/3.
+
 The shared `fuzz-parsers` target feeds bounded arbitrary bytes through
 WebSocket frame headers, owned frames, Close payloads and permessage-deflate
 extension negotiation. Default tests replay truncations, byte flips and random
