@@ -4843,19 +4843,29 @@ pub const Connection = struct {
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
-        var packet = try TypedReceive.read(self, .publish, null);
-        errdefer packet.deinit(self.allocator);
-        var publish_packet = try mqtt.Publish.parsePayload(
-            self.allocator,
-            self.protocol,
-            packet.fixed.flags,
-            packet.remainingBytes(),
-        );
-        errdefer publish_packet.deinit(self.allocator);
-        try self.validateIncomingUtf8(publish_packet.topic);
-        try self.validateIncomingProperties(publish_packet.properties);
-        try self.commitIncomingPublish(&publish_packet);
-        return .{ .packet = packet, .publish = publish_packet };
+        const ready = try TypedReceive.front(self, .publish, null);
+        const value = self.decodeIncomingPublish(ready.packet) catch |err| {
+            if (err != error.OutOfMemory) {
+                var packet = self.pending_packets.?.takeMatch(ready.index);
+                packet.deinit(self.allocator);
+            }
+            return err;
+        };
+        _ = self.pending_packets.?.takeMatch(ready.index);
+        return value;
+    }
+
+    fn decodeIncomingPublish(self: *Connection, packet: OwnedPacket) Error!OwnedPublish {
+        return @import("runtime/receive/publish.zig").decode(self, packet, .{
+            .ErrorType = Error,
+            .PublishType = OwnedPublish,
+            .validateUtf8 = validateIncomingUtf8,
+            .validateProperties = validateIncomingProperties,
+            .validateCapabilities = validateIncomingPublishCapabilities,
+            .validateAlias = validateIncomingTopicAlias,
+            .aliasTopic = incomingTopicAlias,
+            .commit = commitValidatedIncomingPublish,
+        });
     }
 
     pub fn writePubAck(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
@@ -6024,20 +6034,7 @@ pub const Connection = struct {
                 } };
             },
             .publish => blk: {
-                var value = try mqtt.Publish.parsePayload(
-                    self.allocator,
-                    self.protocol,
-                    packet.fixed.flags,
-                    packet.remainingBytes(),
-                );
-                errdefer value.deinit(self.allocator);
-                try self.validateIncomingUtf8(value.topic);
-                try self.validateIncomingProperties(value.properties);
-                try self.commitIncomingPublish(&value);
-                break :blk .{ .publish = .{
-                    .packet = packet,
-                    .publish = value,
-                } };
+                break :blk .{ .publish = try self.decodeIncomingPublish(packet) };
             },
             .puback, .pubrec, .pubrel, .pubcomp => |packet_type| blk: {
                 var value = try mqtt.AckPacket.parsePayload(
@@ -6179,20 +6176,8 @@ pub const Connection = struct {
                 } };
             },
             .publish => {
-                var value = try mqtt.Publish.parsePayload(
-                    self.allocator,
-                    self.protocol,
-                    packet.fixed.flags,
-                    packet.remainingBytes(),
-                );
-                errdefer value.deinit(self.allocator);
-                try self.validateIncomingUtf8(value.topic);
-                try self.validateIncomingProperties(value.properties);
-                try self.commitIncomingPublish(&value);
-                out.* = .{ .publish = .{
-                    .packet = packet,
-                    .publish = value,
-                } };
+                const value = try self.decodeIncomingPublish(packet);
+                out.* = .{ .publish = value };
             },
             .subscribe => {
                 var value = try mqtt.Subscribe.parse(
@@ -6393,6 +6378,10 @@ pub const Connection = struct {
     ) Error!void {
         try self.validateIncomingPublishCapabilities(publish_packet.*);
         try self.validateIncomingTopicAlias(publish_packet.*);
+        return self.commitValidatedIncomingPublish(publish_packet, true);
+    }
+
+    fn commitValidatedIncomingPublish(self: *Connection, publish_packet: *mqtt.Publish, update_alias: bool) Error!void {
         const recorded = try self.recordIncomingPublish(publish_packet.*);
         errdefer if (recorded) {
             const packet_id = publish_packet.packet_id.?;
@@ -6404,7 +6393,7 @@ pub const Connection = struct {
             std.debug.assert(self.packet_identifiers.remove(self.allocator, packet_id, stage));
             self.incoming_inflight -= 1;
         };
-        try self.applyValidatedIncomingTopicAlias(publish_packet);
+        if (update_alias) try self.applyValidatedIncomingTopicAlias(publish_packet);
     }
 
     fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {
@@ -7320,9 +7309,13 @@ pub const OwnedConnAck = struct {
 pub const OwnedPublish = struct {
     packet: OwnedPacket,
     publish: mqtt.Publish,
+    /// Present only when Topic Alias supplied the omitted Topic Name. Normal
+    /// names continue borrowing the packet or caller's receive storage.
+    owned_topic: ?[]u8 = null,
 
     pub fn deinit(self: *OwnedPublish, allocator: std.mem.Allocator) void {
         self.publish.deinit(allocator);
+        if (self.owned_topic) |topic| allocator.free(topic);
         self.packet.deinit(allocator);
         self.* = undefined;
     }
@@ -11589,6 +11582,8 @@ test {
     _ = @import("runtime/receive/event_allocation_tests.zig");
     _ = @import("reconnect/replay_deadline_tests.zig");
     _ = @import("runtime/ping_write_tests.zig");
+    _ = @import("runtime/receive/alias_ownership_tests.zig");
+    _ = @import("runtime/receive/alias_transport_tests.zig");
     _ = @import("reconnect/flush_deadline_tests.zig");
     _ = @import("reconnect/identifier_tests.zig");
     _ = @import("reconnect/identifier_resume_tests.zig");

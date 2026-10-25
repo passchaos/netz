@@ -9,6 +9,19 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Received alias-only PUBLISH messages now own their resolved Topic Name
+independently of the connection's Topic Alias table. Typed, client-event,
+broker-event and caller-buffer results retain the old topic after that alias
+is replaced or the connection is closed. Normal Topic Names keep their packet
+backing; only names omitted on the wire need the additional owned string.
+The common decoder in `runtime/receive/publish.zig` prepares that ownership
+before committing QoS receive state. Allocation failure retains the complete
+packet for retry, including typed reads and reusable caller storage, without
+changing the alias binding or consuming a receive slot. Adjacent tests cover
+QoS 1/2, coalesced following packets, table replacement, and connection teardown.
+Real TCP, TLS 1.2/1.3, WebSocket and WSS exchanges also queue an alias replacement
+while waiting for PINGRESP, then retain both publications after closing the client.
+
 Typed subscriptions now share `mqtt.validateSubscription` across Router direct,
 prepared and batch updates, Session storage, local-consumer preflight and
 SUBSCRIBE writing. Invalid filters, reserved QoS/Retain Handling values,
