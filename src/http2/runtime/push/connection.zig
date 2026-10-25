@@ -4,6 +4,7 @@ const std = @import("std");
 const http2 = @import("../../mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const receive = @import("receive.zig");
+const credit = @import("credit.zig");
 const OwnedFrame = @import("../frame/io.zig").OwnedFrame;
 const flag_end_headers: u8 = 0x4;
 const flag_end_stream: u8 = 0x1;
@@ -85,18 +86,28 @@ pub fn Lifecycle(comptime hooks: anytype) type {
             hooks.forgetWindows(self, id);
         }
 
-        fn failPushedReceive(self: anytype, id: u31, err: receive.Error, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
+        pub fn returnHeldCredit(self: anytype, id: u31, extra: usize, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
+            return credit.release(self, id, extra, deadline, .{ .ErrorType = hooks.Error, .returnCredit = hooks.returnCredit });
+        }
+
+        fn failPushedReceive(self: anytype, id: u31, err: receive.Error, extra_credit: usize, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
             const previous = self.push_state.state.?.received.get(id) orelse return;
             const was_finished = previous.finished and previous.failure == null;
             self.push_state.state.?.received.fail(self.allocator, id, err);
             defer finishPushedReceive(self, id);
+            if (!was_finished) try returnHeldCredit(self, id, extra_credit, deadline);
             const code: http2.ErrorCode = if (was_finished and err == error.UnexpectedFrame) .stream_closed else switch (err) {
                 error.PushBufferFull, error.MessageTooLarge, error.OutOfMemory => .cancel,
                 else => .protocol_error,
             };
+            if (self.terminal_write_failed) return;
             hooks.reset(self, id, code, deadline) catch |reset_err| switch (reset_err) {
                 error.SocketUnconnected, error.ConnectionResetByPeer => {},
-                else => return reset_err,
+                else => {
+                    self.aggregate_timeout_unusable = true;
+                    self.terminal_write_failed = true;
+                    return reset_err;
+                },
             };
         }
 
@@ -110,7 +121,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 return;
             }
             received.headers(self.allocator, id, fields, end_stream, pushedReceiveLimits(self)) catch |err| {
-                try failPushedReceive(self, id, err, deadline);
+                try failPushedReceive(self, id, err, 0, deadline);
                 return;
             };
             if (received.get(id).?.finished) finishPushedReceive(self, id);
@@ -130,7 +141,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                     hooks.deinitHeader(pending, self.allocator);
                     self.allocator.destroy(pending);
                     self.pending_push_header = null;
-                    try failPushedReceive(self, id, error.MessageTooLarge, deadline);
+                    try failPushedReceive(self, id, error.MessageTooLarge, 0, deadline);
                     return;
                 } else self.aggregate_timeout_unusable = true;
                 return err;
@@ -169,7 +180,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                         entry.started = true;
                     }
                     const parsed = hooks.parseHeaders(self, frame) catch |err| {
-                        try failPushedReceive(self, id, err, deadline);
+                        try failPushedReceive(self, id, err, 0, deadline);
                         return true;
                     };
                     if ((frame.header.flags & flag_end_headers) != 0) {
@@ -178,7 +189,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                                 self.aggregate_timeout_unusable = true;
                                 hooks.goAway(self, hooks.processed(self.*), .compression_error, "push-hpack", deadline) catch {};
                             } else if (err == error.MessageTooLarge) {
-                                try failPushedReceive(self, id, error.MessageTooLarge, deadline);
+                                try failPushedReceive(self, id, error.MessageTooLarge, 0, deadline);
                                 return true;
                             } else self.aggregate_timeout_unusable = true;
                             return err;
@@ -218,25 +229,26 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                         try hooks.goAway(self, hooks.processed(self.*), .protocol_error, "data-on-reserved-push", deadline);
                         return error.InvalidFrame;
                     }
+                    const before = self.recv_connection_window.value;
+                    const generation = state.received.connection_refill_generation;
                     const data = try hooks.takeData(self, id, frame);
                     defer hooks.releaseData(self, data);
                     const ended = (frame.header.flags & flag_end_stream) != 0;
                     state.received.data(self.allocator, id, data.data, ended, pushedReceiveLimits(self)) catch |err| {
-                        try failPushedReceive(self, id, err, deadline);
-                        hooks.returnCredit(self, frame.payload.len, deadline) catch |credit_err| switch (credit_err) {
-                            error.SocketUnconnected, error.ConnectionResetByPeer => try self.recv_connection_window.update(@intCast(frame.payload.len)),
-                            else => return credit_err,
-                        };
+                        try failPushedReceive(self, id, err, frame.payload.len, deadline);
                         return true;
                     };
                     try hooks.credit(self, id, data, ended, deadline);
+                    state.received.accountData(id, before, self.recv_connection_window.value, data.adaptive_connection_increment, generation);
                     if (state.received.get(id).?.finished) finishPushedReceive(self, id);
                     return true;
                 },
                 .rst_stream => {
                     _ = try http2.ResetStreamPayload.parse(frame);
+                    const was_finished = entry.finished;
                     state.received.fail(self.allocator, id, error.StreamReset);
-                    finishPushedReceive(self, id);
+                    defer finishPushedReceive(self, id);
+                    if (!was_finished) try returnHeldCredit(self, id, 0, deadline);
                     return true;
                 },
                 .window_update => {

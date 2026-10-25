@@ -2424,6 +2424,20 @@ their deadline through the new refund, and failed writes retire the stream and
 stop later cleanup output. Tests cover all response/request receive forms,
 pushes, exact wire increments, maximum padding, shifted request-batch credit,
 adaptive growth, partial writes, and four-byte-window TCP/TLS 1.2/1.3 exchanges.
+Buffered pushes now record the connection DATA credit they still own. Peer
+reset, message/trailer rejection, receive quota failure, and explicit push
+cancellation return that held credit before removing stream windows; only the
+offending current DATA payload is added to its historical refund. A committed
+whole-connection refill clears every push's credit through a generation marker,
+and active aggregate/streaming or independent-deadline parent readers observe
+that marker before their own failure refunds. Adaptive grants and padding
+returns retain their distinct accounting. Complete pushed responses remain
+readable after a late reset or failed cleanup write. Cancellation reserves reset
+history before refunding, so pre-write OOM preserves promise ownership and credit;
+partial refund/reset writes retire reuse and stop subsequent cleanup output.
+Coalesced-frame and real TCP/TLS 1.2/1.3 tests cover failed and completed siblings,
+parent-triggered and push-triggered refills, exact peer-side window restoration,
+reset/quota/trailer/cancel paths, allocation faults, and partial writes.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives

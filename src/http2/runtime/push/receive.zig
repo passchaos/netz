@@ -3,6 +3,7 @@
 const std = @import("std");
 const http2 = @import("../../mod.zig");
 const message = @import("../headers/message.zig");
+const credit = @import("../flow/credit.zig");
 
 pub const Error = message.Error || error{ InvalidFrame, UnexpectedFrame, StreamReset, PushNotReady, PushBufferFull, MessageTooLarge, TooManyInformationalResponses };
 
@@ -32,6 +33,7 @@ pub const Entry = struct {
     body_allowed: bool = true,
     informational_count: usize = 0,
     retained_bytes: usize = 0,
+    unreleased_connection_bytes: usize = 0,
     finished: bool = false,
     failure: ?Error = null,
     trailers_only: bool = false,
@@ -51,6 +53,33 @@ pub const Store = struct {
     entries: std.ArrayList(Entry) = .empty,
     index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     retained_bytes: usize = 0,
+    connection_refill_generation: usize = 0,
+
+    pub fn accountData(self: *Store, id: u31, before: i64, after: i64, adaptive_increment: u31, generation_before: usize) void {
+        if (generation_before != self.connection_refill_generation) return;
+        const index = self.index.get(id) orelse return;
+        credit.account(self.entries.items, index, before, after, adaptive_increment) catch unreachable;
+    }
+
+    /// A committed full connection refill returned held DATA for every stream.
+    /// Keep ownership metadata while clearing only the credit still owed.
+    pub fn returnedAllConnectionCredit(self: *Store) void {
+        for (self.entries.items) |*entry| entry.unreleased_connection_bytes = 0;
+        self.connection_refill_generation +%= 1;
+    }
+
+    pub fn takeConnectionCredit(self: *Store, id: u31) usize {
+        const entry = self.get(id) orelse return 0;
+        const held = entry.unreleased_connection_bytes;
+        entry.unreleased_connection_bytes = 0;
+        return held;
+    }
+
+    pub fn synchronizeConnectionCredit(self: *const Store, controls: anytype, generation: *usize) void {
+        if (generation.* == self.connection_refill_generation) return;
+        for (controls) |*control| control.unreleased_connection_bytes = 0;
+        generation.* = self.connection_refill_generation;
+    }
 
     pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         for (self.entries.items) |*entry| entry.clear(allocator);

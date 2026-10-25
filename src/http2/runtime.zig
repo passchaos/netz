@@ -7767,6 +7767,8 @@ pub const Connection = struct {
         cancellation: ?BatchCancellationObserver,
     ) anyerror!void {
         const deadline = earliestIndividualBatchDeadline(controls);
+        var push_generation = self.pushedCreditGeneration();
+        defer self.synchronizePushedCredit(controls, &push_generation);
         const read_result: InterruptibleFrameRead = if (cancellation) |cancel|
             self.readBufferedFrameWithDeadlineOrWake(
                 deadline,
@@ -7782,6 +7784,7 @@ pub const Connection = struct {
                 error.Timeout => return,
                 else => |other| return other,
             }) };
+        self.synchronizePushedCredit(controls, &push_generation);
         const frame = switch (read_result) {
             .frame => |borrowed| borrowed.frame,
             .wake => return,
@@ -7863,13 +7866,15 @@ pub const Connection = struct {
                 frame,
             ),
         };
-        try flow_credit.account(
-            controls,
-            state_index,
-            connection_before,
-            self.recv_connection_window.value,
-            adaptive_connection_increment,
-        );
+        if (push_generation == self.pushedCreditGeneration()) {
+            try flow_credit.account(
+                controls,
+                state_index,
+                connection_before,
+                self.recv_connection_window.value,
+                adaptive_connection_increment,
+            );
+        } else self.synchronizePushedCredit(controls, &push_generation);
         process_result catch |err| {
             if (callback_error) |application_error| {
                 try self.failIndividualStreamingCallback(
@@ -8609,10 +8614,17 @@ pub const Connection = struct {
         if (self.push_state.hasPending(promised_stream_id)) {
             return error.InvalidStreamId;
         }
-        try self.writeResetStreamFrame(
-            promised_stream_id,
-            .cancel,
-        );
+        errdefer if (self.aggregate_timeout_unusable) {
+            self.releasePeerStream(promised_stream_id);
+            self.forgetStreamWindows(promised_stream_id);
+        };
+        try self.prepareLocallyResetStreams(1);
+        try PushLifecycle.returnHeldCredit(self, promised_stream_id, 0, null);
+        if (self.terminal_write_failed) return error.ConnectionClosed;
+        self.writeResetStreamFramePrepared(promised_stream_id, .cancel) catch |err| {
+            self.terminal_write_failed = true;
+            return err;
+        };
         _ = self.push_state.cancelRemote(
             self.allocator,
             promised_stream_id,
@@ -14297,6 +14309,9 @@ pub const Connection = struct {
             return;
         }
         if (self.role == .client) {
+            if (self.push_state.isRemoteReserved(reset.stream_id)) {
+                try PushLifecycle.returnHeldCredit(self, reset.stream_id, 0, null);
+            }
             if (self.push_state.cancelRemote(
                 self.allocator,
                 reset.stream_id,
@@ -14734,6 +14749,8 @@ pub const Connection = struct {
     }
 
     fn releaseReceivedPaddingCapacityUntil(self: *Connection, stream_id: u31, padding_bytes: u9, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        const before = self.recv_connection_window.available();
+        const connection_target = self.receiveConnectionWindowTarget();
         const stream_available = if (end_stream) 0 else (try self.recvStreamWindow(stream_id)).available();
         const increments = flow_capacity.plan(self.recv_connection_window.available(), stream_available, self.receiveConnectionWindowTarget(), self.receiveStreamWindowTarget(), padding_bytes, end_stream);
         self.sendWindowUpdatesUntil(
@@ -14751,6 +14768,17 @@ pub const Connection = struct {
             self.forgetStreamWindows(stream_id);
             return err;
         };
+        if (before <= connection_target / 2 and before < connection_target) {
+            if (self.push_state.state) |state| state.received.returnedAllConnectionCredit();
+        }
+    }
+
+    fn pushedCreditGeneration(self: *const Connection) usize {
+        return if (self.push_state.state) |state| state.received.connection_refill_generation else 0;
+    }
+
+    fn synchronizePushedCredit(self: *const Connection, controls: anytype, generation: *usize) void {
+        if (self.push_state.state) |state| state.received.synchronizeConnectionCredit(controls, generation);
     }
 
     fn failDiscardedResponse(self: *Connection, stream_id: u31) void {
@@ -14885,8 +14913,13 @@ pub const Connection = struct {
         var body_capacity_exact = false;
         var informational_count: usize = 0;
         var trailers_only = false;
-        var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        var receive_credits = [_]flow_credit.Tracker{.{}};
+        const receive_credit = &receive_credits[0];
+        var push_generation = self.pushedCreditGeneration();
+        errdefer {
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
+            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        }
 
         while (true) {
             var pending_owned: ?OwnedFrame = null;
@@ -14897,6 +14930,7 @@ pub const Connection = struct {
                 pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
             } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
             if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -15167,8 +15201,13 @@ pub const Connection = struct {
         var expected_body_len: ?usize = null;
         var body_bytes: usize = 0;
         var informational_count: usize = 0;
-        var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        var receive_credits = [_]flow_credit.Tracker{.{}};
+        const receive_credit = &receive_credits[0];
+        var push_generation = self.pushedCreditGeneration();
+        errdefer {
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
+            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        }
 
         while (true) {
             var pending_owned: ?OwnedFrame = null;
@@ -15179,6 +15218,7 @@ pub const Connection = struct {
                 pending_owned = try self.readOwnedFrameWithDeadline(deadline);
                 break :blk pending_owned.?.frame;
             } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
             if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -15589,11 +15629,17 @@ pub const Connection = struct {
         errdefer |err| if (rejection_started and err != error.Timeout and err != error.OutOfMemory) {
             self.abandonExtendedConnect(stream_id);
         };
-        var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        var receive_credits = [_]flow_credit.Tracker{.{}};
+        const receive_credit = &receive_credits[0];
+        var push_generation = self.pushedCreditGeneration();
+        errdefer {
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
+            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        }
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
+            self.synchronizePushedCredit(&receive_credits, &push_generation);
             if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
@@ -38213,6 +38259,10 @@ test {
     _ = @import("runtime/request/padding_credit_tests.zig");
     _ = @import("runtime/flow/tests/padding.zig");
     _ = @import("runtime/push/padding_credit_tests.zig");
+    _ = @import("runtime/push/credit_failure_tests.zig");
+    _ = @import("runtime/push/credit_refill_tests.zig");
+    _ = @import("runtime/push/credit_fault_tests.zig");
+    _ = @import("runtime/push/credit_transport_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
     _ = @import("runtime/request/allocation_failure_tests.zig");
