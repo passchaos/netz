@@ -145,7 +145,10 @@ async fn handle(
         assert_eq!(ping.opcode, 0x9);
         assert!(ping.fin);
         assert_eq!(ping.payload, b"ping");
+        write_frame(&mut stream, 0xA, b"unsolicited").await;
+        write_frame(&mut stream, 0x2, b"during probe").await;
         write_frame(&mut stream, 0xA, &ping.payload).await;
+        println!("Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data");
 
         let close = read_frame(&mut stream, true).await;
         assert_eq!(close.opcode, 0x8);

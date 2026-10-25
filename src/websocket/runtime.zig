@@ -5066,8 +5066,18 @@ pub const MessageWriteProgress = common.MessageWriteProgress;
 const MessageIntoReceiveState = common.MessageIntoReceiveState;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("runtime/control/automatic.zig");
+const ping_control = @import("runtime/control/ping.zig");
 
 pub const Connection = struct {
+    const PingReader = ping_control.Reader(.{
+        .Error = Error,
+        .receive = receiveFrameAutoInternal,
+        .io = struct {
+            fn get(connection: *const Connection) std.Io {
+                return connection.io;
+            }
+        }.get,
+    });
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: net.Stream,
@@ -5905,36 +5915,7 @@ pub const Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
-        while (true) {
-            var frame = try self.receiveFrameAutoInternal(
-                deadline,
-                .ping_wait,
-            );
-            switch (frame.header.opcode) {
-                .ping => {
-                    frame.deinit(self.allocator);
-                    continue;
-                },
-                .pong => {
-                    defer frame.deinit(self.allocator);
-                    if (!std.mem.eql(u8, frame.payload, payload)) {
-                        return error.UnexpectedPong;
-                    }
-                    return .{ .pong = {} };
-                },
-                .close => {
-                    errdefer frame.deinit(self.allocator);
-                    return .{ .closed = try frame.takeClose(self.allocator) };
-                },
-                .text, .binary, .continuation => {
-                    return .{ .application = frame };
-                },
-                else => {
-                    frame.deinit(self.allocator);
-                    return error.InvalidFrame;
-                },
-            }
-        }
+        return PingReader.read(self, payload, deadline);
     }
 
     pub fn sendClose(self: *Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
@@ -7928,6 +7909,15 @@ test "WebSocket HTTP/1 connection keeps resumable writes compact" {
 }
 
 pub const H2Connection = struct {
+    const PingReader = ping_control.Reader(.{
+        .Error = Error,
+        .receive = receiveFrameAutoInternal,
+        .io = struct {
+            fn get(connection: *const H2Connection) std.Io {
+                return connection.tunnel.connection.io;
+            }
+        }.get,
+    });
     allocator: std.mem.Allocator,
     tunnel: http2_runtime.Tunnel,
     tunnel_owned: bool = false,
@@ -8739,36 +8729,7 @@ pub const H2Connection = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
-        while (true) {
-            var frame = try self.receiveFrameAutoInternal(
-                deadline,
-                .ping_wait,
-            );
-            switch (frame.header.opcode) {
-                .ping => {
-                    frame.deinit(self.allocator);
-                    continue;
-                },
-                .pong => {
-                    defer frame.deinit(self.allocator);
-                    if (!std.mem.eql(u8, frame.payload, payload)) {
-                        return error.UnexpectedPong;
-                    }
-                    return .{ .pong = {} };
-                },
-                .close => {
-                    errdefer frame.deinit(self.allocator);
-                    return .{ .closed = try frame.takeClose(self.allocator) };
-                },
-                .text, .binary, .continuation => {
-                    return .{ .application = frame };
-                },
-                else => {
-                    frame.deinit(self.allocator);
-                    return error.InvalidFrame;
-                },
-            }
-        }
+        return PingReader.read(self, payload, deadline);
     }
 
     pub fn sendClose(self: *H2Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
@@ -16123,7 +16084,7 @@ test "WebSocket pingWithDeadline preserves an interleaved message" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket pingWithTimeout rejects mismatched Pong" {
+test "WebSocket pingWithTimeout skips unsolicited Pong before its matching reply" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -16151,6 +16112,9 @@ test "WebSocket pingWithTimeout rejects mismatched Pong" {
             var ping = try connection.receiveFrame();
             defer ping.deinit(self.server.http.allocator);
             try connection.sendPong("wrong");
+            try connection.sendPong(ping.payload);
+            try connection.sendBinary("after probe");
+            try std.testing.expectError(error.Timeout, connection.receiveFrameWithTimeout(.fromMilliseconds(30)));
         }
     };
     var shared = Shared{ .server = &server };
@@ -16161,10 +16125,12 @@ test "WebSocket pingWithTimeout rejects mismatched Pong" {
         .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
     });
     defer client.close();
-    try std.testing.expectError(
-        error.UnexpectedPong,
-        client.pingWithTimeout("probe", .fromSeconds(1)),
-    );
+    var event = try client.pingWithTimeout("probe", .fromSeconds(1));
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .pong);
+    var following = try client.receiveMessageWithTimeout(.fromSeconds(1));
+    defer following.deinit(allocator);
+    try std.testing.expectEqualStrings("after probe", following.payload);
     thread.join();
     if (shared.err) |err| return err;
 }
@@ -17283,6 +17249,7 @@ test "WebSocket connection serializes concurrent sends" {
 test {
     _ = @import("runtime/message/tests/close_ownership.zig");
     _ = @import("runtime/message/tests/automatic_preparation.zig");
+    _ = @import("runtime/control/ping_tests.zig");
     _ = h3;
     _ = @import("runtime/message/tests/buffer.zig");
     _ = @import("runtime/message/tests/state.zig");

@@ -55,6 +55,8 @@ wait "$server_pid"
 server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
+grep -Fq 'netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport=h2c' "$work/client.log"
+grep -Fq 'Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data' "$work/server.log"
 grep -Fq \
   'netz RFC 8441 client interoperated with Hyper: transport=h2c fragmented-text ping pong bounded-close tls_metadata=n/a key_update=n/a client_io=zio-std-io server_io=hyper-tokio' \
   "$work/client.log"
@@ -104,6 +106,8 @@ wait "$server_pid"
 server_pid=
 cat "$work/tls-client.log"
 cat "$work/tls-server.log"
+grep -Fq 'netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport=tls' "$work/tls-client.log"
+grep -Fq 'Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data' "$work/tls-server.log"
 grep -Fq \
   'netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-client.log"

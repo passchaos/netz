@@ -127,14 +127,17 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try websocket.sendPing("ping");
-    var pong = try websocket.receiveFrame();
+    var application = try websocket.pingWithTimeout("ping", .fromSeconds(1));
+    defer application.deinit(allocator);
+    if (application != .application or
+        application.application.header.opcode != .binary or
+        !std.mem.eql(u8, application.application.payload, "during probe")) return error.UnexpectedWebSocketMessage;
+    var pong = try websocket.continuePingWithTimeout("ping", .fromSeconds(1));
     defer pong.deinit(allocator);
-    if (pong.header.opcode != .pong or
-        !std.mem.eql(u8, pong.payload, "ping"))
-    {
+    if (pong != .pong) {
         return error.UnexpectedPong;
     }
+    std.debug.print("netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport={s}\n", .{if (tls_enabled) "tls" else "h2c"});
 
     var close_event = try websocket.closeWithTimeout(
         .{ .code = .normal_closure, .reason = "done" },

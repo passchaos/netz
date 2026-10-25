@@ -1105,6 +1105,16 @@ completes fragmented text, Ping/Pong and bounded Close on the rotated keys. The
 netz client obtains `std.Io` from the zio-backed runtime, and the runner requires
 the terminal records to identify `zio-std-io` and `hyper-tokio`.
 
+Active Ping waits on HTTP/1, RFC 8441 and RFC 9220 tolerate unsolicited or stale
+Pong payloads as RFC 6455 section 5.5.3 permits. Only a payload matching the
+probe completes the wait. Unrelated Pongs are consumed under the original
+absolute deadline, including already buffered frames, while application data
+and peer Close details retain their owned event delivery. One shared reader
+keeps this behavior consistent across transports. Real TCP tests verify timeout
+continuation without a second Ping; the external Hyper RFC 8441 fixture sends
+an unsolicited Pong and application data before its matching reply over h2c
+and certificate-verified TLS, and checks that netz preserves their order.
+
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes
 interleaved Ping/Pong frames under one non-renewing deadline, and returns either

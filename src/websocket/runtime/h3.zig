@@ -27,6 +27,7 @@ const max_batched_payload_slices: usize = 64;
 pub const MessageWriteProgress = common.MessageWriteProgress;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("control/automatic.zig");
+const ping_control = @import("control/ping.zig");
 
 const PendingMessage = struct {
     const Source = enum { contiguous, slices, fragmented, in_place };
@@ -418,6 +419,7 @@ pub const ConnectAttempt = struct {
 pub fn Connection(comptime role: common.Role) type {
     return struct {
         const Self = @This();
+        const PingReader = ping_control.Reader(.{ .Error = Error, .receive = receiveFrameInternal, .io = io });
 
         allocator: std.mem.Allocator,
         stream_id: u62,
@@ -2769,37 +2771,7 @@ pub fn Connection(comptime role: common.Role) type {
             payload: []const u8,
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
-            while (true) {
-                var frame = try self.receiveFrameInternal(
-                    deadline,
-                    .ping_wait,
-                );
-                switch (frame.header.opcode) {
-                    .ping => {
-                        frame.deinit(self.allocator);
-                        continue;
-                    },
-                    .pong => {
-                        defer frame.deinit(self.allocator);
-                        if (!std.mem.eql(u8, frame.payload, payload)) {
-                            return error.UnexpectedPong;
-                        }
-                        return .{ .pong = {} };
-                    },
-                    .close => {
-                        errdefer frame.deinit(self.allocator);
-                        const close = try frame.takeClose(self.allocator);
-                        return .{ .closed = close };
-                    },
-                    .text, .binary, .continuation => {
-                        return .{ .application = frame };
-                    },
-                    else => {
-                        frame.deinit(self.allocator);
-                        return error.InvalidFrame;
-                    },
-                }
-            }
+            return PingReader.read(self, payload, deadline);
         }
 
         fn readCloseHandshakeEvent(
