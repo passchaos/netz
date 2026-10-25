@@ -24,6 +24,7 @@ const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
 const flow_write = @import("flow/write.zig");
+const flow_cancel = @import("flow/cancel.zig");
 const close_write = @import("endpoint_client/close.zig");
 const flow_datagram = @import("flow/datagram.zig");
 const drain_write = @import("endpoint_client/drain.zig");
@@ -338,12 +339,7 @@ pub const Session = struct {
         try self.validateOwner(client);
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
-        try incremental_stream.reset(
-            &client.h3.established.connection,
-            &self.streams,
-            stream_id,
-            code,
-        );
+        try flow_cancel.cancel(&self.control, &client.h3, &self.streams, stream_id, code, .reset);
     }
 
     pub fn stopStream(
@@ -355,12 +351,7 @@ pub const Session = struct {
         try self.validateOwner(client);
         try client.ensureConnectionOpen();
         defer _ = client.observeConnection();
-        try incremental_stream.stop(
-            &client.h3.established.connection,
-            &self.streams,
-            stream_id,
-            code,
-        );
+        try flow_cancel.cancel(&self.control, &client.h3, &self.streams, stream_id, code, .stop);
     }
 
     const StreamControl = @import("endpoint_client/stream_control.zig").Controller(struct {

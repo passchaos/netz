@@ -27,6 +27,7 @@ const connection_lifecycle = @import("runtime/connection_lifecycle.zig");
 const flow_grant = @import("runtime/flow/grant.zig");
 const flow_open = @import("runtime/flow/open.zig");
 const flow_write = @import("runtime/flow/write.zig");
+const flow_cancel = @import("runtime/flow/cancel.zig");
 const flow_read = @import("runtime/flow/read.zig");
 const flow_datagram = @import("runtime/flow/datagram.zig");
 const flow_streams = @import("runtime/flow/streams.zig");
@@ -6633,12 +6634,7 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return resetHandshakeSessionStream(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
+        return flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .reset);
     }
 
     pub fn resetStreamWithTimeout(
@@ -6670,13 +6666,7 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return incremental_stream.resetWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .reset, deadline);
     }
 
     /// Reset after reliably delivering `reliable_size` WebTransport
@@ -6690,13 +6680,7 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return incremental_stream.resetReliably(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            reliable_size,
-        );
+        return flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .{ .reliable = reliable_size });
     }
 
     pub fn resetStreamReliablyWithTimeout(
@@ -6731,14 +6715,7 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return incremental_stream.resetReliablyWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            reliable_size,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .{ .reliable = reliable_size }, deadline);
     }
 
     pub fn stopStream(
@@ -6748,12 +6725,7 @@ pub const AcceptedHandshakeSession = struct {
     ) Error!void {
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return stopHandshakeSessionStream(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
+        return flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .stop);
     }
 
     pub fn stopStreamWithTimeout(
@@ -6785,13 +6757,7 @@ pub const AcceptedHandshakeSession = struct {
         );
         try self.ensureApplicationSendOpen();
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return incremental_stream.stopWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .stop, deadline);
     }
 
     pub fn drain(self: *AcceptedHandshakeSession) Error!void {
@@ -10514,12 +10480,7 @@ pub const HandshakeClientSession = struct {
                 application_error_code,
             )
         else
-            resetHandshakeSessionStream(
-                &self.h3.established.connection,
-                &self.streams,
-                stream_id,
-                application_error_code,
-            );
+            flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .reset);
         try self.refreshDispatcherTimer();
         try result;
     }
@@ -10554,13 +10515,7 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return incremental_stream.resetWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .reset, deadline);
     }
 
     /// Reset after reliably delivering `reliable_size` WebTransport
@@ -10583,13 +10538,7 @@ pub const HandshakeClientSession = struct {
                 reliable_size,
             )
         else
-            incremental_stream.resetReliably(
-                &self.h3.established.connection,
-                &self.streams,
-                stream_id,
-                application_error_code,
-                reliable_size,
-            );
+            flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .{ .reliable = reliable_size });
         try self.refreshDispatcherTimer();
         try result;
     }
@@ -10627,14 +10576,7 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return incremental_stream.resetReliablyWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            reliable_size,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .{ .reliable = reliable_size }, deadline);
     }
 
     pub fn stopStream(
@@ -10652,12 +10594,7 @@ pub const HandshakeClientSession = struct {
                 application_error_code,
             )
         else
-            stopHandshakeSessionStream(
-                &self.h3.established.connection,
-                &self.streams,
-                stream_id,
-                application_error_code,
-            );
+            flow_cancel.cancel(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .stop);
         try self.refreshDispatcherTimer();
         try result;
     }
@@ -10692,13 +10629,7 @@ pub const HandshakeClientSession = struct {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return incremental_stream.stopWithDeadline(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-            deadline,
-        );
+        return flow_cancel.cancelUntil(&self.control, &self.h3, &self.streams, stream_id, application_error_code, .stop, deadline);
     }
 
     pub fn drain(self: *HandshakeClientSession) Error!void {
@@ -14953,8 +14884,6 @@ const receiveHandshakeSessionStream = handshake_stream.receive;
 const receiveHandshakeSessionStreamWithDeadline =
     handshake_stream.receiveWithDeadline;
 const readHandshakeSessionStream = incremental_stream.read;
-const resetHandshakeSessionStream = incremental_stream.reset;
-const stopHandshakeSessionStream = incremental_stream.stop;
 const initDevelopmentStreamRegistry = development_stream.initRegistry;
 pub const OwnedDevelopmentStream = development_stream.Owned;
 
@@ -19213,4 +19142,8 @@ test {
     _ = @import("runtime/stream/wait/timer_tests.zig");
     _ = @import("runtime/stream/wait/shared_tests.zig");
     _ = @import("runtime/stream/wait/deadline_tests.zig");
+    _ = @import("runtime/stream/reset/wait_tests.zig");
+    _ = @import("runtime/stream/reset/shared_wait_tests.zig");
+    _ = @import("runtime/stream/reset/timer_tests.zig");
+    _ = @import("runtime/stream/reset/backpressure_tests.zig");
 }

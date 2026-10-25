@@ -1,9 +1,8 @@
 //! Cancellation for one Session on a shared, single-owner HTTP/3 client.
 const std = @import("std");
 const deadline_policy = @import("../../../internal/deadline.zig");
-const streams = @import("../stream_incremental.zig");
 const lifecycle = @import("../connection_lifecycle.zig");
-const flow_progress = @import("../flow/progress.zig");
+const flow_cancel = @import("../flow/cancel.zig");
 
 pub fn Controller(comptime Context: type) type {
     return struct {
@@ -11,14 +10,14 @@ pub fn Controller(comptime Context: type) type {
         const Client = Context.ClientType;
         const Error = Context.ErrorType;
         const TimeoutError = Context.TimeoutErrorType;
-        const Operation = union(enum) { reset, reliable: u64, stop };
+        const Operation = flow_cancel.Operation;
 
         /// Abort after guaranteeing `reliable_size` application bytes. The
         /// association prefix is added internally and never charged as data.
         pub fn resetStreamReliably(session: *Session, client: *Client, stream_id: u62, code: u32, reliable_size: u64) Error!void {
             try prepare(session, client);
             defer observe(session, client);
-            try streams.resetReliably(&client.h3.established.connection, &session.streams, stream_id, code, reliable_size);
+            try flow_cancel.cancel(&session.control, &client.h3, &session.streams, stream_id, code, .{ .reliable = reliable_size });
         }
 
         pub fn resetStreamWithTimeout(session: *Session, client: *Client, stream_id: u62, code: u32, timeout: std.Io.Duration) TimeoutError!void {
@@ -74,29 +73,7 @@ pub fn Controller(comptime Context: type) type {
             if (client.h3.callback_reader_active) return error.ConcurrentRead;
             try prepare(session, client);
             defer observe(session, client);
-            const connection = &client.h3.established.connection;
-            while (true) {
-                _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-                try flow_progress.buffered(&session.control, connection);
-                try lifecycle.ensureOpen(&session.control, &client.h3, &session.streams);
-                const result = switch (operation) {
-                    .reset => streams.resetOnce(connection, &session.streams, stream_id, code),
-                    .reliable => |size| streams.resetReliablyOnce(connection, &session.streams, stream_id, code, size),
-                    .stop => streams.stopOnce(connection, &session.streams, stream_id, code),
-                };
-                result catch |err| switch (err) {
-                    error.PacingLimited => {
-                        try connection.waitForPacingAvailabilityWithDeadline(absolute);
-                        continue;
-                    },
-                    error.CongestionLimited, error.FlowControlBlocked => {
-                        try client.h3.receiveDetachedResponseProgressWithDeadline(session.session_id.value, absolute);
-                        continue;
-                    },
-                    else => return err,
-                };
-                return;
-            }
+            return flow_cancel.cancelUntil(&session.control, &client.h3, &session.streams, stream_id, code, operation, absolute);
         }
     };
 }

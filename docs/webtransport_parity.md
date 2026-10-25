@@ -623,6 +623,18 @@ If progress receives a QUIC connection close or a connection-scoped HTTP/3
 protocol failure, cancellation updates every shared Session and discards all
 their DATAGRAM queues before returning. A Session CLOSE remains isolated and
 its exact code/reason event stays readable while siblings continue operating.
+Standalone client/server and shared-client cancellation now use one controller
+for RESET_STREAM, reliable reset, and STOP_SENDING. Pacing waits receive through
+the existing HTTP/3 owner until its pacing wake or the application deadline;
+each retry rechecks buffered Session control and connection state before
+submission. A peer CLOSE therefore stops a pending cancellation without
+discarding its event or setting the unsent RESET/STOP state. DRAIN remains
+advisory, and reliable size still adds the mandatory association bytes to the
+requested application prefix. Ordinary cancellation returns congestion or
+stream-credit backpressure without taking a socket read; bounded cancellation
+waits on the same owner. Tests cover both endpoint roles, ordinary/bounded
+CLOSE interruption, connection-close diagnostics, mapped wire codes, DRAIN,
+unwritten reliable prefixes, timeout retry, and shared sibling delivery.
 Shared-client `closeWithTimeout/Deadline` also bounds CLOSE, CONNECT FIN and
 associated SESSION_GONE cleanup. CLOSE encoding is retained before the first
 write, and a one-byte DATA-frame budget is resumable across timeout or socket
