@@ -3817,6 +3817,25 @@ Keep Alive and shutdown checks; neither mechanism renews the application
 budget. Partial TCP/TLS/WebSocket packets and packets queued during PING remain
 resumable after timeout; TLS packet transports now retain their own fixed-header
 and payload progress instead of relying on stack-local framing state.
+MQTT 5 reconnect clients accept an empty Client ID, including Clean Start=0.
+After an accepted CONNACK, they deep-own the Assigned Client Identifier and
+expose it through `clientId()`; every later CONNECT reuses that identity across
+transport loss. A new client configured with an empty MQTT 5 ID can learn the
+same identity from a validated Session snapshot, including version-one images.
+Explicitly configured IDs still require an exact snapshot match. Saving before
+assignment fails with `InvalidClientId`; rejected CONNACKs and failed identity
+allocation leave the client unassigned. QoS Store replacement prepares all
+allocations before retiring the old Store, so a failed replacement leaves its
+handles and durable state usable for inspection. If allocation fails after a
+broker reports Session loss, the client retains that loss across retries and
+rejects snapshots of the obsolete QoS state until replacement succeeds, even
+if the next CONNACK reports Session Present.
+Real TCP cases cover QoS 1 PUBLISH and QoS 2 PUBREL recovery with preserved/lost
+Sessions and Client reconstruction. TCP/TLS/WSS state-machine cases also verify
+the assigned identity on every replacement CONNECT before QoS or subscription
+recovery. The Mosquitto publish gate independently checks server assignment,
+snapshot reconstruction, QoS 1/2 delivery and persisted No Local subscriptions.
+
 Reconnect clients can also encode an identity-bound Session snapshot while
 online under their single-owner API and transactionally restore it only while
 no Network Connection is active. The versioned CRC envelope binds protocol and

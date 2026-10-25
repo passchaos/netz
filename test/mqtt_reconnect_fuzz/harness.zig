@@ -8,22 +8,27 @@ const reconnect = mqtt.reconnect;
 const runtime = mqtt.runtime;
 
 pub fn runSequence(input: []const u8) !model.Summary {
-    return runSequenceWithTransport(input, .tcp);
+    return runSequenceWithTransport(input, .tcp, false);
 }
 
 pub fn runTlsSequence(input: []const u8) !model.Summary {
-    return runSequenceWithTransport(input, .tls);
+    return runSequenceWithTransport(input, .tls, false);
 }
 
 pub fn runWssSequence(input: []const u8) !model.Summary {
-    return runSequenceWithTransport(input, .wss);
+    return runSequenceWithTransport(input, .wss, false);
 }
 
-const Transport = enum { tcp, tls, wss };
+pub const Transport = enum { tcp, tls, wss };
+
+pub fn runAssignedSequence(input: []const u8, comptime transport: Transport) !model.Summary {
+    return runSequenceWithTransport(input, transport, true);
+}
 
 fn runSequenceWithTransport(
     input: []const u8,
     comptime transport: Transport,
+    assigned_identity: bool,
 ) !model.Summary {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -101,6 +106,7 @@ fn runSequenceWithTransport(
     var server_state = ServerState{
         .server = &server,
         .input = sequence,
+        .assigned_identity = assigned_identity,
     };
     const server_thread = try std.Thread.spawn(
         .{},
@@ -153,7 +159,7 @@ fn runSequenceWithTransport(
     else {};
     const connect_options: runtime.ConnectOptions = .{
         .protocol = .v5,
-        .client_id = "fuzz-reconnect",
+        .client_id = if (assigned_identity) "" else "fuzz-reconnect",
         .clean_start = false,
         .connect_timeout = model.packet_timeout,
         .properties = &connect_properties,
@@ -195,6 +201,7 @@ fn runSequenceWithTransport(
     defer client.deinit();
     const initial = try client.connect();
     try std.testing.expect(!initial.session_present);
+    try std.testing.expectEqualStrings(if (assigned_identity) "fuzz-assigned" else "fuzz-reconnect", client.clientId());
     if (expected_alpn) |alpn| {
         try validateTls(client.connection().?, &certificate_der, alpn);
     }

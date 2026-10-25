@@ -110,6 +110,16 @@ pub fn decode(
 /// Read either version. Reconnect subscription limits are independent of the
 /// QoS Store's subscription capacity because desired filters live in Client.
 pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: []const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
+    return decodeState(allocator, bytes, store_options, expected_protocol, expected_client_id, monotonic_now, realtime_now, maximum_subscriptions);
+}
+
+/// A fresh MQTT 5 client requesting server assignment can learn its durable
+/// identity from a fully validated image. Named clients use the bound decoder.
+pub fn decodeAssignedClient(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
+    return decodeState(allocator, bytes, store_options, .v5, null, monotonic_now, realtime_now, maximum_subscriptions);
+}
+
+fn decodeState(allocator: std.mem.Allocator, bytes: []const u8, store_options: session.Options, expected_protocol: mqtt.ProtocolVersion, expected_client_id: ?[]const u8, monotonic_now: std.Io.Timestamp, realtime_now: std.Io.Timestamp, maximum_subscriptions: usize) Error!Restored {
     if (bytes.len > max_snapshot_bytes) return error.SnapshotLimitExceeded;
     const minimum_len = magic.len + 5 * @sizeOf(u32) +
         @sizeOf(i64) + @sizeOf(u8);
@@ -143,8 +153,11 @@ pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const 
         return error.SnapshotProtocolMismatch;
     }
     const client_id = try cursor.readBlob();
-    if (!std.mem.eql(u8, client_id, expected_client_id)) {
-        return error.SnapshotClientMismatch;
+    if (expected_client_id) |expected| {
+        if (!std.mem.eql(u8, client_id, expected)) return error.SnapshotClientMismatch;
+    } else {
+        if (client_id.len == 0 or client_id.len > std.math.maxInt(u16)) return error.CorruptSnapshot;
+        mqtt.validateUtf8String(client_id) catch return error.CorruptSnapshot;
     }
 
     var store = session.Store.init(allocator, store_options);
@@ -163,7 +176,7 @@ pub fn decodeWithSubscriptionLimit(allocator: std.mem.Allocator, bytes: []const 
     {
         return error.SnapshotSessionCountMismatch;
     }
-    const handle = store.find(expected_client_id, monotonic_now) orelse
+    const handle = store.find(client_id, monotonic_now) orelse
         return error.SnapshotSessionCountMismatch;
     try store.restoreIncomingQoS2Snapshot(handle, &cursor);
     var subscription_state = if (found_version == subscription_version)

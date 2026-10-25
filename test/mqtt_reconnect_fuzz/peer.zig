@@ -12,6 +12,7 @@ pub fn ServerState(
     return struct {
         server: *Server,
         input: []const u8,
+        assigned_identity: bool = false,
         summary: model.Summary = .{},
         err: ?anyerror = null,
 
@@ -24,11 +25,12 @@ pub fn ServerState(
         fn runFallible(self: *@This()) !void {
             var active: ?runtime.AcceptedClient = try self.server.accept(.{
                 .protocol = .v5,
+                .assigned_client_identifier = if (self.assigned_identity) "fuzz-assigned" else null,
             });
             defer if (active) |*connection| {
                 connection.deinit(self.server.allocator);
             };
-            try validateConnect(active.?.connect.connect);
+            try validateConnect(active.?.connect.connect, if (self.assigned_identity) "" else "fuzz-reconnect");
             if (expected_alpn) |alpn| {
                 try validateTls(&active.?.connection, alpn);
             }
@@ -138,7 +140,7 @@ pub fn ServerState(
                 .protocol = .v5,
                 .session_present = session_present,
             });
-            try validateConnect(active.*.?.connect.connect);
+            try validateConnect(active.*.?.connect.connect, if (self.assigned_identity) "fuzz-assigned" else "fuzz-reconnect");
             if (expected_alpn) |alpn| {
                 try validateTls(&active.*.?.connection, alpn);
             }
@@ -279,9 +281,9 @@ fn validateTls(connection: *runtime.Connection, expected_alpn: []const u8) !void
     );
 }
 
-fn validateConnect(connect: mqtt.Connect) !void {
+fn validateConnect(connect: mqtt.Connect, expected_identity: []const u8) !void {
     try std.testing.expect(!connect.clean_start);
-    try std.testing.expectEqualStrings("fuzz-reconnect", connect.client_id);
+    try std.testing.expectEqualStrings(expected_identity, connect.client_id);
     try std.testing.expectEqual(
         @as(?u32, 60),
         mqtt.sessionExpiryInterval(connect.properties),

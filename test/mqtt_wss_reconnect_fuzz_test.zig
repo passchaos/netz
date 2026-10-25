@@ -4,6 +4,13 @@ const std = @import("std");
 const harness = @import("mqtt_reconnect_fuzz/harness.zig");
 const model = @import("mqtt_reconnect_fuzz/model.zig");
 
+test "server-assigned MQTT identity survives WSS reconnect recovery sequences" {
+    try model.requireQosRecovery(try harness.runAssignedSequence(model.qos_recovery_seed[4..], .wss));
+    const subscriptions = try harness.runAssignedSequence(model.subscription_seed[4..], .wss);
+    try std.testing.expect(subscriptions.subscription_replays >= 3);
+    try std.testing.expect(subscriptions.empty_reconnect_barriers >= 2);
+}
+
 test "structured WSS MQTT reconnect sequences reach recovery states" {
     const qos = try harness.runWssSequence(model.qos_recovery_seed[4..]);
     try model.requireQosRecovery(qos);

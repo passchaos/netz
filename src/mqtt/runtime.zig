@@ -4081,7 +4081,7 @@ pub const Connection = struct {
                         }
                     }
                     try self.validateIncomingProperties(value.properties);
-                    if (options.clean_start and value.session_present) {
+                    if ((options.clean_start or options.client_id.len == 0) and value.session_present) {
                         return error.InvalidFlags;
                     }
                     try validateAssignedClientIdentifierForConnect(

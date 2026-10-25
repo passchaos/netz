@@ -4,6 +4,13 @@ const std = @import("std");
 const harness = @import("mqtt_reconnect_fuzz/harness.zig");
 const model = @import("mqtt_reconnect_fuzz/model.zig");
 
+test "server-assigned MQTT identity survives TLS reconnect recovery sequences" {
+    try model.requireQosRecovery(try harness.runAssignedSequence(model.qos_recovery_seed[4..], .tls));
+    const subscriptions = try harness.runAssignedSequence(model.subscription_seed[4..], .tls);
+    try std.testing.expect(subscriptions.subscription_replays >= 3);
+    try std.testing.expect(subscriptions.empty_reconnect_barriers >= 2);
+}
+
 test "structured TLS MQTT reconnect sequences reach recovery states" {
     const qos = try harness.runTlsSequence(model.qos_recovery_seed[4..]);
     try model.requireQosRecovery(qos);

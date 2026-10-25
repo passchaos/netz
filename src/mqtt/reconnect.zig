@@ -17,6 +17,7 @@ const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
 const subscription_replay = @import("reconnect/subscription_replay.zig");
 const session_snapshot = @import("reconnect/snapshot.zig");
+const session_identity = @import("reconnect/session_identity.zig");
 const reconnect_target = @import("reconnect/target.zig");
 const backoff = @import("reconnect/backoff.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -49,6 +50,7 @@ pub const SessionSnapshotError = session_snapshot.Error || error{
     SnapshotBusy,
     SessionPersistenceDisabled,
     SessionStateNotEmpty,
+    SessionLost,
 };
 pub const SessionSnapshotFileError = SessionSnapshotError ||
     session_snapshot.FileError;
@@ -1202,6 +1204,9 @@ pub const Client = struct {
     outgoing: session.Store,
     outgoing_handle: session.Handle,
     outgoing_open: bool = true,
+    // A lost broker Session stays lost if preparing its replacement fails.
+    // Retain the old Store for inspection, but never replay or snapshot it.
+    outgoing_session_lost: bool = false,
     client_options: ClientOptions,
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
     // A fresh broker Session needs all desired filters restored. Preserve the
@@ -1406,20 +1411,11 @@ pub const Client = struct {
         {
             return error.ManualAcknowledgementsDisabled;
         }
-        if (options.client_id.len == 0) return error.InvalidClientId;
+        if (options.client_id.len == 0 and options.protocol != .v5) return error.InvalidClientId;
         var owned_options = try OwnedConnectOptions.init(allocator, options);
         errdefer owned_options.deinit(allocator);
-        var outgoing = session.Store.init(
-            allocator,
-            reconnectSessionOptions(),
-        );
+        var outgoing = try session_identity.FreshSession.init(allocator, owned_options.value.client_id, .zero);
         errdefer outgoing.deinit();
-        const opened = try outgoing.open(
-            owned_options.value.client_id,
-            false,
-            std.math.maxInt(u32),
-            .zero,
-        );
         return .{
             .allocator = allocator,
             .io = io,
@@ -1429,8 +1425,8 @@ pub const Client = struct {
             .retry_schedule = .init(policy),
             .shutdown = shutdown,
             .client_options = client_options,
-            .outgoing = outgoing,
-            .outgoing_handle = opened.handle,
+            .outgoing = outgoing.store,
+            .outgoing_handle = outgoing.handle,
         };
     }
 
@@ -1451,6 +1447,14 @@ pub const Client = struct {
 
     pub fn connection(self: *Client) ?*runtime.Connection {
         return if (self.connection_state) |*active| active else null;
+    }
+
+    /// Effective identity retained across transports. An empty MQTT 5 identity
+    /// becomes the server-assigned Client ID after the first accepted CONNACK
+    /// or after restoring a snapshot into an unassigned client. The returned
+    /// slice is borrowed until identity assignment, restore, or deinit.
+    pub fn clientId(self: *const Client) []const u8 {
+        return self.options.value.client_id;
     }
 
     /// Borrow the most recent failed CONNACK. The view remains valid until
@@ -1504,7 +1508,8 @@ pub const Client = struct {
     /// Explicitly downgrade an owned MQTT 5 CONNECT after an Unsupported
     /// Protocol Version refusal. MQTT 5 CONNECT and Will properties cannot be
     /// represented by legacy protocols: CONNECT properties are discarded,
-    /// while a non-empty Will property list fails closed. Returns false for
+    /// while a non-empty Will property list or an unassigned identity fails
+    /// closed. Returns false for
     /// unrelated refusals or when this Client is no longer configured for v5.
     pub fn adaptProtocolToLastConnectRefusal(
         self: *Client,
@@ -1521,6 +1526,7 @@ pub const Client = struct {
         if (self.options.will) |will| {
             if (will.properties.len != 0) return error.InvalidProperty;
         }
+        if (self.options.value.client_id.len == 0) return error.InvalidClientId;
         self.options.value.protocol = fallback;
         self.options.value.bridge_mode = bridge_mode;
         self.options.value.v3_1_connack_mode = if (fallback == .v3_1 and bridge_mode)
@@ -1624,6 +1630,24 @@ pub const Client = struct {
                 return error.ConnectRefused;
             }
             var result = try attempt.requireAccepted();
+            const identity_assigned = self.options.value.client_id.len == 0;
+            const session_present = result.connack.connack.session_present;
+            // Record known Session loss before ticket, identity or Store
+            // allocation can fail. A later preserved Session cannot revive
+            // the Packet Identifiers belonging to the lost one.
+            if (!session_present and !identity_assigned) {
+                self.subscription_replay_index = 0;
+                self.outgoing_session_lost = true;
+            }
+            if (identity_assigned) {
+                session_identity.adopt(self, result.connection.assignedClientId() orelse {
+                    result.deinit(self.allocator);
+                    return error.InvalidProperty;
+                }) catch |err| {
+                    result.deinit(self.allocator);
+                    return err;
+                };
+            }
             self.rememberTls12SessionTicketFromConnection(&result.connection);
             self.rememberTls13SessionTicketFromConnection(
                 &result.connection,
@@ -1632,16 +1656,11 @@ pub const Client = struct {
                 result.deinit(self.allocator);
                 return err;
             };
-            const session_present = result.connack.connack.session_present;
             result.connack.deinit(self.allocator);
             self.connection_state = result.connection;
             self.connection_state.?.resetPacketIdentifiers();
 
-            // A fresh broker Session cannot recognize Packet Identifiers from
-            // the old session. Dropping that state matches rumqttc's behavior
-            // and prevents stale QoS traffic from being replayed into it.
-            if (!session_present) {
-                self.subscription_replay_index = 0;
+            if (self.outgoing_session_lost) {
                 self.resetOutgoingState() catch |err| {
                     if (self.connection_state) |*active| active.close();
                     self.connection_state = null;
@@ -1959,6 +1978,8 @@ pub const Client = struct {
         if (!configuredPersistentSession(self.options.value)) {
             return error.SessionPersistenceDisabled;
         }
+        if (self.options.value.client_id.len == 0) return error.InvalidClientId;
+        if (self.outgoing_session_lost) return error.SessionLost;
         return session_snapshot.encodeWithSubscriptions(
             &self.outgoing,
             self.outgoing_handle,
@@ -2015,6 +2036,8 @@ pub const Client = struct {
     /// Saved subscriptions merge with compatible caller-seeded filters within
     /// the configured limit; conflicting options or properties reject restore.
     /// Version-one snapshots preserve the caller's desired subscriptions.
+    /// An unassigned MQTT 5 client also adopts the validated saved identity;
+    /// a client with an explicit identity requires an exact match.
     /// The next successful CONNACK must report Session Present before any
     /// restored Packet Identifier can be replayed; a fresh Session discards it
     /// through the existing reconnect path.
@@ -2036,23 +2059,39 @@ pub const Client = struct {
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
         try self.validateSessionSnapshotRestore();
-        var restored = try session_snapshot.decodeWithSubscriptionLimit(
-            self.allocator,
-            bytes,
-            reconnectSessionOptions(),
-            self.options.value.protocol,
-            self.options.value.client_id,
-            monotonic_now,
-            realtime_now,
-            self.client_options.max_subscriptions,
-        );
+        var restored = if (self.options.value.client_id.len == 0)
+            try session_snapshot.decodeAssignedClient(
+                self.allocator,
+                bytes,
+                session_identity.options(),
+                monotonic_now,
+                realtime_now,
+                self.client_options.max_subscriptions,
+            )
+        else
+            try session_snapshot.decodeWithSubscriptionLimit(
+                self.allocator,
+                bytes,
+                session_identity.options(),
+                self.options.value.protocol,
+                self.options.value.client_id,
+                monotonic_now,
+                realtime_now,
+                self.client_options.max_subscriptions,
+            );
         defer restored.deinit();
         if (restored.has_subscription_state) {
             try restored.subscription_state.merge(self.allocator, self.subscriptions.items, self.options.value.protocol, self.client_options.max_subscriptions);
         }
+        const assigned_id = if (self.options.value.client_id.len == 0)
+            try session_identity.clone(self.allocator, try restored.store.clientId(restored.handle))
+        else
+            null;
         self.outgoing.swap(&restored.store);
         self.outgoing_handle = restored.handle;
         self.outgoing_open = false;
+        self.outgoing_session_lost = false;
+        if (assigned_id) |value| session_identity.install(self, value);
         if (restored.has_subscription_state) {
             std.mem.swap(std.ArrayList(OwnedSubscription), &self.subscriptions, &restored.subscription_state.values);
             self.subscription_replay_index = restored.subscription_state.replay_index;
@@ -3301,19 +3340,9 @@ pub const Client = struct {
     }
 
     fn resetOutgoingState(self: *Client) Error!void {
-        self.outgoing.deinit();
-        self.outgoing = session.Store.init(
-            self.allocator,
-            reconnectSessionOptions(),
-        );
-        const opened = try self.outgoing.open(
-            self.options.value.client_id,
-            false,
-            std.math.maxInt(u32),
-            std.Io.Clock.awake.now(self.io),
-        );
-        self.outgoing_handle = opened.handle;
-        self.outgoing_open = true;
+        var fresh = try session_identity.FreshSession.init(self.allocator, self.options.value.client_id, std.Io.Clock.awake.now(self.io));
+        defer fresh.deinit();
+        fresh.install(self);
     }
 
     const ReplayContext = struct {
@@ -3846,14 +3875,6 @@ pub const Client = struct {
     }
 };
 
-fn reconnectSessionOptions() session.Options {
-    return .{
-        .max_sessions = 1,
-        .max_queued_per_session = std.math.maxInt(u16),
-        .max_inflight_per_session = std.math.maxInt(u16),
-    };
-}
-
 fn configuredPersistentSession(options: runtime.ConnectOptions) bool {
     if (options.clean_start) return false;
     return switch (options.protocol) {
@@ -3906,6 +3927,10 @@ fn retryableConnectError(err: anyerror) bool {
 }
 
 test {
+    _ = @import("reconnect/assigned_identity_tests.zig");
+    _ = @import("reconnect/assigned_identity_snapshot_tests.zig");
+    _ = @import("reconnect/session_identity_tests.zig");
+    _ = @import("reconnect/session_reset_tests.zig");
     _ = @import("reconnect/subscription_replay_tests.zig");
     _ = @import("reconnect/subscription_snapshot_tests.zig");
     _ = @import("reconnect/snapshot_subscriptions_tests.zig");

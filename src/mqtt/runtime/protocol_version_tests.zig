@@ -219,11 +219,15 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
     const Case = struct {
         client_id: []const u8,
         assigned_client_id: ?[]const u8,
+        clean_start: bool = true,
+        session_present: bool = false,
+        expected_error: anyerror = error.InvalidProperty,
     };
     const cases = [_]Case{
         .{ .client_id = "", .assigned_client_id = null },
         .{ .client_id = "", .assigned_client_id = "" },
         .{ .client_id = "named-client", .assigned_client_id = "replacement" },
+        .{ .client_id = "", .assigned_client_id = "assigned", .clean_start = false, .session_present = true, .expected_error = error.InvalidFlags },
     };
     const Shared = struct {
         listener: *net.Server,
@@ -281,7 +285,7 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
                         &response,
                         self.allocator,
                         .v5,
-                        false,
+                        case.session_present,
                         0,
                         response_properties,
                     );
@@ -302,7 +306,7 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
 
     for (cases) |case| {
         try std.testing.expectError(
-            error.InvalidProperty,
+            case.expected_error,
             runtime.Client.connectAttempt(
                 allocator,
                 io,
@@ -310,7 +314,7 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
                 .{
                     .protocol = .v5,
                     .client_id = case.client_id,
-                    .clean_start = true,
+                    .clean_start = case.clean_start,
                     .limits = .{ .max_packet_size = 4096 },
                 },
             ),
