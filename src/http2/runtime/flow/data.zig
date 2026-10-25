@@ -46,7 +46,7 @@ pub fn Receiver(comptime Context: anytype) type {
             {
                 const connection_before = self.recv_connection_window.value;
                 const stream_before = stream_window.value;
-                try Context.grantAdaptive(self);
+                try Context.grantAdaptive(self, stream_id, @intCast(charged_len - data.data.len));
                 if (self.recv_connection_window.value > connection_before) {
                     adaptive_connection_increment = @intCast(self.recv_connection_window.value - connection_before);
                 }
@@ -71,6 +71,7 @@ pub fn Receiver(comptime Context: anytype) type {
             return .{
                 .data = data.data,
                 .padding_len = data.padding_len,
+                .padding_bytes = @intCast(charged_len - data.data.len),
                 .budget_charge = budget_charge,
                 .adaptive_connection_increment = adaptive_connection_increment,
             };

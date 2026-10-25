@@ -105,14 +105,15 @@ fn exercise(mode: Mode) !void {
     if (mode == .accepted_budget) {
         connection.data_frame_budget.spent = budget.maximum(budget.automatic, 65_535) - 254;
     } else if (mode != .skipped_connection_grant) {
-        connection.data_frame_budget.empty_frames = budget.max_empty_frames;
+        // Real content leaves room for the adaptive grant. Exhaust the byte
+        // budget afterward; pure padding reserves this room for its refund.
+        connection.data_frame_budget.spent = 32_768;
     }
     recorder.fail_prefix = mode == .failed_write;
-    const padded_empty = [_]u8{ 1, 0 };
     const accepted = mode == .accepted_budget or mode == .skipped_connection_grant;
-    const payload: []const u8 = if (accepted) "x" else &padded_empty;
+    const payload: []const u8 = if (accepted) "x" else "xy";
     const received = runtime.testing.receiveDataPayload(&connection, 1, .{
-        .header = .{ .length = @intCast(payload.len), .frame_type = .data, .flags = if (accepted) 0 else 0x8, .stream_id = 1 },
+        .header = .{ .length = @intCast(payload.len), .frame_type = .data, .flags = 0, .stream_id = 1 },
         .payload = payload,
     });
     if (accepted) {

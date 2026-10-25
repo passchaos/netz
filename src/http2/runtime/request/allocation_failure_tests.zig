@@ -143,8 +143,10 @@ fn expectCancellation(fixture: *Fixture) !void {
             },
             .window_update => {
                 const update = try http2.WindowUpdatePayload.parse(incoming.frame);
-                try std.testing.expectEqual(@as(u31, 0), update.stream_id);
-                refunded += update.increment;
+                if (update.stream_id == 0) refunded += update.increment else {
+                    try std.testing.expect(update.stream_id == 1 or update.stream_id == 3);
+                    try std.testing.expect(update.increment <= 3);
+                }
             },
             else => return error.UnexpectedCleanupFrame,
         }

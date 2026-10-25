@@ -120,7 +120,9 @@ test "HTTP/2 response allocation cleanup never writes after a partial credit ref
         defer fixture.deinit();
         const connection = &fixture.connection;
         try appendHead(connection, 1, false);
-        try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0x08, 1, "\x02ab\x00\x00");
+        // Keep preceding content unpadded so the injected partial write occurs
+        // during failure cleanup, after message OOM, rather than delivery.
+        try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0, 1, "ab");
         try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0, 1, "a" ** 255);
         try wire.appendFrame(&connection.frame_reader.buffer, allocator, .headers, 5, 1, "\x00\x01x\x01y");
         var writer: PartialWriter = .{};

@@ -9,12 +9,19 @@ const Transport = enum { tcp, tls12, tls13 };
 
 test "HTTP/2 forbidden response body restores four-byte windows over TCP and TLS" {
     inline for (std.enums.values(Transport)) |transport| {
-        try exercise(transport, false);
-        try exercise(transport, true);
+        try exercise(transport, false, false);
+        try exercise(transport, true, false);
     }
 }
 
-fn exercise(comptime transport: Transport, streaming: bool) !void {
+test "HTTP/2 padded content restores transport windows without returning content credit" {
+    inline for (std.enums.values(Transport)) |transport| {
+        try exercise(transport, false, true);
+        try exercise(transport, true, true);
+    }
+}
+
+fn exercise(comptime transport: Transport, streaming: bool, comptime content: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -55,11 +62,11 @@ fn exercise(comptime transport: Transport, streaming: bool) !void {
         fn serve(self: *@This()) !void {
             var connection = try self.server.acceptWithTimeout(.fromSeconds(2));
             defer connection.close();
-            for (0..5) |index| {
+            for (0..if (content) @as(usize, 1) else 5) |index| {
                 var request = try connection.readRequestWithTimeout(.fromSeconds(2));
                 defer request.deinit(allocator);
                 const id = request.stream_id;
-                const code: []const u8 = if (index == 1) "204" else if (index == 2) "304" else "200";
+                const code: []const u8 = if (!content and index == 1) "204" else if (!content and index == 2) "304" else "200";
                 const head = try connection.hpack_encoder.encodeBlockRetained(allocator, &.{.{ .name = ":status", .value = code }});
                 try runtime.testing.writeRawFrame(&connection, .headers, 4, id, head);
                 // Exhaust the peer's four-byte stream window using padding.
@@ -73,11 +80,11 @@ fn exercise(comptime transport: Transport, streaming: bool) !void {
                 }
                 try std.testing.expectEqual(@as(usize, 4), refunded);
                 if (index < 3) {
-                    try sendData(&connection, id, 9, "\x02\x00\x00");
+                    try sendData(&connection, id, 9, if (content) "\x00ab" else "\x02\x00\x00");
                     var update = try connection.readWindowUpdateWithTimeout(.fromSeconds(2));
                     defer update.deinit(allocator);
                     try std.testing.expectEqual(@as(u31, 0), update.window_update.stream_id);
-                    try std.testing.expectEqual(@as(u31, 3), update.window_update.increment);
+                    try std.testing.expectEqual(@as(u31, if (content) 1 else 3), update.window_update.increment);
                 } else {
                     const trailer = "\x40\x01x\x01y";
                     try runtime.testing.writeRawFrame(&connection, .headers, if (index == 3) 5 else 1, id, if (index == 3) trailer else trailer[0..2]);
@@ -87,12 +94,12 @@ fn exercise(comptime transport: Transport, streaming: bool) !void {
                     try std.testing.expectEqual(id, reset.reset.stream_id);
                     try std.testing.expectEqual(http2.ErrorCode.protocol_error, reset.reset.error_code);
                 }
-                try std.testing.expectEqual(window.default_value, connection.send_connection_window.value);
+                try std.testing.expectEqual(window.default_value - @as(i64, if (content) 2 else 0), connection.send_connection_window.value);
             }
             var healthy = try connection.readRequestWithTimeout(.fromSeconds(2));
             defer healthy.deinit(allocator);
             // The ignored trailers still inserted x=y into the peer's table.
-            try runtime.testing.writeRawFrame(&connection, .headers, 5, healthy.stream_id, "\x88\xbe");
+            try runtime.testing.writeRawFrame(&connection, .headers, 5, healthy.stream_id, if (content) "\x88" else "\x88\xbe");
         }
     };
     var peer = Peer{ .server = &server };
@@ -109,30 +116,30 @@ fn exercise(comptime transport: Transport, streaming: bool) !void {
         }, .fromSeconds(2));
     defer client.close();
     var delivered: usize = 0;
-    for (0..5) |index| {
-        const options = runtime.RequestOptions{ .method = if (index == 1 or index == 2) "GET" else "HEAD", .authority = "localhost" };
+    for (0..if (content) @as(usize, 1) else 5) |index| {
+        const options = runtime.RequestOptions{ .method = if (content or index == 1 or index == 2) "GET" else "HEAD", .authority = "localhost" };
         if (streaming) {
             const result = client.requestStreamingWithTimeout(options, .fromSeconds(2), &delivered, consume);
             if (index < 3) {
                 var response = try result;
                 defer response.deinit(allocator);
-                try std.testing.expectEqual(@as(usize, 0), response.body_bytes);
+                try std.testing.expectEqual(@as(usize, if (content) 2 else 0), response.body_bytes);
             } else try std.testing.expectError(error.InvalidContentLength, result);
         } else {
             const result = client.requestWithTimeout(options, .fromSeconds(2));
             if (index < 3) {
                 var response = try result;
                 defer response.deinit(allocator);
-                try std.testing.expectEqual(@as(usize, 0), response.body.len);
+                try std.testing.expectEqualStrings(if (content) "ab" else "", response.body);
             } else try std.testing.expectError(error.InvalidContentLength, result);
         }
         try std.testing.expect(!client.aggregate_timeout_unusable);
-        try std.testing.expectEqual(window.default_value, client.recv_connection_window.value);
+        try std.testing.expectEqual(window.default_value - @as(i64, if (content) 2 else 0), client.recv_connection_window.value);
     }
     var healthy = try client.requestWithTimeout(.{ .authority = "localhost" }, .fromSeconds(2));
     defer healthy.deinit(allocator);
-    try std.testing.expectEqualStrings("y", runtime.testing.findHeader(healthy.headers, "x").?);
-    try std.testing.expectEqual(@as(usize, 0), delivered);
+    if (!content) try std.testing.expectEqualStrings("y", runtime.testing.findHeader(healthy.headers, "x").?);
+    try std.testing.expectEqual(@as(usize, if (content and streaming) 2 else 0), delivered);
     thread.join();
     joined = true;
     if (peer.err) |err| return err;

@@ -2410,6 +2410,20 @@ also sends the classified connection GOAWAY for compression or CONTINUATION
 errors. Buffered and real-TCP tests cover HEAD/204/304, both END_STREAM states,
 fragmented trailers, exact reset/GOAWAY codes, output limits, allocation faults,
 and bounded/unbounded readers across all eight batch forms.
+Successful DATA processing now returns padding overhead across request,
+response, batch, independent-deadline, duplex, tunnel, and push readers. The
+whole wire payload is charged before validation; only a successful content
+delivery or retention commits padding release, preserving full-payload refunds
+when message validation, allocation, or callbacks fail. Pad Length itself is
+included even when its value is zero. A shared capacity plan merges padding
+release with low-watermark refills into one WINDOW_UPDATE submission, retaining
+only content credit and avoiding redundant grants. END_STREAM never recreates
+a receive window or grants new stream credit. Adaptive growth reserves room for
+pending padding refunds near the protocol window maximum. Bounded readers carry
+their deadline through the new refund, and failed writes retire the stream and
+stop later cleanup output. Tests cover all response/request receive forms,
+pushes, exact wire increments, maximum padding, shifted request-batch credit,
+adaptive growth, partial writes, and four-byte-window TCP/TLS 1.2/1.3 exchanges.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives

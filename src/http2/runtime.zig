@@ -50,6 +50,7 @@ const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
 const response_trailers = @import("runtime/response/trailers.zig");
 const header_block_limits = @import("runtime/headers/block_limits.zig");
 const flow_credit = @import("runtime/flow/credit.zig");
+const flow_capacity = @import("runtime/flow/capacity.zig");
 const validateDeclaredRequestLength =
     message_headers.validateDeclaredRequestLength;
 const requestShouldDefaultContentLength =
@@ -3638,6 +3639,7 @@ const OwnedFrameSlot = struct {
 const ReceivedDataPayload = struct {
     data: []const u8,
     padding_len: u8,
+    padding_bytes: u9 = 0,
     budget_charge: u8,
     // Actual adaptive credit granted during this DATA, separate from releases.
     adaptive_connection_increment: u31 = 0,
@@ -3666,7 +3668,7 @@ pub const Connection = struct {
         .recvWindow = recvStreamWindow,
         .clockNs = awakeNowNanos,
         .writeControl = writeControlFrameUntil,
-        .grantAdaptive = sendQueuedAdaptiveWindowUpdate,
+        .grantAdaptive = sendQueuedAdaptiveWindowUpdateAfterData,
         .budgetMaximum = dataFrameBudgetMaximum,
         .lastProcessed = lastPeerProcessedStreamId,
         .sendGoAway = sendGoAwayUntil,
@@ -3697,7 +3699,7 @@ pub const Connection = struct {
         .takeData = receiveDataPayload,
         .releaseData = releaseDataFrameBudget,
         .returnCredit = releaseConnectionCapacityUntil,
-        .credit = maybeReleaseReceivedCapacityUntil,
+        .credit = releaseReceivedDataCapacityUntil,
         .decodeHeaders = decodeOwnedHeaders,
         .freeHeaders = freeHeaders,
     });
@@ -7155,9 +7157,11 @@ pub const Connection = struct {
                 } else {
                     try state.body.appendSlice(self.allocator, data.data);
                 }
-                try self.maybeReleaseReceivedCapacity(
+                try self.releaseReceivedDataCapacityUntil(
                     state.stream_id,
+                    data,
                     (frame.header.flags & flag_end_stream) != 0,
+                    deadline,
                 );
                 if ((frame.header.flags & flag_end_stream) != 0) {
                     state.done = true;
@@ -8176,9 +8180,11 @@ pub const Connection = struct {
                         return @errorCast(err);
                     };
                     try state.body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         state.stream_id,
+                        data,
                         (frame.header.flags & flag_end_stream) != 0,
+                        deadline,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         state.done = true;
@@ -8458,9 +8464,11 @@ pub const Connection = struct {
                             return err;
                         };
                     }
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         state.stream_id,
+                        data,
                         (frame.header.flags & flag_end_stream) != 0,
+                        deadline,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         state.done = true;
@@ -9755,10 +9763,12 @@ pub const Connection = struct {
                                                 self.allocator,
                                                 data.data,
                                             );
-                                            try self.maybeReleaseReceivedCapacity(
+                                            try self.releaseReceivedDataCapacityUntil(
                                                 stream_id,
+                                                data,
                                                 (owned.frame.header.flags &
                                                     flag_end_stream) != 0,
+                                                deadline,
                                             );
                                             if ((owned.frame.header.flags &
                                                 flag_end_stream) != 0) break;
@@ -10331,9 +10341,11 @@ pub const Connection = struct {
                                     };
                                 }
                             }
-                            try self.maybeReleaseReceivedCapacity(
+                            try self.releaseReceivedDataCapacityUntil(
                                 stream_id,
+                                data,
                                 (frame.header.flags & flag_end_stream) != 0,
+                                deadline,
                             );
                             if ((frame.header.flags & flag_end_stream) != 0) {
                                 break;
@@ -10721,9 +10733,11 @@ pub const Connection = struct {
                             return @errorCast(err);
                         };
                     }
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         frame.header.stream_id,
+                        data,
                         (frame.header.flags & flag_end_stream) != 0,
+                        deadline,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         try self.finishBatchStreamingRequest(
@@ -11627,9 +11641,11 @@ pub const Connection = struct {
             return @errorCast(err);
         };
         try body.appendSlice(self.allocator, data.data);
-        try self.maybeReleaseReceivedCapacity(
+        try self.releaseReceivedDataCapacityUntil(
             stream_id,
+            data,
             (header.flags & flag_end_stream) != 0,
+            deadline,
         );
         return .{
             .direct_data = (header.flags & flag_end_stream) != 0,
@@ -14706,33 +14722,35 @@ pub const Connection = struct {
     }
 
     fn maybeReleaseReceivedCapacityUntil(self: *Connection, stream_id: u31, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
-        const connection_target: usize =
-            self.receiveConnectionWindowTarget();
-        const connection_low_watermark = connection_target / 2;
-        const conn_available = self.recv_connection_window.available();
-        const stream_window = try self.recvStreamWindow(stream_id);
-        const stream_target: usize = self.receiveStreamWindowTarget();
-        const stream_low_watermark = stream_target / 2;
-        const stream_available = stream_window.available();
-        const connection_increment: ?u31 =
-            if (conn_available <= connection_low_watermark and
-            conn_available < connection_target)
-                @intCast(connection_target - conn_available)
-            else
-                null;
-        const stream_increment: ?u31 =
-            if (!end_stream and
-            stream_available <= stream_low_watermark and
-            stream_available < stream_target)
-                @intCast(stream_target - stream_available)
-            else
-                null;
-        try self.sendWindowUpdatesUntil(
+        return self.releaseReceivedPaddingCapacityUntil(stream_id, 0, end_stream, deadline);
+    }
+
+    fn releaseReceivedDataCapacity(self: *Connection, stream_id: u31, data: ReceivedDataPayload, end_stream: bool) Error!void {
+        return self.releaseReceivedDataCapacityUntil(stream_id, data, end_stream, null);
+    }
+
+    fn releaseReceivedDataCapacityUntil(self: *Connection, stream_id: u31, data: ReceivedDataPayload, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        return self.releaseReceivedPaddingCapacityUntil(stream_id, data.padding_bytes, end_stream, deadline);
+    }
+
+    fn releaseReceivedPaddingCapacityUntil(self: *Connection, stream_id: u31, padding_bytes: u9, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        const stream_available = if (end_stream) 0 else (try self.recvStreamWindow(stream_id)).available();
+        const increments = flow_capacity.plan(self.recv_connection_window.available(), stream_available, self.receiveConnectionWindowTarget(), self.receiveStreamWindowTarget(), padding_bytes, end_stream);
+        self.sendWindowUpdatesUntil(
             stream_id,
-            connection_increment,
-            stream_increment,
+            increments.connection,
+            increments.stream,
             deadline,
-        );
+        ) catch |err| {
+            // A committed WINDOW_UPDATE prefix cannot be followed by another
+            // refund or reset while the response/request owner unwinds.
+            self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
+            self.releaseLocalStream(stream_id);
+            self.releasePeerStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+            return err;
+        };
     }
 
     fn failDiscardedResponse(self: *Connection, stream_id: u31) void {
@@ -14986,9 +15004,11 @@ pub const Connection = struct {
                         return @errorCast(err);
                     };
                     try body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         stream_id,
+                        data,
                         (frame.header.flags & flag_end_stream) != 0,
+                        deadline,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         break;
@@ -15378,9 +15398,11 @@ pub const Connection = struct {
                             };
                         }
                     }
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         stream_id,
+                        data,
                         (frame.header.flags & flag_end_stream) != 0,
+                        deadline,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         break;
@@ -15489,9 +15511,11 @@ pub const Connection = struct {
                         return error.MessageTooLarge;
                     }
                     try body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         stream_id,
+                        data,
                         (frame.frame.header.flags & flag_end_stream) != 0,
+                        null,
                     );
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         break;
@@ -15703,9 +15727,11 @@ pub const Connection = struct {
                         ended,
                     );
                     try body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(
+                    try self.releaseReceivedDataCapacityUntil(
                         stream_id,
+                        data,
                         ended,
+                        deadline,
                     );
                     if (ended) break;
                 },
@@ -17180,6 +17206,11 @@ pub const Connection = struct {
         }
     }
 
+    fn sendQueuedAdaptiveWindowUpdateAfterData(self: *Connection, id: u31, padding_bytes: u9) Error!void {
+        const target = self.adaptive_queued_target orelse return;
+        if (try self.sendAdaptiveWindowUpdateKeepingPadding(target, id, padding_bytes)) self.adaptive_queued_target = null;
+    }
+
     fn applySettingsAck(self: *Connection) Error!void {
         if (!self.awaiting_settings_ack) return error.InvalidFrame;
         self.awaiting_settings_ack = false;
@@ -17191,6 +17222,10 @@ pub const Connection = struct {
         self: *Connection,
         target: u32,
     ) Error!bool {
+        return self.sendAdaptiveWindowUpdateKeepingPadding(target, null, 0);
+    }
+
+    fn sendAdaptiveWindowUpdateKeepingPadding(self: *Connection, target: u32, data_stream: ?u31, padding_bytes: u9) Error!bool {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (target <= self.recv_stream_window_target and
             target <= self.recv_connection_window_target) return true;
@@ -17211,7 +17246,7 @@ pub const Connection = struct {
             // than the adaptive target needs. In that case advancing the
             // logical refill target without another WINDOW_UPDATE avoids a
             // wire overflow while preserving the already-larger peer credit.
-            if (next <= max_flow_window) connection_increment = increment;
+            if (next <= max_flow_window - @as(i64, padding_bytes)) connection_increment = increment;
         }
         const stream_delta: i64 = @as(i64, target) -
             self.recv_stream_window_target;
@@ -17224,7 +17259,8 @@ pub const Connection = struct {
             // SETTINGS_INITIAL_WINDOW_SIZE applies to every existing stream.
             // Defer the whole update until DATA consumption makes it safe; a
             // selective stream adjustment would desynchronize peer state.
-            if (next > max_flow_window) return false;
+            const reserved: i64 = if (data_stream == entry.stream_id) padding_bytes else 0;
+            if (next > max_flow_window - reserved) return false;
         }
         var settings_payload: [6]u8 = undefined;
         std.mem.writeInt(
@@ -19431,9 +19467,11 @@ pub const ClientDuplexStream = struct {
                         self.maybeRelease();
                     }
                     if (payload.data.len == 0) {
-                        try self.connection.maybeReleaseReceivedCapacity(
+                        try self.connection.releaseReceivedDataCapacityUntil(
                             self.stream_id,
+                            payload,
                             end_stream,
+                            deadline,
                         );
                         if (end_stream) {
                             self.response_finished_reported = true;
@@ -19442,9 +19480,11 @@ pub const ClientDuplexStream = struct {
                         }
                         continue;
                     }
-                    try self.connection.maybeReleaseReceivedCapacity(
+                    try self.connection.releaseReceivedDataCapacityUntil(
                         self.stream_id,
+                        payload,
                         end_stream,
+                        deadline,
                     );
                     const data = payload.data;
                     frame_owned = false;
@@ -20171,9 +20211,11 @@ pub const ServerDuplexStream = struct {
                         self.maybeRelease();
                     }
                     if (payload.data.len == 0) {
-                        try self.connection.maybeReleaseReceivedCapacity(
+                        try self.connection.releaseReceivedDataCapacityUntil(
                             self.stream_id,
+                            payload,
                             end_stream,
+                            deadline,
                         );
                         if (end_stream) {
                             self.request_finished_reported = true;
@@ -20182,9 +20224,11 @@ pub const ServerDuplexStream = struct {
                         }
                         continue;
                     }
-                    try self.connection.maybeReleaseReceivedCapacity(
+                    try self.connection.releaseReceivedDataCapacityUntil(
                         self.stream_id,
+                        payload,
                         end_stream,
+                        deadline,
                     );
                     const data = payload.data;
                     frame_owned = false;
@@ -20894,9 +20938,11 @@ pub const Tunnel = struct {
                     const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
                     defer self.connection.releaseDataFrameBudget(payload);
                     const end_stream = (frame.frame.header.flags & flag_end_stream) != 0;
-                    try self.connection.maybeReleaseReceivedCapacity(
+                    try self.connection.releaseReceivedDataCapacityUntil(
                         self.stream_id,
+                        payload,
                         end_stream,
+                        deadline,
                     );
                     if (payload.data.len == 0 and !end_stream) {
                         frame.deinit(self.connection.allocator);
@@ -21523,6 +21569,11 @@ pub const testing = struct {
 
     pub fn receiveDataPayload(connection: *Connection, stream_id: u31, frame: http2.Frame) Error!ReceivedDataPayload {
         return connection.receiveDataPayload(stream_id, frame);
+    }
+
+    pub fn releaseReceivedDataCapacity(connection: *Connection, stream_id: u31, data: ReceivedDataPayload, end_stream: bool) Error!void {
+        defer connection.releaseDataFrameBudget(data);
+        return connection.releaseReceivedDataCapacity(stream_id, data, end_stream);
     }
 
     pub fn queueAdaptiveWindowTarget(connection: *Connection, target: u32) Error!void {
@@ -38157,6 +38208,11 @@ test {
     _ = @import("runtime/response/forbidden_body_tests.zig");
     _ = @import("runtime/response/batch_trailer_sync_tests.zig");
     _ = @import("runtime/response/batch_trailer_failure_tests.zig");
+    _ = @import("runtime/response/padding_credit_tests.zig");
+    _ = @import("runtime/response/padding_failure_tests.zig");
+    _ = @import("runtime/request/padding_credit_tests.zig");
+    _ = @import("runtime/flow/tests/padding.zig");
+    _ = @import("runtime/push/padding_credit_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
     _ = @import("runtime/request/allocation_failure_tests.zig");

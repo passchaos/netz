@@ -229,7 +229,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                         };
                         return true;
                     };
-                    try hooks.credit(self, id, ended, deadline);
+                    try hooks.credit(self, id, data, ended, deadline);
                     if (state.received.get(id).?.finished) finishPushedReceive(self, id);
                     return true;
                 },

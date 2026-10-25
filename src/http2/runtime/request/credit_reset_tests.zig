@@ -19,7 +19,7 @@ fn exercise(batch_len: usize, reset_id: u31, completed: bool) !void {
     defer threaded.deinit();
     const io = threaded.io();
     const surviving_id: u31 = if (reset_id == 1) 3 else 1;
-    const surviving_credit: usize = if (surviving_id == 3) 5 else 2;
+    const surviving_credit: usize = 2;
     const replacement_id: u31 = @intCast(batch_len * 2 + 1);
     var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer server.deinit();
