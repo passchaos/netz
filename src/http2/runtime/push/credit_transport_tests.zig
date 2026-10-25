@@ -5,7 +5,7 @@ const tls = @import("../../../tls/mod.zig");
 const window = @import("../flow/window.zig");
 const allocator = std.testing.allocator;
 const Transport = enum { tcp, tls12, tls13 };
-const Failure = enum { reset, malformed, cancel, quota };
+const Failure = enum { reset, malformed, cancel, quota, late_data };
 
 test "HTTP/2 push failures refund wire credit over TCP and authenticated TLS" {
     inline for (std.enums.values(Transport)) |transport| {
@@ -51,26 +51,28 @@ fn exercise(comptime transport: Transport, failure: Failure) !void {
             const good = try connection.promisePush(parent.stream_id, &fields);
             const head = try connection.hpack_encoder.encodeBlockRetained(allocator, if (self.failure == .malformed) &.{ .{ .name = ":status", .value = "200" }, .{ .name = "content-length", .value = "3" } } else &.{.{ .name = ":status", .value = "200" }});
             try runtime.testing.writeRawFrame(&connection, .headers, 4, bad, head);
-            try sendData(&connection, bad, 8, "\x02ab\x00\x00");
+            try sendData(&connection, bad, if (self.failure == .late_data) 9 else 8, "\x02ab\x00\x00");
             try connection.writePushedResponse(good, .{ .body = "xyz" });
             try connection.writeResponse(parent.stream_id, .{});
             switch (self.failure) {
                 .reset => try runtime.testing.writeRawFrame(&connection, .rst_stream, 0, bad, &.{ 0, 0, 0, 8 }),
                 .malformed => try sendData(&connection, bad, 9, "\x00cd"),
                 .quota => try sendData(&connection, bad, 0, "a" ** 512),
+                .late_data => try sendData(&connection, bad, 9, "\x00late"),
                 .cancel => {},
             }
             if (self.failure != .reset) {
                 var reset = try connection.readResetStreamWithTimeout(.fromSeconds(2));
                 defer reset.deinit(allocator);
                 try std.testing.expectEqual(bad, reset.reset.stream_id);
-                try std.testing.expectEqual(if (self.failure == .malformed) http2.ErrorCode.protocol_error else http2.ErrorCode.cancel, reset.reset.error_code);
+                try std.testing.expectEqual(if (self.failure == .late_data) http2.ErrorCode.stream_closed else if (self.failure == .malformed) http2.ErrorCode.protocol_error else http2.ErrorCode.cancel, reset.reset.error_code);
             }
             var next = try connection.readRequestWithTimeout(.fromSeconds(2));
             defer next.deinit(allocator);
             // Parsing the next request drains all earlier WINDOW_UPDATEs.
-            // Only the healthy push's three content bytes remain held.
-            try std.testing.expectEqual(window.default_value - 3, connection.send_connection_window.value);
+            // Late DATA leaves both committed responses intact. Other failures
+            // retain only the healthy push's three content bytes.
+            try std.testing.expectEqual(window.default_value - @as(i64, if (self.failure == .late_data) 5 else 3), connection.send_connection_window.value);
             try connection.writeResponse(next.stream_id, .{});
         }
     };
@@ -92,7 +94,12 @@ fn exercise(comptime transport: Transport, failure: Failure) !void {
     defer if (bad_owned) bad.deinit(allocator);
     var good = client.takePromisedRequest() orelse return error.MissingPromise;
     defer good.deinit(allocator);
-    if (failure == .cancel) {
+    if (failure == .late_data) {
+        _ = try client.pingWithTimeout(.{ 1, 2, 3, 4, 5, 6, 7, 8 }, .fromSeconds(2));
+        var committed = try client.readPushedResponseWithTimeout(bad, .fromSeconds(2));
+        defer committed.deinit(allocator);
+        try std.testing.expectEqualStrings("ab", committed.body);
+    } else if (failure == .cancel) {
         try client.cancelPush(&bad);
         bad_owned = false;
     } else try std.testing.expectError(switch (failure) {
@@ -101,7 +108,7 @@ fn exercise(comptime transport: Transport, failure: Failure) !void {
         .quota => error.PushBufferFull,
         else => unreachable,
     }, client.readPushedResponseWithTimeout(bad, .fromSeconds(2)));
-    try std.testing.expectEqual(window.default_value - 3, client.recv_connection_window.value);
+    try std.testing.expectEqual(window.default_value - @as(i64, if (failure == .late_data) 5 else 3), client.recv_connection_window.value);
     var sibling = try client.readPushedResponseWithTimeout(good, .fromSeconds(2));
     defer sibling.deinit(allocator);
     try std.testing.expectEqualStrings("xyz", sibling.body);

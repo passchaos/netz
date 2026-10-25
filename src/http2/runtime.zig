@@ -8499,6 +8499,7 @@ pub const Connection = struct {
         self: *Connection,
         states: []const BatchResponseState,
     ) Error!void {
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         if (self.serve_read_connection_error != null) {
             self.sendServeReadError(error.InvalidFrame);
             return;
@@ -13660,6 +13661,7 @@ pub const Connection = struct {
         payload: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         if (deadline) |absolute| {
             var committed: usize = 0;
             writeFrameTransportWithDeadline(
@@ -13695,6 +13697,7 @@ pub const Connection = struct {
         encoded: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         if (deadline) |absolute| {
             var committed: usize = 0;
             self.transportForIo().writeAllWithDeadline(
@@ -13984,6 +13987,7 @@ pub const Connection = struct {
         error_code: http2.ErrorCode,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         try self.prepareLocallyResetStreams(1);
         if (deadline) |absolute| {
             var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
@@ -14012,6 +14016,7 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
         const encoded = try http2.ResetStreamPayload.writeInto(
             &storage,
@@ -14433,6 +14438,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         if (connection_increment == null and stream_increment == null) return;
+        if (self.terminal_write_failed) return error.ConnectionClosed;
         if (stream_increment != null) {
             const id = stream_id orelse return error.InvalidStreamId;
             if (!self.outboundStreamIsActive(id) and
@@ -38263,6 +38269,7 @@ test {
     _ = @import("runtime/push/credit_refill_tests.zig");
     _ = @import("runtime/push/credit_fault_tests.zig");
     _ = @import("runtime/push/credit_transport_tests.zig");
+    _ = @import("runtime/push/late_credit_tests.zig");
     _ = @import("runtime/request/body_length_tests.zig");
     _ = @import("runtime/request/credit_failure_tests.zig");
     _ = @import("runtime/request/allocation_failure_tests.zig");

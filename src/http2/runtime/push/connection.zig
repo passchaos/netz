@@ -90,6 +90,20 @@ pub fn Lifecycle(comptime hooks: anytype) type {
             return credit.release(self, id, extra, deadline, .{ .ErrorType = hooks.Error, .returnCredit = hooks.returnCredit });
         }
 
+        fn resetPush(self: anytype, id: u31, code: http2.ErrorCode, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
+            if (self.terminal_write_failed) return;
+            hooks.reset(self, id, code, deadline) catch |err| {
+                // Even peer-close errors can follow an accepted frame prefix.
+                // Keep complete buffered responses but never append more bytes.
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+                switch (err) {
+                    error.SocketUnconnected, error.ConnectionResetByPeer => {},
+                    else => return err,
+                }
+            };
+        }
+
         fn failPushedReceive(self: anytype, id: u31, err: receive.Error, extra_credit: usize, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
             const previous = self.push_state.state.?.received.get(id) orelse return;
             const was_finished = previous.finished and previous.failure == null;
@@ -100,15 +114,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 error.PushBufferFull, error.MessageTooLarge, error.OutOfMemory => .cancel,
                 else => .protocol_error,
             };
-            if (self.terminal_write_failed) return;
-            hooks.reset(self, id, code, deadline) catch |reset_err| switch (reset_err) {
-                error.SocketUnconnected, error.ConnectionResetByPeer => {},
-                else => {
-                    self.aggregate_timeout_unusable = true;
-                    self.terminal_write_failed = true;
-                    return reset_err;
-                },
-            };
+            try resetPush(self, id, code, deadline);
         }
 
         fn acceptPushedHeaders(self: anytype, id: u31, fields: []http2.Hpack.HeaderField, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
@@ -214,14 +220,8 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                     if (entry.finished) {
                         _ = try http2.DataPayload.parse(frame);
                         try self.recv_connection_window.receive(frame.payload.len);
-                        hooks.returnCredit(self, frame.payload.len, deadline) catch |err| switch (err) {
-                            error.SocketUnconnected, error.ConnectionResetByPeer => try self.recv_connection_window.update(@intCast(frame.payload.len)),
-                            else => return err,
-                        };
-                        if (!hooks.wasReset(self, id)) hooks.reset(self, id, .stream_closed, deadline) catch |err| switch (err) {
-                            error.SocketUnconnected, error.ConnectionResetByPeer => {},
-                            else => return err,
-                        };
+                        try credit.refund(self, frame.payload.len, deadline, .{ .ErrorType = hooks.Error, .returnCredit = hooks.returnCredit });
+                        if (!hooks.wasReset(self, id)) try resetPush(self, id, .stream_closed, deadline);
                         return true;
                     }
                     if (!entry.started) {

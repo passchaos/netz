@@ -2438,6 +2438,16 @@ partial refund/reset writes retire reuse and stop subsequent cleanup output.
 Coalesced-frame and real TCP/TLS 1.2/1.3 tests cover failed and completed siblings,
 parent-triggered and push-triggered refills, exact peer-side window restoration,
 reset/quota/trailer/cancel paths, allocation faults, and partial writes.
+Late DATA on a completed push uses the same refund and reset failure rules:
+it returns only the current frame's flow-controlled payload, preserves the
+committed response and its earlier content credit, and sends STREAM_CLOSED
+when cleanup succeeds. Partial refund/reset writes, including errors reported
+as peer close, stop all subsequent cleanup bytes. Fault-injected prefix tests
+retain both complete pushed responses after failure, and TCP/TLS 1.2/1.3 tests
+verify the late-frame refund, exact reset code, and following request reuse.
+The shared control, WINDOW_UPDATE, and reset writers also refuse output after
+an indeterminate cleanup prefix, including automatic replies to a PING already
+buffered behind that late DATA frame.
 The public `SettingsIterator` prevalidates a borrowed SETTINGS payload without
 allocating descriptors. Established connections use it for setting updates,
 while owned parsing retains its existing result type. The peer policy lives
