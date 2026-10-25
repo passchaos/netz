@@ -15,13 +15,13 @@ pub fn Handler(comptime hooks: anytype) type {
                 },
                 .headers => {
                     // A reset does not cancel HPACK's connection-wide order.
-                    const fields = hooks.readHeaders(self, frame, deadline) catch |err| {
-                        // This stack-owned header chain cannot resume after a
-                        // deadline discards its incomplete CONTINUATION state.
-                        if (err == error.Timeout) self.aggregate_timeout_unusable = true;
+                    discardHeaders(self, frame, deadline) catch |err| {
+                        // This stack-owned input cannot be replayed after a
+                        // partial decode, lost continuation, or allocation
+                        // failure. A reset only retires the stream's fields.
+                        self.aggregate_timeout_unusable = true;
                         return err;
                     };
-                    hooks.freeHeaders(self.allocator, fields);
                     if (hooks.preadmitted(self, frame.header.stream_id)) |index| {
                         if (self.graceful_preadmitted_peer_streams.items[index].admission == .refused_reset_sent) {
                             _ = self.graceful_preadmitted_peer_streams.orderedRemove(index);
@@ -32,6 +32,25 @@ pub fn Handler(comptime hooks: anytype) type {
                 else => return false,
             }
             return true;
+        }
+
+        fn discardHeaders(self: anytype, first: http2.Frame, deadline: ?std.Io.Clock.Timestamp) hooks.Error!void {
+            // A PING/push pump can have already decoded a queued section.
+            // Retire its existing output instead of advancing HPACK twice.
+            if (try hooks.resumeDeferred(self, first, deadline, false, true)) |fields| {
+                hooks.freeHeaders(self.allocator, fields);
+                return;
+            }
+            const block = try hooks.collect(self, first, deadline, false);
+            // Decoded output limits apply to application-owned sections.
+            // Discard still enforces HPACK and encoded assembly limits, and
+            // retains only dynamic entries needed by subsequent streams.
+            self.hpack_decoder.discardBlock(self.allocator, block.bytes) catch |err| {
+                if (self.hpack_decoder.lastDecodeWasCompressionError()) {
+                    self.serve_read_connection_error = .compression;
+                }
+                return @errorCast(err);
+            };
         }
     };
 }

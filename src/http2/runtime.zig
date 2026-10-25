@@ -3642,7 +3642,8 @@ pub const Connection = struct {
     const LateResetFrames = @import("runtime/reset/late.zig").Handler(.{
         .Error = Error,
         .wasReset = wasLocallyResetAt,
-        .readHeaders = readHeaderBlockUntil,
+        .resumeDeferred = resumeDeferredHeaderBlockUntil,
+        .collect = collectHeaderBlockUntil,
         .freeHeaders = freeHeaders,
         .refund = releaseLateResetConnectionCapacityUntil,
         .preadmitted = gracefulPreadmittedIndex,
@@ -16404,24 +16405,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         raw_continuations: bool,
     ) Error![]http2.Hpack.HeaderField {
-        if (try self.takeDeferredHeaderBlock(first, raw_continuations)) |headers| return headers;
-        if (!raw_continuations) {
-            if (self.pending_duplex_sibling_header.getPtr()) |pending| {
-                if (pending.payload_key == @intFromPtr(first.payload.ptr)) {
-                    for (0..pending.queued_continuation_count) |_| {
-                        var continuation = self.popQueuedApplicationFrame() orelse return error.UnexpectedFrame;
-                        defer continuation.deinit(self.allocator);
-                        if (continuation.frame.header.frame_type != .continuation or continuation.frame.header.stream_id != first.header.stream_id) return error.UnexpectedFrame;
-                    }
-                    pending.queued_continuation_count = 0;
-                    self.push_ingress_headers_active = true;
-                    defer self.push_ingress_headers_active = false;
-                    const fields = (try pending.header.resumeUntil(self, deadline)) orelse return error.UnexpectedFrame;
-                    self.pending_duplex_sibling_header.deinit(self.allocator);
-                    return fields;
-                }
-            }
-        }
+        if (try self.resumeDeferredHeaderBlockUntil(first, deadline, raw_continuations, false)) |headers| return headers;
         const block = try self.collectHeaderBlockUntil(
             first,
             deadline,
@@ -16458,6 +16442,37 @@ pub const Connection = struct {
                 else => |other| other,
             };
         };
+    }
+
+    fn resumeDeferredHeaderBlockUntil(
+        self: *Connection,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        raw_continuations: bool,
+        discard: bool,
+    ) Error!?[]http2.Hpack.HeaderField {
+        if (try self.takeDeferredHeaderBlock(first, raw_continuations)) |headers| return headers;
+        if (!raw_continuations) {
+            if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+                if (pending.payload_key == @intFromPtr(first.payload.ptr)) {
+                    for (0..pending.queued_continuation_count) |_| {
+                        var continuation = self.popQueuedApplicationFrame() orelse return error.UnexpectedFrame;
+                        defer continuation.deinit(self.allocator);
+                        if (continuation.frame.header.frame_type != .continuation or continuation.frame.header.stream_id != first.header.stream_id) return error.UnexpectedFrame;
+                    }
+                    pending.queued_continuation_count = 0;
+                    self.push_ingress_headers_active = true;
+                    defer self.push_ingress_headers_active = false;
+                    const fields = if (discard)
+                        try pending.header.discardUntil(self, deadline)
+                    else
+                        (try pending.header.resumeUntil(self, deadline)) orelse return error.UnexpectedFrame;
+                    self.pending_duplex_sibling_header.deinit(self.allocator);
+                    return fields;
+                }
+            }
+        }
+        return null;
     }
 
     fn collectHeaderBlockUntil(
@@ -18812,6 +18827,22 @@ const DuplexHeaderBlock = struct {
         connection: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?[]http2.Hpack.HeaderField {
+        try self.completeUntil(connection, deadline);
+        return try self.decode(connection);
+    }
+
+    fn discardUntil(self: *DuplexHeaderBlock, connection: *Connection, deadline: ?std.Io.Clock.Timestamp) Error![]http2.Hpack.HeaderField {
+        try self.completeUntil(connection, deadline);
+        connection.hpack_decoder.discardBlock(connection.allocator, self.bytes.items) catch |err| {
+            if (connection.hpack_decoder.lastDecodeWasCompressionError()) {
+                connection.serve_read_connection_error = .compression;
+            }
+            return @errorCast(err);
+        };
+        return &.{};
+    }
+
+    fn completeUntil(self: *DuplexHeaderBlock, connection: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!void {
         const header_mode = connection.push_ingress_headers_active;
         connection.push_ingress_headers_active = true;
         defer connection.push_ingress_headers_active = header_mode;
@@ -18830,7 +18861,6 @@ const DuplexHeaderBlock = struct {
             }
             try self.appendContinuation(connection, continuation.frame);
         }
-        return try self.decode(connection);
     }
 
     fn decode(self: *DuplexHeaderBlock, connection: *Connection) Error![]http2.Hpack.HeaderField {
@@ -38157,6 +38187,7 @@ test {
     _ = @import("runtime/frame/retention_tests.zig");
     _ = @import("runtime/headers/limit_reuse_tests.zig");
     _ = @import("runtime/headers/reset_deadline_tests.zig");
+    _ = @import("runtime/reset/header_failure_tests.zig");
     _ = @import("runtime/request/batch_error_tests.zig");
     _ = @import("runtime/response/credit_lifecycle_tests.zig");
     _ = @import("runtime/response/credit_failure_tests.zig");

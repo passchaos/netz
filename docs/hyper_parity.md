@@ -2483,6 +2483,15 @@ consumes continuations from its existing transport owner rather than recursively
 entering an ordinary reader or replaying older queued sibling frames. Real-TCP
 tests cover timed-out PING/response/duplex reads and completed late headers whose
 dynamic entries remain usable by a following response on the same connection.
+Ignored late HEADERS now decode through HPACK's discard path, which applies
+dynamic-table updates without allocating application field output. Their
+decoded field-count and list-size limits no longer interrupt unrelated PINGs;
+compressed assembly bounds and malformed HPACK still fail. Every unrecoverable
+discard error, including allocation failure and a broken CONTINUATION sequence,
+retires connection reuse. Already decoded queued fields are freed once, and
+partial deferred sections finish without reapplying dynamic entries. Focused
+fault tests cover those failures, both deferred states, zero output allocation,
+and a terminal assembly overflow that preserves the following dynamic index.
 When a valid peer request exceeds the advertised local concurrent-stream
 limit, every server request reader now consumes and decodes its complete HPACK
 field section, sends `RST_STREAM(REFUSED_STREAM)`, and continues serving the
