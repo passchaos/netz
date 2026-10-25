@@ -4016,14 +4016,25 @@ pub const Connection = struct {
             allocator,
             properties.items,
         );
-        if (connect_deadline) |deadline|
-            try self.writeGeneratedPacketWithDeadline(
+        (if (connect_deadline) |deadline|
+            self.writeGeneratedPacketWithDeadline(
                 self.write_scratch.items,
                 .connect,
                 deadline,
             )
         else
-            try self.writeGeneratedPacket(self.write_scratch.items, .connect);
+            self.writeGeneratedPacket(self.write_scratch.items, .connect)) catch |err| {
+            if (self.isUsable()) {
+                // Validation/deadline rejection before transport output can
+                // retry CONNECT. Undo its connection-owned method and phase.
+                self.authentication.deinit(allocator);
+                self.authentication = .{};
+            }
+            return err;
+        };
+        // CONNECT has reached the transport. A consumed challenge or local
+        // callback failure cannot safely restart this exchange on the socket.
+        errdefer self.transport_unusable.store(true, .release);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
         var connack: OwnedConnAck = while (true) {
@@ -4049,7 +4060,7 @@ pub const Connection = struct {
                         if (err == error.AuthenticationMethodMismatch or
                             err == error.InvalidAuthenticationState)
                         {
-                            self.sendAuthenticationProtocolError();
+                            self.sendAuthenticationProtocolErrorUntil(connect_deadline);
                         }
                         return err;
                     };
@@ -4057,14 +4068,9 @@ pub const Connection = struct {
                         auth_handler.?.context,
                         auth,
                     );
-                    self.authentication.validatePeerProperties(
-                        response,
-                    ) catch |err| {
-                        if (err == error.AuthenticationMethodMismatch) {
-                            self.sendAuthenticationProtocolError();
-                        }
-                        return err;
-                    };
+                    // This property set came from the local callback. The
+                    // attempt owner closes on failure without blaming the peer.
+                    try self.authentication.validatePeerProperties(response);
                     if (connect_deadline) |deadline|
                         try self.writeAuthWithDeadline(
                             0x18,
@@ -4110,7 +4116,7 @@ pub const Connection = struct {
                     self.authentication
                         .receiveInitialConnAck(value) catch |err| {
                         if (err == error.AuthenticationMethodMismatch) {
-                            self.sendAuthenticationProtocolError();
+                            self.sendAuthenticationProtocolErrorUntil(connect_deadline);
                         }
                         return err;
                     };
@@ -5366,34 +5372,17 @@ pub const Connection = struct {
         try self.writeDisconnectWithProperties(reason_code, &.{});
     }
 
-    pub fn writeDisconnectWithProperties(
-        self: *Connection,
-        reason_code: u8,
-        properties: []const mqtt.Property,
-    ) Error!void {
-        try self.validateOutgoingDisconnect(reason_code, properties);
-        if (properties.len == 0) {
-            var encoded: [mqtt.Disconnect.no_properties_max_len]u8 = undefined;
-            return self.writeGeneratedPacket(
-                try mqtt.Disconnect.writeNoPropertiesInto(
-                    &encoded,
-                    self.protocol,
-                    reason_code,
-                ),
-                .disconnect,
-            );
-        }
-        self.write_scratch.clearRetainingCapacity();
-        try mqtt.Disconnect.write(
-            &self.write_scratch,
-            self.allocator,
-            self.protocol,
-            reason_code,
-            properties,
-        );
-        try self.writeGeneratedPacket(self.write_scratch.items, .disconnect);
-        if (mqtt.sessionExpiryInterval(properties)) |interval| self.session_expiry_interval = interval;
-    }
+    const DisconnectWriter = @import("runtime/disconnect.zig").Controller(struct {
+        pub const ConnectionType = Connection;
+        pub const ErrorType = Error;
+        pub const validate = Connection.validateOutgoingDisconnect;
+        pub const generate = Connection.writeGeneratedPacket;
+        pub const generateBefore = Connection.writeGeneratedPacketWithDeadline;
+    });
+
+    pub const writeDisconnectWithProperties = DisconnectWriter.write;
+    pub const writeDisconnectWithDeadline = DisconnectWriter.withDeadline;
+    pub const writeDisconnectWithTimeout = DisconnectWriter.withTimeout;
 
     fn validateOutgoingDisconnect(
         self: *const Connection,
@@ -5703,7 +5692,7 @@ pub const Connection = struct {
         if (self.authentication.phase != .reauthenticating) return error.InvalidAuthenticationState;
         var auth = try ReauthenticationReader.read(self, deadline);
         errdefer auth.deinit(self.allocator);
-        const complete = try self.applyAuthenticationEvent(auth.auth);
+        const complete = try self.applyAuthenticationEventUntil(auth.auth, deadline);
         return .{ .auth = auth, .complete = complete };
     }
 
@@ -5716,6 +5705,15 @@ pub const Connection = struct {
         self: *Connection,
         auth: mqtt.Auth,
     ) Error!bool {
+        return self.applyAuthenticationEventUntil(auth, null);
+    }
+
+    pub fn applyAuthenticationEventWithDeadline(self: *Connection, auth: mqtt.Auth, deadline: std.Io.Clock.Timestamp) Error!bool {
+        _ = try deadline_policy.usableAwake(self.transport.ioHandle(), deadline);
+        return self.applyAuthenticationEventUntil(auth, deadline);
+    }
+
+    fn applyAuthenticationEventUntil(self: *Connection, auth: mqtt.Auth, deadline: ?std.Io.Clock.Timestamp) Error!bool {
         if (auth.reason_code == 0x19) {
             self.authentication.beginReauthentication(
                 auth.properties,
@@ -5724,7 +5722,7 @@ pub const Connection = struct {
                     err == error.AuthenticationNotConfigured or
                     err == error.InvalidAuthenticationState)
                 {
-                    self.sendAuthenticationProtocolError();
+                    self.sendAuthenticationProtocolErrorUntil(deadline);
                 }
                 return err;
             };
@@ -5735,7 +5733,7 @@ pub const Connection = struct {
                 err == error.AuthenticationNotConfigured or
                 err == error.InvalidAuthenticationState)
             {
-                self.sendAuthenticationProtocolError();
+                self.sendAuthenticationProtocolErrorUntil(deadline);
             }
             return err;
         };
@@ -5873,14 +5871,14 @@ pub const Connection = struct {
         var auth = try ReauthenticationReader.read(self, deadline);
         errdefer auth.deinit(self.allocator);
         if (auth.auth.reason_code != 0x19) {
-            self.sendAuthenticationProtocolError();
+            self.sendAuthenticationProtocolErrorUntil(deadline);
             return error.InvalidAuthenticationState;
         }
         self.authentication.beginReauthentication(
             auth.auth.properties,
         ) catch |err| {
             if (err == error.AuthenticationMethodMismatch) {
-                self.sendAuthenticationProtocolError();
+                self.sendAuthenticationProtocolErrorUntil(deadline);
             }
             return err;
         };
@@ -6760,7 +6758,7 @@ pub const Connection = struct {
         const packet = try self.readUnvalidatedTransportPacketWithDeadline(
             deadline,
         );
-        return self.finishReadPacket(packet);
+        return self.finishReadPacketUntil(packet, deadline);
     }
 
     fn readUnvalidatedTransportPacketWithDeadline(
@@ -6857,7 +6855,7 @@ pub const Connection = struct {
         pub const ErrorType = Error;
         pub const canReadBuffered = termination.canReadBuffered;
         pub const recordReceived = Connection.recordPacketReceived;
-        pub const validate = Connection.validateReadPacket;
+        pub const validate = Connection.validateReadPacketUntil;
         pub const decodeDisconnect = Connection.decodeIncomingDisconnect;
         pub const finishDisconnect = Connection.finishIncomingDisconnect;
     });
@@ -7009,10 +7007,7 @@ pub const Connection = struct {
         return pending.pop();
     }
 
-    fn validateReadPacket(
-        self: *Connection,
-        packet: *const OwnedPacket,
-    ) Error!void {
+    fn validateReadPacketUntil(self: *Connection, packet: *const OwnedPacket, deadline: ?std.Io.Clock.Timestamp) Error!void {
         // Validate wire syntax before semantic direction/state so a packet
         // that is wrong in both ways is still classified as Malformed Packet.
         try mqtt.validatePacketFlags(self.protocol, packet.fixed);
@@ -7021,7 +7016,7 @@ pub const Connection = struct {
             packet.fixed.packet_type,
         ) catch |err| {
             if (err == error.AuthenticationInProgress) {
-                self.sendAuthenticationProtocolError();
+                self.sendAuthenticationProtocolErrorUntil(deadline);
             }
             return err;
         };
@@ -7031,9 +7026,13 @@ pub const Connection = struct {
         self: *Connection,
         packet_value: OwnedPacket,
     ) Error!OwnedPacket {
+        return self.finishReadPacketUntil(packet_value, null);
+    }
+
+    fn finishReadPacketUntil(self: *Connection, packet_value: OwnedPacket, deadline: ?std.Io.Clock.Timestamp) Error!OwnedPacket {
         var packet = packet_value;
         errdefer packet.deinit(self.allocator);
-        try self.validateReadPacket(&packet);
+        try self.validateReadPacketUntil(&packet, deadline);
         return packet;
     }
 
@@ -7071,10 +7070,15 @@ pub const Connection = struct {
         }
     }
 
-    fn sendAuthenticationProtocolError(self: *Connection) void {
-        if (self.protocol == .v5) {
+    fn sendAuthenticationProtocolErrorUntil(self: *Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        // Diagnostic output is secondary to the peer error. Even a pre-wire
+        // timeout/size rejection must retire this invalid authentication state.
+        defer self.transport_unusable.store(true, .release);
+        if (self.protocol != .v5) return;
+        if (deadline) |absolute|
+            self.writeDisconnectWithDeadline(0x82, &.{}, absolute) catch {}
+        else
             self.writeDisconnectWithProperties(0x82, &.{}) catch {};
-        }
     }
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
@@ -11622,6 +11626,12 @@ test {
     _ = @import("runtime/transport/parts_deadline_tests.zig");
     _ = @import("runtime/acknowledgement/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/output_deadline_tests.zig");
+    _ = @import("runtime/diagnostic/receive_deadline_tests.zig");
+    _ = @import("runtime/diagnostic/reauth_deadline_tests.zig");
+    _ = @import("runtime/diagnostic/connect_deadline_tests.zig");
+    _ = @import("runtime/diagnostic/connect_callback_tests.zig");
+    _ = @import("runtime/diagnostic/connect_retry_tests.zig");
+    _ = @import("runtime/disconnect/deadline_tests.zig");
     _ = @import("runtime/acknowledgement/exchange_tests.zig");
     _ = @import("runtime/acknowledgement/control/tests.zig");
     _ = @import("runtime/acknowledgement/control/exchange_tests.zig");

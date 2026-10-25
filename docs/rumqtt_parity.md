@@ -9,6 +9,22 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+MQTT 5 protocol-error DISCONNECT output now shares the original CONNECT,
+reauthentication, typed/event receive or reconnect-poll deadline. A blocked
+diagnostic cannot extend that budget or replace the original peer error.
+Authentication violations retire their Network Connection even when an
+expired deadline or packet-size limit prevents diagnostic output. Initial
+authentication callback failures and invalid callback response methods remain
+local errors: they retire the incomplete exchange without sending a peer-fault
+diagnostic. A provably pre-wire CONNECT rejection instead rolls back its
+authentication preparation, allowing a corrected attempt on the same socket.
+Public `writeDisconnectWithTimeout`/`writeDisconnectWithDeadline`
+preserve packet-direction/property validation and update Session Expiry only
+after successful complete output. Their encoder and write policy live in
+`runtime/disconnect.zig`. Real TCP regressions exercise initial AUTH/CONNACK
+method mismatches, direct callback failures, typed and event reads, both
+reauthentication roles, poll diagnostics and post-write expiry ownership.
+
 Reconnect polling now applies the caller's original deadline to automatic
 PUBACK/PUBREC/PUBCOMP output, outbound PUBREL replay, and authentication callback
 responses. An interrupted first PUBLISH acknowledgement retains one owned

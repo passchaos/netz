@@ -199,8 +199,9 @@ pub fn Controller(comptime Context: type) type {
                     break :blk .{ .disconnect = owned };
                 },
                 .auth => |owned| blk: {
-                    const complete = active.applyAuthenticationEvent(
+                    const complete = active.applyAuthenticationEventWithDeadline(
                         owned.auth,
+                        deadline,
                     ) catch |err| {
                         // The runtime has already attempted the required protocol
                         // diagnostic for authentication state violations.

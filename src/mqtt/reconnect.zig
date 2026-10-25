@@ -31,6 +31,7 @@ test {
     _ = @import("reconnect/event_write_tests.zig");
     _ = @import("reconnect/qos_write_tests.zig");
     _ = @import("reconnect/auth_write_tests.zig");
+    _ = @import("reconnect/diagnostic_deadline_tests.zig");
 }
 
 pub const CommandQueue = command_queue.CommandQueue;
@@ -3001,7 +3002,7 @@ pub const Client = struct {
                 read_deadline.withClock(.awake),
             ) catch |err| {
                 if (err == error.Timeout) continue;
-                if (self.disconnectForPeerProtocolViolation(err)) return err;
+                if (self.disconnectForPeerProtocolViolation(err, call_deadline.withClock(.awake))) return err;
                 if (!retryableConnectError(err)) {
                     self.disconnectTransport();
                     return err;
@@ -3034,7 +3035,7 @@ pub const Client = struct {
                     // consumed challenge still prevents safe reuse.
                     self.disconnectTransport();
                 } else if (!valid_publish_refusal and
-                    !self.disconnectForPeerProtocolViolation(err))
+                    !self.disconnectForPeerProtocolViolation(err, call_deadline.withClock(.awake)))
                 {
                     self.disconnectTransport();
                 }
@@ -3685,13 +3686,14 @@ pub const Client = struct {
     fn disconnectForPeerProtocolViolation(
         self: *Client,
         err: anyerror,
+        deadline: std.Io.Clock.Timestamp,
     ) bool {
         const reason_code =
             runtime.disconnectReasonForProtocolViolation(err, .client) orelse
             return false;
         const active = self.connection() orelse return true;
         if (active.protocol == .v5) {
-            active.writeDisconnectWithProperties(reason_code, &.{}) catch {};
+            active.writeDisconnectWithDeadline(reason_code, &.{}, deadline) catch {};
         }
         self.disconnectTransport();
         return true;

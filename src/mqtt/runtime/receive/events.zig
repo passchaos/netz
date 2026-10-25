@@ -61,7 +61,7 @@ pub fn Reader(comptime Context: type) type {
             errdefer if (owned) packet.deinit(connection.allocator);
             if (!packet.traffic_recorded) Context.recordReceived(connection, packet.bytes.len);
             packet.traffic_recorded = true;
-            try Context.validate(connection, &packet);
+            try Context.validate(connection, &packet, options.deadline);
             if (!packet.owns_bytes) {
                 owned = false;
                 return .{ .packet = .{ .packet = packet, .source = .caller } };
