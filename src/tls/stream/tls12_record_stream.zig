@@ -8,7 +8,7 @@
 const std = @import("std");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
-const read_interruption = @import("../../internal/read_interruption.zig");
+const io_interruption = @import("../../internal/io_interruption.zig");
 
 const net = std.Io.net;
 const tls12 = vail.tls.tls12;
@@ -115,7 +115,7 @@ pub const Stream = struct {
                 self.record_reader.read(io, stream, &self.buffered_plaintext)) catch |err| {
                 if (err == error.UnexpectedEof) {
                     self.peer_eof_without_notify = true;
-                } else if (!read_interruption.retryable(err)) {
+                } else if (!io_interruption.retryable(err)) {
                     self.failed = true;
                 }
                 return err;
@@ -242,6 +242,9 @@ pub const Stream = struct {
         }
     }
 
+    /// Count only complete plaintext records and retain partial ciphertext
+    /// across timeout, cancellation and executor admission failure. Retry
+    /// with the uncommitted suffix of the original bytes.
     pub fn writeAllWithDeadline(
         self: *Stream,
         io: std.Io,
@@ -300,7 +303,7 @@ pub const Stream = struct {
             &self.pending_write_offset,
             deadline,
         ) catch |err| {
-            if (err != error.Timeout and err != error.Canceled) self.failed = true;
+            if (!io_interruption.retryable(err)) self.failed = true;
             return err;
         };
         committed.* += self.pending_plaintext_len;

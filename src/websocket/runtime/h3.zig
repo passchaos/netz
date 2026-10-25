@@ -5,7 +5,7 @@
 //! share the RFC 6455 codec and transactional permessage-deflate engine.
 
 const std = @import("std");
-const read_interruption = @import("../../internal/read_interruption.zig");
+const io_interruption = @import("../../internal/io_interruption.zig");
 const builtin = @import("builtin");
 const websocket = @import("../mod.zig");
 const common = @import("common.zig");
@@ -2286,7 +2286,7 @@ pub fn Connection(comptime role: common.Role) type {
             // after a complete compressed message also retains owned input,
             // having already released the caller's output reference. Other
             // failures terminate this caller-buffer operation.
-            if (!read_interruption.retryable(err) and !self.message_into.canRetryCompletion(err)) {
+            if (!io_interruption.retryable(err) and !self.message_into.canRetryCompletion(err)) {
                 self.message_into.reset();
                 self.message_frame_receive.reset();
             }

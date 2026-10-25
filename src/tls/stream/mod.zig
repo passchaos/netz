@@ -61,6 +61,7 @@ test {
     _ = @import("version.zig");
     _ = @import("tls12_record_stream.zig");
     _ = @import("read_interruption_tests.zig");
+    _ = @import("write_interruption_tests.zig");
     _ = @import("versioned_client_connection.zig");
     _ = @import("versioned_server_connection.zig");
     _ = @import("versioned_tests.zig");

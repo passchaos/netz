@@ -1388,8 +1388,8 @@ pub const TlsClientConnection = struct {
 
     /// Write plaintext under an absolute socket deadline. Progress advances
     /// only after the complete TLS record carrying that plaintext has reached
-    /// the socket. On timeout the already-encrypted record remains buffered,
-    /// preserving the consumed TLS sequence number for a later retry.
+    /// the socket. Timeout, cancellation and executor admission failure retain
+    /// the encrypted record and consumed sequence number for a later retry.
     pub fn writeAllWithDeadline(
         self: *TlsClientConnection,
         bytes: []const u8,

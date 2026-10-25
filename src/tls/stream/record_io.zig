@@ -214,8 +214,8 @@ pub fn writeAll(
 
 /// Resume a ciphertext record under one absolute deadline. `offset` is
 /// advanced only by bytes accepted by the socket, so an encrypted record can
-/// survive timeout/cancelation without being regenerated under the same TLS
-/// nonce.
+/// survive timeout, cancellation or executor admission failure without being
+/// regenerated under the same TLS nonce.
 pub fn writeAllWithDeadline(
     io: std.Io,
     stream: net.Stream,

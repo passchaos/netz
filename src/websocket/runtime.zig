@@ -1,5 +1,5 @@
 const std = @import("std");
-const read_interruption = @import("../internal/read_interruption.zig");
+const io_interruption = @import("../internal/io_interruption.zig");
 const builtin = @import("builtin");
 const websocket = @import("mod.zig");
 const common = @import("runtime/common.zig");
@@ -12133,7 +12133,7 @@ fn receiveMessageIntoDirectConnection(
         return error.BufferTooShort;
     }
     try connection.message_into.validateOutput(out);
-    errdefer |err| if (!read_interruption.retryable(err) and
+    errdefer |err| if (!io_interruption.retryable(err) and
         err != error.ResponseAvailable and
         !connection.message_into.canRetryCompletion(err))
     {
@@ -17262,6 +17262,7 @@ test {
     _ = @import("runtime/receive_failure_tests.zig");
     _ = @import("runtime/read_interruption_tests.zig");
     _ = @import("runtime/read_interruption_transport_tests.zig");
+    _ = @import("runtime/write_interruption_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");

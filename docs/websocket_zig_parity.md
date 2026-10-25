@@ -1480,6 +1480,18 @@ duplicate WebSocket bytes across a retry. Real H2 flow-control and H3 pacing
 regressions parse the resumed wire bytes as one exact masked frame; HTTP/1
 chunk-boundary tests independently fix the one-mask suffix reconstruction
 contract.
+Bounded TCP and WSS sends also retain their exact transaction after local
+executor admission failure (`ConcurrencyUnavailable`). Native TLS 1.2/1.3
+preserve the already-encrypted record and its nonce, matching the standard
+TLS client's retained ciphertext behavior. A timer admission failure racing
+an already-completed socket write still reports that accepted prefix.
+Socket-backed regressions cover interruption before any write, partial record
+headers and ciphertext, and the boundary between two authenticated records.
+Real WS/WSS exchanges cover binary slices, in-place masking, compression
+context takeover, Ping/Pong, Close and automatic replies across all client TLS
+backends. Resuming commits one message/control frame; the next message and
+read remain usable, while genuine network write errors still retire native
+TLS records.
 HTTP/1 bounded Ping and Close use the same retained-frame transport path. A
 timeout keeps the encoded header, client mask, payload, and committed cursor;
 the matching `continuePing*` or `closeWith*`/`continueClose*` call writes only

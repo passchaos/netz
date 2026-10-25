@@ -1,8 +1,6 @@
 //! Executor admission failure cannot invalidate an incomplete TLS record.
 const std = @import("std");
-const vail = @import("vail");
-const tls13 = @import("record_stream.zig");
-const tls12 = @import("tls12_record_stream.zig");
+const fixture = @import("testing/record_fixture.zig");
 const record_io = @import("record_io.zig");
 const allocator = std.testing.allocator;
 
@@ -19,23 +17,6 @@ const Probe = struct {
         return base.vtable.batchAwaitConcurrent(userdata, batch, timeout);
     }
 };
-
-fn stream(comptime old: bool, read_fill: u8, write_fill: u8) !if (old) tls12.Stream else tls13.Stream {
-    if (old) return tls12.Stream.init(
-        vail.tls.tls12.TrafficState.init(try vail.tls.tls12.Keys.init(.ecdhe_ecdsa_aes_128_gcm_sha256, &([_]u8{read_fill} ** 16), &([_]u8{0x42} ** 4))),
-        vail.tls.tls12.TrafficState.init(try vail.tls.tls12.Keys.init(.ecdhe_ecdsa_aes_128_gcm_sha256, &([_]u8{write_fill} ** 16), &([_]u8{0x42} ** 4))),
-    );
-    const suite = vail.tls.cipher_suite.Suite.aes_128_gcm_sha256;
-    var read_secret = try vail.tls.secret.Secret.init(suite.hash(), &([_]u8{read_fill} ** 32));
-    errdefer read_secret.deinit();
-    var write_secret = try vail.tls.secret.Secret.init(suite.hash(), &([_]u8{write_fill} ** 32));
-    errdefer write_secret.deinit();
-    var read_keys = try vail.tls.record.Keys.derive(suite, read_secret);
-    errdefer read_keys.deinit();
-    var write_keys = try vail.tls.record.Keys.derive(suite, write_secret);
-    errdefer write_keys.deinit();
-    return tls13.Stream.init(read_keys, write_keys, read_secret, write_secret);
-}
 
 fn seal(comptime old: bool, sender: anytype, output: []u8, payload: []const u8) !usize {
     if (old) return sender.write_traffic.seal(23, payload, output);
@@ -67,9 +48,9 @@ fn exercise(comptime old: bool, fault: Fault, cut: usize) !void {
     defer socket.close(base);
     const peer = try listener.accept(base);
     defer peer.close(base);
-    var sender = try stream(old, 0x22, 0x11);
+    var sender = try fixture.stream(old, 0x22, 0x11);
     defer sender.deinit();
-    var receiver = try stream(old, 0x11, 0x22);
+    var receiver = try fixture.stream(old, 0x11, 0x22);
     defer receiver.deinit();
     var encoded: [record_io.max_record_len]u8 = undefined;
     const len = try seal(old, &sender, &encoded, "accepted record");

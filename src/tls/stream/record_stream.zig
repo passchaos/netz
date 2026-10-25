@@ -9,7 +9,7 @@
 const std = @import("std");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
-const read_interruption = @import("../../internal/read_interruption.zig");
+const io_interruption = @import("../../internal/io_interruption.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -213,7 +213,7 @@ pub const Stream = struct {
             const authenticated_record = record_bytes catch |err| {
                 if (err == error.UnexpectedEof) {
                     self.peer_eof_without_notify = true;
-                } else if (!read_interruption.retryable(err)) {
+                } else if (!io_interruption.retryable(err)) {
                     self.failed = true;
                 }
                 return err;
@@ -586,6 +586,8 @@ pub const Stream = struct {
     /// only after all of its ciphertext is accepted by the socket. A partial
     /// ciphertext record remains connection-owned and is resumed before any
     /// new plaintext is encrypted.
+    /// Timeout, cancellation and executor admission failure retain that
+    /// transaction. Retry with the uncommitted suffix of the original bytes.
     pub fn writeAllWithDeadline(
         self: *Stream,
         io: std.Io,
@@ -696,7 +698,7 @@ pub const Stream = struct {
             &self.pending_write_offset,
             deadline,
         ) catch |err| {
-            if (err != error.Timeout and err != error.Canceled) {
+            if (!io_interruption.retryable(err)) {
                 self.failed = true;
             }
             return err;
