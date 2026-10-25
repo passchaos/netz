@@ -2,20 +2,9 @@
 const std = @import("std");
 const websocket = @import("../../mod.zig");
 
-pub const Fault = enum { executor, cancellation };
-
-pub const InterruptedIo = struct {
-    pub threadlocal var next: ?Fault = null;
-    pub threadlocal var delegate: std.Io = undefined;
-
-    pub fn awaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        if (next) |fault| {
-            next = null;
-            return if (fault == .executor) error.ConcurrencyUnavailable else error.Canceled;
-        }
-        return delegate.vtable.batchAwaitConcurrent(userdata, batch, timeout);
-    }
-};
+const read_fault = @import("../../../internal/testing/read_interruption.zig");
+pub const Fault = read_fault.Fault;
+pub const InterruptedIo = read_fault.InterruptedIo;
 
 /// Seed an already-buffered non-final frame and wait for an injected error
 /// before allowing the real peer to send its continuation.

@@ -83,7 +83,7 @@ const TcpTransport = struct {
 
 /// Resumable packet state for stream transports whose own read API does not
 /// retain MQTT framing progress. This mirrors `TcpTransport` so timeout and
-/// cancellation can never discard a partial Remaining Length or payload.
+/// cancellation and executor admission failure retain each accepted prefix.
 const StreamPacketState = struct {
     header: [5]u8 = undefined,
     header_len: usize = 0,
@@ -91,7 +91,7 @@ const StreamPacketState = struct {
     packet_prefix_len: u16 = 0,
     packet_read: usize = 0,
 
-    fn deinit(self: *StreamPacketState, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *StreamPacketState, allocator: std.mem.Allocator) void {
         if (self.packet) |packet| freePacketBytes(
             allocator,
             packet,
@@ -877,112 +877,17 @@ fn readStreamPacketWithDeadline(
     );
 }
 
-fn readStreamPacketWithPolicy(
-    allocator: std.mem.Allocator,
-    transport: anytype,
-    max_packet_size: usize,
-    inactivity_timeout: ?std.Io.Clock.Duration,
-    absolute_deadline: ?std.Io.Clock.Timestamp,
-    owned_prefix_len: usize,
-) Error!OwnedPacket {
-    const connection = transport.connection;
-    var deadline = if (inactivity_timeout) |timeout|
-        inactivityDeadline(connection.io, timeout)
-    else
-        absolute_deadline;
-    const state = &transport.packet_state;
+const StreamPacketReader = @import("transport/stream_receive.zig").Reader(struct {
+    pub const ErrorType = Error;
+    pub const PacketType = OwnedPacket;
+    pub const allocate = allocatePacketBytes;
+    pub const free = freePacketBytes;
+    pub const fromInactivity = inactivityDeadline;
+});
+const readStreamPacketWithPolicy = StreamPacketReader.read;
 
-    while (state.packet == null) {
-        if (state.header_len >= state.header.len) {
-            return error.MalformedRemainingLength;
-        }
-        state.header_len += readStreamExactWithDeadline(
-            connection,
-            state.header[state.header_len .. state.header_len + 1],
-            deadline,
-        ) catch |err| return err;
-        if (state.header_len == 1) {
-            _ = try mqtt.packetTypeFromFirstByte(state.header[0]);
-        }
-        if (state.header_len == 1 or
-            (state.header[state.header_len - 1] & 0x80) != 0)
-        {
-            continue;
-        }
-
-        const decoded = try mqtt.decodeRemainingLength(
-            state.header[1..state.header_len],
-        );
-        const packet_len = std.math.add(
-            usize,
-            1 + decoded.len,
-            decoded.value,
-        ) catch return error.PacketTooLarge;
-        if (packet_len > max_packet_size) return error.PacketTooLarge;
-        const allocated = try allocatePacketBytes(
-            allocator,
-            packet_len,
-            owned_prefix_len,
-        );
-        const packet = allocated.bytes;
-        @memcpy(packet[0..state.header_len], state.header[0..state.header_len]);
-        state.packet = packet;
-        state.packet_prefix_len = allocated.prefix_len;
-        state.packet_read = state.header_len;
-    }
-
-    const packet = state.packet.?;
-    while (state.packet_read < packet.len) {
-        if (inactivity_timeout) |timeout| {
-            if (packet.len - state.packet_read >
-                keep_alive_reader.progress_threshold)
-            {
-                deadline = inactivityDeadline(connection.io, timeout);
-            }
-        }
-        state.packet_read += readStreamExactWithDeadline(
-            connection,
-            packet[state.packet_read..],
-            deadline,
-        ) catch |err| return err;
-    }
-
-    state.packet = null;
-    const packet_prefix_len = state.packet_prefix_len;
-    state.packet_prefix_len = 0;
-    state.packet_read = 0;
-    state.header_len = 0;
-    errdefer freePacketBytes(allocator, packet, packet_prefix_len);
-    return .{
-        .bytes = packet,
-        .fixed = try mqtt.FixedHeader.parse(packet),
-        .prefix_len = packet_prefix_len,
-    };
-}
-
-fn readStreamExactWithDeadline(
-    connection: anytype,
-    buffer: []u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!usize {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        const count = if (deadline) |absolute|
-            connection.readWithDeadline(buffer[offset..], absolute)
-        else
-            connection.read(buffer[offset..]);
-        const received = count catch |err| {
-            if (err == error.Timeout and offset != 0) return offset;
-            // TLS reports a socket EOF at a record boundary as UnexpectedEof
-            // when the peer omits close_notify. MQTT treats that exactly like
-            // a cleartext EOF so reconnecting clients can recover uniformly.
-            if (err == error.UnexpectedEof) return error.ConnectionClosed;
-            return err;
-        };
-        if (received == 0) return error.ConnectionClosed;
-        offset += received;
-    }
-    return offset;
+test "MQTT TLS packet cursor retains every accepted byte across local interruptions" {
+    try @import("transport/stream_receive_tests.zig").cursor(StreamPacketReader, StreamPacketState, Error);
 }
 
 pub const OwnedPacket = struct {
@@ -1688,11 +1593,11 @@ test "TLS record-boundary EOF is an MQTT connection close" {
         io: std.Io,
         failure: Error,
 
-        fn read(self: *@This(), _: []u8) Error!usize {
+        pub fn read(self: *@This(), _: []u8) Error!usize {
             return self.failure;
         }
 
-        fn readWithDeadline(
+        pub fn readWithDeadline(
             self: *@This(),
             _: []u8,
             _: std.Io.Clock.Timestamp,
@@ -1712,7 +1617,7 @@ test "TLS record-boundary EOF is an MQTT connection close" {
     };
     try std.testing.expectError(
         error.ConnectionClosed,
-        readStreamExactWithDeadline(&eof, &byte, null),
+        StreamPacketReader.readSome(&eof, &byte, null),
     );
 
     var truncated = FakeConnection{
@@ -1721,7 +1626,7 @@ test "TLS record-boundary EOF is an MQTT connection close" {
     };
     try std.testing.expectError(
         error.TruncatedRecord,
-        readStreamExactWithDeadline(&truncated, &byte, null),
+        StreamPacketReader.readSome(&truncated, &byte, null),
     );
 }
 
@@ -2185,4 +2090,8 @@ test "TCP packet receive rejects oversize before allocating" {
         transport.readPacket(fail_first.allocator(), 132),
     );
     try std.testing.expect(!fail_first.has_induced_failure);
+}
+
+test {
+    _ = @import("transport/read_interruption_tests.zig");
 }

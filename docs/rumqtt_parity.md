@@ -5511,6 +5511,20 @@ proxy evidence for the entire suite.
    TLS, and WebSocket, and all 1,825 source-locked Mosquitto sequences passed.
    Keep Alive timing, large-packet progress renewal, and timeout-resumable
    framing remain unchanged.
+   MQTT stream framing also commits every TLS plaintext prefix before another
+   read can return `Canceled`, `ConcurrencyUnavailable`, or `Timeout`. The
+   original local-loop cursor could lose bytes returned before cancellation
+   or executor rejection, even while the underlying TLS record was intact.
+   The extracted `runtime/transport/stream_receive.zig` keeps that progress in
+   the packet state, retains a complete Fixed Header across allocation failure,
+   and retries allocation without consuming payload as Remaining Length.
+   Deterministic cursor/allocation tests cover ordinary and aligned-prefix
+   ownership. Real TCP, native TLS 1.2/1.3, standard TLS 1.3 and WebSocket
+   exchanges interrupt split Remaining Length and PUBLISH bodies, then verify
+   exact QoS 1/2 payloads, same-identifier ACK completion, the following packet,
+   and continued PING traffic. MQTT state and traffic accounting advance only
+   after a complete packet arrives; Keep Alive still renews only while the
+   outstanding body exceeds the existing 1,000-byte progress threshold.
    Connection traffic counters now follow their actual ownership boundary too.
    The single protocol reader and externally serialized writer update private
    atomic snapshots with load/store instead of multi-writer RMW. Broker
