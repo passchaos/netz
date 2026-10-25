@@ -4,6 +4,10 @@ const Broker = @import("../broker.zig").Broker;
 const LocalConsumerAckAction = @import("local_consumer.zig").AckAction;
 const LocalConsumerWake = @import("local_consumer.zig").Wake;
 
+test {
+    _ = @import("local_consumer_completion_tests.zig");
+}
+
 test "broker local consumer reports pending messages and signals arrivals" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

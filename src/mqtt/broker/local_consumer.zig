@@ -63,6 +63,12 @@ pub const Wake = struct {
 pub const Registration = struct {
     session: session.Handle,
     wake: ?*Wake,
+    /// The selected QoS 0 delivery was removed in memory, but its persistence
+    /// barrier has not completed. This belongs to the broker registration so
+    /// a copied consumer handle cannot bypass the barrier.
+    qos0_completion_pending: bool = false,
+    /// A finished writer may clear only the completion it captured.
+    qos0_completion_generation: u64 = 0,
 };
 
 pub const Handle = struct {
@@ -399,6 +405,13 @@ pub fn Operations(comptime Context: type) type {
             if (!ownsConsumerLocked(self, consumer)) {
                 return error.LocalConsumerClosed;
             }
+            if (self.local_consumer_routes.get(consumer.route_id).?.qos0_completion_pending) {
+                const generation = self.local_consumer_routes.get(consumer.route_id).?.qos0_completion_generation;
+                self.state_mutex.unlock(self.io);
+                state_locked = false;
+                try finishQoS0Completion(self, consumer, generation);
+                return null;
+            }
             var storage: [1]session_mod.Transmission = undefined;
             const transmissions = try self.sessions.drainIntoTrackingSnapshotChange(
                 consumer.session,
@@ -499,7 +512,8 @@ pub fn Operations(comptime Context: type) type {
 
         /// Complete ownership of a QoS 0 delivery after the downstream operation
         /// succeeds. Until this call, `retryLocalConsumerEvent` can restore it to
-        /// the front of the durable queue.
+        /// the front of the durable queue. A failed persistence barrier can be
+        /// retried by calling this method or polling, before any new selection.
         pub fn completeLocalConsumerQoS0(
             self: *Broker,
             consumer: *LocalConsumer,
@@ -511,15 +525,32 @@ pub fn Operations(comptime Context: type) type {
             if (!ownsConsumerLocked(self, consumer)) {
                 return error.LocalConsumerClosed;
             }
-            try self.sessions.completeQoS0Transmission(
-                consumer.session,
-                consumer.route_id,
-                0,
-            );
-            Context.recordPersistentChangeLocked(self, true);
+            const registration = self.local_consumer_routes.getPtr(consumer.route_id).?;
+            if (!registration.qos0_completion_pending) {
+                try self.sessions.completeQoS0Transmission(
+                    consumer.session,
+                    consumer.route_id,
+                    0,
+                );
+                Context.recordPersistentChangeLocked(self, true);
+                registration.qos0_completion_pending = true;
+                registration.qos0_completion_generation +%= 1;
+            }
+            const generation = registration.qos0_completion_generation;
             self.state_mutex.unlock(self.io);
             state_locked = false;
+            try finishQoS0Completion(self, consumer, generation);
+        }
+
+        fn finishQoS0Completion(self: *Broker, consumer: *LocalConsumer, generation: u64) Error!void {
             try Context.finalizePersistentChange(self, true, true);
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            if (!ownsConsumerLocked(self, consumer)) return error.LocalConsumerClosed;
+            const registration = self.local_consumer_routes.getPtr(consumer.route_id).?;
+            if (registration.qos0_completion_generation == generation) {
+                registration.qos0_completion_pending = false;
+            }
         }
 
         /// Return a previously selected event to the Session transmission cursor.

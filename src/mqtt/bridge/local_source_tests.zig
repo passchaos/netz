@@ -93,3 +93,44 @@ test "local source QoS2 retries PUBCOMP durability before selecting another deli
     try std.testing.expectEqualStrings("next", next.publish.publish.payload);
     try source.completeQoS0();
 }
+
+test "local source QoS0 retries completion journal failure before next delivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var broker = try broker_mod.Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });
+    defer broker.deinit();
+    try broker.createCommitLog(tmp.dir, "zero.log", .{});
+    var shutdown: std.Io.Event = .unset;
+    var source = try sourceFor(&broker, io, &shutdown);
+    defer source.deinit();
+    for ([_][]const u8{ "sent", "next" }) |payload| {
+        try broker.publishLocal(.{ .dup = false, .qos = .at_most_once, .retain = false, .topic = "retry/zero", .packet_id = null, .properties = &.{}, .payload = payload });
+    }
+    var sent = (try source.pollWithOptions(.{ .timeout = .fromMilliseconds(1) })).?;
+    defer sent.deinit(allocator);
+    try std.testing.expectEqualStrings("sent", sent.publish.publish.payload);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, source.completeQoS0());
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 1), try source.pendingCount());
+    // An empty adapter poll must finish the removed delivery's journal write,
+    // without selecting or resending either message in the same call.
+    try std.testing.expect((try source.pollWithOptions(.{ .timeout = .fromMilliseconds(1) })) == null);
+    {
+        var restored = try broker_mod.Broker.init(allocator, io, .{ .queue_qos0_messages = true });
+        defer restored.deinit();
+        try restored.restoreCommitLog(tmp.dir, "zero.log", .{});
+        try std.testing.expectEqual(@as(usize, 1), restored.stats().session_queued_messages);
+    }
+    var next = (try source.pollWithOptions(.{ .timeout = .fromMilliseconds(1) })).?;
+    defer next.deinit(allocator);
+    try std.testing.expectEqualStrings("next", next.publish.publish.payload);
+    try source.completeQoS0();
+    try std.testing.expect((try source.pollWithOptions(.{ .timeout = .fromMilliseconds(1) })) == null);
+}

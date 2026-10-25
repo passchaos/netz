@@ -70,7 +70,7 @@ pub const Client = struct {
     consumer: ?broker_mod.LocalConsumer = null,
     receipts: session.Store,
     receipt_handle: session.Handle,
-    selected: ?union(enum) { publish: u16, pubrel: u16 } = null,
+    selected: ?union(enum) { publish: u16, pubrel: u16, qos0_completion: void } = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -215,11 +215,16 @@ pub const Client = struct {
     pub fn pollWithOptions(self: *Client, _: reconnect.PollOptions) Error!?Event {
         if (self.shutdown.isSet()) return error.Canceled;
         if (self.consumer == null) return .{ .connected = try self.connect() };
-        // Preserve a selected publication while its target is pending. A
+        // Preserve a selected publication while its target is pending. Once
+        // QoS 0 finishes at the target, retry only the broker completion. A
         // selected PUBREL can be replayed after a coordinator commit rollback,
         // or finish an already-staged PUBCOMP whose broker journal write failed.
         if (self.selected) |selected| switch (selected) {
             .publish => return null,
+            .qos0_completion => {
+                try self.completeQoS0();
+                return null;
+            },
             .pubrel => |packet_id| {
                 const state = try self.receipts.incomingQoS2State(self.receipt_handle, packet_id);
                 if (state == null) {
@@ -257,7 +262,12 @@ pub const Client = struct {
     }
 
     pub fn completeQoS0(self: *Client) Error!void {
-        try self.broker.completeLocalConsumerQoS0(&self.consumer.?);
+        const selected = self.selected orelse return error.InvalidAcknowledgement;
+        if (selected != .qos0_completion and
+            (selected != .publish or selected.publish != 0)) return error.InvalidAcknowledgement;
+        const consumer = if (self.consumer) |*value| value else return error.SourceSessionLost;
+        self.selected = .qos0_completion;
+        try self.broker.completeLocalConsumerQoS0(consumer);
         self.selected = null;
     }
 

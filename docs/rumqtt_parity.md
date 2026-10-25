@@ -3662,6 +3662,17 @@ broker journal to prove completion was persisted; a bounded real-TCP two-broker
 test covers both failures and uses a subscriber PING barrier to reject any
 extra target delivery.
 
+Local-consumer QoS 0 completion retains a broker-owned persistence barrier if
+the selected delivery was removed in memory but its journal write failed.
+Explicit completion retries and polling finish that same barrier before
+selecting another message, including polling through a copied consumer handle.
+The local bridge separately remembers that its target send finished, so it
+retries only local completion. Journal restoration and real-TCP tests cover
+in-place retry, local-source reconnect, continued queue draining, and the
+absence of a second target publication. Their PING barriers read the next
+packet directly rather than using a synchronous helper that can buffer
+interleaved PUBLISH packets.
+
 ## Remaining work before broad superiority
 
 The shared `fuzz-parsers` target dispatches every bounded input through the

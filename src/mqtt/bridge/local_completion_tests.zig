@@ -1,9 +1,10 @@
-//! Recovery of local-source completion after the target already committed QoS2.
+//! Recovery of local-source completion after the target already accepted it.
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 const runtime = @import("../runtime.zig");
 const outbound = @import("outbound.zig");
+const forwarding = @import("outbound_forward.zig");
 
 const BrokerRunner = struct {
     broker: *broker_mod.Broker,
@@ -56,6 +57,20 @@ fn retryWithinBudget(bridge: *outbound.LocalBridge, shutdown: *std.Io.Event) !vo
     thread.join();
     joined = true;
     if (runner.err) |err| return err;
+}
+
+fn expectDelivery(subscriber: *runtime.Connection, payload: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var delivered = try subscriber.readClientPacketEventWithTimeout(.fromSeconds(2));
+    defer delivered.deinit(allocator);
+    try std.testing.expect(delivered == .publish);
+    try std.testing.expectEqualStrings("remote/completion", delivered.publish.publish.topic);
+    try std.testing.expectEqualStrings(payload, delivered.publish.publish.payload);
+    // Read the next packet directly: ping() would buffer an extra PUBLISH.
+    try subscriber.writePingReq();
+    var barrier = try subscriber.readClientPacketEventWithTimeout(.fromSeconds(2));
+    defer barrier.deinit(allocator);
+    try std.testing.expect(barrier == .pingresp);
 }
 
 test "local outbound QoS2 completion retries journal failures without target redelivery" {
@@ -116,11 +131,65 @@ test "local outbound QoS2 completion retries journal failures without target red
         try retryWithinBudget(&bridge, &shutdown);
         try std.testing.expect(!bridge.hasPendingDurableQoS2());
         try std.testing.expectEqual(@as(usize, 0), local.stats().session_inflight_messages);
-        var delivered = try subscriber.readPublish();
-        defer delivered.deinit(allocator);
-        try std.testing.expectEqualStrings("remote/completion", delivered.publish.topic);
-        try std.testing.expectEqualStrings("once", delivered.publish.payload);
-        // PING is an ordering barrier: any extra PUBLISH fails before PINGRESP.
-        try subscriber.ping();
+        try expectDelivery(&subscriber, "once");
+    }
+}
+
+test "local outbound QoS0 completion retries journal failure without blocking or redelivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var remote = try broker_mod.Broker.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer remote.deinit();
+    var remote_runner = BrokerRunner{ .broker = &remote };
+    const remote_thread = try std.Thread.spawn(.{}, BrokerRunner.run, .{&remote_runner});
+    defer {
+        remote_runner.shutdown.set(io);
+        remote_thread.join();
+    }
+    var subscriber = try runtime.Client.connect(allocator, io, remote.address(), .{ .protocol = .v5, .client_id = "zero-completion-observer" });
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(&.{.{ .topic_filter = "remote/#" }}, .{});
+    defer suback.deinit(allocator);
+    for ([_]bool{ false, true }) |reconnect_source| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var local = try broker_mod.Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });
+        defer local.deinit();
+        try local.createCommitLog(tmp.dir, "zero-broker.log", .{});
+        var shutdown: std.Io.Event = .unset;
+        var bridge = try outbound.LocalBridge.initEndpoints(allocator, io, .{ .broker = &local, .id = [_]u8{0x96} ** 16 }, .{ .address = remote.address() }, .{
+            .source_connect = .{ .protocol = .v5, .client_id = "zero-completion-source", .clean_start = false },
+            .target_connect = .{ .protocol = .v5, .client_id = "zero-completion-target" },
+            .rules = &.{.{ .filter = "#", .local_prefix = "local/", .remote_prefix = "remote/" }},
+        }, &shutdown);
+        defer bridge.deinit();
+        _ = try bridge.connect();
+        for ([_][]const u8{ "sent", "next" }) |payload| {
+            try local.publishLocal(.{ .dup = false, .qos = .at_most_once, .retain = false, .topic = "local/completion", .packet_id = null, .properties = &.{}, .payload = payload });
+        }
+        var sent = (try bridge.source.pollWithOptions(.{ .timeout = .fromMilliseconds(50) })).?;
+        defer sent.deinit(allocator);
+        try forwarding.Operations(outbound.LocalBridge).forward(&bridge, &sent.publish.publish, .{ .timeout = .fromSeconds(2) });
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(error.OutOfMemory, bridge.source.completeQoS0());
+        try std.testing.expect(failing.has_induced_failure);
+        failing.fail_index = std.math.maxInt(usize);
+        if (reconnect_source) bridge.source.disconnectTransport();
+        try retryWithinBudget(&bridge, &shutdown);
+        {
+            var restored = try broker_mod.Broker.init(allocator, io, .{ .queue_qos0_messages = true });
+            defer restored.deinit();
+            try restored.restoreCommitLog(tmp.dir, "zero-broker.log", .{});
+            try std.testing.expectEqual(@as(usize, 1), restored.stats().session_queued_messages);
+        }
+        try expectDelivery(&subscriber, "sent");
+        // The alternating target and source turns must deliver the next item.
+        try retryWithinBudget(&bridge, &shutdown);
+        try retryWithinBudget(&bridge, &shutdown);
+        try std.testing.expectEqual(@as(usize, 0), try bridge.source.pendingCount());
+        try expectDelivery(&subscriber, "next");
     }
 }
