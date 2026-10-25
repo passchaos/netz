@@ -15,6 +15,7 @@ const close_delimited = @import("runtime/message/close_delimited.zig");
 const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const tls_client_reader = @import("runtime/tls_client/reader.zig");
+const tls_write_retry = @import("../tls/stream/write_retry.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
@@ -1107,6 +1108,7 @@ pub const TlsClientConnection = struct {
     /// Plaintext represented by the TLS ciphertext currently buffered in
     /// `net_writer` after a bounded application write timed out.
     pending_timed_plaintext_len: usize = 0,
+    pending_timed_plaintext_fingerprint: tls_write_retry.Fingerprint = .{},
     write_closed: bool = false,
 
     pub fn init(
@@ -1250,6 +1252,7 @@ pub const TlsClientConnection = struct {
     }
 
     pub fn deinit(self: *TlsClientConnection) void {
+        self.pending_timed_plaintext_fingerprint.clear();
         if (!self.write_closed) {
             self.client.end() catch {};
             self.net_writer.interface.flush() catch {};
@@ -1390,6 +1393,10 @@ pub const TlsClientConnection = struct {
     /// only after the complete TLS record carrying that plaintext has reached
     /// the socket. Timeout, cancellation and executor admission failure retain
     /// the encrypted record and consumed sequence number for a later retry.
+    /// Retry with the identical pending-record prefix, optionally relocated or
+    /// extended with unaccepted tail bytes. A mismatch returns WriteInProgress
+    /// before socket I/O. finishPendingTimedWrite explicitly drains that record
+    /// without consuming replacement plaintext.
     pub fn writeAllWithDeadline(
         self: *TlsClientConnection,
         bytes: []const u8,
@@ -1400,6 +1407,7 @@ pub const TlsClientConnection = struct {
         if (self.write_closed) return error.ConnectionClosed;
 
         if (self.pending_timed_plaintext_len != 0) {
+            try self.pending_timed_plaintext_fingerprint.validate(self.pending_timed_plaintext_len, bytes);
             try self.finishTimedRecord(committed, deadline);
         }
         while (committed.* < bytes.len) {
@@ -1409,14 +1417,16 @@ pub const TlsClientConnection = struct {
             );
             std.debug.assert(self.client.writer.buffered().len == 0);
             std.debug.assert(self.net_writer.interface.buffered().len == 0);
-            try self.client.writer.writeAll(
-                bytes[committed.*..][0..chunk_len],
-            );
+            const plaintext = bytes[committed.*..][0..chunk_len];
+            try self.client.writer.writeAll(plaintext);
             // This encrypts into the connection-owned network writer buffer;
             // that buffer is one full TLS record and performs no socket I/O.
             try self.client.writer.flush();
             self.pending_timed_plaintext_len = chunk_len;
-            try self.finishTimedRecord(committed, deadline);
+            self.finishTimedRecord(committed, deadline) catch |err| {
+                self.pending_timed_plaintext_fingerprint.capture(plaintext);
+                return err;
+            };
         }
     }
 
@@ -1430,6 +1440,7 @@ pub const TlsClientConnection = struct {
         try self.net_writer.interface.flush();
         committed.* = self.pending_timed_plaintext_len;
         self.pending_timed_plaintext_len = 0;
+        self.pending_timed_plaintext_fingerprint.clear();
     }
 
     fn finishTimedRecord(
@@ -1449,6 +1460,7 @@ pub const TlsClientConnection = struct {
         }
         committed.* += self.pending_timed_plaintext_len;
         self.pending_timed_plaintext_len = 0;
+        self.pending_timed_plaintext_fingerprint.clear();
     }
 
     pub fn closeWrite(self: *TlsClientConnection) Error!void {
@@ -14278,6 +14290,7 @@ test {
     _ = @import("runtime/response_reuse_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
+    _ = @import("runtime/tls_client/write_retry_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/half_close_tests.zig");
     _ = @import("runtime/tls_close_tests.zig");

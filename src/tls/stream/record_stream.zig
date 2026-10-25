@@ -10,6 +10,7 @@ const std = @import("std");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
 const io_interruption = @import("../../internal/io_interruption.zig");
+const write_retry = @import("write_retry.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -86,6 +87,7 @@ pub const Stream = struct {
     pending_write_len: usize = 0,
     pending_write_offset: usize = 0,
     pending_plaintext_len: usize = 0,
+    pending_plaintext_fingerprint: write_retry.Fingerprint = .{},
 
     pub fn init(
         read_keys: tls_record.Keys,
@@ -112,6 +114,7 @@ pub const Stream = struct {
         std.crypto.secureZero(u8, &self.buffered_plaintext);
         std.crypto.secureZero(u8, &self.post_handshake);
         std.crypto.secureZero(u8, &self.pending_write);
+        self.pending_plaintext_fingerprint.clear();
         self.* = undefined;
     }
 
@@ -588,6 +591,9 @@ pub const Stream = struct {
     /// new plaintext is encrypted.
     /// Timeout, cancellation and executor admission failure retain that
     /// transaction. Retry with the uncommitted suffix of the original bytes.
+    /// That suffix must contain the identical pending-record plaintext prefix;
+    /// it may move to a new address or include more unaccepted tail bytes.
+    /// A mismatch returns WriteInProgress without writing or changing progress.
     pub fn writeAllWithDeadline(
         self: *Stream,
         io: std.Io,
@@ -603,6 +609,7 @@ pub const Stream = struct {
             return error.ConnectionClosed;
         }
         if (self.pending_write_len != 0) {
+            try self.pending_plaintext_fingerprint.validate(self.pending_plaintext_len, bytes);
             try self.finishPendingWriteWithDeadline(
                 io,
                 stream,
@@ -619,16 +626,20 @@ pub const Stream = struct {
                 record_io.max_plaintext_len,
                 bytes.len - committed.*,
             );
+            const plaintext = bytes[committed.*..][0..chunk_len];
             try self.beginPendingWrite(
                 tls_record.content_type_application_data,
-                bytes[committed.*..][0..chunk_len],
+                plaintext,
             );
-            try self.finishPendingWriteWithDeadline(
+            self.finishPendingWriteWithDeadline(
                 io,
                 stream,
                 committed,
                 deadline,
-            );
+            ) catch |err| {
+                self.pending_plaintext_fingerprint.capture(plaintext);
+                return err;
+            };
         }
     }
 
@@ -660,6 +671,7 @@ pub const Stream = struct {
         self.pending_write_len = 0;
         self.pending_write_offset = 0;
         self.pending_plaintext_len = 0;
+        self.pending_plaintext_fingerprint.clear();
     }
 
     fn beginPendingWrite(
@@ -707,6 +719,7 @@ pub const Stream = struct {
         self.pending_write_len = 0;
         self.pending_write_offset = 0;
         self.pending_plaintext_len = 0;
+        self.pending_plaintext_fingerprint.clear();
     }
 
     pub fn sendCloseNotify(

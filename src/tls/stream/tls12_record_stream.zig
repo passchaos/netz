@@ -9,6 +9,7 @@ const std = @import("std");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
 const io_interruption = @import("../../internal/io_interruption.zig");
+const write_retry = @import("write_retry.zig");
 
 const net = std.Io.net;
 const tls12 = vail.tls.tls12;
@@ -37,6 +38,7 @@ pub const Stream = struct {
     pending_write_len: usize = 0,
     pending_write_offset: usize = 0,
     pending_plaintext_len: usize = 0,
+    pending_plaintext_fingerprint: write_retry.Fingerprint = .{},
     write_mutex: std.Io.Mutex = .init,
 
     pub fn init(
@@ -54,6 +56,7 @@ pub const Stream = struct {
         self.write_traffic.deinit();
         std.crypto.secureZero(u8, &self.buffered_plaintext);
         std.crypto.secureZero(u8, &self.pending_write);
+        self.pending_plaintext_fingerprint.clear();
         self.* = undefined;
     }
 
@@ -245,6 +248,9 @@ pub const Stream = struct {
     /// Count only complete plaintext records and retain partial ciphertext
     /// across timeout, cancellation and executor admission failure. Retry
     /// with the uncommitted suffix of the original bytes.
+    /// The pending-record prefix must be identical, but may move to another
+    /// address or gain unaccepted tail bytes. A mismatch returns WriteInProgress
+    /// without writing or changing the pending record.
     pub fn writeAllWithDeadline(
         self: *Stream,
         io: std.Io,
@@ -258,11 +264,16 @@ pub const Stream = struct {
         defer self.write_mutex.unlock(io);
         try self.requireWritableAllowPending();
         if (self.pending_write_len != 0) {
+            try self.pending_plaintext_fingerprint.validate(self.pending_plaintext_len, bytes);
             try self.finishPendingWriteWithDeadline(io, stream, committed, deadline);
         }
         while (committed.* < bytes.len) {
-            _ = try self.beginPendingWrite(bytes[committed.*..]);
-            try self.finishPendingWriteWithDeadline(io, stream, committed, deadline);
+            const plaintext = bytes[committed.*..];
+            const consumed = try self.beginPendingWrite(plaintext);
+            self.finishPendingWriteWithDeadline(io, stream, committed, deadline) catch |err| {
+                self.pending_plaintext_fingerprint.capture(plaintext[0..consumed]);
+                return err;
+            };
         }
     }
 
@@ -327,6 +338,7 @@ pub const Stream = struct {
         self.pending_write_len = 0;
         self.pending_write_offset = 0;
         self.pending_plaintext_len = 0;
+        self.pending_plaintext_fingerprint.clear();
     }
 
     fn requireWritable(self: *const Stream) Error!void {

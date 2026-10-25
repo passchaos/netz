@@ -4,18 +4,21 @@ const fixture = @import("testing/record_fixture.zig");
 const support = @import("../../internal/testing/write_interruption.zig");
 const record_io = @import("record_io.zig");
 const allocator = std.testing.allocator;
+const Resume = enum { replay, explicit, extend };
 
 test "TLS bounded write interruptions preserve ciphertext and authenticated sequence" {
     inline for ([_]bool{ false, true }) |old| {
-        try exercise(old, .before_write, 0, false);
+        try exercise(old, .before_write, 0, false, .replay);
         for ([_]support.Stage{ .after_prefix, .after_prefix_timer_rejected }) |stage| {
-            for ([_]usize{ 1, 6, 12 }) |prefix| try exercise(old, stage, prefix, false);
-            try exercise(old, stage, record_io.max_record_len, true);
+            for ([_]usize{ 1, 6, 12 }) |prefix| try exercise(old, stage, prefix, false, .replay);
+            try exercise(old, stage, record_io.max_record_len, true, .replay);
         }
+        try exercise(old, .after_prefix, 6, false, .explicit);
+        try exercise(old, .before_write, 0, false, .extend);
     }
 }
 
-fn exercise(comptime old: bool, stage: support.Stage, prefix: usize, comptime cross_record: bool) !void {
+fn exercise(comptime old: bool, stage: support.Stage, prefix: usize, comptime cross_record: bool, resume_mode: Resume) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const base = threaded.io();
@@ -48,19 +51,47 @@ fn exercise(comptime old: bool, stage: support.Stage, prefix: usize, comptime cr
     try std.testing.expect(!sender.failed);
     const encoded_len = sender.pending_write_len;
     probe.armed = false;
-    try sender.writeAllWithDeadline(io, socket, payload[first_plaintext..], &committed, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
-    try std.testing.expectEqual(payload.len - first_plaintext, committed);
-    try std.testing.expectEqual(encoded_len + (if (cross_record) first_ciphertext else 0), probe.written);
+    const pending_bytes = payload[first_plaintext..];
+    const extension: []const u8 = if (resume_mode == .extend) "/extra" else "";
+    const relocated = try allocator.alloc(u8, pending_bytes.len + extension.len);
+    defer allocator.free(relocated);
+    @memcpy(relocated[0..pending_bytes.len], pending_bytes);
+    @memcpy(relocated[pending_bytes.len..], extension);
+    relocated[0] ^= 1;
+    const before_mutation = probe.written;
+    try std.testing.expectError(error.WriteInProgress, sender.writeAllWithDeadline(io, socket, relocated, &committed, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) })));
+    try std.testing.expectEqual(before_mutation, probe.written);
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    relocated[0] ^= 1;
+    for ([_][]const u8{ "", pending_bytes[0..1], "different pending record with enough bytes" }) |mismatch| {
+        const before = probe.written;
+        try std.testing.expectError(error.WriteInProgress, sender.writeAllWithDeadline(io, socket, mismatch, &committed, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) })));
+        try std.testing.expectEqual(@as(usize, 0), committed);
+        try std.testing.expectEqual(before, probe.written);
+        try std.testing.expectEqual(encoded_len, sender.pending_write_len);
+        try std.testing.expect(!sender.failed);
+    }
+    if (resume_mode == .explicit) {
+        try sender.finishPendingWrite(io, socket, &committed);
+    } else {
+        try sender.writeAllWithDeadline(io, socket, relocated, &committed, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+    }
+    try std.testing.expectEqual(payload.len - first_plaintext + extension.len, committed);
+    const extra_record_len = if (resume_mode == .extend) extension.len + (if (old) @as(usize, 29) else @as(usize, 22)) else 0;
+    try std.testing.expectEqual(encoded_len + (if (cross_record) first_ciphertext else 0) + extra_record_len, probe.written);
     try std.testing.expectEqual(@as(usize, 0), sender.pending_write_len);
-    try std.testing.expectEqual(records, if (old) sender.write_traffic.next_sequence_number else sender.write_sequence);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &sender.pending_plaintext_fingerprint.digest);
+    const completed_records = records + @as(u64, if (resume_mode == .extend) 1 else 0);
+    try std.testing.expectEqual(completed_records, if (old) sender.write_traffic.next_sequence_number else sender.write_sequence);
     var out: [record_io.max_plaintext_len + 32]u8 = undefined;
     var count: usize = 0;
-    while (count < payload.len) count += try receiver.readWithDeadline(base, peer, out[count..payload.len], .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
-    try std.testing.expectEqualStrings(payload, out[0..count]);
+    while (count < payload.len + extension.len) count += try receiver.readWithDeadline(base, peer, out[count .. payload.len + extension.len], .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+    try std.testing.expectEqualStrings(payload, out[0..payload.len]);
+    try std.testing.expectEqualStrings(extension, out[payload.len..count]);
     try sender.writeAllWithDeadline(io, socket, "following", &committed, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
     const next = try receiver.readWithDeadline(base, peer, &out, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }));
     try std.testing.expectEqualStrings("following", out[0..next]);
-    try std.testing.expectEqual(records + 1, if (old) sender.write_traffic.next_sequence_number else sender.write_sequence);
+    try std.testing.expectEqual(completed_records + 1, if (old) sender.write_traffic.next_sequence_number else sender.write_sequence);
 }
 
 test "TLS bounded write failure keeps real network errors terminal" {

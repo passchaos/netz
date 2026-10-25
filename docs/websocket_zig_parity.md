@@ -1492,6 +1492,16 @@ context takeover, Ping/Pong, Close and automatic replies across all client TLS
 backends. Resuming commits one message/control frame; the next message and
 read remain usable, while genuine network write errors still retire native
 TLS records.
+TLS bounded-write retries validate the plaintext prefix represented by the
+pending ciphertext before sending its suffix. Empty, too-short or changed
+retry input returns `WriteInProgress` with zero new progress and leaves the
+record intact. Identical bytes may move between scratch buffers or be followed
+by more unaccepted plaintext; this keeps masked, sliced and compressed
+WebSocket continuations usable. A fixed 32-byte SHA-256 fingerprint is captured
+only when a new record write is interrupted, then cleared on completion or
+teardown. It avoids retaining caller pointers or another plaintext record
+buffer. Native TLS 1.2/1.3 and standard TLS 1.3 socket tests verify rejection
+without writes, moved and extended retries, and explicit pending-record drains.
 HTTP/1 bounded Ping and Close use the same retained-frame transport path. A
 timeout keeps the encoded header, client mask, payload, and committed cursor;
 the matching `continuePing*` or `closeWith*`/`continueClose*` call writes only
