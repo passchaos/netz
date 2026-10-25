@@ -6192,6 +6192,7 @@ test "HTTP/3 generic frame codec rejects WebTransport stream prefix" {
 
 test {
     _ = @import("qpack/tests.zig");
+    _ = @import("priority_dictionary_tests.zig");
 }
 
 test "HTTP/3 priority field and PRIORITY_UPDATE frame" {

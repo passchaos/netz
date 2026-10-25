@@ -10,51 +10,11 @@ pub const Priority = struct {
     urgency: u3 = 3,
     incremental: bool = false,
 
-    /// Extract the RFC 9218 parameters understood by Netz.
-    ///
-    /// Unknown parameters and recognized parameters with unsupported values
-    /// retain the defaults, as required by RFC 9218. The wire codecs separately
-    /// enforce ASCII; this parser remains useful for trusted header values too.
+    /// Parse one complete structured Dictionary and extract the understood
+    /// RFC 9218 parameters. Header parse failures use defaults; frame codecs
+    /// can call parseStrict to apply their connection-error policy instead.
     pub fn parse(value: []const u8) Priority {
-        var result = Priority{};
-        var rest = value;
-        while (rest.len != 0) {
-            rest = trimLeading(rest);
-            if (rest.len == 0) break;
-            if (rest[0] == ',') {
-                rest = rest[1..];
-                continue;
-            }
-
-            const name_end = nameEnd(rest);
-            const name = rest[0..name_end];
-            rest = trimLeading(rest[name_end..]);
-            if (rest.len != 0 and rest[0] == '=') {
-                rest = trimLeading(rest[1..]);
-                const value_end = valueEnd(rest);
-                const parameter_value = rest[0..value_end];
-                rest = rest[value_end..];
-                if (std.mem.eql(u8, name, "u")) {
-                    if (parameter_value.len == 1 and
-                        parameter_value[0] >= '0' and
-                        parameter_value[0] <= '7')
-                    {
-                        result.urgency =
-                            @intCast(parameter_value[0] - '0');
-                    }
-                } else if (std.mem.eql(u8, name, "i")) {
-                    if (std.mem.eql(u8, parameter_value, "?1")) {
-                        result.incremental = true;
-                    }
-                    if (std.mem.eql(u8, parameter_value, "?0")) {
-                        result.incremental = false;
-                    }
-                }
-            } else if (std.mem.eql(u8, name, "i")) {
-                result.incremental = true;
-            }
-        }
-        return result;
+        return parseStrict(value) catch .{};
     }
 
     /// Serialize the canonical representation of the parameters Netz knows.
@@ -90,7 +50,9 @@ pub const Priority = struct {
     pub fn parseStrict(value: []const u8) error{InvalidPriority}!Priority {
         var result = Priority{};
         var cursor: usize = 0;
-        skipOptionalWhitespace(value, &cursor);
+        // RFC 8941's field entry algorithm strips leading SP; HTAB is
+        // permitted only by Dictionary OWS after members and commas.
+        while (cursor < value.len and value[cursor] == ' ') : (cursor += 1) {}
         if (cursor == value.len) return result;
         while (cursor < value.len) {
             const name_start = cursor;
@@ -114,9 +76,11 @@ pub const Priority = struct {
             if (std.mem.eql(u8, name, "u")) {
                 result.urgency = 3;
                 if (member_value) |raw| {
-                    if (raw.len == 1 and raw[0] >= '0' and raw[0] <= '7') {
-                        result.urgency = @intCast(raw[0] - '0');
-                    }
+                    // Structured-field integers are typed values, not their
+                    // spelling. RFC 8941 allows leading zeros and -0; decimal
+                    // or string members still fail integer conversion here.
+                    const integer = std.fmt.parseInt(i64, raw, 10) catch 3;
+                    if (integer >= 0 and integer <= 7) result.urgency = @intCast(integer);
                 }
             } else if (std.mem.eql(u8, name, "i")) {
                 result.incremental = false;
@@ -142,42 +106,13 @@ pub const Priority = struct {
     }
 };
 
-/// PRIORITY_UPDATE specifies ASCII text. Rejecting non-ASCII bytes at the
-/// version-specific wire boundary avoids ambiguous structured-field parsing.
+/// PRIORITY_UPDATE specifies ASCII text. HTAB can be Dictionary OWS; the
+/// structured parser separately rejects it inside strings, items and lists.
 pub fn isAsciiFieldValue(value: []const u8) bool {
     for (value) |byte| {
-        if (byte < 0x20 or byte > 0x7e) return false;
+        if (byte != 0x09 and (byte < 0x20 or byte > 0x7e)) return false;
     }
     return true;
-}
-
-fn trimLeading(value: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < value.len and
-        (value[i] == ' ' or value[i] == 0x09)) : (i += 1)
-    {}
-    return value[i..];
-}
-
-fn nameEnd(value: []const u8) usize {
-    var i: usize = 0;
-    while (i < value.len and
-        value[i] != '=' and
-        value[i] != ',' and
-        value[i] != ' ' and
-        value[i] != 0x09) : (i += 1)
-    {}
-    return i;
-}
-
-fn valueEnd(value: []const u8) usize {
-    var i: usize = 0;
-    while (i < value.len and
-        value[i] != ',' and
-        value[i] != ' ' and
-        value[i] != 0x09) : (i += 1)
-    {}
-    return i;
 }
 
 fn skipOptionalWhitespace(value: []const u8, cursor: *usize) void {
@@ -412,12 +347,16 @@ test "priority parameters parse and serialize across HTTP versions" {
     );
 }
 
-test "priority field values are printable ASCII" {
+test "priority field values permit ASCII Dictionary OWS and reject other controls" {
     try std.testing.expect(isAsciiFieldValue(""));
     try std.testing.expect(isAsciiFieldValue("u=0, i"));
-    try std.testing.expect(!isAsciiFieldValue("u=0,\ti"));
+    try std.testing.expect(isAsciiFieldValue("u=0,\ti"));
     try std.testing.expect(!isAsciiFieldValue("u=0\n"));
     try std.testing.expect(!isAsciiFieldValue(&.{0xff}));
+    try std.testing.expect(!isAsciiFieldValue(&.{0}));
+    for ([_][]const u8{ "\ti", "u=\t1", "custom=\"a\tb\"", "custom=(1\t2)" }) |value| {
+        try std.testing.expectError(error.InvalidPriority, Priority.parseStrict(value));
+    }
 }
 
 test "strict priority parsing rejects malformed dictionaries" {
@@ -451,4 +390,23 @@ test "strict priority parsing rejects malformed dictionaries" {
         error.InvalidPriority,
         Priority.parseStrict("custom=:A=:"),
     );
+}
+
+test "priority structured dictionaries isolate extensions and use final typed member values" {
+    const Case = struct { value: []const u8, expected: Priority };
+    const cases = [_]Case{
+        .{ .value = "custom=\"noise, i, tail\", u=2", .expected = .{ .urgency = 2 } },
+        .{ .value = "custom=(\"noise, i, tail\" ?1);p=\"u=0\", u=2", .expected = .{ .urgency = 2 } },
+        .{ .value = "u=1;note=\"noise, i, tail\"", .expected = .{ .urgency = 1 } },
+        .{ .value = "u=0, u=9, i, i=token", .expected = .{} },
+        .{ .value = "u=1, i, u=(0), i=(?1)", .expected = .{} },
+        .{ .value = "u=01, i=?1", .expected = .{ .urgency = 1, .incremental = true } },
+        .{ .value = "u=-0", .expected = .{ .urgency = 0 } },
+        .{ .value = "u=000000000000007", .expected = .{ .urgency = 7 } },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, try Priority.parseStrict(case.value));
+        try std.testing.expectEqual(case.expected, Priority.parse(case.value));
+    }
+    try std.testing.expectEqual(Priority{}, Priority.parse("u=0, custom=\"unterminated"));
 }

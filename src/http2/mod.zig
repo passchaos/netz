@@ -4067,6 +4067,7 @@ test "HTTP/2 HPACK accepts legal size updates and rejects bad dynamic use" {
 }
 
 test {
+    _ = priority_field;
     _ = @import("hpack/tests/decoded_fields.zig");
     _ = @import("runtime/client_pool_tests.zig");
     _ = @import("runtime/shared_client_pool_tests.zig");

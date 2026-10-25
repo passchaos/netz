@@ -1212,6 +1212,20 @@ matched loopback workload results, not universal throughput or memory claims.
 
 ### RFC 9218 priority-aware response scheduling
 
+HTTP/2 and HTTP/3 use the same Structured Fields Dictionary parser for both
+Priority metadata and decoded PRIORITY_UPDATE values. Quoted strings, inner
+lists and item parameters belonging to unknown extensions cannot introduce
+fake urgency or incremental members. Duplicate keys use their final typed
+value, while valid leading-zero integers and signed zero retain their numeric
+meaning. Unknown types and out-of-range values use RFC 9218 defaults.
+Dictionary OWS accepts HTAB at permitted separators; tabs inside strings or
+inner lists remain invalid. `Priority.parse` yields defaults for malformed
+dictionaries, while HTTP/2 PRIORITY_UPDATE retains strict rejection through
+`Priority.parseStrict`.
+Real TCP cases compare request metadata and control updates, and HTTP/3 cases
+verify the same values through QPACK decoding, control-state cloning and
+request lifecycle admission.
+
 RFC 9218's priority-ignore policy also applies to inbound HEADERS and
 PRIORITY frames. A server honors the client's initial
 `SETTINGS_NO_RFC7540_PRIORITIES=1`, and endpoints configured to ignore legacy

@@ -38186,6 +38186,7 @@ test {
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/priority/legacy_tests.zig");
+    _ = @import("runtime/priority/dictionary_tests.zig");
     _ = @import("runtime/priority/legacy_shutdown_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
     _ = @import("runtime/response_batch_tests.zig");
