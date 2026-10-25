@@ -7534,7 +7534,7 @@ pub const Broker = struct {
                 self.io,
                 slot_index,
             )) {
-                try self.flushSlot(slot_index, &self.slots[slot_index]);
+                try self.flushMatches(&.{match});
             }
         }
     }
@@ -7578,14 +7578,15 @@ pub const Broker = struct {
         self: *Broker,
         matches: []const router_mod.Match,
     ) Error!void {
-        for (matches) |match| {
-            const slot_index = subscriberIndex(
-                match.subscriber_id,
-                self.slots.len,
-            ) orelse continue;
-            const slot = &self.slots[slot_index];
-            try self.flushSlot(slot_index, slot);
-        }
+        return @import("broker/fanout/flush.zig").run(struct {
+            pub const BrokerType = Broker;
+            pub const MatchType = router_mod.Match;
+            pub const ErrorType = Error;
+            pub const index = subscriberIndex;
+            pub const id = subscriberId;
+            pub const flush = Broker.flushSlotLocked;
+            pub const transportClosed = ungracefulTransportClose;
+        }, self, matches);
     }
 
     fn flushSlot(
@@ -10522,6 +10523,8 @@ test {
     _ = @import("broker/persistence_tests.zig");
     _ = @import("broker/local_consumer_tests.zig");
     _ = @import("broker/router_churn_tests.zig");
+    _ = @import("broker/fanout/transport_tests.zig");
+    _ = @import("broker/fanout/flush_tests.zig");
 }
 
 test "broker retained expiry scan persists physical removal" {

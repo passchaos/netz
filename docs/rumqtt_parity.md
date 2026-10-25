@@ -9,6 +9,18 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Synchronous fanout now validates the selected recipient's connection generation
+while holding its writer lock. A disconnected target's stale route plan cannot
+touch a reused slot, and its socket failure wakes only that target's reader
+instead of aborting the publication's source connection. Healthy recipients
+continue receiving, while local state/persistence errors still propagate.
+The common guarded path in `broker/fanout/flush.zig` also covers shared-writer
+fallback; the publisher's own acknowledgement/delivery path retains its direct
+error handling. Real TCP tests inject recipient resets across MQTT 3.1.1/5,
+all three source QoS levels, and persistent/transient subscriptions, then verify
+source PING and surviving fanout delivery. This fixes the offline-QoS0 gate's
+disconnect/routing race without relying on timing sleeps.
+
 MQTT 5 protocol-error DISCONNECT output now shares the original CONNECT,
 reauthentication, typed/event receive or reconnect-poll deadline. A blocked
 diagnostic cannot extend that budget or replace the original peer error.
