@@ -1212,6 +1212,19 @@ matched loopback workload results, not universal throughput or memory claims.
 
 ### RFC 9218 priority-aware response scheduling
 
+RFC 9218's priority-ignore policy also applies to inbound HEADERS and
+PRIORITY frames. A server honors the client's initial
+`SETTINGS_NO_RFC7540_PRIORITIES=1`, and endpoints configured to ignore legacy
+signals skip their dependency and weight semantics. Frame layout, priority
+field length, padding, CONTINUATION ordering and HPACK validation remain
+enforced. The ordinary parser retains RFC 7540 self-dependency validation for
+callers that still use that priority model.
+Real TCP regressions cover both sources of the ignore policy, padded and
+fragmented requests and responses, aggregate and duplex reads, server push,
+and graceful-shutdown preadmission. Each response path completes a later
+request using the same HPACK dynamic table, while the modern Priority field
+continues to determine request urgency and incremental behavior.
+
 When `SETTINGS_NO_RFC7540_PRIORITIES=1` is enabled, the same flow-controlled
 batch writer now applies the Priority request field and later
 `PRIORITY_UPDATE` signals to DATA selection:

@@ -656,6 +656,17 @@ pub const HeadersPayload = struct {
     padding_len: u8,
 
     pub fn parse(frame: Frame) Error!HeadersPayload {
+        return parseInternal(frame, true);
+    }
+
+    /// RFC 9218 permits ignoring the deprecated dependency and weight while
+    /// retaining the HEADERS field layout, priority length and padding checks.
+    /// The returned priority is null so callers cannot apply those signals.
+    pub fn parseIgnoringPriority(frame: Frame) Error!HeadersPayload {
+        return parseInternal(frame, false);
+    }
+
+    fn parseInternal(frame: Frame, use_priority: bool) Error!HeadersPayload {
         if (frame.header.frame_type != .headers) return error.InvalidFrameSize;
         if (frame.header.stream_id == 0) return error.InvalidStreamId;
         const flags = Flags.fromByte(frame.header.flags);
@@ -669,8 +680,10 @@ pub const HeadersPayload = struct {
         var priority: ?Priority = null;
         if (flags.priority) {
             if (frame.payload.len < pos + 5) return error.InvalidFrameSize;
-            priority = try Priority.parse(frame.payload[pos .. pos + 5]);
-            if (priority.?.stream_dependency == frame.header.stream_id) return error.InvalidStreamId;
+            if (use_priority) {
+                priority = try Priority.parse(frame.payload[pos .. pos + 5]);
+                if (priority.?.stream_dependency == frame.header.stream_id) return error.InvalidStreamId;
+            }
             pos += 5;
         }
         if (frame.payload.len < pos + @as(usize, pad_len)) return error.InvalidPadding;

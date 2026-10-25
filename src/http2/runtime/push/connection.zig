@@ -168,16 +168,10 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                         try hooks.activate(self, id);
                         entry.started = true;
                     }
-                    const parsed = http2.HeadersPayload.parse(frame) catch |err| {
+                    const parsed = hooks.parseHeaders(self, frame) catch |err| {
                         try failPushedReceive(self, id, err, deadline);
                         return true;
                     };
-                    if (parsed.priority) |priority| {
-                        if (priority.stream_dependency == id) {
-                            try failPushedReceive(self, id, error.InvalidFrame, deadline);
-                            return true;
-                        }
-                    }
                     if ((frame.header.flags & flag_end_headers) != 0) {
                         const fields = hooks.decodeHeaders(self.allocator, parsed.header_block, self.limits, &self.hpack_decoder) catch |err| {
                             if (self.hpack_decoder.lastDecodeWasCompressionError()) {

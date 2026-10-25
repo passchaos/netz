@@ -11,6 +11,7 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
+const legacy_priority = @import("runtime/priority/legacy.zig");
 const peer_metadata = @import("runtime/peer_metadata.zig");
 const response_scheduler = @import(
     "runtime/response_scheduler.zig",
@@ -3672,6 +3673,7 @@ pub const Connection = struct {
         .Response = OwnedResponse,
         .Header = DuplexHeaderBlock,
         .initHeader = DuplexHeaderBlock.init,
+        .parseHeaders = legacy_priority.parseHeaders,
         .resumeHeader = DuplexHeaderBlock.resumeUntil,
         .deinitHeader = DuplexHeaderBlock.deinit,
         .prepareQueued = completeDeferredHeadersBeforePushRead,
@@ -11527,7 +11529,7 @@ pub const Connection = struct {
             self.graceful_preadmit_base_processed_stream_id = null;
             self.clearGracefulPreadmitDecoder();
         };
-        const parsed = try http2.HeadersPayload.parse(frame);
+        const parsed = try legacy_priority.parseHeaders(self, frame);
         const headers = try self.graceful_preadmit_decoder.?
             .decodeBlockOwnedWithLimit(
             self.allocator,
@@ -14247,7 +14249,7 @@ pub const Connection = struct {
             },
             .rst_stream => _ = try http2.ResetStreamPayload.parse(frame),
             .window_update => _ = try http2.WindowUpdatePayload.parse(frame),
-            .priority => _ = try http2.PriorityPayload.parse(frame),
+            .priority => try legacy_priority.validateFrame(self, frame),
             // A bare CONTINUATION is invalid regardless of GOAWAY. Valid
             // continuations are consumed by the HEADERS branch above.
             .continuation => return error.UnexpectedFrame,
@@ -16219,12 +16221,7 @@ pub const Connection = struct {
                 // alter the message body.  The envelope validator has already
                 // checked stream id and payload length; parse it here so
                 // malformed priority payloads still fail before being ignored.
-                _ = try http2.PriorityPayload.parse(frame);
-                if (self.limits.no_rfc7540_priorities) {
-                    // Advertising SETTINGS_NO_RFC7540_PRIORITIES=1 commits this
-                    // endpoint to ignoring legacy dependency signals.
-                    return true;
-                }
+                try legacy_priority.validateFrame(self, frame);
                 return true;
             },
             .priority_update => {
@@ -16477,10 +16474,7 @@ pub const Connection = struct {
         self.push_ingress_headers_active = true;
         defer self.push_ingress_headers_active = header_mode;
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
-        const first_headers = try http2.HeadersPayload.parse(first);
-        if (first_headers.priority) |priority| {
-            if (priority.stream_dependency == first.header.stream_id) return error.InvalidFrame;
-        }
+        const first_headers = try legacy_priority.parseHeaders(self, first);
         var flags = first.header.flags;
         var limit_exceeded = false;
         const header_block_limit = header_block_limits.byteLimit(self.limits.max_frame_payload, self.limits.max_header_fields);
@@ -18794,12 +18788,7 @@ const DuplexHeaderBlock = struct {
         connection: *Connection,
         first: http2.Frame,
     ) Error!DuplexHeaderBlock {
-        const first_headers = try http2.HeadersPayload.parse(first);
-        if (first_headers.priority) |priority| {
-            if (priority.stream_dependency == first.header.stream_id) {
-                return error.InvalidFrame;
-            }
-        }
+        const first_headers = try legacy_priority.parseHeaders(connection, first);
         var result = DuplexHeaderBlock{
             .stream_id = first.header.stream_id,
             .end_stream = (first.header.flags & flag_end_stream) != 0,
@@ -38196,6 +38185,8 @@ test {
     _ = @import("runtime/tls_tests.zig");
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
+    _ = @import("runtime/priority/legacy_tests.zig");
+    _ = @import("runtime/priority/legacy_shutdown_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
     _ = @import("runtime/response_batch_tests.zig");
     _ = @import("runtime/informational_batch_tests.zig");
