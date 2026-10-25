@@ -15,6 +15,7 @@ const command_queue = @import("reconnect/command_queue.zig");
 const event_queue = @import("reconnect/event_queue.zig");
 const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
+const subscription_replay = @import("reconnect/subscription_replay.zig");
 const session_snapshot = @import("reconnect/snapshot.zig");
 const reconnect_target = @import("reconnect/target.zig");
 const backoff = @import("reconnect/backoff.zig");
@@ -1203,6 +1204,9 @@ pub const Client = struct {
     outgoing_open: bool = true,
     client_options: ClientOptions,
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
+    // A fresh broker Session needs all desired filters restored. Preserve the
+    // unconfirmed suffix across transport loss or refusal during recovery.
+    subscription_replay_index: ?usize = null,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
     tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
@@ -1637,6 +1641,7 @@ pub const Client = struct {
             // the old session. Dropping that state matches rumqttc's behavior
             // and prevents stale QoS traffic from being replayed into it.
             if (!session_present) {
+                self.subscription_replay_index = 0;
                 self.resetOutgoingState() catch |err| {
                     if (self.connection_state) |*active| active.close();
                     self.connection_state = null;
@@ -1671,7 +1676,7 @@ pub const Client = struct {
                 self.disconnectTransport();
                 return err;
             };
-            if (!session_present) {
+            if (self.subscription_replay_index != null) {
                 self.replaySubscriptions(deadline) catch |err| {
                     self.disconnectTransport();
                     return err;
@@ -2110,7 +2115,8 @@ pub const Client = struct {
     /// Seed application-owned desired subscription state before CONNECT. A
     /// fresh broker Session receives the subscription through normal reconnect
     /// replay; Session Present=1 leaves the retained remote subscription
-    /// untouched and emits no redundant SUBSCRIBE.
+    /// untouched and emits no redundant SUBSCRIBE after recovery completed.
+    /// If recovery is pending, newly added filters join its unconfirmed suffix.
     pub fn seedSubscription(
         self: *Client,
         subscription: mqtt.Subscription,
@@ -2516,7 +2522,9 @@ pub const Client = struct {
 
     /// Subscribe and remember only filters accepted by the broker. A future
     /// reconnect replays them when CONNACK reports that no Session survived.
-    /// Existing entries are updated transactionally after SUBACK.
+    /// Failed replay resumes its unconfirmed suffix even if the next connection
+    /// preserves that partially restored Session. Existing entries are updated
+    /// transactionally after SUBACK.
     pub fn subscribe(
         self: *Client,
         subscriptions: []const mqtt.Subscription,
@@ -3311,23 +3319,7 @@ pub const Client = struct {
     }
 
     fn replaySubscriptions(self: *Client, deadline: ?std.Io.Clock.Timestamp) Error!void {
-        const active = self.connection() orelse
-            return error.ConnectionUnavailable;
-        // MQTT 5 Subscription Identifier/User Properties are scoped to the
-        // SUBSCRIBE packet. Re-emit each accepted filter with the exact owned
-        // properties from the operation that established it.
-        for (self.subscriptions.items) |stored| {
-            const one = [_]mqtt.Subscription{stored.value()};
-            const options = runtime.SubscribeOptions{ .properties = stored.properties };
-            var suback = if (deadline) |absolute|
-                try active.subscribeWithDeadline(&one, options, absolute)
-            else
-                try active.subscribe(&one, options);
-            defer suback.deinit(self.allocator);
-            if (suback.suback.reason_codes[0] >= 0x80) {
-                return error.SubscriptionRefused;
-            }
-        }
+        return subscription_replay.run(Error, self, deadline);
     }
 
     fn applyPacketEvent(
@@ -3898,4 +3890,8 @@ fn retryableConnectError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+test {
+    _ = @import("reconnect/subscription_replay_tests.zig");
 }

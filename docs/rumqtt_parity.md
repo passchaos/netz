@@ -3713,6 +3713,18 @@ discard, preserved-Session resume, and ordered accepted-subscription replay.
 native TLS reconnect connector. Every initial or replacement connection is
 certificate-pinned and must report `mqtt` ALPN plus AES-128-GCM/SHA-256 before
 QoS replay or subscription recovery can proceed.
+Subscription recovery now records the successfully acknowledged prefix while
+replaying a fresh broker Session. A refused SUBACK, timeout, or transport loss
+keeps the unconfirmed suffix pending. If the next MQTT 3.1.1/5 CONNACK preserves
+that partially restored Session, only the suffix is replayed; a fresh Session
+restarts all desired filters. The original subscription options, Subscription
+Identifier and User Properties remain owned for retries, and filters seeded
+while recovery is pending join its suffix. An interleaved PUBLISH remains
+available through the normal event poll. Real TCP regressions cover seeded and
+previously accepted filters, repeated refusals, lost Sessions, timeout and
+transport loss, then prove a later fully restored Session receives no redundant
+SUBSCRIBE. MQTT 3.1 continues restoring all filters because its CONNACK has no
+Session Present flag.
 `fuzz-mqtt-wss-reconnect` adds HTTP/1 Upgrade, WebSocket framing/masking, and
 MQTT byte-stream reassembly to the same recovery schedule. Its vail-backed WSS
 connections must report `http/1.1` ALPN, AES-128-GCM/SHA-256, and the pinned
