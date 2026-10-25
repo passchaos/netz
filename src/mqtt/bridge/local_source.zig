@@ -215,10 +215,21 @@ pub const Client = struct {
     pub fn pollWithOptions(self: *Client, _: reconnect.PollOptions) Error!?Event {
         if (self.shutdown.isSet()) return error.Canceled;
         if (self.consumer == null) return .{ .connected = try self.connect() };
-        // A local source has no socket to drain while the target is pending.
-        // Preserve ownership of the selected event, including QoS 0 behind a
-        // QoS 1/2 delivery, until its explicit ACK/completion boundary.
-        if (self.selected != null) return null;
+        // Preserve a selected publication while its target is pending. A
+        // selected PUBREL can be replayed after a coordinator commit rollback,
+        // or finish an already-staged PUBCOMP whose broker journal write failed.
+        if (self.selected) |selected| switch (selected) {
+            .publish => return null,
+            .pubrel => |packet_id| {
+                const state = try self.receipts.incomingQoS2State(self.receipt_handle, packet_id);
+                if (state == null) {
+                    try self.writeStagedIncomingQoS2Completion(packet_id, .{});
+                    return null;
+                }
+                if (state != .release_pending) return error.InvalidAcknowledgement;
+                return releaseEvent(packet_id);
+            },
+        };
         var event = self.broker.pollLocalConsumer(&self.consumer.?) catch |err| switch (err) {
             error.InflightFull => return null,
             else => return err,
@@ -234,12 +245,13 @@ pub const Client = struct {
                 if (state == null) {
                     // The coordinator durably cleared after target completion
                     // but the final broker PUBCOMP commit was interrupted.
-                    _ = try self.broker.acknowledgeLocalConsumer(&self.consumer.?, .pubcomp, packet_id, 0);
+                    self.selected = .{ .pubrel = packet_id };
+                    try self.writeStagedIncomingQoS2Completion(packet_id, .{});
                     break :blk null;
                 }
                 try self.receipts.markIncomingQoS2ReleasePending(self.receipt_handle, packet_id);
                 self.selected = .{ .pubrel = packet_id };
-                break :blk .{ .pubrel = .{ .ack = .{ .packet_type = .pubrel, .packet_id = packet_id } } };
+                break :blk releaseEvent(packet_id);
             },
         };
     }
@@ -325,7 +337,32 @@ pub const Client = struct {
     }
 
     pub fn writeStagedIncomingQoS2Completion(self: *Client, packet_id: u16, _: runtime.AcknowledgeOptions) Error!void {
-        _ = try self.broker.acknowledgeLocalConsumer(&self.consumer.?, .pubcomp, packet_id, 0);
+        const selected = self.selected orelse return error.InvalidAcknowledgement;
+        if (selected != .pubrel or selected.pubrel != packet_id or
+            (try self.receipts.incomingQoS2State(self.receipt_handle, packet_id)) != null) return error.InvalidAcknowledgement;
+        const consumer = if (self.consumer) |*value| value else return error.SourceSessionLost;
+        _ = try self.broker.localConsumerPendingCount(consumer);
+        self.broker.state_mutex.lockUncancelable(self.io);
+        const state = self.broker.sessions.outgoingQoSState(consumer.session, packet_id) catch |err| {
+            self.broker.state_mutex.unlock(self.io);
+            return err;
+        };
+        self.broker.state_mutex.unlock(self.io);
+        if (state != null) {
+            _ = try self.broker.acknowledgeLocalConsumer(consumer, .pubcomp, packet_id, 0);
+        } else if (self.broker.commitLogEnabled()) {
+            // ACK removal can precede a failed snapshot/journal allocation.
+            // Retrying the now-unknown Packet Identifier cannot commit that
+            // mutation; append its complete live image before selecting more.
+            while (true) {
+                _ = self.broker.appendCommit() catch |err| {
+                    if (err != error.SnapshotBusy) return err;
+                    try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
+                    continue;
+                };
+                break;
+            }
+        }
         self.selected = null;
     }
 
@@ -340,3 +377,11 @@ pub const Client = struct {
         self.receipt_handle = restored.handle;
     }
 };
+
+fn releaseEvent(packet_id: u16) Event {
+    return .{ .pubrel = .{ .ack = .{ .packet_type = .pubrel, .packet_id = packet_id } } };
+}
+
+test {
+    _ = @import("local_source_tests.zig");
+}

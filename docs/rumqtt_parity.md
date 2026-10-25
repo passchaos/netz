@@ -3652,6 +3652,16 @@ prevented a clean timed pair, so no WebTransport speed claim is made. The full
 method, ratios, binary hashes, perf interpretation, and evidence boundary are
 recorded in `docs/benchmark-baseline.md`.
 
+Local outbound QoS 2 completion also resumes after in-process journal errors.
+If coordinator clearing fails, the adapter reoffers its selected PUBREL with
+the same Packet Identifier after receipt rollback. If broker PUBCOMP removal
+already happened in memory but its journal write failed, polling retries the
+complete broker image before selecting another delivery. Provisional listener
+registration remains a retryable SnapshotBusy barrier. Unit tests restore the
+broker journal to prove completion was persisted; a bounded real-TCP two-broker
+test covers both failures and uses a subscriber PING barrier to reject any
+extra target delivery.
+
 ## Remaining work before broad superiority
 
 The shared `fuzz-parsers` target dispatches every bounded input through the
