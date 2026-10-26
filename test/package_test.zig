@@ -1,6 +1,17 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP2 terminal cleanup policy rejects negative budgets before I/O" {
+    try std.testing.expectEqual(std.Io.Duration.fromMilliseconds(10), (netz.http2.runtime.Limits{}).terminal_cleanup_timeout);
+    const disabled: netz.grpc.runtime.ClientOptions = .{ .limits = .{ .terminal_cleanup_timeout = .zero } };
+    try std.testing.expectEqual(std.Io.Duration.zero, disabled.limits.terminal_cleanup_timeout);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidSetting, netz.http2.runtime.Client.connect(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, .{
+        .terminal_cleanup_timeout = .fromMilliseconds(-1),
+    }));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "public gRPC-Web selects text responses and decodes padded flush chunks" {
     const response_type = try netz.grpc.web.negotiateResponseContentType(
         try netz.grpc.web.parseContentType("application/grpc-web+proto"),

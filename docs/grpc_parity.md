@@ -60,8 +60,8 @@ existing HTTP/2 runtime:
 - unary client deadlines captured once from `grpc-timeout` at API entry and
   enforced locally with the awake clock across request setup and the complete
   HTTP/2 exchange; expiration returns `error.Timeout`, while a null timeout
-  remains unbounded. Aggregate-response cancellation at expiry currently has
-  the open transport regression described below,
+  remains unbounded. After expiry, best-effort CANCEL and connection-credit
+  return share a separate bounded terminal cleanup budget, described below,
 - explicit opt-in unary retry policies for replay-safe methods, with at most
   five total attempts, configured retryable status codes, exponential jittered
   backoff, server `grpc-retry-pushback-ms`, and standard
@@ -445,17 +445,34 @@ The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
 parity.
 
-The 2026-10-26 gRPC-Web verification also exposed an existing HTTP/2 aggregate
-deadline regression: `gRPC unary call times out locally and cancels the HTTP2
-stream` fails because the peer observes connection closure instead of the
-required CANCEL reset. `readResponseUntil` unwinds through
-`failDiscardedResponseUntil`, which passes the expired operation deadline to
-`writeTerminalResetStreamUntil`; the tracked transport writer refuses the
-already-expired write. The full focused gRPC run therefore currently reports
-202/203 passing tests. This needs a bounded cancellation path that preserves
-the caller's deadline and terminal connection state; broad gRPC deadline parity
-remains unproven until that regression passes. The gRPC-Web ReleaseFast gate
-and public-package gate pass independently.
+The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
+regression: the terminal CANCEL reused the expired read deadline, and a partial
+response could first exhaust that deadline trying to return connection credit.
+Both control writes now share one fresh absolute cleanup deadline after Timeout.
+`http2.runtime.Limits.terminal_cleanup_timeout` defaults to 10 ms; this is the
+maximum additional transport-write budget on the return path, not a renewed RPC
+or response-read deadline. Zero skips those transport writes and still retires
+local credit, stream ownership and windows. Negative values are rejected before
+I/O. OOM before the operation deadline takes the earlier operation/cleanup bound;
+expiry during a refund never renews the budget for CANCEL. Any failed or partial
+terminal write prevents further writes and leaves the channel unusable because
+discarded aggregate parser state cannot be resumed.
+
+The original silent-peer unary cancellation regression now passes. TCP,
+certificate-pinned TLS 1.2 and TLS 1.3 tests also observe exact WINDOW_UPDATE
+credit followed by CANCEL after a partial response-body timeout, through both
+aggregate and callback-streaming reads. Injected blocked/partial socket writes
+verify bounded cancellation, preserved original errors, task cancellation/join,
+stream retirement, zero-budget opt-out, and the earlier OOM deadline bound.
+
+TLS 1.3 KeyUpdate responses are included in bounded read/write budgets. A local
+timeout or executor failure retains the exact old-epoch response ciphertext;
+read, application-write, or explicit pending-write completion resumes that
+record before activating the next write epoch. KeyUpdate bytes contribute zero
+application progress. A bounded call that encounters another write owner returns
+`WriteInProgress`. Socket-backed tests authenticate the next application record
+after zero-byte and partial-ciphertext failures and after a blocked read-side
+KeyUpdate response, checking that the epoch transition happens once.
 
 ## gRPC-Web unary and server streaming support
 

@@ -10,6 +10,8 @@ const Mode = enum { aggregate, streaming };
 const Shape = enum { empty, declared, growing, padded, fragmented, trailers, informational, dynamic, forbidden };
 
 test {
+    _ = @import("timeout_cleanup_tests.zig");
+    _ = @import("timeout_cleanup_transport_tests.zig");
     _ = @import("connect_allocation_tests.zig");
     _ = @import("cleanup_failure_tests.zig");
     _ = @import("trailer_sync_tests.zig");

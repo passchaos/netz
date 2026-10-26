@@ -2261,6 +2261,15 @@ client pools consequently discard that lease. Netz also exposes
 one-shot HTTP/HTTPS URI deadline helpers that preserve that same absolute
 timestamp across DNS/TCP, TLS, SETTINGS bootstrap, and the complete response;
 matching relative-timeout wrappers convert once before any network work.
+Discarded-response cleanup uses `Limits.terminal_cleanup_timeout`, defaulting
+to 10 ms of additional transport-wait budget. Connection-credit return and
+best-effort CANCEL share one absolute cleanup deadline after read Timeout;
+zero skips those transport writes while still retiring local ownership. OOM
+before expiry retains the earlier operation deadline, and a failed or partial
+refund prevents any later reset write. TCP and pinned TLS 1.2/1.3 tests observe
+the credit return and CANCEL after partial response bodies. TLS 1.3 KeyUpdate
+replies also respect bounded read/write budgets and retain exact ciphertext
+across timeout or executor failure before committing the next write epoch.
 h2c Upgrade one-shot and existing-stream helpers provide the same timeout and
 absolute-deadline forms: one caller budget spans TCP when applicable, the
 HTTP/1.1 101 response, HTTP/2 SETTINGS bootstrap, and the complete stream-1

@@ -1,9 +1,52 @@
-/// A stack-based response reader cannot reconstruct discarded headers or body
-/// state. Cancel its admitted stream without allocating reset history and
-/// prevent later readers or pool leases from consuming ambiguous input.
-pub fn failClosed(connection: anytype, id: u31, comptime Hooks: anytype) void {
+const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
+
+pub fn cleanupDeadline(connection: anytype, operation_deadline: ?std.Io.Clock.Timestamp) ?std.Io.Clock.Timestamp {
+    // An expired read deadline cannot be used to send the cancellation. Give
+    // terminal control writes their own bounded budget. When the
+    // operation still has time (e.g. OOM), retain its earlier absolute bound.
+    const timeout = connection.limits.terminal_cleanup_timeout;
+    if (timeout.nanoseconds > 0) {
+        const cleanup_deadline = std.Io.Clock.Timestamp.fromNow(connection.io, .{ .raw = timeout, .clock = .awake });
+        return if (operation_deadline) |outer|
+            if (deadline_policy.usableAwake(connection.io, outer)) |valid|
+                deadline_policy.earlier(valid, cleanup_deadline).?
+            else |_|
+                cleanup_deadline
+        else
+            cleanup_deadline;
+    }
+    return null;
+}
+
+/// Refund and reset share one absolute cleanup deadline. Expiry during the
+/// refund never renews the budget or permits a reset after a partial write.
+pub fn returnCapacity(connection: anytype, amount: usize, before: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) void {
     connection.aggregate_timeout_unusable = true;
-    Hooks.reset(connection, id, .cancel) catch {};
+    if (connection.terminal_write_failed or amount == 0) return;
+    if (before) |deadline| {
+        Hooks.refund(connection, amount, deadline) catch {
+            connection.terminal_write_failed = true;
+        };
+    } else {
+        // Opting out of transport cleanup still retires local ownership.
+        var remaining = amount;
+        while (remaining != 0) {
+            const increment: u31 = @intCast(@min(remaining, std.math.maxInt(u31)));
+            connection.recv_connection_window.update(increment) catch {
+                connection.terminal_write_failed = true;
+                return;
+            };
+            remaining -= increment;
+        }
+    }
+}
+
+/// Retire discarded parser state without allocating reset history, even when
+/// the bounded control write fails or the caller opted out of cleanup writes.
+pub fn failClosedBefore(connection: anytype, id: u31, before: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) void {
+    connection.aggregate_timeout_unusable = true;
+    if (before) |deadline| Hooks.reset(connection, id, .cancel, deadline) catch {} else connection.terminal_write_failed = true;
     Hooks.releaseLocal(connection, id);
     Hooks.releasePeer(connection, id);
     Hooks.forgetWindows(connection, id);

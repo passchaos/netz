@@ -7,6 +7,7 @@
 //! specific connection wrapper.
 
 const std = @import("std");
+const key_update_write = @import("key_update/write.zig");
 const vail = @import("vail");
 const record_io = @import("record_io.zig");
 const io_interruption = @import("../../internal/io_interruption.zig");
@@ -88,6 +89,8 @@ pub const Stream = struct {
     pending_write_offset: usize = 0,
     pending_plaintext_len: usize = 0,
     pending_plaintext_fingerprint: write_retry.Fingerprint = .{},
+    /// A retained KeyUpdate reply contributes no application-write progress.
+    pending_write_key_update: bool = false,
 
     pub fn init(
         read_keys: tls_record.Keys,
@@ -180,6 +183,28 @@ pub const Stream = struct {
     ) Error!usize {
         if (out.len == 0) return 0;
         while (true) {
+            // Respond outside the authenticated-read transition's cancellation
+            // protection. A blocked response retains its old-epoch ciphertext
+            // and can resume under the next read or application-write budget.
+            if (!self.failed and self.peer_update_response_pending.load(.acquire)) {
+                if (deadline) |before| {
+                    if (!self.write_mutex.tryLock()) return error.WriteInProgress;
+                    defer self.write_mutex.unlock(io);
+                    try key_update_write.respondUntil(self, io, stream, before, .{
+                        .begin = beginPendingWrite,
+                        .finish = finishPendingWriteWithDeadline,
+                    });
+                } else {
+                    self.write_mutex.lockUncancelable(io);
+                    defer self.write_mutex.unlock(io);
+                    if (self.pending_write_key_update) {
+                        var committed: usize = 0;
+                        try self.finishPendingWriteUnlocked(io, stream, &committed);
+                    } else {
+                        try self.respondToPeerUpdateUnlocked(io, stream);
+                    }
+                }
+            }
             if (self.buffered_start != self.buffered_end) {
                 const count = @min(
                     out.len,
@@ -353,8 +378,8 @@ pub const Stream = struct {
 
     fn consumePostHandshake(
         self: *Stream,
-        io: std.Io,
-        stream: net.Stream,
+        _: std.Io,
+        _: net.Stream,
         bytes: []const u8,
     ) Error!void {
         var offset: usize = 0;
@@ -447,9 +472,6 @@ pub const Stream = struct {
 
             if (request_peer_update) {
                 self.peer_update_response_pending.store(true, .release);
-                self.write_mutex.lockUncancelable(io);
-                defer self.write_mutex.unlock(io);
-                try self.respondToPeerUpdateUnlocked(io, stream);
             }
         }
     }
@@ -603,12 +625,13 @@ pub const Stream = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
         committed.* = 0;
-        self.write_mutex.lockUncancelable(io);
+        _ = try @import("../../internal/deadline.zig").usableAwake(io, deadline);
+        if (!self.write_mutex.tryLock()) return error.WriteInProgress;
         defer self.write_mutex.unlock(io);
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
-        if (self.pending_write_len != 0) {
+        if (self.pending_write_len != 0 and !self.pending_write_key_update) {
             try self.pending_plaintext_fingerprint.validate(self.pending_plaintext_len, bytes);
             try self.finishPendingWriteWithDeadline(
                 io,
@@ -617,10 +640,10 @@ pub const Stream = struct {
                 deadline,
             );
         }
-        // A response requested while the previous record was partially sent
-        // must follow that record and precede any later application bytes.
-        // It is tiny and the just-completed record established writability.
-        try self.respondToPeerUpdateUnlocked(io, stream);
+        try key_update_write.respondUntil(self, io, stream, deadline, .{
+            .begin = beginPendingWrite,
+            .finish = finishPendingWriteWithDeadline,
+        });
         while (committed.* < bytes.len) {
             const chunk_len = @min(
                 record_io.max_plaintext_len,
@@ -646,6 +669,7 @@ pub const Stream = struct {
     /// Finish ciphertext retained by a previous bounded write without
     /// encrypting another plaintext record. The returned count is the
     /// plaintext prefix that becomes committed by completing that record.
+    /// A KeyUpdate reply completes its epoch transition and contributes zero.
     pub fn finishPendingWrite(
         self: *Stream,
         io: std.Io,
@@ -655,6 +679,10 @@ pub const Stream = struct {
         committed.* = 0;
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
+        return self.finishPendingWriteUnlocked(io, stream, committed);
+    }
+
+    fn finishPendingWriteUnlocked(self: *Stream, io: std.Io, stream: net.Stream, committed: *usize) Error!void {
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
@@ -667,11 +695,7 @@ pub const Stream = struct {
             self.failed = true;
             return err;
         };
-        committed.* = self.pending_plaintext_len;
-        self.pending_write_len = 0;
-        self.pending_write_offset = 0;
-        self.pending_plaintext_len = 0;
-        self.pending_plaintext_fingerprint.clear();
+        try self.commitPendingWrite(committed);
     }
 
     fn beginPendingWrite(
@@ -715,11 +739,24 @@ pub const Stream = struct {
             }
             return err;
         };
-        committed.* += self.pending_plaintext_len;
+        try self.commitPendingWrite(committed);
+    }
+
+    fn commitPendingWrite(self: *Stream, committed: *usize) Error!void {
+        if (self.pending_write_key_update) {
+            key_update_write.rotate(self) catch |err| {
+                self.failed = true;
+                return err;
+            };
+            self.peer_update_response_pending.store(false, .release);
+        } else {
+            committed.* += self.pending_plaintext_len;
+        }
         self.pending_write_len = 0;
         self.pending_write_offset = 0;
         self.pending_plaintext_len = 0;
         self.pending_plaintext_fingerprint.clear();
+        self.pending_write_key_update = false;
     }
 
     pub fn sendCloseNotify(
@@ -808,34 +845,16 @@ pub const Stream = struct {
         if (self.write_sequence == std.math.maxInt(u64)) {
             return error.SequenceOverflow;
         }
-        var next_secret = try vail.tls.key_schedule.nextTrafficSecretFor(
-            self.write_traffic_secret,
-        );
-        errdefer next_secret.deinit();
-        var next_keys = try tls_record.Keys.derive(
-            self.write_keys.suite,
-            next_secret,
-        );
-        errdefer next_keys.deinit();
-        const message = [_]u8{
-            handshake_type_key_update,
-            0,
-            0,
-            1,
-            @intFromBool(request_peer_update),
-        };
+        var epoch = try key_update_write.prepare(self);
+        errdefer epoch.deinit();
+        const message = key_update_write.message(request_peer_update);
         try self.writeRecord(
             io,
             stream,
             tls_record.content_type_handshake,
             &message,
         );
-        self.write_keys.deinit();
-        self.write_traffic_secret.deinit();
-        self.write_keys = next_keys;
-        self.write_traffic_secret = next_secret;
-        self.write_sequence = 0;
-        _ = self.key_updates_sent.fetchAdd(1, .monotonic);
+        epoch.activate(self);
     }
 
     fn rotateReadKeys(self: *Stream) Error!void {

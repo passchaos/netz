@@ -471,6 +471,10 @@ pub const Limits = struct {
     /// can be advertised to peers and must stay within RFC 9113 bounds.
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
+    /// Best-effort WINDOW_UPDATE/CANCEL cleanup after a discarded response.
+    /// The RPC read keeps its original deadline; cleanup may add at most this
+    /// separate shared transport budget to the return path. Zero skips writes.
+    terminal_cleanup_timeout: std.Io.Duration = .fromMilliseconds(10),
     max_header_fields: usize = 256,
     /// Maximum interim response heads accepted before a final response. This
     /// bounds both HPACK work and observer callbacks from an endless 1xx chain.
@@ -15341,21 +15345,21 @@ pub const Connection = struct {
         if (self.push_state.state) |state| state.received.synchronizeConnectionCredit(controls, generation);
     }
 
-    fn failDiscardedResponse(self: *Connection, stream_id: u31) void {
-        response_cleanup.failClosed(self, stream_id, .{
-            .reset = writeTerminalResetStream,
+    fn failDiscardedResponseBefore(self: *Connection, stream_id: u31, before: ?std.Io.Clock.Timestamp) void {
+        response_cleanup.failClosedBefore(self, stream_id, before, .{
+            .reset = writeTerminalResetStreamUntil,
             .releaseLocal = releaseLocalStream,
             .releasePeer = releasePeerStream,
             .forgetWindows = forgetStreamWindows,
         });
     }
 
-    fn failDiscardedResponseUntil(self: *Connection, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) void {
-        self.aggregate_timeout_unusable = true;
-        self.writeTerminalResetStreamUntil(stream_id, .cancel, deadline) catch {};
-        self.releaseLocalStream(stream_id);
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+    fn failDiscardedResponse(self: *Connection, stream_id: u31) void {
+        self.failDiscardedResponseBefore(stream_id, response_cleanup.cleanupDeadline(self, null));
+    }
+
+    fn returnDiscardedResponseCapacity(self: *Connection, amount: usize, before: ?std.Io.Clock.Timestamp) void {
+        response_cleanup.returnCapacity(self, amount, before, .{ .refund = releaseConnectionCapacityUntil });
     }
 
     fn cancelPeerRequest(self: *Connection, stream_id: u31) void {
@@ -15463,6 +15467,7 @@ pub const Connection = struct {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
+        var cleanup_before: ?std.Io.Clock.Timestamp = null;
         defer self.releaseLocalStream(stream_id);
         errdefer |err| if (err != error.Timeout) {
             self.sendResponseReadError(stream_id, err);
@@ -15472,7 +15477,7 @@ pub const Connection = struct {
             // keeps partially decoded headers/body only on its stack. Preserve
             // connection integrity by canceling the stream and preventing
             // reuse after that state is discarded.
-            self.failDiscardedResponseUntil(stream_id, deadline);
+            self.failDiscardedResponseBefore(stream_id, cleanup_before);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -15488,9 +15493,14 @@ pub const Connection = struct {
         var receive_credits = [_]flow_credit.Tracker{.{}};
         const receive_credit = &receive_credits[0];
         var push_generation = self.pushedCreditGeneration();
-        errdefer {
+        errdefer |err| {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
+            if (err == error.Timeout or err == error.OutOfMemory) {
+                cleanup_before = response_cleanup.cleanupDeadline(self, if (err == error.Timeout) null else deadline);
+                self.returnDiscardedResponseCapacity(receive_credit.unreleased_connection_bytes, cleanup_before);
+            } else {
+                self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
+            }
         }
 
         while (true) {
@@ -15747,6 +15757,7 @@ pub const Connection = struct {
         defer self.releaseLocalStream(stream_id);
         var completed = false;
         var callback_failed = false;
+        var cleanup_before: ?std.Io.Clock.Timestamp = null;
         errdefer if (!callback_failed and
             (self.serve_read_connection_error != null or
                 self.serve_read_stream_error != null))
@@ -15761,7 +15772,7 @@ pub const Connection = struct {
             self.serve_read_connection_error == null and
             self.serve_read_stream_error == null)
         {
-            self.failDiscardedResponse(stream_id);
+            self.failDiscardedResponseBefore(stream_id, cleanup_before);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |value| {
@@ -15776,9 +15787,16 @@ pub const Connection = struct {
         var receive_credits = [_]flow_credit.Tracker{.{}};
         const receive_credit = &receive_credits[0];
         var push_generation = self.pushedCreditGeneration();
-        errdefer {
+        errdefer |failure| {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+            if (!callback_failed and (deadline != null or failure == error.OutOfMemory) and
+                self.serve_read_connection_error == null and self.serve_read_stream_error == null)
+            {
+                cleanup_before = response_cleanup.cleanupDeadline(self, if (failure == error.Timeout) null else deadline);
+                self.returnDiscardedResponseCapacity(receive_credit.unreleased_connection_bytes, cleanup_before);
+            } else {
+                self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+            }
         }
 
         while (true) {
@@ -16182,11 +16200,12 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!ExtendedConnectAttempt {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        var cleanup_before: ?std.Io.Clock.Timestamp = null;
         errdefer |err| if (err == error.Timeout or err == error.OutOfMemory) {
             // An aggregate CONNECT wait cannot resume after discarding decoded
             // informational heads or a partial HPACK block. Cancel the stream
             // and prevent a pooled caller from reusing ambiguous state.
-            self.failDiscardedResponseUntil(stream_id, deadline);
+            self.failDiscardedResponseBefore(stream_id, cleanup_before);
         };
         var informational_count: usize = 0;
         var headers: ?[]http2.Hpack.HeaderField = null;
@@ -16204,9 +16223,14 @@ pub const Connection = struct {
         var receive_credits = [_]flow_credit.Tracker{.{}};
         const receive_credit = &receive_credits[0];
         var push_generation = self.pushedCreditGeneration();
-        errdefer {
+        errdefer |err| {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
+            if (err == error.Timeout or err == error.OutOfMemory) {
+                cleanup_before = response_cleanup.cleanupDeadline(self, if (err == error.Timeout) null else deadline);
+                self.returnDiscardedResponseCapacity(receive_credit.unreleased_connection_bytes, cleanup_before);
+            } else {
+                self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
+            }
         }
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
@@ -22078,7 +22102,9 @@ fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
     if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
     if (limits.max_pending_ping_frames == 0) return error.InvalidSetting;
-    if (limits.reset_stream_duration.nanoseconds < 0) {
+    if (limits.reset_stream_duration.nanoseconds < 0 or
+        limits.terminal_cleanup_timeout.nanoseconds < 0)
+    {
         return error.InvalidSetting;
     }
 }
