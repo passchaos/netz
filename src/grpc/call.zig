@@ -4,10 +4,11 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
+const details_mod = @import("status_details.zig");
 const wire = @import("wire.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
-    compression_mod.Error ||
+    compression_mod.Error || details_mod.Error ||
     http2.runtime.ResponseTimeoutError || error{
     CompressionNotNegotiated,
     InvalidContentType,
@@ -381,6 +382,7 @@ pub const UnaryResponse = struct {
     reset: ?http2.ResetStreamPayload = null,
     status: Status,
     status_message: []u8,
+    status_details: ?details_mod.Owned = null,
     message: ?Message,
     was_compressed: bool,
     encoding: ?[]const u8,
@@ -389,6 +391,7 @@ pub const UnaryResponse = struct {
     pub fn deinit(self: *UnaryResponse) void {
         if (self.owned_message) |owned| self.allocator.free(owned);
         self.allocator.free(self.status_message);
+        if (self.status_details) |*details| details.deinit();
         if (self.transport) |*transport| {
             transport.deinit(self.allocator);
         }
@@ -720,6 +723,8 @@ pub const UnaryResponseOptions = struct {
     /// Decoders advertised by this server for future request messages.
     accepted_encodings: AlgorithmSet = .supported,
     status_message: ?[]const u8 = null,
+    /// Raw google.rpc.Status protobuf, validated against status before I/O.
+    status_details: ?[]const u8 = null,
     initial_metadata: []const http2.Hpack.HeaderField = &.{},
     trailing_metadata: []const http2.Hpack.HeaderField = &.{},
     /// Raw initial metadata encoded into HTTP/2 response headers.
@@ -738,6 +743,9 @@ pub fn writeUnaryResponse(
     stream_id: u31,
     options: UnaryResponseOptions,
 ) Error!void {
+    if (options.status_details) |bytes| _ = try details_mod.validate(options.status, bytes);
+    const encoded_details = if (options.status_details) |bytes| try details_mod.encodedAlloc(allocator, options.status, bytes) else null;
+    defer if (encoded_details) |bytes| allocator.free(bytes);
     try validateCustomMetadata(options.initial_metadata);
     try validateCustomMetadata(options.trailing_metadata);
     try validateCustomBinaryMetadata(
@@ -813,7 +821,8 @@ pub fn writeUnaryResponse(
         ) catch return error.MessageTooLarge,
         @as(usize, 1) +
             @intFromBool(options.status_message != null) +
-            @intFromBool(options.retry_pushback_ms != null),
+            @intFromBool(options.retry_pushback_ms != null) +
+            @intFromBool(options.status_details != null),
     ) catch return error.MessageTooLarge;
     var initial_storage: [16]http2.Hpack.HeaderField = undefined;
     const initial_base = std.math.add(
@@ -896,6 +905,7 @@ pub fn writeUnaryResponse(
             ) catch unreachable,
         });
     }
+    if (encoded_details) |bytes| trailing.appendAssumeCapacity(.{ .name = details_mod.name, .value = bytes, .never_index = true });
     trailing.appendSliceAssumeCapacity(options.trailing_metadata);
     trailing.appendSliceAssumeCapacity(trailing_binary.fields);
 
@@ -928,6 +938,8 @@ fn parseUnaryResponse(
         Status.parse(raw) catch .unknown
     else
         statusFromHttp(owned.status);
+    var status_details = try details_mod.fromMetadataAlloc(allocator, status, owned.headers, owned.trailers);
+    errdefer if (status_details) |*details| details.deinit();
     const status_message_raw = findHeader(
         owned.trailers,
         "grpc-message",
@@ -1002,6 +1014,7 @@ fn parseUnaryResponse(
         .reset = null,
         .status = status,
         .status_message = status_message,
+        .status_details = status_details,
         .message = message,
         .was_compressed = was_compressed,
         .encoding = encoding,

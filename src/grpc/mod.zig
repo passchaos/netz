@@ -7,6 +7,7 @@
 
 pub const wire = @import("wire.zig");
 pub const auth = @import("auth.zig");
+pub const status_details = @import("status_details.zig");
 pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
@@ -59,6 +60,7 @@ pub const StreamingRequest = stream.Request;
 pub const readStreamingRequest = stream.readRequest;
 pub const readStreamingRequestWithTimeout = stream.readRequestWithTimeout;
 pub const readStreamingRequestWithDeadline = stream.readRequestWithDeadline;
+pub const TerminalOptions = stream.TerminalOptions;
 pub const StreamingResponseOptions = stream.ResponseOptions;
 pub const StreamingServerWriter = stream.ServerWriter;
 pub const startStreamingResponse = stream.startResponse;
@@ -101,6 +103,7 @@ pub const bearerAuthorizationValueLen = auth.bearerAuthorizationValueLen;
 pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
+    _ = status_details;
     _ = auth;
     _ = web;
     _ = @import("tests.zig");

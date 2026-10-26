@@ -1,6 +1,20 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC rich status details preserve opaque Any and reject inconsistent status" {
+    const allocator = std.testing.allocator;
+    const bytes = try netz.grpc.status_details.encodeAlloc(allocator, .invalid_argument, "bad input", &.{.{ .type_url = "type.googleapis.com/demo.Error", .value = "\x00\xff" }});
+    defer allocator.free(bytes);
+    const view = try netz.grpc.status_details.validate(.invalid_argument, bytes);
+    var iterator = view.details();
+    try std.testing.expectEqualSlices(u8, "\x00\xff", (try iterator.next()).?.value);
+    try std.testing.expectError(error.StatusDetailsMismatch, netz.grpc.status_details.validate(.internal, bytes));
+    const terminal: netz.grpc.TerminalOptions = .{ .status = .invalid_argument, .status_details = bytes };
+    const block = try netz.grpc.web.buildTrailerBlock(allocator, terminal);
+    defer allocator.free(block);
+    try std.testing.expect(std.mem.indexOf(u8, block, "grpc-status-details-bin:") != null);
+}
+
 test "public gRPC-Web HTTP2 dispatch validates policy and deadline before I/O" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime.ServerConnection, "readWebRequest"));
     try std.testing.expect(@hasDecl(netz.grpc.web.http2.Request, "startServerStream"));

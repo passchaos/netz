@@ -26,6 +26,13 @@ existing HTTP/2 runtime:
   bounded scratch,
 - tolerant `grpc-message` percent decoding that preserves malformed percent
   sequences as required by the protocol,
+- reserved `grpc-status-details-bin` support for `google.rpc.Status`, with
+  owned client envelopes, borrowed `Any` iteration, canonical protobuf/Base64
+  output, and validation that an explicitly present code matches the non-OK
+  terminal `grpc-status`. Unknown protobuf fields and bounded groups are
+  preserved, repeated singular fields follow protobuf's last-value rule, and
+  malformed containers, invalid UTF-8, ambiguous duplicate metadata and
+  contradictory status codes are rejected,
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length. A caller-buffer constructor emits the
@@ -633,3 +640,57 @@ one frame reader on each server connection while the stream waits for browser
 delivery. HTTP/1.1 gates retain the SDK Ack RPC and idle TLS-close probe. Browser
 permission checks, exposed unary failure status and incremental stream delivery
 are validated on both modern HTTP transports.
+
+## Rich error details
+
+`grpc.status_details.encodeAlloc` builds a standard `google.rpc.Status` image
+from a canonical non-OK status, a UTF-8 message and opaque `Any` entries.
+Applications may instead supply an image from their own generated protobuf
+codec. `UnaryResponseOptions.status_details` and `grpc.TerminalOptions.status_details`
+accept those raw protobuf bytes. Native sequential and duplex writers expose
+`finishWithOptions`; gRPC-Web unary, trailers-only and server-streaming paths
+use the same option. The reserved field remains unavailable through custom
+metadata, preventing an application from bypassing its status validation.
+
+```zig
+const details = try netz.grpc.status_details.encodeAlloc(
+    allocator,
+    .invalid_argument,
+    "invalid item",
+    &.{.{ .type_url = "type.googleapis.com/example.FieldViolation", .value = encoded_violation }},
+);
+defer allocator.free(details);
+try stream.finishWithOptions(.{
+    .status = .invalid_argument,
+    .status_message = "invalid item",
+    .status_details = details,
+});
+```
+
+Unary, sequential and duplex client responses own an optional `status_details`.
+Its `view.code` distinguishes an omitted code field from an explicit zero;
+`view.message` and `view.details()` borrow the owned image until response
+`deinit`. Each iterator result supplies `type_url` and raw `value`, leaving the
+application's schema above the transport. The image, including unknown fields,
+remains available as `bytes`. Details with OK status, multiple reserved values,
+missing/malformed terminal status, invalid Base64/protobuf or a conflicting
+code fail response conversion. A missing code is accepted under the protocol's
+explicit-field consistency rule. A details message need not equal grpc-message.
+
+The pbz adapter retains an independent owned copy in `RpcFailure`; taking that
+failure preserves its details across later calls. Server adapters can configure
+`handler_error_details`, validated with `handler_error_status` at initialization.
+The common bounded protobuf reader is shared with reflection, and native
+terminal-field construction lives beside the streaming writer in
+`src/grpc/stream/terminal.zig`.
+
+TCP and certificate-pinned TLS matrices use one concurrent stream slot and
+exercise unary trailers-only errors, errors after streamed DATA, duplex
+trailers-only and trailing HEADERS, sender validation/retry, and deliberate
+peer status contradictions. A final unary RPC proves channel reuse after
+every response path. Allocation-failure sweeps cover envelope creation,
+Base64 decode, clone, terminal parsing and response-field construction.
+The generated pbz process fixture checks transferred details after a later
+successful call. The official Chromium grpc-web SDK also checks exact
+google.rpc.Status bytes exposed by CORS on its UNAUTHENTICATED response over
+HTTP/1.1 and TLS HTTP/2.

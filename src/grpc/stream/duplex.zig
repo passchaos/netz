@@ -7,6 +7,7 @@
 //! after the owning HTTP/2 event has been released.
 
 const std = @import("std");
+const details_mod = @import("../status_details.zig");
 const http2 = @import("../../http2/mod.zig");
 const auth = @import("../auth.zig");
 const call = @import("../call.zig");
@@ -53,10 +54,12 @@ pub const Response = struct {
     reset: ?http2.ResetStreamPayload = null,
     status: wire.Status,
     status_message: []u8,
+    status_details: ?details_mod.Owned = null,
     encoding: ?[]const u8 = null,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.status_message);
+        if (self.status_details) |*details| details.deinit();
         if (self.head) |*head| head.deinit(self.allocator);
         if (self.trailers) |trailers| {
             http2.Hpack.freeOwnedFields(self.allocator, trailers);
@@ -614,6 +617,7 @@ pub const ClientDuplex = struct {
             .trailers = trailers,
             .status = parsed.status,
             .status_message = parsed.status_message,
+            .status_details = parsed.status_details,
             .encoding = parsed.encoding,
         };
     }
@@ -1069,28 +1073,30 @@ pub const ServerDuplex = struct {
         trailing_metadata: []const http2.Hpack.HeaderField,
         trailing_binary_metadata: []const metadata.BinaryMetadata,
     ) Error!void {
+        return self.finishWithOptions(.{ .status = status, .status_message = status_message, .trailing_metadata = trailing_metadata, .trailing_binary_metadata = trailing_binary_metadata });
+    }
+
+    pub fn finishWithOptions(self: *ServerDuplex, options: sequential.TerminalOptions) Error!void {
+        // Local metadata errors occur before output and preserve the writer.
+        if (options.status_details) |bytes| _ = try details_mod.validate(options.status, bytes);
+        try call.validateCustomMetadata(options.trailing_metadata);
+        try call.validateCustomBinaryMetadata(options.trailing_binary_metadata);
         try self.ensureResponseWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         if (self.response_encoder == null) {
-            sequential.finishDuplexHeadersOnly(
+            sequential.finishDuplexHeadersOnlyWithOptions(
                 &self.transport,
                 self.allocator,
-                status,
-                status_message,
-                trailing_metadata,
-                trailing_binary_metadata,
+                options,
             ) catch |err| {
                 self.fail(.internal_error);
                 return err;
             };
         } else {
-            sequential.finishDuplexTrailers(
+            sequential.finishDuplexTrailersWithOptions(
                 &self.transport,
                 self.allocator,
-                status,
-                status_message,
-                trailing_metadata,
-                trailing_binary_metadata,
+                options,
             ) catch |err| {
                 self.fail(.internal_error);
                 return err;
@@ -1361,7 +1367,7 @@ fn negotiatedResponseAlgorithm(
         .identity;
 }
 
-test "duplex terminal allocation failure releases all owned metadata" {
+test "gRPC duplex terminal allocation failure releases all owned metadata" {
     const allocator = std.testing.allocator;
     const headers = [_]http2.Hpack.HeaderField{
         .{
@@ -1373,12 +1379,13 @@ test "duplex terminal allocation failure releases all owned metadata" {
     const trailers = [_]http2.Hpack.HeaderField{
         .{ .name = "grpc-status", .value = "7" },
         .{ .name = "grpc-message", .value = "denied%20message" },
+        .{ .name = "grpc-status-details-bin", .value = "CAc" },
     };
 
     // Sweep allocation failure through both owned header copies and terminal
     // status-message decoding. Every unsuccessful construction must release
     // exactly the allocations it acquired before failing.
-    for (0..6) |fail_index| {
+    for (0..16) |fail_index| {
         var failing = std.testing.FailingAllocator.init(allocator, .{
             .fail_index = fail_index,
         });
@@ -1420,6 +1427,10 @@ test "duplex terminal allocation failure releases all owned metadata" {
             continue;
         };
         failing_allocator.free(parsed.status_message);
+        if (parsed.status_details) |value| {
+            var details = value;
+            details.deinit();
+        }
         http2.Hpack.freeOwnedFields(failing_allocator, trailers_copy);
         head.deinit(failing_allocator);
         try std.testing.expectEqual(

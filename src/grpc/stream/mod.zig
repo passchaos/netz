@@ -15,6 +15,7 @@ pub const startClient = runtime.startClient;
 pub const Response = runtime.Response;
 pub const Request = runtime.Request;
 pub const readRequest = runtime.readRequest;
+pub const TerminalOptions = runtime.TerminalOptions;
 pub const ResponseOptions = runtime.ResponseOptions;
 pub const ServerWriter = runtime.ServerWriter;
 pub const startResponse = runtime.startResponse;
@@ -35,4 +36,5 @@ pub const acceptDuplexWithDeadline = duplex.acceptDuplexWithDeadline;
 
 test {
     _ = @import("tests.zig");
+    _ = @import("terminal.zig");
 }

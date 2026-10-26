@@ -13,9 +13,10 @@ const metadata = @import("metadata.zig");
 const runtime = @import("runtime.zig");
 const service_config = @import("service_config.zig");
 const stream = @import("stream/mod.zig");
+const details_mod = @import("status_details.zig");
 const wire = @import("wire.zig");
 
-pub const Error = error{
+pub const Error = details_mod.Error || error{
     InvalidServiceName,
     InvalidTransportOptions,
     InvalidMethodShape,
@@ -49,17 +50,20 @@ pub const ServerOptions = struct {
     max_message_size: usize = 16 * 1024 * 1024,
     handler_error_status: wire.Status = .internal,
     handler_error_message: ?[]const u8 = "generated handler failed",
+    handler_error_details: ?[]const u8 = null,
 };
 
 pub const RpcFailure = struct {
     allocator: std.mem.Allocator,
     status: wire.Status,
     status_message: []u8,
+    status_details: ?details_mod.Owned = null,
     reset: ?http2.ResetStreamPayload = null,
     http_status: ?u16 = null,
 
     pub fn deinit(self: *RpcFailure) void {
         self.allocator.free(self.status_message);
+        if (self.status_details) |*details| details.deinit();
         self.* = undefined;
     }
 };
@@ -423,7 +427,10 @@ pub fn ClientTransport(comptime Service: type) type {
             self: *Self,
             response: *const grpc_call.UnaryResponse,
         ) !void {
+            var status_details = if (response.status_details) |details| try details.clone(self.client.connection.allocator) else null;
+            errdefer if (status_details) |*details| details.deinit();
             self.last_failure = .{
+                .status_details = status_details,
                 .allocator = self.client.connection.allocator,
                 .status = response.status,
                 .status_message = try self.client.connection.allocator.dupe(
@@ -442,7 +449,10 @@ pub fn ClientTransport(comptime Service: type) type {
             self: *Self,
             response: *const stream.Response,
         ) !void {
+            var status_details = if (response.status_details) |details| try details.clone(self.client.connection.allocator) else null;
+            errdefer if (status_details) |*details| details.deinit();
             self.last_failure = .{
+                .status_details = status_details,
                 .allocator = self.client.connection.allocator,
                 .status = response.status,
                 .status_message = try self.client.connection.allocator.dupe(
@@ -461,7 +471,10 @@ pub fn ClientTransport(comptime Service: type) type {
             self: *Self,
             response: *const stream.DuplexResponse,
         ) !void {
+            var status_details = if (response.status_details) |details| try details.clone(self.client.connection.allocator) else null;
+            errdefer if (status_details) |*details| details.deinit();
             self.last_failure = .{
+                .status_details = status_details,
                 .allocator = self.client.connection.allocator,
                 .status = response.status,
                 .status_message = try self.client.connection.allocator.dupe(
@@ -590,6 +603,7 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             if (options.handler_error_status == .ok) {
                 return error.InvalidTransportOptions;
             }
+            if (options.handler_error_details) |bytes| _ = try details_mod.validate(options.handler_error_status, bytes);
             return .{
                 .connection = connection,
                 .handler = handler,
@@ -737,12 +751,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             rpc: *stream.ServerDuplex,
             _: anyerror,
         ) !wire.Status {
-            try rpc.finish(
-                self.options.handler_error_status,
-                self.options.handler_error_message,
-                &.{},
-                &.{},
-            );
+            try rpc.finishWithOptions(.{
+                .status = self.options.handler_error_status,
+                .status_message = self.options.handler_error_message,
+                .status_details = self.options.handler_error_details,
+            });
             return self.options.handler_error_status;
         }
 

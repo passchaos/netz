@@ -852,6 +852,8 @@ Current protocol coverage includes:
   compressed-flag validation, eight-digit `grpc-timeout` parse/format with
   non-shortening deadline rounding, all canonical status codes, HTTP-to-gRPC
   fallback mapping, tolerant percent-encoded `grpc-message` handling,
+  owned `google.rpc.Status` error details with opaque `Any` iteration,
+  status-consistency validation and dedicated unary/streaming/gRPC-Web output,
   content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token

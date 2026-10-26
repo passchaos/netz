@@ -8,6 +8,7 @@
 //! `runtime.ServerConnection` maps it onto the production HTTP/2 connection.
 
 const std = @import("std");
+const details_mod = @import("status_details.zig");
 const http2_mod = @import("../http2/mod.zig");
 const call = @import("call.zig");
 const wire = @import("wire.zig");
@@ -125,6 +126,7 @@ pub fn buildResponseBody(
     const trailer_block = try buildTrailerBlock(allocator, .{
         .status = options.status,
         .status_message = options.status_message,
+        .status_details = options.status_details,
         .retry_pushback_ms = options.retry_pushback_ms,
         .trailing_metadata = options.trailing_metadata,
         .trailing_binary_metadata = options.trailing_binary_metadata,
@@ -156,6 +158,8 @@ pub fn buildTrailerBlock(
     allocator: std.mem.Allocator,
     options: TerminalOptions,
 ) Error![]u8 {
+    const encoded_details = if (options.status_details) |bytes| try details_mod.encodedAlloc(allocator, options.status, bytes) else null;
+    defer if (encoded_details) |bytes| allocator.free(bytes);
     try call.validateCustomMetadata(options.trailing_metadata);
     try call.validateCustomBinaryMetadata(options.trailing_binary_metadata);
     // These fields travel in DATA, bypassing HTTP/2's header validation. The
@@ -209,6 +213,7 @@ pub fn buildTrailerBlock(
             .{pushback},
         );
     }
+    if (encoded_details) |bytes| try trailer_block.print(allocator, "grpc-status-details-bin:{s}\r\n", .{bytes});
     for (options.trailing_metadata) |field| {
         try trailer_block.print(
             allocator,
@@ -269,6 +274,7 @@ pub fn writeUnaryResponse(
         .terminal = if (options.trailers_only) .{
             .status = options.status,
             .status_message = options.status_message,
+            .status_details = options.status_details,
             .retry_pushback_ms = options.retry_pushback_ms,
             .trailing_metadata = options.trailing_metadata,
             .trailing_binary_metadata = options.trailing_binary_metadata,

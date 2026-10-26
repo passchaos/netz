@@ -100,7 +100,7 @@ const Context = struct {
                 try stream.writeMessage("second");
                 try stream.finish(.{ .status = .ok, .trailing_metadata = &.{.{ .name = "x-terminal", .value = "done" }} });
             } else if (std.mem.eql(u8, request.request.method, "Denied")) {
-                try request.writeUnary(.{ .status = .unauthenticated, .status_message = "bad token", .trailers_only = true });
+                try request.writeUnary(.{ .status = .unauthenticated, .status_message = "bad token", .status_details = "\x08\x10\x12\x09bad token", .trailers_only = true });
             } else {
                 try request.writeUnary(.{ .message = request.request.message.payload, .initial_metadata = &.{.{ .name = "x-initial", .value = "visible" }} });
                 if (std.mem.eql(u8, request.request.method, "Ack")) self.ack.set(self.io);
@@ -114,7 +114,7 @@ fn run(server: anytype, origin: []const u8, io: std.Io, scheme: []const u8, comp
     var context: Context = .{ .io = io, .options = .{ .cors_policy = .{
         .allowed_origins = &.{origin},
         .allow_credentials = true,
-        .exposed_headers = &.{ "grpc-status", "grpc-message", "grpc-encoding", "x-initial" },
+        .exposed_headers = &.{ "grpc-status", "grpc-message", "grpc-status-details-bin", "grpc-encoding", "x-initial" },
     } } };
     defer context.group.cancel(io);
     const Acceptor = struct {

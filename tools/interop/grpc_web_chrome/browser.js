@@ -48,7 +48,11 @@ window.runGrpcWebProbe = async endpoint => {
     stream.on('end', () => { clearTimeout(timer); if (count !== 2 || !statusSeen) reject(new Error('incomplete stream')); else resolve(); });
   });
   try { await unary(binary, endpoint, 'Denied', 'denied'); throw new Error('missing RPC error'); }
-  catch (error) { if (error.code !== grpc.StatusCode.UNAUTHENTICATED || error.message !== 'bad token') throw error; }
+  catch (error) {
+    if (error.code !== grpc.StatusCode.UNAUTHENTICATED || error.message !== 'bad token') throw error;
+    const details = error.metadata && error.metadata['grpc-status-details-bin'];
+    if (!details || atob(details) !== '\x08\x10\x12\x09bad token') throw new Error('rich status details not exposed by CORS/SDK');
+  }
   if (await unary(binary, endpoint, 'Finish', 'finish') !== 'finish') throw new Error('finish mismatch');
-  return {client: 'grpc-web-2.1.1', unary: ['binary', 'text'], stream: 'incremental-text', error: 'UNAUTHENTICATED'};
+  return {client: 'grpc-web-2.1.1', unary: ['binary', 'text'], stream: 'incremental-text', error: 'UNAUTHENTICATED', details: 'google.rpc.Status'};
 };

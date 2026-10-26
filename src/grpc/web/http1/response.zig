@@ -32,6 +32,7 @@ pub fn writeUnary(request: *adapter.Request, options: call.UnaryResponseOptions)
         .terminal = if (options.trailers_only) .{
             .status = options.status,
             .status_message = options.status_message,
+            .status_details = options.status_details,
             .retry_pushback_ms = options.retry_pushback_ms,
             .trailing_metadata = options.trailing_metadata,
             .trailing_binary_metadata = options.trailing_binary_metadata,

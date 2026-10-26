@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const details_mod = @import("../status_details.zig");
 const call = @import("../call.zig");
 const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
@@ -216,6 +217,7 @@ pub const ClientWriter = struct {
             .reset = null,
             .status = result.status,
             .status_message = result.status_message,
+            .status_details = result.status_details,
             .encoding = result.encoding,
         };
     }
@@ -393,10 +395,12 @@ pub const Response = struct {
     reset: ?http2.ResetStreamPayload = null,
     status: wire.Status,
     status_message: []u8,
+    status_details: ?details_mod.Owned = null,
     encoding: ?[]const u8,
 
     pub fn deinit(self: *Response) void {
         self.allocator.free(self.status_message);
+        if (self.status_details) |*details| details.deinit();
         if (self.transport) |*transport| {
             transport.deinit(self.allocator);
         }
@@ -615,6 +619,8 @@ pub fn readRequestWithDeadline(
     return finishRequest(connection, allocator, &bridge, request);
 }
 
+pub const TerminalOptions = web.TerminalOptions;
+
 pub const ResponseOptions = struct {
     compression: compression.Algorithm = .identity,
     compression_level: u4 = 6,
@@ -662,13 +668,11 @@ pub const ServerWriter = struct {
         trailing_metadata: []const http2.Hpack.HeaderField,
         trailing_binary_metadata: []const metadata.BinaryMetadata,
     ) Error!void {
-        var fields = try terminalFields(
-            self.allocator,
-            status,
-            status_message,
-            trailing_metadata,
-            trailing_binary_metadata,
-        );
+        return self.finishWithOptions(.{ .status = status, .status_message = status_message, .trailing_metadata = trailing_metadata, .trailing_binary_metadata = trailing_binary_metadata });
+    }
+
+    pub fn finishWithOptions(self: *ServerWriter, options: TerminalOptions) Error!void {
+        var fields = try terminalFields(self.allocator, options);
         defer fields.deinit();
         try self.transport.finishTrailers(fields.fields);
     }
@@ -810,74 +814,7 @@ fn appendResponseHeaders(
     headers.appendSliceAssumeCapacity(binary_fields);
 }
 
-const TerminalFields = struct {
-    allocator: std.mem.Allocator,
-    fields: []http2.Hpack.HeaderField,
-    status_value: []u8,
-    encoded_message: []u8,
-    binary: metadata.EncodedFields,
-
-    fn deinit(self: *TerminalFields) void {
-        self.binary.deinit();
-        self.allocator.free(self.encoded_message);
-        self.allocator.free(self.status_value);
-        self.allocator.free(self.fields);
-        self.* = undefined;
-    }
-};
-
-fn terminalFields(
-    allocator: std.mem.Allocator,
-    status: wire.Status,
-    status_message: ?[]const u8,
-    trailing_metadata: []const http2.Hpack.HeaderField,
-    trailing_binary_metadata: []const metadata.BinaryMetadata,
-) Error!TerminalFields {
-    try call.validateCustomMetadata(trailing_metadata);
-    try call.validateCustomBinaryMetadata(trailing_binary_metadata);
-    var binary = try metadata.encodeFieldsAlloc(
-        allocator,
-        trailing_binary_metadata,
-    );
-    errdefer binary.deinit();
-    var status_buffer: [2]u8 = undefined;
-    const status_text = std.fmt.bufPrint(
-        &status_buffer,
-        "{d}",
-        .{@intFromEnum(status)},
-    ) catch unreachable;
-    const status_value = try allocator.dupe(u8, status_text);
-    errdefer allocator.free(status_value);
-    const encoded_message = if (status_message) |message|
-        try wire.encodeStatusMessageAlloc(allocator, message)
-    else
-        try allocator.alloc(u8, 0);
-    errdefer allocator.free(encoded_message);
-    const count = std.math.add(
-        usize,
-        std.math.add(usize, trailing_metadata.len, binary.fields.len) catch
-            return error.MessageTooLarge,
-        @as(usize, 1) + @intFromBool(status_message != null),
-    ) catch return error.MessageTooLarge;
-    const fields = try allocator.alloc(http2.Hpack.HeaderField, count);
-    var list: std.ArrayList(http2.Hpack.HeaderField) = .initBuffer(fields);
-    list.appendAssumeCapacity(.{ .name = "grpc-status", .value = status_value });
-    if (status_message != null) {
-        list.appendAssumeCapacity(.{
-            .name = "grpc-message",
-            .value = encoded_message,
-        });
-    }
-    list.appendSliceAssumeCapacity(trailing_metadata);
-    list.appendSliceAssumeCapacity(binary.fields);
-    return .{
-        .allocator = allocator,
-        .fields = fields,
-        .status_value = status_value,
-        .encoded_message = encoded_message,
-        .binary = binary,
-    };
-}
+const terminalFields = @import("terminal.zig").build;
 
 pub fn finishDuplexTrailers(
     transport: *http2.runtime.ServerDuplexStream,
@@ -887,13 +824,11 @@ pub fn finishDuplexTrailers(
     trailing_metadata: []const http2.Hpack.HeaderField,
     trailing_binary_metadata: []const metadata.BinaryMetadata,
 ) Error!void {
-    var fields = try terminalFields(
-        allocator,
-        status,
-        status_message,
-        trailing_metadata,
-        trailing_binary_metadata,
-    );
+    return finishDuplexTrailersWithOptions(transport, allocator, .{ .status = status, .status_message = status_message, .trailing_metadata = trailing_metadata, .trailing_binary_metadata = trailing_binary_metadata });
+}
+
+pub fn finishDuplexTrailersWithOptions(transport: *http2.runtime.ServerDuplexStream, allocator: std.mem.Allocator, options: TerminalOptions) Error!void {
+    var fields = try terminalFields(allocator, options);
     defer fields.deinit();
     try transport.finishResponseTrailers(fields.fields);
 }
@@ -906,13 +841,11 @@ pub fn finishDuplexHeadersOnly(
     trailing_metadata: []const http2.Hpack.HeaderField,
     trailing_binary_metadata: []const metadata.BinaryMetadata,
 ) Error!void {
-    var terminal = try terminalFields(
-        allocator,
-        status,
-        status_message,
-        trailing_metadata,
-        trailing_binary_metadata,
-    );
+    return finishDuplexHeadersOnlyWithOptions(transport, allocator, .{ .status = status, .status_message = status_message, .trailing_metadata = trailing_metadata, .trailing_binary_metadata = trailing_binary_metadata });
+}
+
+pub fn finishDuplexHeadersOnlyWithOptions(transport: *http2.runtime.ServerDuplexStream, allocator: std.mem.Allocator, options: TerminalOptions) Error!void {
+    var terminal = try terminalFields(allocator, options);
     defer terminal.deinit();
     const count = std.math.add(usize, terminal.fields.len, 1) catch
         return error.MessageTooLarge;
@@ -1129,6 +1062,7 @@ fn ServerRequestBridge(
 pub const ParsedResponseTerminal = struct {
     status: wire.Status,
     status_message: []u8,
+    status_details: ?details_mod.Owned = null,
     encoding: ?[]const u8,
 };
 
@@ -1150,6 +1084,8 @@ pub fn parseResponseTerminal(
     if (status_raw == null and http_status == 200) {
         return error.MissingGrpcStatus;
     }
+    var status_details = try details_mod.fromMetadataAlloc(allocator, status, headers, trailers);
+    errdefer if (status_details) |*details| details.deinit();
     const message_raw = call.headerValue(
         trailers,
         "grpc-message",
@@ -1167,5 +1103,6 @@ pub fn parseResponseTerminal(
         else
             try allocator.alloc(u8, 0),
         .encoding = encoding,
+        .status_details = status_details,
     };
 }

@@ -5,11 +5,14 @@ const call = @import("../call.zig");
 const wire = @import("../wire.zig");
 const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
+const details_mod = @import("../status_details.zig");
 const content_type = @import("content_type.zig");
 
 pub const TerminalOptions = struct {
     status: wire.Status,
     status_message: ?[]const u8 = null,
+    /// Raw google.rpc.Status protobuf; valid only for a matching non-OK status.
+    status_details: ?[]const u8 = null,
     retry_pushback_ms: ?i64 = null,
     trailing_metadata: []const http2.Hpack.HeaderField = &.{},
     trailing_binary_metadata: []const metadata.BinaryMetadata = &.{},
@@ -31,6 +34,7 @@ pub const Block = struct {
     initial_binary: ?metadata.EncodedFields = null,
     trailing_binary: ?metadata.EncodedFields = null,
     encoded_message: ?[]u8 = null,
+    encoded_details: ?[]u8 = null,
     inline_fields: [32]http2.Hpack.HeaderField = undefined,
     heap_fields: bool = false,
     status_buffer: [2]u8 = undefined,
@@ -45,11 +49,12 @@ pub const Block = struct {
         self.initial_binary = try metadata.encodeFieldsAlloc(allocator, options.initial_binary_metadata);
         var terminal_count: usize = 0;
         if (options.terminal) |terminal| {
+            if (terminal.status_details) |bytes| self.encoded_details = try details_mod.encodedAlloc(allocator, terminal.status, bytes);
             try call.validateCustomMetadata(terminal.trailing_metadata);
             try call.validateCustomBinaryMetadata(terminal.trailing_binary_metadata);
             self.trailing_binary = try metadata.encodeFieldsAlloc(allocator, terminal.trailing_binary_metadata);
             if (terminal.status_message) |message| self.encoded_message = try wire.encodeStatusMessageAlloc(allocator, message);
-            terminal_count = try sum(1 + @as(usize, @intFromBool(terminal.status_message != null)) + @as(usize, @intFromBool(terminal.retry_pushback_ms != null)), try sum(terminal.trailing_metadata.len, self.trailing_binary.?.fields.len));
+            terminal_count = try sum(1 + @as(usize, @intFromBool(terminal.status_message != null)) + @as(usize, @intFromBool(terminal.retry_pushback_ms != null)) + @as(usize, @intFromBool(terminal.status_details != null)), try sum(terminal.trailing_metadata.len, self.trailing_binary.?.fields.len));
         }
         const count = try sum(try sum(2 + @as(usize, @intFromBool(options.compression != .identity)), options.initial_metadata.len), try sum(self.initial_binary.?.fields.len, terminal_count));
         if (count <= self.inline_fields.len) {
@@ -67,6 +72,7 @@ pub const Block = struct {
             self.fields.appendAssumeCapacity(.{ .name = "grpc-status", .value = std.fmt.bufPrint(&self.status_buffer, "{d}", .{@intFromEnum(terminal.status)}) catch unreachable });
             if (self.encoded_message) |message| self.fields.appendAssumeCapacity(.{ .name = "grpc-message", .value = message });
             if (terminal.retry_pushback_ms) |milliseconds| self.fields.appendAssumeCapacity(.{ .name = "grpc-retry-pushback-ms", .value = std.fmt.bufPrint(&self.pushback_buffer, "{d}", .{milliseconds}) catch unreachable });
+            if (self.encoded_details) |bytes| self.fields.appendAssumeCapacity(.{ .name = details_mod.name, .value = bytes, .never_index = true });
             self.fields.appendSliceAssumeCapacity(terminal.trailing_metadata);
             self.fields.appendSliceAssumeCapacity(self.trailing_binary.?.fields);
         }
@@ -77,6 +83,7 @@ pub const Block = struct {
         if (self.initial_binary) |*binary| binary.deinit();
         if (self.trailing_binary) |*binary| binary.deinit();
         if (self.encoded_message) |message| allocator.free(message);
+        if (self.encoded_details) |bytes| allocator.free(bytes);
         self.* = .{};
     }
 };
@@ -101,6 +108,7 @@ fn allocationCase(allocator: std.mem.Allocator) !void {
         .terminal = .{
             .status = .unavailable,
             .status_message = "try%again",
+            .status_details = "\x08\x0e",
             .retry_pushback_ms = -123,
             .trailing_binary_metadata = &.{.{ .name = "x-end-bin", .value = &.{0xff} }},
         },
@@ -112,4 +120,5 @@ fn allocationCase(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("-123", call.headerValue(block.fields.items, "grpc-retry-pushback-ms").?);
     try std.testing.expectEqualStrings("AQI", call.headerValue(block.fields.items, "x-initial-bin").?);
     try std.testing.expectEqualStrings("/w", call.headerValue(block.fields.items, "x-end-bin").?);
+    try std.testing.expectEqualStrings("CA4", call.headerValue(block.fields.items, "grpc-status-details-bin").?);
 }

@@ -107,6 +107,7 @@ const ServerState = struct {
         var transport = try Transport.init(&connection, &handler, .{
             .package = grpc_pb.proto_package,
             .handler_error_status = .invalid_argument,
+            .handler_error_details = "\x08\x03\x12\x09bad input",
         });
         for (0..8) |index| {
             const expected: netz.grpc.Status = if (index == 4 or index == 5)
@@ -221,9 +222,11 @@ pub fn main(init: std.process.Init) !void {
     );
     try std.testing.expectEqual(@as(?u16, 200), borrowed_failure.http_status);
     try std.testing.expect(borrowed_failure.reset == null);
+    try std.testing.expectEqualStrings("bad input", borrowed_failure.status_details.?.view.message);
     var owned_failure = generated_client.transport.takeFailure().?;
     defer owned_failure.deinit();
     try std.testing.expect(generated_client.transport.lastFailure() == null);
+    try std.testing.expectEqual(netz.grpc.Status.invalid_argument, owned_failure.status_details.?.view.code.?);
 
     var malformed = try client.unary(.{
         .path = "/demo.binding.Pipe/Get",
@@ -287,6 +290,7 @@ pub fn main(init: std.process.Init) !void {
     );
     try std.testing.expect(generated_client.transport.lastFailure() == null);
 
+    try std.testing.expectEqualStrings("bad input", owned_failure.status_details.?.view.message);
     server_future.await(io);
     if (server_state.err) |err| return err;
     _ = init;
