@@ -14,8 +14,9 @@ const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
 const codec = @import("codec.zig");
+const web = @import("../web.zig");
 
-pub const Error = call.Error || codec.Error || error{
+pub const Error = call.Error || codec.Error || web.Error || error{
     MissingGrpcStatus,
 };
 
@@ -431,6 +432,7 @@ pub fn readRequest(
         allocator,
         max_message_size,
         context,
+        false,
     );
     defer bridge.deinit();
     const request = try connection.readRequestStreamingWithHead(
@@ -439,6 +441,93 @@ pub fn readRequest(
         @TypeOf(bridge).consumeData,
     );
     return finishRequest(connection, allocator, &bridge, request);
+}
+
+/// One gRPC-Web server-streaming request plus the negotiated text or binary
+/// wire its response must use.
+pub const WebRequest = struct {
+    request: Request,
+    content_type: web.ContentType,
+
+    pub fn deinit(self: *WebRequest) void {
+        self.request.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn readWebRequest(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    max_message_size: usize,
+    context: anytype,
+    comptime consume: anytype,
+) !WebRequest {
+    var bridge = ServerRequestBridge(@TypeOf(context), consume).init(
+        allocator,
+        max_message_size,
+        context,
+        true,
+    );
+    defer bridge.deinit();
+    const request = try connection.readRequestStreamingWithHead(
+        &bridge,
+        @TypeOf(bridge).begin,
+        @TypeOf(bridge).consumeData,
+    );
+    const finished = try finishRequest(connection, allocator, &bridge, request);
+    return .{
+        .request = finished,
+        .content_type = bridge.content_type orelse
+            return error.InvalidWebContentType,
+    };
+}
+
+pub fn readWebRequestWithTimeout(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    max_message_size: usize,
+    timeout: std.Io.Duration,
+    context: anytype,
+    comptime consume: anytype,
+) !WebRequest {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readWebRequestWithDeadline(
+        connection,
+        allocator,
+        max_message_size,
+        .fromNow(connection.io, .{ .raw = timeout, .clock = .awake }),
+        context,
+        consume,
+    );
+}
+
+pub fn readWebRequestWithDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    max_message_size: usize,
+    deadline: std.Io.Clock.Timestamp,
+    context: anytype,
+    comptime consume: anytype,
+) !WebRequest {
+    var bridge = ServerRequestBridge(@TypeOf(context), consume).init(
+        allocator,
+        max_message_size,
+        context,
+        true,
+    );
+    defer bridge.deinit();
+    const request = try connection.readRequestStreamingWithHeadAndDeadline(
+        deadline,
+        &bridge,
+        @TypeOf(bridge).begin,
+        @TypeOf(bridge).consumeData,
+    );
+    const finished = try finishRequest(connection, allocator, &bridge, request);
+    return .{
+        .request = finished,
+        .content_type = bridge.content_type orelse
+            return error.InvalidWebContentType,
+    };
 }
 
 fn finishRequest(
@@ -461,6 +550,15 @@ fn finishRequest(
         return err;
     };
     const parsed = bridge.metadata orelse return error.InvalidGrpcRequest;
+    // gRPC-Web server streaming carries exactly one request message; the
+    // client-streaming half of bidi is not part of the protocol.
+    if (bridge.web and bridge.message_count != 1) {
+        connection.abandonPeerRequest(
+            request.stream_id,
+            .internal_error,
+        );
+        return error.InvalidMessageCount;
+    }
     return .{
         .allocator = allocator,
         .transport = request,
@@ -505,6 +603,7 @@ pub fn readRequestWithDeadline(
         allocator,
         max_message_size,
         context,
+        false,
     );
     defer bridge.deinit();
     const request = try connection.readRequestStreamingWithHeadAndDeadline(
@@ -927,30 +1026,62 @@ fn ServerRequestBridge(
         allocator: std.mem.Allocator,
         max_message_size: usize,
         context: Context,
+        web: bool,
         metadata: ?call.RequestMetadata = null,
+        content_type: ?web.ContentType = null,
         decoder: ?codec.Decoder = null,
         message_count: usize = 0,
+        /// Base64 text entities are accumulated whole before decoding at
+        /// END_STREAM; they contain exactly one gRPC-Web request message.
+        text_entity: ?std.ArrayList(u8) = null,
 
         fn init(
             allocator: std.mem.Allocator,
             max_message_size: usize,
             context: Context,
+            web_flavor: bool,
         ) @This() {
             return .{
                 .allocator = allocator,
                 .max_message_size = max_message_size,
                 .context = context,
+                .web = web_flavor,
             };
         }
 
         fn deinit(self: *@This()) void {
             if (self.decoder) |*decoder| decoder.deinit();
+            if (self.text_entity) |*entity| entity.deinit(self.allocator);
         }
 
         fn begin(
             self: *@This(),
             head: http2.runtime.StreamingRequestHead,
         ) Error!void {
+            if (self.web) {
+                const raw = call.headerValue(
+                    head.headers,
+                    "content-type",
+                ) orelse return error.InvalidContentType;
+                const negotiated = try web.parseContentType(raw);
+                self.content_type = negotiated;
+                if (negotiated.text) {
+                    self.text_entity = .empty;
+                }
+                const parsed = try call.parseWebRequestMetadata(
+                    head.method,
+                    head.path,
+                    head.headers,
+                );
+                self.metadata = parsed;
+                self.decoder = try codec.Decoder.init(
+                    self.allocator,
+                    self.max_message_size,
+                    parsed.encoding,
+                    compression.AlgorithmSet.supported,
+                );
+                return;
+            }
             const parsed = try call.parseRequestMetadata(
                 head.method,
                 head.path,
@@ -966,6 +1097,18 @@ fn ServerRequestBridge(
         }
 
         fn consumeData(self: *@This(), data: []const u8) !void {
+            if (self.text_entity) |*entity| {
+                // One framed message plus base64 expansion is the only valid
+                // text request entity; reject an oversized upload up front.
+                const bound = std.base64.standard.Encoder.calcSize(
+                    5 + self.max_message_size,
+                );
+                if (entity.items.len + data.len > bound) {
+                    return error.GrpcMessageTooLarge;
+                }
+                try entity.appendSlice(self.allocator, data);
+                return;
+            }
             const decoder = if (self.decoder) |*value|
                 value
             else
@@ -981,11 +1124,19 @@ fn ServerRequestBridge(
             self.message_count += 1;
         }
 
-        fn finish(self: *@This()) Error!void {
+        fn finish(self: *@This()) !void {
             const decoder = if (self.decoder) |*value|
                 value
             else
                 return error.InvalidStreamState;
+            if (self.text_entity) |*entity| {
+                const decoded = try web.base64DecodeAlloc(
+                    self.allocator,
+                    entity.items,
+                );
+                defer self.allocator.free(decoded);
+                try decoder.feed(decoded, self, deliverMessage);
+            }
             try decoder.finish();
         }
     };

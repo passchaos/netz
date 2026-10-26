@@ -13,8 +13,9 @@ const call = @import("call.zig");
 const wire = @import("wire.zig");
 const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
+const codec = @import("stream/codec.zig");
 
-pub const Error = call.Error || error{
+pub const Error = call.Error || codec.Error || error{
     InvalidTextEncoding,
     InvalidWebContentType,
 };
@@ -100,7 +101,7 @@ pub fn parseContentType(raw: []const u8) Error!ContentType {
     return error.InvalidWebContentType;
 }
 
-fn base64DecodeAlloc(
+pub fn base64DecodeAlloc(
     allocator: std.mem.Allocator,
     input: []const u8,
 ) Error![]u8 {
@@ -208,8 +209,48 @@ pub fn buildResponseBody(
         );
     }
 
+    const trailer_block = try buildTrailerBlock(allocator, .{
+        .status = options.status,
+        .status_message = options.status_message,
+        .retry_pushback_ms = options.retry_pushback_ms,
+        .trailing_metadata = options.trailing_metadata,
+        .trailing_binary_metadata = options.trailing_binary_metadata,
+    });
+    defer allocator.free(trailer_block);
+
+    if (trailer_block.len > std.math.maxInt(u32)) {
+        return error.MessageTooLarge;
+    }
+    var frame_header: [5]u8 = undefined;
+    frame_header[0] = 0x80;
+    std.mem.writeInt(
+        u32,
+        frame_header[1..5],
+        @intCast(trailer_block.len),
+        .big,
+    );
+    try body.appendSlice(allocator, &frame_header);
+    try body.appendSlice(allocator, trailer_block);
+    return body.toOwnedSlice(allocator);
+}
+
+/// Terminal gRPC-Web metadata serialized as one `0x80` frame.
+pub const TerminalOptions = struct {
+    status: wire.Status,
+    status_message: ?[]const u8 = null,
+    retry_pushback_ms: ?i64 = null,
+    trailing_metadata: []const http2.Hpack.HeaderField = &.{},
+    trailing_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+};
+
+/// Build the `Name: Value\r\n` trailer block for a terminal gRPC-Web frame.
+/// The returned bytes are allocator-owned and omit the five-byte prefix.
+pub fn buildTrailerBlock(
+    allocator: std.mem.Allocator,
+    options: TerminalOptions,
+) Error![]u8 {
     var trailer_block: std.ArrayList(u8) = .empty;
-    defer trailer_block.deinit(allocator);
+    errdefer trailer_block.deinit(allocator);
     var status_buffer: [2]u8 = undefined;
     const status_value = std.fmt.bufPrint(
         &status_buffer,
@@ -262,21 +303,7 @@ pub fn buildResponseBody(
             .{ field.name, field.value },
         );
     }
-
-    if (trailer_block.items.len > std.math.maxInt(u32)) {
-        return error.MessageTooLarge;
-    }
-    var frame_header: [5]u8 = undefined;
-    frame_header[0] = 0x80;
-    std.mem.writeInt(
-        u32,
-        frame_header[1..5],
-        @intCast(trailer_block.items.len),
-        .big,
-    );
-    try body.appendSlice(allocator, &frame_header);
-    try body.appendSlice(allocator, trailer_block.items);
-    return body.toOwnedSlice(allocator);
+    return trailer_block.toOwnedSlice(allocator);
 }
 
 /// Write one unary gRPC-Web response on an HTTP/2 connection. Trailers are
@@ -625,4 +652,248 @@ test "gRPC-Web response body ends with one trailers frame" {
     try std.testing.expect(std.mem.startsWith(u8, trailer_block, "grpc-status:0\r\n"));
     try std.testing.expect(trailer_block[trailer_block.len - 2 ..][0] == '\r' and
         trailer_block[trailer_block.len - 1] == '\n');
+}
+
+// ---------------------------------------------------------------------------
+// Server streaming
+// ---------------------------------------------------------------------------
+
+pub const StreamResponseOptions = struct {
+    compression: compression_mod.Algorithm = .identity,
+    compression_level: u4 = 6,
+    request_accepted_encodings: compression_mod.AlgorithmSet = .{},
+    accepted_encodings: compression_mod.AlgorithmSet =
+        compression_mod.AlgorithmSet.supported,
+    initial_metadata: []const http2.Hpack.HeaderField = &.{},
+    initial_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    max_message_size: usize = 16 * 1024 * 1024,
+};
+
+/// Allocation-free streaming standard-base64 filter for `grpc-web-text`.
+/// Three input bytes become four output characters; up to two final bytes
+/// stay buffered until `flushPadding` writes the padded terminal group.
+const Base64Sink = struct {
+    inner: ?*http2.runtime.ResponseWriter = null,
+    pending: [3]u8 = undefined,
+    pending_len: u2 = 0,
+
+    const encoder = std.base64.standard.Encoder;
+    /// Input chunk size (a multiple of three); 768 input bytes become 1024.
+    const chunk_input = 768;
+    const chunk_output: usize = chunk_input / 3 * 4;
+
+    pub fn write(self: *Base64Sink, bytes: []const u8) Error!void {
+        const inner = self.inner orelse return error.InvalidStreamState;
+        var input = bytes;
+        if (self.pending_len != 0) {
+            const take = @min(
+                @as(usize, 3) - self.pending_len,
+                input.len,
+            );
+            @memcpy(
+                self.pending[self.pending_len..][0..take],
+                input[0..take],
+            );
+            self.pending_len += @intCast(take);
+            input = input[take..];
+            if (self.pending_len == 3) {
+                var group: [4]u8 = undefined;
+                _ = encoder.encode(&group, &self.pending);
+                try inner.write(&group);
+                self.pending_len = 0;
+            }
+        }
+        var encoded: [chunk_output]u8 = undefined;
+        while (input.len >= chunk_input) {
+            _ = encoder.encode(
+                &encoded,
+                input[0..chunk_input],
+            );
+            try inner.write(&encoded);
+            input = input[chunk_input..];
+        }
+        // Fewer than one chunk remains, but it can still contain complete
+        // triplets; only the final 1-2 bytes stay buffered for padding.
+        const complete = (input.len / 3) * 3;
+        if (complete != 0) {
+            const out_len = encoder.calcSize(complete);
+            _ = encoder.encode(encoded[0..out_len], input[0..complete]);
+            try inner.write(encoded[0..out_len]);
+            input = input[complete..];
+        }
+        if (input.len != 0) {
+            std.debug.assert(input.len < 3);
+            @memcpy(self.pending[0..input.len], input);
+            self.pending_len = @intCast(input.len);
+        }
+    }
+
+    fn flushPadding(self: *Base64Sink) Error!void {
+        const inner = self.inner orelse return error.InvalidStreamState;
+        if (self.pending_len == 0) return;
+        var group: [4]u8 = undefined;
+        _ = encoder.encode(
+            &group,
+            self.pending[0..self.pending_len],
+        );
+        try inner.write(&group);
+        self.pending_len = 0;
+    }
+};
+
+/// Streaming gRPC-Web response: zero or more data frames followed by one
+/// `0x80` trailers frame, all carried in HTTP/2 DATA with END_STREAM.
+pub const ServerStreamWriter = struct {
+    allocator: std.mem.Allocator,
+    transport: http2.runtime.ResponseWriter,
+    encoder: codec.Encoder,
+    content_type: ContentType,
+    base64_sink: Base64Sink = .{},
+    finished: bool = false,
+
+    pub fn deinit(self: *ServerStreamWriter) void {
+        if (!self.finished) self.transport.deinit();
+    }
+
+    pub fn writeMessage(self: *ServerStreamWriter, payload: []const u8) Error!void {
+        return self.writeMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: *ServerStreamWriter,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!void {
+        if (self.finished) return error.InvalidStreamState;
+        if (self.content_type.text) {
+            self.base64_sink.inner = &self.transport;
+            return self.encoder.writeMessageWithOptions(
+                &self.base64_sink,
+                payload,
+                options,
+            );
+        }
+        return self.encoder.writeMessageWithOptions(
+            &self.transport,
+            payload,
+            options,
+        );
+    }
+
+    /// Append the terminal trailers frame and end the HTTP/2 stream without
+    /// an HTTP trailer block.
+    pub fn finish(
+        self: *ServerStreamWriter,
+        status: wire.Status,
+        status_message: ?[]const u8,
+        trailing_metadata: []const http2.Hpack.HeaderField,
+        trailing_binary_metadata: []const metadata_mod.BinaryMetadata,
+    ) Error!void {
+        if (self.finished) return error.InvalidStreamState;
+        const block = try buildTrailerBlock(self.allocator, .{
+            .status = status,
+            .status_message = status_message,
+            .trailing_metadata = trailing_metadata,
+            .trailing_binary_metadata = trailing_binary_metadata,
+        });
+        defer self.allocator.free(block);
+        if (block.len > std.math.maxInt(u32)) return error.MessageTooLarge;
+        var frame_header: [5]u8 = undefined;
+        frame_header[0] = 0x80;
+        std.mem.writeInt(
+            u32,
+            frame_header[1..5],
+            @intCast(block.len),
+            .big,
+        );
+        if (self.content_type.text) {
+            self.base64_sink.inner = &self.transport;
+            try self.base64_sink.write(&frame_header);
+            try self.base64_sink.write(block);
+            try self.base64_sink.flushPadding();
+        } else {
+            try self.transport.write(&frame_header);
+            try self.transport.write(block);
+        }
+        try self.transport.finishData(&.{});
+        self.finished = true;
+    }
+
+    pub fn finishOk(self: *ServerStreamWriter) Error!void {
+        return self.finish(.ok, null, &.{}, &.{});
+    }
+};
+
+/// Start a gRPC-Web server-streaming response with the negotiated wire.
+pub fn startServerStream(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    stream_id: u31,
+    options: StreamResponseOptions,
+    content_type: ContentType,
+) Error!ServerStreamWriter {
+    try call.validateCustomMetadata(options.initial_metadata);
+    try call.validateCustomBinaryMetadata(options.initial_binary_metadata);
+    const response_algorithm: compression_mod.Algorithm =
+        if (options.request_accepted_encodings.contains(options.compression))
+            options.compression
+        else
+            .identity;
+
+    var initial_binary = try metadata_mod.encodeFieldsAlloc(
+        allocator,
+        options.initial_binary_metadata,
+    );
+    defer initial_binary.deinit();
+
+    const initial_count = 3 +
+        @as(usize, @intFromBool(response_algorithm != .identity)) +
+        options.initial_metadata.len +
+        initial_binary.fields.len;
+    var header_storage: [32]http2.Hpack.HeaderField = undefined;
+    const initial_buffer = if (initial_count <= header_storage.len)
+        header_storage[0..initial_count]
+    else
+        try allocator.alloc(http2.Hpack.HeaderField, initial_count);
+    defer if (initial_buffer.ptr != header_storage[0..].ptr) {
+        allocator.free(initial_buffer);
+    };
+    var initial: std.ArrayList(http2.Hpack.HeaderField) =
+        .initBuffer(initial_buffer);
+    initial.appendAssumeCapacity(.{
+        .name = "content-type",
+        .value = content_type.canonical(),
+    });
+    if (response_algorithm != .identity) {
+        initial.appendAssumeCapacity(.{
+            .name = "grpc-encoding",
+            .value = response_algorithm.name(),
+        });
+    }
+    var accept_encoding_buffer: [32]u8 = undefined;
+    initial.appendAssumeCapacity(.{
+        .name = "grpc-accept-encoding",
+        .value = try compression_mod.formatAcceptEncodingInto(
+            &accept_encoding_buffer,
+            options.accepted_encodings,
+        ),
+    });
+    initial.appendSliceAssumeCapacity(options.initial_metadata);
+    initial.appendSliceAssumeCapacity(initial_binary.fields);
+
+    const transport = try connection.startResponse(stream_id, .{
+        .status = 200,
+        .headers = initial.items,
+    });
+    return .{
+        .allocator = allocator,
+        .transport = transport,
+        .encoder = .{
+            .allocator = allocator,
+            .algorithm = response_algorithm,
+            .compression_level = options.compression_level,
+            .max_message_size = options.max_message_size,
+        },
+        .content_type = content_type,
+    };
 }

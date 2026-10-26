@@ -732,6 +732,73 @@ pub const ServerConnection = struct {
         );
     }
 
+    /// Read one gRPC-Web server-streaming request. Exactly one framed
+    /// request message is delivered to `consume`; the negotiated text/binary
+    /// wire is returned for the matching `startStreamingWeb` response.
+    pub fn readStreamingWeb(
+        self: *ServerConnection,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.WebRequest {
+        return streaming.readWebRequest(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readStreamingWebWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.WebRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return streaming.readWebRequestWithTimeout(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            timeout,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readStreamingWebWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.WebRequest {
+        return streaming.readWebRequestWithDeadline(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    /// Start a gRPC-Web server-streaming response. Messages become data
+    /// frames and `finish` emits the single `0x80` trailers frame.
+    pub fn startStreamingWeb(
+        self: *ServerConnection,
+        stream_id: u31,
+        options: web.StreamResponseOptions,
+        content_type: web.ContentType,
+    ) !web.ServerStreamWriter {
+        return web.startServerStream(
+            &self.connection,
+            self.connection.allocator,
+            stream_id,
+            options,
+            content_type,
+        );
+    }
+
     /// Start a message-stream response for a request returned by
     /// `readStreaming`. The writer borrows this connection until it is
     /// finished or deinitialized.

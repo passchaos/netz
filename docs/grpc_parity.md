@@ -459,6 +459,17 @@ remain in the response headers. Compression negotiation reuses the standard
 gRPC algorithms and grpc-accept-encoding rules. Pure codec tests cover all media
 types, text decode ownership, malformed base64, and zero/duplicate message
 rejection; real h2c loopback tests exercise binary and base64 unary calls with
-custom trailer metadata and a trailers-only UNAUTHENTICATED response. Client and
-server streaming over gRPC-Web remain future work; unary is the browser XHR/fetch
-shape the spec requires servers to support.
+custom trailer metadata and a trailers-only UNAUTHENTICATED response.
+
+Server streaming is supported through the same server connection:
+`readStreamingWeb` negotiates the wire, delivers exactly one request message
+(browser client streaming is not part of gRPC-Web and zero or multiple request
+messages reset the stream), and `startStreamingWeb` returns a streaming writer
+whose messages become data frames and whose `finish` appends the single `0x80`
+trailers frame. `-text` requests buffer and base64-decode the single entity at
+END_STREAM before frame validation, while `-text` responses stream through an
+allocation-free standard-base64 filter (768-byte input chunks, at most two
+buffered bytes) so large server streams never materialize a full response.
+Real h2c loopback tests cover binary and base64 multi-message streams plus the
+multiple-request rejection. Browser client streaming and duplex remain out of
+scope for gRPC-Web itself.

@@ -3089,3 +3089,295 @@ test "gRPC-Web trailers-only error reaches the HTTP response headers" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "gRPC-Web h2c server streaming frames all messages and trailers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const messages = [_][]const u8{ "one", "two", "three" };
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        messages: []const []const u8,
+        err: ?anyerror = null,
+
+        const Counter = struct {
+            count: usize = 0,
+            fn consume(
+                self: *@This(),
+                message: grpc.StreamingMessage,
+            ) !void {
+                _ = message;
+                self.count += 1;
+            }
+        };
+
+        fn handleCall(
+            connection: *grpc.runtime.ServerConnection,
+            messages_slice: []const []const u8,
+            text: bool,
+        ) !void {
+            var counter = Counter{};
+            var request = try connection.readStreamingWeb(
+                &counter,
+                Counter.consume,
+            );
+            defer request.deinit();
+            if (counter.count != 1 or
+                text != request.content_type.text)
+            {
+                return error.InvalidGrpcRequest;
+            }
+            var writer = try connection.startStreamingWeb(
+                request.request.transport.stream_id,
+                .{},
+                request.content_type,
+            );
+            defer writer.deinit();
+            for (messages_slice) |message| {
+                try writer.writeMessage(message);
+            }
+            try writer.finish(
+                .ok,
+                null,
+                &.{.{ .name = "x-seq", .value = "7" }},
+                &.{},
+            );
+        }
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            // Both calls multiplex on the one accepted connection.
+            handleCall(
+                &connection,
+                self.messages,
+                false,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            handleCall(&connection, self.messages, true) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server, .messages = &messages };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+
+    {
+        var entity: [9]u8 = undefined;
+        entity[0] = 0;
+        std.mem.writeInt(u32, entity[1..5], 4, .big);
+        @memcpy(entity[5..9], "ping");
+        const headers = [_]http2.Hpack.HeaderField{
+            .{ .name = "content-type", .value = "application/grpc-web" },
+        };
+        var response = try client.connection.request(.{
+            .method = "POST",
+            .path = "/demo.Echo/ServerStream",
+            .authority = "localhost",
+            .headers = &headers,
+            .body = &entity,
+        });
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expect(response.trailers.len == 0);
+
+        var offset: usize = 0;
+        for (messages) |message| {
+            try std.testing.expectEqual(@as(u8, 0), response.body[offset]);
+            const len = std.mem.readInt(
+                u32,
+                response.body[offset + 1 ..][0..4],
+                .big,
+            );
+            try std.testing.expectEqualStrings(
+                message,
+                response.body[offset + 5 ..][0..len],
+            );
+            offset += 5 + len;
+        }
+        try std.testing.expectEqual(@as(u8, 0x80), response.body[offset]);
+        offset += 1;
+        const trailer_len = std.mem.readInt(
+            u32,
+            response.body[offset..][0..4],
+            .big,
+        );
+        offset += 4;
+        try std.testing.expectEqual(response.body.len - offset, trailer_len);
+        const block = response.body[offset..];
+        try std.testing.expect(std.mem.startsWith(
+            u8,
+            block,
+            "grpc-status:0\r\n",
+        ));
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            block,
+            "x-seq:7\r\n",
+        ) != null);
+    }
+
+    // Base64 text wire: one base64 request message and a base64 response.
+    {
+        var framed: [9]u8 = undefined;
+        framed[0] = 0;
+        std.mem.writeInt(u32, framed[1..5], 4, .big);
+        @memcpy(framed[5..9], "ping");
+        const encoder = std.base64.standard.Encoder;
+        const encoded = try allocator.alloc(
+            u8,
+            encoder.calcSize(framed.len),
+        );
+        defer allocator.free(encoded);
+        _ = encoder.encode(encoded, &framed);
+
+        const headers = [_]http2.Hpack.HeaderField{
+            .{ .name = "content-type", .value = "application/grpc-web-text" },
+        };
+        var response = try client.connection.request(.{
+            .method = "POST",
+            .path = "/demo.Echo/TextServerStream",
+            .authority = "localhost",
+            .headers = &headers,
+            .body = encoded,
+        });
+        defer response.deinit(allocator);
+        const decoder = std.base64.standard.Decoder;
+        const decoded = try allocator.alloc(
+            u8,
+            decoder.calcSizeForSlice(response.body) catch
+                return error.InvalidResponse,
+        );
+        defer allocator.free(decoded);
+        try decoder.decode(decoded, response.body);
+
+        var offset: usize = 0;
+        for (messages) |message| {
+            try std.testing.expectEqual(@as(u8, 0), decoded[offset]);
+            const len = std.mem.readInt(
+                u32,
+                decoded[offset + 1 ..][0..4],
+                .big,
+            );
+            try std.testing.expectEqualStrings(
+                message,
+                decoded[offset + 5 ..][0..len],
+            );
+            offset += 5 + len;
+        }
+        try std.testing.expectEqual(@as(u8, 0x80), decoded[offset]);
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC-Web streaming rejects more than one request message" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            const Context = struct {
+                fn consume(_: *void, _: grpc.StreamingMessage) !void {}
+            };
+            var context: void = {};
+            var request = connection.readStreamingWeb(
+                &context,
+                Context.consume,
+            ) catch |err| {
+                self.err = if (err == error.InvalidMessageCount) null else err;
+                return;
+            };
+            request.deinit();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+
+    var entity: [18]u8 = undefined;
+    for (0..2) |index| {
+        entity[index * 9] = 0;
+        std.mem.writeInt(
+            u32,
+            entity[index * 9 + 1 ..][0..4],
+            4,
+            .big,
+        );
+        @memcpy(entity[index * 9 + 5 ..][0..4], "ping");
+    }
+    const headers = [_]http2.Hpack.HeaderField{
+        .{ .name = "content-type", .value = "application/grpc-web" },
+    };
+    try std.testing.expectError(
+        error.StreamReset,
+        client.connection.request(.{
+            .method = "POST",
+            .path = "/demo.Echo/ClientStream",
+            .authority = "localhost",
+            .headers = &headers,
+            .body = &entity,
+        }),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
