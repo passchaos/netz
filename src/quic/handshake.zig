@@ -636,6 +636,7 @@ pub fn establishPreconfigured(
         options.alpn_protocol,
         options.send_keys.suite,
         false,
+        null,
         false,
         .not_offered,
         options.resumption_master_secret,
