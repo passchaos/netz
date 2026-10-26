@@ -37,7 +37,8 @@ window.runGrpcWebProbe = async endpoint => {
         if (message.bytes.length !== 32768 || message.bytes.some(byte => byte !== 97)) return reject(new Error('first stream message mismatch'));
         // The server waits for this separate RPC before sending message two
         // or terminal status, proving official SDK delivery before END_STREAM.
-        unary(binary, endpoint, 'Ack', 'ack').catch(reject);
+        const acknowledged = window.acknowledgeStream ? window.acknowledgeStream() : unary(binary, endpoint, 'Ack', 'ack');
+        acknowledged.catch(reject);
       } else if (count === 2) {
         if (decoder.decode(message.bytes) !== 'second') reject(new Error('second stream message mismatch'));
       } else reject(new Error('extra stream message'));

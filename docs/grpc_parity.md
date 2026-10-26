@@ -596,6 +596,7 @@ The JS codecs are opaque fixture messages, not production language bindings.
 ```sh
 zig build interop-grpc-web-chrome -Doptimize=ReleaseFast
 zig build interop-grpc-web-chrome -Doptimize=ReleaseFast -- --tls
+zig build interop-grpc-web-chrome -Doptimize=ReleaseFast -- --tls --http2
 ```
 
 The HTTPS gate also abandons an authenticated idle TLS connection without
@@ -603,5 +604,32 @@ close_notify and requires the endpoint to continue serving all RPCs. Partial
 HTTP requests retain their failure behavior. The HTTPS gate pins only its
 temporary certificate's SPKI in Chromium. The
 runner defaults to `/usr/bin/chromium`; set `CHROME` to another compatible
-Chromium executable. The CORS helper can also be used by custom HTTP/2 routers;
-the existing gRPC HTTP/2 owning server does not automatically route OPTIONS.
+Chromium executable.
+
+`grpc.web.http2` now provides the same owned-request/handled-status dispatch on
+HTTP/2. `grpc.runtime.ServerConnection.readWebRequest`, `readWebRequestWithTimeout`
+and `readWebRequestWithDeadline` expose it through the existing gRPC listeners.
+Preflights and policy/protocol rejections receive complete HTTP responses on
+their own streams before application dispatch. The returned request writes unary
+or streaming gRPC-Web responses with policy-controlled permission/exposure fields
+and Vary: Accept. Its accepted compression and message-size bounds come from the
+validated request and owning server. Dropping an unanswered request cancels only
+that stream and retires its local state. Local conversion failures also abandon
+the admitted request while preserving the original error.
+
+HTTP/1.1 and HTTP/2 share the same media/CORS classifier. HTTP/2 tests use one
+concurrent-stream slot and require reuse after 204, 403, 400, 405, 415, 406 and
+413 responses, a dropped-request CANCEL, binary/text negotiation, and streaming
+body trailers. Allocation-failure sweeps cover request and response ownership.
+`ServerStreamWriter.finishWithOptions` carries terminal retry pushback as well
+as status/message and custom metadata; the HTTP/2 request wrapper uses the same
+TerminalOptions interface as HTTP/1.1.
+
+The browser runner's `--tls --http2` mode uses the production TLS HTTP/2 listener
+and the same official grpc-web SDK probes. DevTools response metadata must
+report `h2`, so a fallback to HTTP/1.1 cannot satisfy the gate. The stream-delivery
+Ack uses a separately verified Node HTTP/2 control session in this mode, keeping
+one frame reader on each server connection while the stream waits for browser
+delivery. HTTP/1.1 gates retain the SDK Ack RPC and idle TLS-close probe. Browser
+permission checks, exposed unary failure status and incremental stream delivery
+are validated on both modern HTTP transports.

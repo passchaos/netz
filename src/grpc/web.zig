@@ -8,7 +8,7 @@
 //! `runtime.ServerConnection` maps it onto the production HTTP/2 connection.
 
 const std = @import("std");
-const http2 = @import("../http2/mod.zig");
+const http2_mod = @import("../http2/mod.zig");
 const call = @import("call.zig");
 const wire = @import("wire.zig");
 const compression_mod = @import("compression.zig");
@@ -19,16 +19,18 @@ const text = @import("web/text.zig");
 const response_headers = @import("web/response_headers.zig");
 pub const cors = @import("web/cors/mod.zig");
 pub const http1 = @import("web/http1/mod.zig");
+pub const http2 = @import("web/http2/mod.zig");
 
 test {
     _ = response_headers;
     _ = cors;
     _ = http1;
+    _ = http2;
     _ = @import("web/tests.zig");
     _ = @import("web/streaming_tests.zig");
 }
 
-pub const Error = call.Error || codec.Error || content_type_mod.Error || text.Error;
+pub const Error = call.Error || codec.Error || content_type_mod.Error || text.Error || cors.Error;
 
 pub const Format = content_type_mod.Format;
 pub const ContentType = content_type_mod.ContentType;
@@ -55,7 +57,7 @@ pub fn parseUnaryRequest(
     allocator: std.mem.Allocator,
     method: []const u8,
     path: []const u8,
-    headers: []const http2.Hpack.HeaderField,
+    headers: []const http2_mod.Hpack.HeaderField,
     body: []const u8,
     content_type: ContentType,
     max_message_size: usize,
@@ -233,7 +235,7 @@ pub fn buildTrailerBlock(
 /// delivered in the body (or, for trailers-only responses, in headers), so
 /// the stream never uses an HTTP trailer block.
 pub fn writeUnaryResponse(
-    connection: *http2.runtime.Connection,
+    connection: *http2_mod.runtime.Connection,
     allocator: std.mem.Allocator,
     stream_id: u31,
     options: call.UnaryResponseOptions,
@@ -298,18 +300,18 @@ pub const StreamResponseOptions = struct {
     request_accepted_encodings: compression_mod.AlgorithmSet = .{},
     accepted_encodings: compression_mod.AlgorithmSet =
         compression_mod.AlgorithmSet.supported,
-    initial_metadata: []const http2.Hpack.HeaderField = &.{},
+    initial_metadata: []const http2_mod.Hpack.HeaderField = &.{},
     initial_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
     max_message_size: usize = 16 * 1024 * 1024,
 };
 
-const Base64Sink = text.EncoderSink(http2.runtime.ResponseWriter);
+const Base64Sink = text.EncoderSink(http2_mod.runtime.ResponseWriter);
 
 /// Streaming gRPC-Web response: zero or more data frames followed by one
 /// `0x80` trailers frame, all carried in HTTP/2 DATA with END_STREAM.
 pub const ServerStreamWriter = struct {
     allocator: std.mem.Allocator,
-    transport: http2.runtime.ResponseWriter,
+    transport: http2_mod.runtime.ResponseWriter,
     encoder: codec.Encoder,
     content_type: ContentType,
     base64_sink: Base64Sink = .{},
@@ -351,16 +353,20 @@ pub const ServerStreamWriter = struct {
         self: *ServerStreamWriter,
         status: wire.Status,
         status_message: ?[]const u8,
-        trailing_metadata: []const http2.Hpack.HeaderField,
+        trailing_metadata: []const http2_mod.Hpack.HeaderField,
         trailing_binary_metadata: []const metadata_mod.BinaryMetadata,
     ) Error!void {
-        if (self.finished) return error.InvalidStreamState;
-        const block = try buildTrailerBlock(self.allocator, .{
+        return self.finishWithOptions(.{
             .status = status,
             .status_message = status_message,
             .trailing_metadata = trailing_metadata,
             .trailing_binary_metadata = trailing_binary_metadata,
         });
+    }
+
+    pub fn finishWithOptions(self: *ServerStreamWriter, options: TerminalOptions) Error!void {
+        if (self.finished) return error.InvalidStreamState;
+        const block = try buildTrailerBlock(self.allocator, options);
         defer self.allocator.free(block);
         if (block.len > std.math.maxInt(u32)) return error.MessageTooLarge;
         var frame_header: [5]u8 = undefined;
@@ -391,7 +397,7 @@ pub const ServerStreamWriter = struct {
 
 /// Start a gRPC-Web server-streaming response with the negotiated wire.
 pub fn startServerStream(
-    connection: *http2.runtime.Connection,
+    connection: *http2_mod.runtime.Connection,
     allocator: std.mem.Allocator,
     stream_id: u31,
     options: StreamResponseOptions,

@@ -7,6 +7,7 @@ const codec = @import("../../stream/codec.zig");
 const text = @import("../text.zig");
 const response_headers = @import("../response_headers.zig");
 const adapter = @import("mod.zig");
+const server_request = @import("../server_request.zig");
 
 pub fn writeUnary(request: *adapter.Request, options: call.UnaryResponseOptions) adapter.Error!void {
     if (request.responded) return error.InvalidStreamState;
@@ -148,8 +149,7 @@ fn extras(request: *const adapter.Request) []const h2.Hpack.HeaderField {
 }
 
 fn validateCorsMetadata(request: *const adapter.Request, fields: []const h2.Hpack.HeaderField) adapter.Error!void {
-    if (request.cors_headers == null) return;
-    for (fields) |field| if (std.ascii.startsWithIgnoreCase(field.name, "access-control-")) return error.InvalidMetadata;
+    return server_request.validateCorsMetadata(request.cors_headers != null, fields);
 }
 
 fn encode(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]u8 {

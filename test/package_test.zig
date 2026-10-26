@@ -1,6 +1,18 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC-Web HTTP2 dispatch validates policy and deadline before I/O" {
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.ServerConnection, "readWebRequest"));
+    try std.testing.expect(@hasDecl(netz.grpc.web.http2.Request, "startServerStream"));
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var connection: netz.http2.runtime.Connection = .{ .allocator = failing.allocator(), .io = undefined, .stream = undefined, .role = .server };
+    try std.testing.expectError(error.InvalidCorsPolicy, netz.grpc.web.http2.readRequest(&connection, .{
+        .cors_policy = .{ .allow_any_origin = true, .allow_credentials = true },
+    }));
+    try std.testing.expectError(error.Timeout, netz.grpc.web.http2.readRequestWithTimeout(&connection, .{}, .zero));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "public gRPC-Web HTTP1 adapter validates CORS before transport work" {
     const policy: netz.grpc.web.cors.Policy = .{ .allowed_origins = &.{"https://app.example"} };
     const decision = try netz.grpc.web.cors.evaluate(policy, "POST", &.{.{ .name = "origin", .value = "https://app.example" }});

@@ -6,12 +6,10 @@ const web = @import("../../web.zig");
 const call = @import("../../call.zig");
 const cors = @import("../cors/mod.zig");
 const response = @import("response.zig");
+const server_request = @import("../server_request.zig");
 
 pub const Error = web.Error || http.runtime.Error || cors.Error;
-pub const Options = struct {
-    max_message_size: usize = 16 * 1024 * 1024,
-    cors_policy: ?cors.Policy = null,
-};
+pub const Options = server_request.Options;
 
 pub const Request = struct {
     /// Borrowed; keep the connection alive through response completion and
@@ -69,49 +67,14 @@ pub fn readRequest(connection: *http.runtime.Connection, options: Options) Error
     defer if (owned_cors) {
         if (cors_headers) |*fields| fields.deinit();
     };
-    if (options.cors_policy) |policy| {
-        const decision = cors.evaluate(policy, transport.request.method.string(), headers.fields) catch {
-            try response.handled(connection, &transport.request, 400, &.{});
-            return .{ .handled = .{ .status = 400 } };
-        };
-        cors_headers = try cors.Headers.init(connection.allocator, policy, decision);
-        const status: ?u16 = switch (decision.kind) {
-            .denied => 403,
-            .preflight => 204,
-            else => null,
-        };
-        if (status) |code| {
-            try response.handled(connection, &transport.request, code, cors_headers.?.fields);
-            return .{ .handled = .{ .status = code } };
-        }
-    }
+    const classified = try server_request.classify(options, transport.request.method.string(), headers.fields);
+    if (options.cors_policy) |policy| cors_headers = try cors.Headers.init(connection.allocator, policy, classified.cors_decision.?);
     const extra = if (cors_headers) |fields| fields.fields else &.{};
-    if (transport.request.method != .POST) {
-        try response.handled(connection, &transport.request, 405, extra);
-        return .{ .handled = .{ .status = 405 } };
-    }
-    var content_type: ?web.ContentType = null;
-    for (headers.fields) |field| {
-        if (!std.mem.eql(u8, field.name, "content-type")) continue;
-        if (content_type != null) {
-            try response.handled(connection, &transport.request, 400, extra);
-            return .{ .handled = .{ .status = 400 } };
-        }
-        content_type = web.parseContentType(field.value) catch {
-            try response.handled(connection, &transport.request, 415, extra);
-            return .{ .handled = .{ .status = 415 } };
-        };
-    }
-    const input_type = content_type orelse {
-        try response.handled(connection, &transport.request, 415, extra);
-        return .{ .handled = .{ .status = 415 } };
-    };
-    const output_type = web.negotiateResponseContentType(input_type, headers.fields) catch |err| {
-        const status: u16 = if (err == error.InvalidWebAccept) 400 else 406;
+    if (classified.status) |status| {
         try response.handled(connection, &transport.request, status, extra);
         return .{ .handled = .{ .status = status } };
-    };
-    var request = web.parseUnaryRequest(connection.allocator, "POST", transport.request.target, headers.fields, transport.request.body, input_type, options.max_message_size) catch |err| {
+    }
+    var request = web.parseUnaryRequest(connection.allocator, "POST", transport.request.target, headers.fields, transport.request.body, classified.input_type.?, options.max_message_size) catch |err| {
         if (err == error.OutOfMemory) return err;
         const status: u16 = if (err == error.GrpcMessageTooLarge) 413 else 400;
         try response.handled(connection, &transport.request, status, extra);
@@ -125,7 +88,7 @@ pub fn readRequest(connection: *http.runtime.Connection, options: Options) Error
         .connection = connection,
         .transport = transport,
         .request = request,
-        .content_type = output_type,
+        .content_type = classified.output_type.?,
         .cors_headers = cors_headers,
         .mapped_headers = headers,
         .max_message_size = options.max_message_size,

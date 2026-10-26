@@ -48,7 +48,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("server")
     parser.add_argument("--tls", action="store_true")
+    parser.add_argument("--http2", action="store_true")
     args = parser.parse_args()
+    if args.http2 and not args.tls:
+        parser.error("browser HTTP/2 requires --tls")
     client_dir = Path(__file__).with_name("grpc_web_chrome")
     if not (client_dir / "node_modules/grpc-web").exists():
         subprocess.run(["npm", "ci", "--prefix", str(client_dir), "--ignore-scripts", "--no-audit", "--no-fund"], check=True)
@@ -66,7 +69,11 @@ def main():
             files, spki = tls_files(work)
             server_args.extend(files)
             environment["CERTIFICATE_SPKI_SHA256"] = spki
+            environment["GRPC_WEB_TEST_CERTIFICATE"] = str(work / "cert.pem")
             scheme = "https"
+        if args.http2:
+            server_args.append("--http2")
+        environment["EXPECTED_HTTP_PROTOCOL"] = "h2" if args.http2 else "http/1.1"
         server = subprocess.Popen(server_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         log = []
         try:
@@ -80,7 +87,7 @@ def main():
             if not match:
                 raise RuntimeError("unexpected server readiness: " + ready)
             endpoint = f"{scheme}://localhost:{match.group(1)}"
-            if args.tls:
+            if args.tls and not args.http2:
                 # Browsers may abandon a speculative TLS connection without
                 # close_notify. Exercise that idle boundary before any RPC.
                 trust = ssl.create_default_context(cafile=str(work / "cert.pem"))

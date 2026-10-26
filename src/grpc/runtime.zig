@@ -488,6 +488,8 @@ pub const ServerConnection = struct {
     /// Read the next request when the caller has already classified it as
     /// gRPC-Web. Most applications should use `readUnaryWeb`, which performs
     /// the content-type negotiation before dispatch.
+    ///
+    /// Applications handling browser preflights should use `readWebRequest`.
     pub fn readUnaryWebWith(
         self: *ServerConnection,
         content_type: web.ContentType,
@@ -499,6 +501,26 @@ pub const ServerConnection = struct {
         self: *ServerConnection,
     ) Error!WebUnaryRequest {
         return self.readUnaryWebMaybeBefore(null, null);
+    }
+
+    /// Dispatch one gRPC-Web request, CORS preflight, or HTTP rejection.
+    /// Handled streams have already received a response and release peer credit.
+    pub fn readWebRequest(self: *ServerConnection, options: web.http2.Options) Error!web.http2.ReadResult {
+        return web.http2.readRequest(&self.connection, self.webRequestOptions(options));
+    }
+
+    pub fn readWebRequestWithTimeout(self: *ServerConnection, options: web.http2.Options, timeout: std.Io.Duration) Error!web.http2.ReadResult {
+        return web.http2.readRequestWithTimeout(&self.connection, self.webRequestOptions(options), timeout);
+    }
+
+    pub fn readWebRequestWithDeadline(self: *ServerConnection, options: web.http2.Options, deadline: std.Io.Clock.Timestamp) Error!web.http2.ReadResult {
+        return web.http2.readRequestWithDeadline(&self.connection, self.webRequestOptions(options), deadline);
+    }
+
+    fn webRequestOptions(self: *const ServerConnection, options: web.http2.Options) web.http2.Options {
+        var bounded = options;
+        bounded.max_message_size = @min(self.max_message_size, options.max_message_size);
+        return bounded;
     }
 
     pub fn readUnaryWebWithTimeout(
