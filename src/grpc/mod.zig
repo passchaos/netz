@@ -11,6 +11,7 @@ pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
 pub const call = @import("call.zig");
+pub const web = @import("web.zig");
 pub const runtime = @import("runtime.zig");
 pub const health = @import("health.zig");
 pub const reflection = @import("reflection.zig");
@@ -101,6 +102,7 @@ pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
     _ = auth;
+    _ = web;
     _ = @import("tests.zig");
     _ = @import("runtime_tests.zig");
     _ = runtime;

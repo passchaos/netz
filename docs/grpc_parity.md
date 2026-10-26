@@ -440,3 +440,25 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
 parity.
+
+## gRPC-Web unary server support
+
+The production h2c/TLS gRPC server now speaks the gRPC-Web wire protocol
+(https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md) for unary RPCs.
+`grpc.web.parseContentType` classifies all six media types
+(`application/grpc-web[+proto|+json]` and `application/grpc-web-text[+proto|+json]`,
+case-insensitive with HTTP parameter tolerance) while rejecting plain
+`application/grpc` so the two paths cannot be confused. `ServerConnection.readUnaryWeb`
+performs the content-type negotiation, omits the browser-forbidden `te:
+trailers` requirement, accepts exactly one length-prefixed request message, and
+base64-decodes `-text` entities into request-owned storage; `writeUnaryWeb`
+returns the negotiated media type and delivers terminal `grpc-status`,
+`grpc-message`, pushback, and custom (including binary) metadata in one `0x80`
+in-body trailers frame with no HTTP trailer block, while trailers-only errors
+remain in the response headers. Compression negotiation reuses the standard
+gRPC algorithms and grpc-accept-encoding rules. Pure codec tests cover all media
+types, text decode ownership, malformed base64, and zero/duplicate message
+rejection; real h2c loopback tests exercise binary and base64 unary calls with
+custom trailer metadata and a trailers-only UNAUTHENTICATED response. Client and
+server streaming over gRPC-Web remain future work; unary is the browser XHR/fetch
+shape the spec requires servers to support.

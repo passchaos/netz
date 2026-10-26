@@ -8,6 +8,7 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const auth = @import("auth.zig");
 const call = @import("call.zig");
+const web = @import("web.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
 const service_config = @import("service_config.zig");
@@ -16,7 +17,7 @@ const duplex = @import("stream/duplex.zig");
 
 const net = std.Io.net;
 
-pub const Error = call.Error;
+pub const Error = web.Error;
 
 pub const ClientOptions = struct {
     limits: http2.runtime.Limits = .{},
@@ -484,6 +485,114 @@ pub const ServerConnection = struct {
         );
     }
 
+    /// Read the next request when the caller has already classified it as
+    /// gRPC-Web. Most applications should use `readUnaryWeb`, which performs
+    /// the content-type negotiation before dispatch.
+    pub fn readUnaryWebWith(
+        self: *ServerConnection,
+        content_type: web.ContentType,
+    ) Error!WebUnaryRequest {
+        return self.readUnaryWebMaybeBefore(content_type, null);
+    }
+
+    pub fn readUnaryWeb(
+        self: *ServerConnection,
+    ) Error!WebUnaryRequest {
+        return self.readUnaryWebMaybeBefore(null, null);
+    }
+
+    pub fn readUnaryWebWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+    ) Error!WebUnaryRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readUnaryWebMaybeBefore(
+            null,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn readUnaryWebWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!WebUnaryRequest {
+        return self.readUnaryWebMaybeBefore(null, deadline);
+    }
+
+    fn readUnaryWebMaybeBefore(
+        self: *ServerConnection,
+        preselected_content_type: ?web.ContentType,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!WebUnaryRequest {
+        var transport = if (deadline) |absolute|
+            try self.connection.readRequestWithDeadline(absolute)
+        else
+            try self.connection.readRequest();
+        errdefer transport.deinit(self.connection.allocator);
+        const negotiated = preselected_content_type orelse blk: {
+            const raw = call.headerValue(
+                transport.headers,
+                "content-type",
+            ) orelse {
+                self.connection.abandonPeerRequest(
+                    transport.stream_id,
+                    .internal_error,
+                );
+                return error.InvalidContentType;
+            };
+            const parsed = web.parseContentType(raw) catch |err| {
+                self.connection.abandonPeerRequest(
+                    transport.stream_id,
+                    .internal_error,
+                );
+                return err;
+            };
+            break :blk parsed;
+        };
+        var request = web.parseUnaryRequest(
+            self.connection.allocator,
+            transport.method,
+            transport.path,
+            transport.headers,
+            transport.body,
+            negotiated,
+            self.max_message_size,
+        ) catch |err| {
+            self.connection.abandonPeerRequest(
+                transport.stream_id,
+                .internal_error,
+            );
+            return err;
+        };
+        request.stream_id = transport.stream_id;
+        return .{
+            .transport = transport,
+            .request = request,
+            .content_type = negotiated,
+        };
+    }
+
+    /// Write one gRPC-Web unary response in the negotiated text or binary
+    /// wire. Terminal status travels in the `0x80` body frame (or headers for
+    /// a trailers-only response), never as an HTTP trailer block.
+    pub fn writeUnaryWeb(
+        self: *ServerConnection,
+        stream_id: u31,
+        options: call.UnaryResponseOptions,
+        content_type: web.ContentType,
+    ) Error!void {
+        return web.writeUnaryResponse(
+            &self.connection,
+            self.connection.allocator,
+            stream_id,
+            options,
+            content_type,
+        );
+    }
+
     /// Require one RFC 6750 Bearer credential before application dispatch.
     /// Rejection is a trailers-only UNAUTHENTICATED response and affects only
     /// this stream, so the HTTP/2 channel remains available for another RPC.
@@ -658,6 +767,21 @@ pub const OwnedUnaryRequest = struct {
     request: call.UnaryRequest,
 
     pub fn deinit(self: *OwnedUnaryRequest) void {
+        const allocator = self.request.allocator;
+        self.request.deinit();
+        self.transport.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// One accepted unary gRPC-Web RPC plus the negotiated text/binary wire the
+/// matching `writeUnaryWeb` response must use.
+pub const WebUnaryRequest = struct {
+    transport: http2.runtime.OwnedRequest,
+    request: call.UnaryRequest,
+    content_type: web.ContentType,
+
+    pub fn deinit(self: *WebUnaryRequest) void {
         const allocator = self.request.allocator;
         self.request.deinit();
         self.transport.deinit(allocator);

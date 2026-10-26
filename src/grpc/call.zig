@@ -83,6 +83,27 @@ pub fn parseRequestMetadata(
     )) {
         return error.InvalidGrpcRequest;
     }
+    return parseValidatedRequestMetadata(path_value, headers);
+}
+
+/// gRPC-Web requests omit the `te: trailers` header that browsers are not
+/// allowed to set. The content type is already validated by the web module,
+/// so this only validates POST, path, timeout, and compression metadata.
+pub fn parseWebRequestMetadata(
+    method: []const u8,
+    path_value: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+) Error!RequestMetadata {
+    if (!std.mem.eql(u8, method, "POST")) {
+        return error.InvalidGrpcRequest;
+    }
+    return parseValidatedRequestMetadata(path_value, headers);
+}
+
+fn parseValidatedRequestMetadata(
+    path_value: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+) Error!RequestMetadata {
     const path = try splitMethodPath(path_value);
     return .{
         .path = path_value,
@@ -104,13 +125,56 @@ pub fn parseUnaryRequest(
     request: *const http2.runtime.OwnedRequest,
     max_message_size: usize,
 ) Error!UnaryRequest {
-    const metadata = try parseRequestMetadata(
+    return parseUnaryRequestParts(
+        allocator,
+        request.stream_id,
         request.method,
         request.path,
         request.headers,
-    );
-    var iterator = MessageIterator.init(
         request.body,
+        max_message_size,
+        false,
+    );
+}
+
+pub fn parseWebUnaryRequest(
+    allocator: std.mem.Allocator,
+    method: []const u8,
+    path_value: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+    body: []const u8,
+    max_message_size: usize,
+) Error!UnaryRequest {
+    return parseUnaryRequestParts(
+        allocator,
+        // The HTTP/2 stream identifier is transport metadata. Body-level
+        // parsing is stream-independent; callers fill it in after parsing.
+        0,
+        method,
+        path_value,
+        headers,
+        body,
+        max_message_size,
+        true,
+    );
+}
+
+fn parseUnaryRequestParts(
+    allocator: std.mem.Allocator,
+    stream_id: u31,
+    method: []const u8,
+    path_value: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+    body: []const u8,
+    max_message_size: usize,
+    web: bool,
+) Error!UnaryRequest {
+    const metadata = if (web)
+        try parseWebRequestMetadata(method, path_value, headers)
+    else
+        try parseRequestMetadata(method, path_value, headers);
+    var iterator = MessageIterator.init(
+        body,
         max_message_size,
     );
     const message = (try iterator.next()) orelse
@@ -129,7 +193,7 @@ pub fn parseUnaryRequest(
     errdefer decoded.deinit(allocator);
     return .{
         .allocator = allocator,
-        .stream_id = request.stream_id,
+        .stream_id = stream_id,
         .path = metadata.path,
         .service = metadata.service,
         .method = metadata.method,
@@ -141,7 +205,7 @@ pub fn parseUnaryRequest(
         .timeout = metadata.timeout,
         .encoding = metadata.encoding,
         .accepted_encodings = metadata.accepted_encodings,
-        .headers = request.headers,
+        .headers = headers,
         .owned_message = decoded.owned,
     };
 }
