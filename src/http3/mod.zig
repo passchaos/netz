@@ -1,5 +1,9 @@
 const std = @import("std");
 const authority_semantics = @import("../http/authority/mod.zig");
+
+test {
+    _ = @import("origin_normalization_tests.zig");
+}
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
 const exact_range_set = @import("../internal/exact_range_set.zig");
@@ -157,12 +161,12 @@ pub const OriginKey = struct {
 /// scheme/host/port key used by those decisions.
 pub fn requestOrigin(scheme: []const u8, authority: []const u8) Error!Origin {
     try validateUriScheme(scheme);
-    try validateRequestAuthority(authority);
+    const parsed_authority = authority_semantics.parse(authority) catch return error.InvalidHeader;
     const default_port = defaultPortForScheme(scheme) orelse return error.InvalidHeader;
     return .{
         .scheme = scheme,
-        .host = try altSvcAuthorityHost(authority),
-        .port = altSvcPort(authority) orelse default_port,
+        .host = if (parsed_authority.kind == .future) authority[0 .. parsed_authority.host.len + 2] else parsed_authority.host,
+        .port = parsed_authority.port orelse default_port,
     };
 }
 
@@ -204,19 +208,14 @@ pub fn originFromSerialized(serialized: []const u8) Error!Origin {
     {
         return error.InvalidOrigin;
     }
-    const host_component = uri.host orelse return error.InvalidOrigin;
-    const host = switch (host_component) {
-        .raw, .percent_encoded => |value| value,
-    };
-    if (host.len == 0) return error.InvalidOrigin;
-    const normalized_host = normalizeAltSvcHost(host) catch
-        return error.InvalidOrigin;
-    const default_port = defaultPortForScheme(uri.scheme) orelse
-        return error.InvalidOrigin;
+    if (serialized.len < uri.scheme.len + 3 or !std.mem.eql(u8, serialized[uri.scheme.len..][0..3], "://")) return error.InvalidOrigin;
+    const raw_authority = serialized[uri.scheme.len + 3 ..];
+    const parsed_authority = authority_semantics.parse(raw_authority) catch return error.InvalidOrigin;
+    const default_port = defaultPortForScheme(uri.scheme) orelse return error.InvalidOrigin;
     return .{
         .scheme = uri.scheme,
-        .host = normalized_host,
-        .port = uri.port orelse default_port,
+        .host = if (parsed_authority.kind == .future) raw_authority[0 .. parsed_authority.host.len + 2] else parsed_authority.host,
+        .port = parsed_authority.port orelse default_port,
     };
 }
 
@@ -229,10 +228,15 @@ pub fn originKeyFromOrigin(
     allocator: std.mem.Allocator,
     origin: Origin,
 ) Error!OriginKey {
+    try validateUriScheme(origin.scheme);
+    const owned_host = authority_semantics.canonicalHostAlloc(allocator, origin.host) catch |err| switch (err) {
+        error.InvalidAuthority => return error.InvalidHeader,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    errdefer allocator.free(owned_host);
     const owned_scheme = try asciiLowerAlloc(allocator, origin.scheme);
     errdefer allocator.free(owned_scheme);
-    const owned_host = try asciiLowerAlloc(allocator, origin.host);
-    errdefer allocator.free(owned_host);
+
     return .{
         .allocator = allocator,
         .scheme = owned_scheme,
@@ -256,24 +260,13 @@ fn cloneOriginKey(
     };
 }
 
-fn cloneOrigin(
-    allocator: std.mem.Allocator,
-    origin: Origin,
-) std.mem.Allocator.Error!OriginKey {
-    const scheme = try allocator.dupe(u8, origin.scheme);
-    errdefer allocator.free(scheme);
-    const host = try allocator.dupe(u8, origin.host);
-    return .{
-        .allocator = allocator,
-        .scheme = scheme,
-        .host = host,
-        .port = origin.port,
-    };
+fn cloneOrigin(allocator: std.mem.Allocator, origin: Origin) Error!OriginKey {
+    return originKeyFromOrigin(allocator, origin);
 }
 
 pub fn sameOrigin(a: Origin, b: Origin) bool {
     return std.ascii.eqlIgnoreCase(a.scheme, b.scheme) and
-        std.ascii.eqlIgnoreCase(a.host, b.host) and
+        authority_semantics.hostEquivalent(a.host, b.host) and
         a.port == b.port;
 }
 

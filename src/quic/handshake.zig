@@ -2122,6 +2122,10 @@ fn connectAttempt(
     defer if (peer_certificate) |*certificate| {
         certificate.deinit(endpoint.allocator);
     };
+    // Parsed entries borrow this decompressed message until the established
+    // connection makes its own DER copies at the end of the handshake.
+    var owned_certificate_bytes: ?[]u8 = null;
+    defer if (owned_certificate_bytes) |owned| endpoint.allocator.free(owned);
     var established_certificate_compression: ?quic.tls.certificate_compression.Algorithm = null;
     if (resumed) {
         if (server_flight.certificate != null or
@@ -2138,10 +2142,6 @@ fn connectAttempt(
         // RFC 8879: a type-0x19 message is decompressed for chain parsing,
         // while the transcript continues over the compressed bytes because
         // server_flight.through_certificate keeps the original flight slice.
-        var owned_certificate_bytes: ?[]u8 = null;
-        defer if (owned_certificate_bytes) |owned| {
-            endpoint.allocator.free(owned);
-        };
         const certificate_bytes = if (raw_certificate_bytes[0] ==
             quic.tls.certificate_compression.handshake_type_compressed_certificate)
         blk: {
@@ -5737,6 +5737,7 @@ fn appendTestHandshakeMessage(
 }
 
 test {
+    _ = @import("handshake/certificate_ownership_tests.zig");
     _ = @import("handshake/failure_tests.zig");
     _ = @import("handshake/tests.zig");
     _ = @import("handshake/key_exchange_tests.zig");

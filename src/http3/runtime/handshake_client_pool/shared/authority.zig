@@ -2,6 +2,7 @@
 //! connection driver to concurrent request producers.
 
 const std = @import("std");
+const host_authority = @import("../../../../http/authority/mod.zig");
 const http3 = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
 const route = @import("route.zig");
@@ -100,7 +101,7 @@ pub const Snapshot = struct {
     pub fn allows(self: *const Snapshot, key: *const route.Key) bool {
         const origin = key.origin();
         for (self.entries[0..self.entry_count]) |entry| {
-            if (entry.port == origin.port and std.ascii.eqlIgnoreCase(
+            if (entry.port == origin.port and host_authority.hostEquivalent(
                 self.storage[entry.host_offset..][0..entry.host_len],
                 origin.host,
             )) return true;

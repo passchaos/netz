@@ -5,6 +5,7 @@
 //! it needs while leaving request payload ownership with the producer.
 
 const std = @import("std");
+const authority = @import("../../../../http/authority/mod.zig");
 const http3 = @import("../../../mod.zig");
 const connection_budget = @import("../../../../internal/connection_budget.zig");
 
@@ -71,7 +72,7 @@ pub const Key = struct {
                     self.connect_host[0..self.connect_host_len],
                     target.connect_host,
                 ) and
-                std.ascii.eqlIgnoreCase(
+                authority.hostEquivalent(
                     self.origin_host[0..self.origin_host_len],
                     target.origin_host,
                 );
@@ -88,7 +89,7 @@ pub const Key = struct {
                     self.connect_host[0..self.connect_host_len],
                     other.connect_host[0..other.connect_host_len],
                 ) and
-                std.ascii.eqlIgnoreCase(
+                authority.hostEquivalent(
                     self.origin_host[0..self.origin_host_len],
                     other.origin_host[0..other.origin_host_len],
                 );
@@ -107,10 +108,11 @@ pub const Key = struct {
             return error.InvalidUri;
         }
         const host_component = uri.host orelse return error.InvalidUri;
-        var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
-        const raw_host = host_component.toRaw(&host_buffer) catch
-            return error.InvalidUri;
-        const host = normalizedUriHost(raw_host) orelse
+        const raw_host = switch (host_component) {
+            .raw, .percent_encoded => |value| value,
+        };
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = authority.canonicalHostInto(&host_buffer, raw_host) catch
             return error.InvalidUri;
         if (host.len > net.HostName.max_len) return error.InvalidUri;
         var self: Key = .{
@@ -140,10 +142,12 @@ pub const Key = struct {
             return false;
         }
         const host_component = uri.host orelse return false;
-        var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
-        const raw_host = host_component.toRaw(&host_buffer) catch return false;
-        const host = normalizedUriHost(raw_host) orelse return false;
-        if (!std.ascii.eqlIgnoreCase(
+        const raw_host = switch (host_component) {
+            .raw, .percent_encoded => |value| value,
+        };
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = authority.canonicalHostInto(&host_buffer, raw_host) catch return false;
+        if (!authority.hostEquivalent(
             self.origin_host[0..self.origin_host_len],
             host,
         )) return false;
@@ -156,7 +160,7 @@ pub const Key = struct {
 
     pub fn eql(self: *const Key, other: *const Key) bool {
         if (self.origin_port != other.origin_port or
-            !std.ascii.eqlIgnoreCase(
+            !authority.hostEquivalent(
                 self.origin_host[0..self.origin_host_len],
                 other.origin_host[0..other.origin_host_len],
             ) or
@@ -185,26 +189,6 @@ fn sameReclaimer(
 ) bool {
     if (a == null or b == null) return a == null and b == null;
     return a.?.context == b.?.context and a.?.reclaim == b.?.reclaim;
-}
-
-fn normalizedUriHost(raw: []const u8) ?[]const u8 {
-    if (raw.len == 0) return null;
-    if (raw[0] == '[') {
-        if (raw.len < 3 or raw[raw.len - 1] != ']') return null;
-        const inner = raw[1 .. raw.len - 1];
-        if (std.mem.indexOfScalar(u8, inner, '[') != null or
-            std.mem.indexOfScalar(u8, inner, ']') != null)
-        {
-            return null;
-        }
-        return inner;
-    }
-    if (std.mem.indexOfScalar(u8, raw, '[') != null or
-        std.mem.indexOfScalar(u8, raw, ']') != null)
-    {
-        return null;
-    }
-    return raw;
 }
 
 test "shared HTTP/3 route key normalizes origins and isolates route policy" {
@@ -286,4 +270,22 @@ test "shared HTTP/3 route key normalizes origins and isolates route policy" {
             .port = 443,
         }, null),
     );
+}
+
+test "shared HTTP/3 route key recognizes canonical IPv6 and escaped host aliases" {
+    const aliases = [_][2][]const u8{
+        .{ "https://%65xample.test/path", "https://EXAMPLE.test:443/other" },
+        .{ "https://[2001:DB8:0:0:0:0:0:1]/path", "https://[2001:db8::1]:443/other" },
+        .{ "https://[::ffff:c000:201]/path", "https://[::ffff:192.0.2.1]:443/other" },
+    };
+    for (aliases) |pair| {
+        const first = try Key.init(pair[0], null, null);
+        const second = try Key.init(pair[1], null, null);
+        try std.testing.expect(first.matches(pair[1], null, null));
+        try std.testing.expect(first.eql(&second));
+        try std.testing.expect(http3.sameOrigin(first.origin(), second.origin()));
+    }
+    const encoded = try Key.init("https://a%2Bb.test/", null, null);
+    try std.testing.expect(!encoded.matches("https://a+b.test/", null, null));
+    try std.testing.expect(!encoded.matches("https://a%2Bb.test:444/", null, null));
 }

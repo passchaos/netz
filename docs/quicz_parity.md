@@ -1059,6 +1059,14 @@ accepted cross-origin connection, certificate-mismatch isolation, 421
 exclusion, and ordinary 1-RTT behavior even through the early-capable
 acquisition path. A unified two-origin H2 Alt-Svc discovery test independently
 requires one H3/QUIC accept for both authorities.
+Host identity now uses the same shared authority module for owned origin keys,
+idle-pool hash lookup, active route matching, and authorization snapshots.
+Unreserved percent escapes and IPv6 textual aliases select the same origin;
+reserved escapes remain encoded, and bracketed IPvFuture literals cannot
+collide with DNS names. ORIGIN deduplication, 421 exclusion, and later
+re-authorization use that same identity. A real authenticated shared-route
+regression advertises `https://%6cocalhost:4444`, coalesces the normalized
+`localhost` origin, applies 421 revocation, and isolates unauthorized origins.
 The unified HTTP pool now closes the next product boundary: after an
 authenticated H2 response advertises H3, two later URI requests select H3 and
 reuse one QUIC connection while returning the common owned response type. A
@@ -2870,9 +2878,8 @@ The netz QUIC client (`src/quic/tls_client_hello.zig`) also advertises RFC
 compressed Certificate messages: the client handshake decompresses with vail
 (enforcing the advertised-algorithm and a 64 KiB bound before allocation) for
 chain verification while the transcript retains the compressed message as
-required by the spec. The QUIC server's ClientHello parser already ignores the
-unknown extension, so compressed-cert offers never break existing servers;
-the QUIC server does not yet emit compressed Certificates itself. Tests cover
+required by the spec. Servers with compression disabled accept the offer and
+send the ordinary Certificate message. Tests cover
 the extension encoding (default/custom/omitted), the 0x19 server-flight split
 with transcript boundaries, decompression round trip, and unoffered-algorithm
 rejection. QUIC servers now also emit compressed Certificates: the server
@@ -2883,3 +2890,11 @@ stays valid; an authenticated handshake with a six-copy DER chain proves the
 client decompresses and verifies it, while a server with compression disabled
 still completes the same handshake with an uncompressed Certificate. The
 negotiated algorithm is exposed on the established connection.
+
+The client now retains decompressed Certificate storage until the established
+connection owns its DER copies. Parsed chain entries borrow that storage;
+freeing it immediately after authentication left later identity checks reading
+released memory during HTTP/3 connection coalescing. A real handshake
+regression forces zlib, brotli, and zstd separately, asserts the selected
+algorithm and exact retained DER, and verifies both accepted and mismatched
+server identities after `connectWithTimeout` returns.

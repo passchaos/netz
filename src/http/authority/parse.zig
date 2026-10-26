@@ -8,7 +8,7 @@ pub const Parsed = struct {
     host: []const u8,
     port: ?u16,
     kind: Kind,
-    address: [16]u8 = undefined,
+    address: [16]u8 = @splat(0),
 };
 
 pub fn parse(raw: []const u8) Error!Parsed {
@@ -58,7 +58,7 @@ fn validateName(host: []const u8) Error!void {
     }
 }
 
-fn validateFuture(host: []const u8) Error!void {
+pub fn validateFuture(host: []const u8) Error!void {
     const dot = std.mem.indexOfScalar(u8, host, '.') orelse return error.InvalidAuthority;
     if (dot <= 1 or dot + 1 == host.len) return error.InvalidAuthority;
     for (host[1..dot]) |byte| if (!std.ascii.isHex(byte)) return error.InvalidAuthority;

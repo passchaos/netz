@@ -7,6 +7,7 @@
 //! handles that expire or exceed capacity.
 
 const std = @import("std");
+const authority = @import("../http/authority/mod.zig");
 const http3 = @import("mod.zig");
 
 const OriginIndexKey = struct {
@@ -20,8 +21,7 @@ const OriginIndexContext = struct {
         var hasher = std.hash.Wyhash.init(0);
         std.hash.autoHash(&hasher, key.scheme.len);
         updateLower(&hasher, key.scheme);
-        std.hash.autoHash(&hasher, key.host.len);
-        updateLower(&hasher, key.host);
+        std.hash.autoHash(&hasher, authority.hostHash(key.host) catch 0);
         std.hash.autoHash(&hasher, key.port);
         return hasher.final();
     }
@@ -29,7 +29,7 @@ const OriginIndexContext = struct {
     pub fn eql(_: @This(), lhs: OriginIndexKey, rhs: OriginIndexKey) bool {
         return lhs.port == rhs.port and
             std.ascii.eqlIgnoreCase(lhs.scheme, rhs.scheme) and
-            std.ascii.eqlIgnoreCase(lhs.host, rhs.host);
+            authority.hostEquivalent(lhs.host, rhs.host);
     }
 
     fn updateLower(hasher: *std.hash.Wyhash, bytes: []const u8) void {

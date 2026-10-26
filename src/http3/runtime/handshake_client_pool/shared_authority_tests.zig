@@ -3,7 +3,7 @@ const http3 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const tls_testing = @import("../../../tls/testing.zig");
 
-test "HTTP/3 active route coalesces authorized ORIGIN and honors 421" {
+test "HTTP/3 active route coalesces normalized authorized ORIGIN and honors 421" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -40,7 +40,7 @@ test "HTTP/3 active route coalesces authorized ORIGIN and honors 421" {
 
     const authority_a = "localhost:4443";
     const authority_b = "localhost:4444";
-    const origin_b = "https://localhost:4444";
+    const origin_b = "https://%6cocalhost:4444";
     const origin_c = "https://unauthorized.invalid:4445";
     const Worker = struct {
         server: *runtime.HandshakeServer,

@@ -1,6 +1,18 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP3 origin equality and keys recognize normalized hosts" {
+    const allocator = std.testing.allocator;
+    const original = try netz.http3.requestOrigin("https", "[2001:DB8:0:0:0:0:0:1]");
+    const alias = try netz.http3.requestOrigin("HTTPS", "[2001:db8::1]:443");
+    try std.testing.expect(netz.http3.sameOrigin(original, alias));
+    var key = try netz.http3.originKeyFromOrigin(allocator, original);
+    defer key.deinit();
+    try std.testing.expectEqualStrings("2001:db8::1", key.host);
+    try std.testing.expectEqualStrings("https", key.scheme);
+    try std.testing.expectEqual(try netz.http.authority.hostHash(original.host), try netz.http.authority.hostHash(alias.host));
+}
+
 test "public HTTP authority compares normalized request origins" {
     try std.testing.expect(netz.http.authority.equivalent("https", "Example.test:", "example.test:443"));
     try std.testing.expect(netz.http.authority.equivalent("http", "[2001:db8::1]", "[2001:db8:0:0:0:0:0:1]:80"));

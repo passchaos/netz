@@ -174,6 +174,11 @@ fn exerciseAll(bytes: []const u8) !void {
 }
 
 fn exerciseHttp(bytes: []const u8) !void {
+    if (netz.http.authority.canonicalHostAlloc(std.testing.allocator, bytes)) |canonical| {
+        defer std.testing.allocator.free(canonical);
+        try std.testing.expect(netz.http.authority.hostEquivalent(bytes, canonical));
+        try std.testing.expectEqual(try netz.http.authority.hostHash(bytes), try netz.http.authority.hostHash(canonical));
+    } else |_| {}
     if (netz.http.authority.parse(bytes)) |parsed| {
         try std.testing.expect(parsed.host.len != 0 and parsed.host.len <= bytes.len);
         try std.testing.expect(netz.http.authority.equivalent("https", bytes, bytes));

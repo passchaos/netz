@@ -4,6 +4,9 @@
 starts with deterministic parsers, serializers, preallocated fixed-width
 wire-integer helpers, and state helpers across four public protocol families.
 
+Ongoing HTTP development targets the widely used HTTP/1.1, HTTP/2, and HTTP/3
+versions. HTTP/1.0 is outside the supported-feature goal.
+
 The four public protocol families share a bounded parser fuzz target.
 `zig build fuzz-parsers` replays valid and hostile HTTP/1, HTTP/2, HTTP/3,
 HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds plus deterministic
@@ -594,9 +597,12 @@ Current protocol coverage includes:
   an incremental iterator for CONNECT stream data, borrowed and owning
   normalized HTTP/3 origin keys for conservative connection-reuse/coalescing
   policy decisions including direct owned-key construction from parsed origins,
+  with shared host equality, canonical text, and hashing for unreserved
+  percent escapes and IPv6 address aliases; reserved escapes and IPvFuture
+  literals retain distinct identity across route keys and ORIGIN authorization,
   plus an indexed generic origin-keyed idle pool with empty-pool miss fast paths,
   exact-origin preference, bounded policy-filtered cross-origin selection,
-  stable connection-origin ownership, chunked case-folded hashing, and
+  stable connection-origin ownership, canonical host hashing, and
   single-lookup release/new-origin append checks for runtime-specific
   client handles with explicit expiry pruning and targeted index repair,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, bidirectional message-stream and non-critical extension-stream role-validation skips before preallocated control-state rollback cloning, forbidden frame rejection on control/request streams including misplaced WebTransport stream prefixes, client-initiated push-stream rejection, and prefix-driven peer-unidirectional stream classification that reassembles offset-zero type bytes before routing control/QPACK/push streams or draining unknown reserved types, without assuming fixed critical stream IDs; stateful routing returns consumed control/QPACK/unknown bytes to both QUIC receive windows, retires terminal unknown streams to restore MAX_STREAMS credit, while push streams return their fragmented association prefix exactly once before preserving application DATA backpressure, preserves reordered WebTransport 0x54 prefixes on both roles, and failed MAX_DATA/MAX_STREAM_DATA writes retry from the connection timer with fair MTU-bounded multi-stream credit coalescing; QPACK encoder/decoder critical stream registration with duplicate-stream `H3_STREAM_CREATION_ERROR` plus FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, checked prefix-integer decoding through the maximum `usize` with bounded wider-value rejection, preallocated/assume-capacity varint writes plus transactional single-reservation field-section prefixes and Encoder Stream instructions, all relative/post-base dynamic field-line forms with blocking/eviction distinction and never-indexed preservation, Huffman-capable encoder with reused length prechecks/exact slice allocation and direct-to-target byte emission plus preallocated decoder with empty-input fast paths, instruction codecs with preallocated instruction and field-section literal-name writes, a connection-scoped decoder with out-of-order/split encoder-stream reassembly plus preallocated coalesced feedback, and a non-blocking encoder state with Known Received Count gating, decoder-stream reassembly, single-pass outstanding reference accounting with adjacent duplicate fast paths, empty-reference eviction checks, single-probe pending-section indexing with empty-index skips, tail-release fast paths, and prohibited-eviction prevention, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection, cached multi-set drain-floor checks, and same-control-stream GOAWAY emission with persistent control-stream offsets,
