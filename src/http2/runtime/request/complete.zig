@@ -5,11 +5,13 @@ const headers = @import("../headers/message.zig");
 const outbound_headers = @import("../headers/connection.zig");
 const cleanup = @import("../response/cleanup.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
+const upload = @import("upload.zig");
 
 pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, comptime Context: anytype) Context.ErrorType!Context.PendingType {
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
     if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
     if (self.role != .client) return error.UnexpectedFrame;
+    try Context.synchronize(self, deadline);
     // A previous reset reason is useful only to the operation that
     // returned StreamReset. Starting a new request invalidates any value
     // that its caller chose not to consume.
@@ -91,6 +93,8 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
     const stream_id = try Context.reserve(self);
     var head_committed = false;
+    var body_written: usize = 0;
+    var response_available = false;
     errdefer |err| {
         // A partial wire write forbids any appended CANCEL frame. If a
         // complete head was sent before a flow-control timeout or OOM, retire
@@ -106,7 +110,7 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
     if (request_options.body.len != 0 and
         request_options.trailers.len == 0)
     {
-        try Context.burst(
+        Context.burst(
             self,
             stream_id,
             fields.items,
@@ -114,7 +118,11 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
             true,
             deadline,
             &head_committed,
-        );
+            &body_written,
+        ) catch |err| {
+            if (err != error.ResponseAvailable) return @as(Context.ErrorType!Context.PendingType, err);
+            response_available = true;
+        };
     } else {
         try Context.headers(
             self,
@@ -126,21 +134,27 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
         );
         head_committed = true;
         if (request_options.body.len != 0) {
-            var written: usize = 0;
-            try Context.data(
+            Context.data(
                 self,
                 stream_id,
                 request_options.body,
                 false,
-                &written,
+                &body_written,
                 deadline,
-            );
+            ) catch |err| {
+                if (err != error.ResponseAvailable) return @as(Context.ErrorType!Context.PendingType, err);
+                response_available = true;
+            };
         }
     }
-    if (request_options.trailers.len != 0) try Context.headers(self, stream_id, request_options.trailers, true, deadline);
+    if (!response_available and request_options.trailers.len != 0) try Context.headers(self, stream_id, request_options.trailers, true, deadline);
     return .{
         .stream_id = stream_id,
         .request_method = request_options.method,
         .extended_connect = extended_connect,
+        .upload = if (response_available) upload.Upload{
+            .body = request_options.body[body_written..],
+            .trailers = request_options.trailers,
+        } else null,
     };
 }

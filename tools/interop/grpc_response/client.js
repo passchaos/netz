@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
 const assert = require('node:assert/strict');
+const {WireRelay} = require('./relay');
 const referenceVersion = require('@grpc/grpc-js/package.json').version;
 assert.equal(referenceVersion, '1.14.0', 'the reference SDK must match the pinned fixture');
 
@@ -39,12 +40,14 @@ const probes = [
     ['normalized-percent-host','%65xample.test','example.test:80'],
     ['normalized-ipv6-host','[2001:DB8::1]','[2001:db8:0:0:0:0:0:1]:80'],
   ].map(([name,requestAuthority,requestHost]) => ({name,requestAuthority,requestHost,status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}})),
+  ...[false,true].map(earlyReset => ({name:earlyReset?'early-upload-no-error-reset':'early-upload-error',status:7,headers:{'content-type':'application/grpc'},body:Buffer.alloc(0),trailers:{'grpc-status':'7','grpc-message':'early%20denial','x-early':'yes'},requestPayload:'x'.repeat(32*1024),statusMessage:'early denial',early:true,earlyReset,unaryOnly:true})),
+  {name:'success-after-early-upload',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}},
 ];
 
-async function reference(client, probe, index) {
+async function reference(client, probe, index, relay) {
   const metadata = new grpc.Metadata();
   if (probe.requestHost) metadata.set('host',probe.requestHost);
-  const call = client.makeServerStreamRequest(`/fixture.Response/Case${index}`, x=>x, x=>x, Buffer.alloc(0), metadata, {deadline:Date.now()+5000,host:probe.requestAuthority});
+  const call = client.makeServerStreamRequest(`/fixture.Response/Case${index}`, x=>x, x=>x, Buffer.from(probe.requestPayload ?? ''), metadata, {deadline:Date.now()+5000,host:probe.requestAuthority});
   const messages = [];
   call.on('data', message => messages.push(message));
   call.on('error', () => {});
@@ -53,6 +56,7 @@ async function reference(client, probe, index) {
   assert.equal(messages.length, probe.messages ?? 0, probe.name);
   for (const message of messages) assert.equal(message.toString(), probe.payload, probe.name);
   if (probe.details) assert.deepEqual(status.metadata.get('grpc-status-details-bin'), [Buffer.from([8,7])]);
+  if (probe.early) await relay.waitForClosed(index);
   return status.code;
 }
 
@@ -81,56 +85,99 @@ function native(executable, port, manifest) {
 async function main() {
   assert.equal(process.argv.length, 3);
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'netz-grpc-response-'));
-  const server = http2.createServer({settings:{maxConcurrentStreams:1}});
+  const server = http2.createServer({settings:{maxConcurrentStreams:1,initialWindowSize:1024}});
   const sessions = new Set();
   const counts = probes.map(() => 0);
+  const closed = new Map();
   let failure;
+  let relay;
+  let clientPort;
   server.on('session', session => { sessions.add(session); session.on('error', error => {failure ??= error;}); });
   server.on('stream', (stream, headers) => {
     const chunks = [];
     let size = 0;
     stream.on('error', () => {});
-    stream.on('data', chunk => {size += chunk.length; if (size > 5) {failure ??= new Error('unexpected request size'); stream.close(1);} else chunks.push(chunk);});
-    stream.on('end', () => {
-      try {
-        assert.deepEqual(Buffer.concat(chunks), Buffer.alloc(5));
-        const match = /^\/fixture.Response\/Case(\d+)$/.exec(headers[':path']);
-        assert.ok(match);
-        assert.equal(headers[':scheme'], 'http');
-        assert.ok(headers[':authority']);
-        const index = Number(match[1]);
-        const probe = probes[index];
-        assert.ok(probe);
-        assert.equal(headers[':authority'], probe.requestAuthority ?? `127.0.0.1:${server.address().port}`);
-        if (probe.requestHost) assert.equal(headers.host,probe.requestHost);
+    try {
+      const match = /^\/fixture.Response\/Case(\d+)$/.exec(headers[':path']);
+      assert.ok(match);
+      assert.equal(headers[':scheme'], 'http');
+      const index = Number(match[1]);
+      const probe = probes[index];
+      assert.ok(probe);
+      if (probe.early) {
+        let resolveClosed;
+        const completion = new Promise(resolve => {resolveClosed = resolve;});
+        closed.set(index,completion);
+        stream.once('close',resolveClosed);
+      }
+      assert.equal(headers[':authority'], probe.requestAuthority ?? `127.0.0.1:${clientPort}`);
+      if (probe.requestHost) assert.equal(headers.host,probe.requestHost);
+      const expected = frame(probe.requestPayload ?? '');
+      const reply = () => {
         counts[index]++;
         const head = {':status':probe.http ?? 200, ...probe.headers};
         if (probe.trailers) {
+          if (probe.earlyReset) closed.set(index,relay.afterEndStream(stream.session.socket.remotePort,stream.id,() => {
+            assert.ok(!stream.destroyed, 'the large upload must still be open');
+            stream.close(http2.constants.NGHTTP2_NO_ERROR);
+            stream.resume();
+          }));
           stream.respond(head, {waitForTrailers:true});
-          stream.once('wantTrailers', () => {if (!stream.destroyed) stream.sendTrailers(probe.trailers);});
+          stream.once('wantTrailers', () => {
+            if (stream.destroyed) return;
+            stream.sendTrailers(probe.trailers);
+          });
           stream.end(probe.body);
         } else if (probe.body) {stream.respond(head); stream.end(probe.body);}
         else stream.respond(head, {endStream:true});
-      } catch (error) {failure ??= error; stream.close(1);}
-    });
+      };
+      stream.on('data', chunk => {
+        try {
+          size += chunk.length;
+          assert.ok(size <= expected.length, 'request payload was replayed');
+          chunks.push(chunk);
+          assert.deepEqual(Buffer.concat(chunks), expected.subarray(0,size));
+        } catch (error) {failure ??= error; stream.close(1);}
+      });
+      stream.on('end', () => {
+        try {
+          if (!probe.early) {assert.deepEqual(Buffer.concat(chunks), expected); reply();}
+        } catch (error) {failure ??= error; stream.close(1);}
+      });
+      // Respond before consuming DATA. The unary message exceeds the peer's
+      // bounded stream window; completion and NO_ERROR never require the
+      // client to finish uploading an entity that was already rejected.
+      if (probe.early) {if (probe.earlyReset) stream.pause(); reply();}
+    } catch (error) {failure ??= error; stream.close(1);}
   });
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const port = server.address().port;
+    relay = new WireRelay(server.address().port,error => {failure ??= error;});
+    relay.waitForClosed = index => {
+      const completion = closed.get(index);
+      assert.ok(completion);
+      return new Promise((resolve,reject) => {
+        const timer = setTimeout(() => reject(new Error(`reference request stream ${index} did not close`)),5000);
+        completion.then(() => {clearTimeout(timer); resolve();});
+      });
+    };
+    const port = clientPort = await relay.listen();
     const client = new grpc.Client(`127.0.0.1:${port}`, grpc.credentials.createInsecure());
     const observed = [];
-    try { for (let i=0; i<probes.length; i++) observed.push(await reference(client, probes[i], i)); }
+    try { for (let i=0; i<probes.length; i++) observed.push(await reference(client, probes[i], i, relay)); }
     finally {client.close();}
     const manifest = path.join(work, 'cases.json');
-    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null}))));
+    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null, request_payload:probe.requestPayload ?? '', unary_only:probe.unaryOnly ?? false, status_message:probe.statusMessage ?? null}))));
     try {await native(process.argv[2], port, manifest);}
-    catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}`);}
+    catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}; frames=${JSON.stringify([...relay.captures.values()].map(capture=>({client:capture.clientFrames,server:capture.serverFrames})))}`);}
     if (failure) throw failure;
-    assert.deepEqual(counts, probes.map(()=>4));
+    assert.deepEqual(counts, probes.map(probe=>probe.unaryOnly?2:4));
     assert.equal(sessions.size, 2, 'each client must reuse its one HTTP/2 connection');
+    const noErrorAfterEndStream = relay.assertResets(2);
     const differences = probes.flatMap((probe,i) => observed[i] === probe.status ? [] : [{case:probe.name, netz:probe.status, grpcJs:observed[i]}]);
-    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.length*3, maxConcurrentStreams:1, differences})+'\n');
+    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3),0), maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
   } finally {
+    if (relay) await relay.close();
     for (const session of sessions) session.destroy();
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(work, {recursive:true, force:true});

@@ -3498,7 +3498,7 @@ socket retirement and balanced allocation ownership. Additional tests cover
 URI pool origin binding and RFC 8441 virtual-host cookie isolation. The
 independent `interop-grpc-response` gate now omits netz's per-call authority and
 requires the Node HTTP/2 peer to receive the exact connected endpoint in all
-57 native RPCs on one connection. The runner additionally covers nine native
+62 native RPCs on one connection. The runner additionally covers nine native
 RPCs with scheme-normalized Host/authority pairs.
 
 ## Shared request authority syntax and comparison
@@ -3550,3 +3550,47 @@ Unary gRPC tests cover both ordinary and explicit-retry calls. The opening
 header regression was also run against the prior implementation: a 30 ms
 deadline returned only after the fixture closed its unread peer at 500 ms,
 with `ConnectionResetByPeer` instead of Timeout.
+
+## Complete requests with early responses
+
+Aggregate and callback-response complete requests now suspend their upload
+when the flow-control pump receives response frames, then use the same reader
+to advance response parsing and the exact unsent body suffix. The pending
+upload lives under `http2/runtime/request/upload.zig` and borrows the caller's
+body and trailers until the complete request call returns. Informational 1xx
+and an early final response head preserve upload progress; only a completed
+response makes the remaining upload unnecessary.
+
+At response END_STREAM, an unfinished upload is canceled as a stream operation
+instead of emitting a short DATA FIN that contradicts Content-Length. The
+response remains available even if cancellation fails; the existing terminal
+cleanup budget bounds that write and failed output retires connection reuse.
+A zero cleanup budget performs no transport write and retires the unfinished
+owner locally. Committed first-burst DATA retains its flow credit across an
+early-response pause instead of being refunded as an unsent burst.
+
+RFC 9113 section 8.1 permits a server NO_ERROR reset after a complete response;
+the response is preserved and late reset input cannot affect a subsequent
+request. A reset before response completion still reports StreamReset. A
+callback reader that receives this reset while waiting for upload credit now
+retains the same stream-local cleanup and reuse behavior as a direct reset.
+Callback rejection also cancels an unfinished upload when the rejected head or
+DATA already carries END_STREAM. Its connection-credit refund and CANCEL share
+one terminal deadline, preserving the callback error and forbidding a second
+write after a partial refund. Tests cover subsequent reuse and blocked cleanup.
+Real single-slot TCP tests cover aggregate and callback APIs, bounded and
+unbounded calls, request trailers, 1xx plus early final heads, early body
+completion, server resets, exact body delivery, and subsequent channel reuse.
+The early-terminal regression also fails against the prior implementation
+with ResponseAvailable.
+
+Resetting a request that occupied all peer-advertised concurrent stream slots
+now records an admission synchronization requirement. The next complete,
+incremental, or batch request sends a uniquely identified PING and awaits its
+ACK before committing new request headers, using that next operation's original
+deadline. The completed response does not wait on this synchronization. This
+also covers Node 26.10's deferred stream-map removal during a receive batch,
+which can otherwise reject the next HEADERS with ENHANCE_YOUR_CALM even when
+CANCEL preceded it on TCP. A silent-peer regression proves expiry before
+reserving another stream; the independent Node gate verifies direct native
+reuse with one concurrent slot.

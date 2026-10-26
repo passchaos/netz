@@ -110,6 +110,7 @@ test {
     _ = @import("tests.zig");
     _ = @import("runtime_tests.zig");
     _ = @import("call/output_deadline_tests.zig");
+    _ = @import("call/early_response_tests.zig");
     _ = runtime;
     _ = stream;
     _ = health;

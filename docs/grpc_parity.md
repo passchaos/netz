@@ -484,6 +484,22 @@ new RPC attempt. A complete-frame flow-control timeout may send CANCEL within
 the existing terminal cleanup budget, while an indeterminate partial wire
 write forbids another frame. Pre-output OOM retains channel reuse.
 
+Unary calls now consume a terminal response received during an incomplete
+upload instead of exposing HTTP/2 ResponseAvailable. The complete-request
+transport keeps one response reader, resumes the exact request suffix after
+intermediate heads, and cancels an unnecessary suffix after response
+completion without fabricating a short Content-Length entity. Trailers-only
+PERMISSION_DENIED preserves its status message and custom metadata; a following
+server NO_ERROR does not replace that status. Ordinary and explicit-retry
+calls are tested with an eight-byte stream window and one concurrent slot,
+including a successful RPC on the same channel after the early rejection.
+When a reset releases the last peer-advertised concurrent slot, the next call
+synchronizes that retirement under its own existing deadline before sending
+new request headers. This preserves the completed gRPC status while supporting
+peers such as Node 26.10 that defer stream-map removal until a receive batch
+finishes. The reset and new HEADERS remain ordered without renewing either RPC
+deadline.
+
 TLS 1.3 KeyUpdate responses are included in bounded read/write budgets. A local
 timeout or executor failure retains the exact old-epoch response ciphertext;
 read, application-write, or explicit pending-write completion resumes that
@@ -747,11 +763,19 @@ zig build interop-grpc-response -Doptimize=ReleaseFast
 This separate process gate uses a raw Node HTTP/2 peer with one advertised
 concurrent stream slot. A pinned official `@grpc/grpc-js` 1.14.0 client and the
 zio-backed netz unary, sequential and duplex clients each reuse one channel
-across the same 22 cases. The peer validates exact request envelopes and counts
-all 88 exchanges. It covers every HTTP mapping, explicit status precedence,
+across 23 shared cases, with two additional large-message unary cases. The peer
+validates complete request envelopes or exact rejected-upload prefixes and
+counts all 96 exchanges (25 reference calls and 71 native RPCs). It covers
+every HTTP mapping, explicit status precedence,
 missing/trailing metadata, rich status, messages before terminal failure, and
 scheme-normalized Host/:authority pairs with default ports, percent-encoded
-unreserved host bytes and equivalent IPv6 representations.
+unreserved host bytes and equivalent IPv6 representations. The added unary
+cases reject 32 KiB messages before request completion and require preserved
+status messages and custom trailers plus a subsequent successful call. A TCP
+relay triggers server NO_ERROR only after observing complete response
+END_STREAM and asserts both independent clients received that wire sequence.
+The reference runner waits for its asynchronous stream closure before starting
+another call; native calls reuse the one-slot channel directly.
 The two observed SDK differences are reported explicitly: grpc-js produces
 INTERNAL on DATA FIN without `grpc-status`, and RESOURCE_EXHAUSTED when it reads
 the fixture's HTML body as an oversized message envelope. Netz applies the
@@ -768,6 +792,6 @@ flow metadata stay out of the HTTP origin. TLS constructors retain their
 hostname or explicitly configured authority and certificate/SNI identity.
 The same independent response-policy gate now omits netz's per-call authority
 and requires the raw Node peer to observe the exact connected address/port in
-the 57 native RPCs that use the constructor default, including correct `http`
+the 62 native RPCs that use the constructor default, including correct `http`
 scheme and connection reuse. Nine further native calls supply equivalent Host
 and authority fields and must complete successfully on that same connection.

@@ -2,7 +2,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false, authority: ?[]const u8 = null, host: ?[]const u8 = null };
+const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false, authority: ?[]const u8 = null, host: ?[]const u8 = null, request_payload: []const u8 = "", unary_only: bool = false, status_message: ?[]const u8 = null };
 const Collector = struct {
     probe: Probe,
     count: usize = 0,
@@ -25,6 +25,7 @@ fn check(response: anytype, probe: Probe, count: usize) !void {
     try std.testing.expectEqual(probe.details, response.status_details != null);
     if (probe.details) try std.testing.expectEqualSlices(u8, "\x08\x07", response.status_details.?.bytes);
     try std.testing.expect(response.reset == null);
+    if (probe.status_message) |expected| try std.testing.expectEqualStrings(expected, response.status_message);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -35,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     var backend = try netz.runtime.Backend.initZio(allocator);
     defer backend.deinit();
     const io = backend.io();
-    const manifest = try std.Io.Dir.cwd().readFileAlloc(io, args[2], allocator, .limited(64 * 1024));
+    const manifest = try std.Io.Dir.cwd().readFileAlloc(io, args[2], allocator, .limited(256 * 1024));
     defer allocator.free(manifest);
     var probes = try std.json.parseFromSlice([]const Probe, allocator, manifest, .{});
     defer probes.deinit();
@@ -44,12 +45,14 @@ pub fn main(init: std.process.Init) !void {
     for (probes.value) |probe| {
         var storage: [1]netz.http2.Hpack.HeaderField = undefined;
         const metadata = requestHeaders(probe, &storage);
-        var response = try client.unary(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .message = "", .timeout = .{ .value = 5, .unit = .second } });
+        var response = try client.unary(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .message = probe.request_payload, .timeout = .{ .value = 5, .unit = .second } });
         defer response.deinit();
         try check(response, probe, @intFromBool(response.message != null));
         if (response.message) |message| try std.testing.expectEqualStrings(probe.payload, message.payload);
+        if (probe.unary_only) try std.testing.expectEqualStrings("yes", netz.grpc.call.headerValue(response.transport.?.trailers, "x-early").?);
     }
     for (probes.value) |probe| {
+        if (probe.unary_only) continue;
         var storage: [1]netz.http2.Hpack.HeaderField = undefined;
         const metadata = requestHeaders(probe, &storage);
         var stream = try client.startStreaming(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .timeout = .{ .value = 5, .unit = .second } });
@@ -61,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
         try check(response, probe, collector.count);
     }
     for (probes.value) |probe| {
+        if (probe.unary_only) continue;
         var storage: [1]netz.http2.Hpack.HeaderField = undefined;
         const metadata = requestHeaders(probe, &storage);
         var stream = try client.startDuplex(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .timeout = .{ .value = 5, .unit = .second } });

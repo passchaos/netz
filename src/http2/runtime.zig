@@ -23,6 +23,8 @@ test {
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/request/complete_deadline_tests.zig");
+    _ = @import("runtime/request/complete_early_response_tests.zig");
+    _ = @import("runtime/request/upload_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
 }
@@ -64,6 +66,7 @@ const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
 const complete_request = @import("runtime/request/complete.zig");
+const complete_upload = @import("runtime/request/upload.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
@@ -3832,6 +3835,10 @@ pub const Connection = struct {
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
     peer_max_concurrent_streams: ?u32 = null,
+    /// A peer can defer retiring a reset stream until its current receive
+    /// batch ends. Synchronize before new admission when the reset released
+    /// the last advertised slot; use the next operation's original deadline.
+    peer_reset_admission_pending: bool = false,
     peer_enable_connect_protocol: bool = false,
     peer_enable_push: bool = true,
     peer_no_rfc7540_priorities: bool = false,
@@ -4278,12 +4285,13 @@ pub const Connection = struct {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequestUntil(options, deadline);
-        return self.readResponseUntil(
+        return self.readResponseAndUploadUntil(
             pending.stream_id,
             pending.request_method,
             pending.extended_connect,
             informational,
             deadline,
+            pending.upload,
         );
     }
 
@@ -4381,11 +4389,13 @@ pub const Connection = struct {
     ) Error!OwnedResponse {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         const pending = try self.sendCompleteRequest(options);
-        return self.readResponse(
+        return self.readResponseAndUploadUntil(
             pending.stream_id,
             pending.request_method,
             pending.extended_connect,
             informational,
+            null,
+            pending.upload,
         );
     }
 
@@ -4809,7 +4819,26 @@ pub const Connection = struct {
         stream_id: u31,
         request_method: []const u8,
         extended_connect: bool,
+        upload: ?complete_upload.Upload = null,
     };
+
+    fn resumeCompleteUploadUntil(self: *Connection, upload: *complete_upload.Upload, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        return upload.progress(self, stream_id, deadline, .{
+            .ErrorType = Error,
+            .data = writeDataTrackedUntil,
+            .headers = writeHeadersUntil,
+        });
+    }
+
+    fn rejectResponseCallback(self: *Connection, stream_id: u31, upload: ?*complete_upload.Upload, remote_ended: bool, amount: usize, deadline: ?std.Io.Clock.Timestamp) void {
+        const unfinished_upload = if (upload) |remaining| !remaining.finished else false;
+        response_cleanup.callbackRejectedBefore(self, stream_id, remote_ended and !unfinished_upload, amount, response_cleanup.cleanupDeadline(self, deadline), .{
+            .refund = releaseConnectionCapacityUntil,
+            .reset = writeResetStreamFrameUntil,
+            .forgetWindows = forgetStreamWindows,
+        });
+        if (upload) |remaining| remaining.finished = true;
+    }
 
     fn sendCompleteRequest(
         self: *Connection,
@@ -4823,6 +4852,7 @@ pub const Connection = struct {
             .ErrorType = Error,
             .PendingType = PendingResponse,
             .resolveAuthority = resolveRequestAuthorityFromHeaders,
+            .synchronize = synchronizePeerResetAdmissionUntil,
             .reserve = reserveNextClientStreamId,
             .release = releaseLocalStream,
             .forgetWindows = forgetStreamWindows,
@@ -4876,6 +4906,7 @@ pub const Connection = struct {
     ) ResponseTimeoutError!RequestWriter {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
+        try self.synchronizePeerResetAdmissionUntil(deadline);
         self.last_peer_reset = null;
         if (methodIsConnect(options.method)) {
             return error.InvalidContentLength;
@@ -5354,6 +5385,7 @@ pub const Connection = struct {
             .pending => unreachable,
         };
         if (started == 0) return;
+        try self.synchronizePeerResetAdmissionUntil(earliestIndividualBatchDeadline(controls[0..started]));
 
         var views_stack: [16]BatchDataView = undefined;
         const views = if (started <= views_stack.len)
@@ -5534,6 +5566,8 @@ pub const Connection = struct {
                 return error.InvalidHeader;
             }
         }
+
+        try self.synchronizePeerResetAdmissionUntil(deadline);
 
         var states_stack: [16]BatchResponseState = undefined;
         const states = if (requests.len <= states_stack.len)
@@ -5765,6 +5799,8 @@ pub const Connection = struct {
                 return error.InvalidHeader;
             }
         }
+
+        try self.synchronizePeerResetAdmissionUntil(deadline);
 
         var states_stack: [16]BatchResponseState = undefined;
         const states = if (requests.len <= states_stack.len)
@@ -6184,6 +6220,8 @@ pub const Connection = struct {
                 self.peer_max_header_list_size,
             );
         }
+
+        try self.synchronizePeerResetAdmissionUntil(deadline);
 
         var states_stack: [16]BatchResponseState = undefined;
         const states = if (requests.len <= states_stack.len)
@@ -14375,6 +14413,26 @@ pub const Connection = struct {
         };
     }
 
+    fn notePeerResetAdmission(self: *Connection, stream_id: u31) void {
+        if (self.role != .client or !self.active_local_index.contains(stream_id)) return;
+        const limit = self.peer_max_concurrent_streams orelse return;
+        if (limit != 0 and self.activeLocalStreamCount() >= limit) self.peer_reset_admission_pending = true;
+    }
+
+    fn synchronizePeerResetAdmissionUntil(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (!self.peer_reset_admission_pending) return;
+        var payload: [8]u8 = undefined;
+        std.Io.random(self.io, &payload);
+        _ = self.pingUntil(payload, deadline) catch |err| {
+            // This admission wait owns the reader. An incomplete control
+            // frame cannot be discarded while retaining connection reuse.
+            self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
+            return err;
+        };
+        self.peer_reset_admission_pending = false;
+    }
+
     fn writeResetStreamFrameUntil(
         self: *Connection,
         stream_id: u31,
@@ -14400,6 +14458,7 @@ pub const Connection = struct {
                 return err;
             };
             self.rememberLocallyResetStreamAssumeCapacity(stream_id);
+            self.notePeerResetAdmission(stream_id);
             return;
         }
         return self.writeResetStreamFramePrepared(stream_id, error_code);
@@ -14422,6 +14481,7 @@ pub const Connection = struct {
             return err;
         };
         self.rememberLocallyResetStreamAssumeCapacity(stream_id);
+        self.notePeerResetAdmission(stream_id);
     }
 
     fn writeLocalErrorResetStream(
@@ -15380,10 +15440,23 @@ pub const Connection = struct {
         informational: ?InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        return self.readResponseAndUploadUntil(stream_id, request_method, extended_connect, informational, deadline, null);
+    }
+
+    fn readResponseAndUploadUntil(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        upload_value: ?complete_upload.Upload,
+    ) Error!OwnedResponse {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
+        var upload = upload_value;
         var cleanup_before: ?std.Io.Clock.Timestamp = null;
         defer self.releaseLocalStream(stream_id);
         errdefer |err| if (err != error.Timeout) {
@@ -15421,6 +15494,7 @@ pub const Connection = struct {
         }
 
         while (true) {
+            if (upload) |*remaining| try self.resumeCompleteUploadUntil(remaining, stream_id, deadline);
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
                 owned.deinit(self.allocator);
@@ -15564,6 +15638,7 @@ pub const Connection = struct {
             body.toOwnedSliceAssert()
         else
             try body.toOwnedSlice(self.allocator);
+        if (upload) |*remaining| remaining.finishResponse(self, stream_id, deadline);
         return .{
             .headers = final_headers,
             .status = status,
@@ -15669,6 +15744,7 @@ pub const Connection = struct {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         const stream_id = pending.stream_id;
+        var upload = pending.upload;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         defer self.releaseLocalStream(stream_id);
@@ -15706,17 +15782,24 @@ pub const Connection = struct {
         var push_generation = self.pushedCreditGeneration();
         errdefer |failure| {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            if (!callback_failed and (deadline != null or failure == error.OutOfMemory) and
+            if (!completed and !callback_failed and (deadline != null or failure == error.OutOfMemory) and
                 self.serve_read_connection_error == null and self.serve_read_stream_error == null)
             {
                 cleanup_before = response_cleanup.cleanupDeadline(self, if (failure == error.Timeout) null else deadline);
                 self.returnDiscardedResponseCapacity(receive_credit.unreleased_connection_bytes, cleanup_before);
             } else {
-                self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+                self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
             }
         }
 
         while (true) {
+            if (upload) |*remaining| self.resumeCompleteUploadUntil(remaining, stream_id, deadline) catch |err| {
+                // A peer reset consumed while pumping upload credit already
+                // terminates this stream. Preserve the same stream-local
+                // disposition as a reset read directly by this loop.
+                if (err == error.StreamReset) completed = true;
+                return @as(anyerror!StreamingResponse, err);
+            };
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
                 owned.deinit(self.allocator);
@@ -15836,10 +15919,7 @@ pub const Connection = struct {
                             .body_allowed = !responseForbidsBody(status, pending.request_method, pending.extended_connect),
                         }) catch |err| {
                             callback_failed = true;
-                            response_cleanup.callbackRejected(self, stream_id, (frame.header.flags & flag_end_stream) != 0, .{
-                                .reset = writeResetStreamFrame,
-                                .forgetWindows = forgetStreamWindows,
-                            });
+                            self.rejectResponseCallback(stream_id, if (upload) |*remaining| remaining else null, (frame.header.flags & flag_end_stream) != 0, 0, deadline);
                             return @as(anyerror!StreamingResponse, err);
                         };
                     }
@@ -15936,11 +16016,7 @@ pub const Connection = struct {
                                 // canceling; a low-watermark-only update would
                                 // let repeated small callback failures
                                 // gradually starve siblings.
-                                self.releaseDiscardedMessageCapacity(frame.payload.len);
-                                response_cleanup.callbackRejected(self, stream_id, (frame.header.flags & flag_end_stream) != 0, .{
-                                    .reset = writeResetStreamFrame,
-                                    .forgetWindows = forgetStreamWindows,
-                                });
+                                self.rejectResponseCallback(stream_id, if (upload) |*remaining| remaining else null, (frame.header.flags & flag_end_stream) != 0, frame.payload.len, deadline);
                                 return @as(anyerror!StreamingResponse, err);
                             };
                         }
@@ -15967,6 +16043,7 @@ pub const Connection = struct {
             }
         }
 
+        if (upload) |*remaining| remaining.finishResponse(self, stream_id, deadline);
         completed = true;
         return .{
             .headers = headers orelse return error.MissingPseudoHeader,
@@ -16519,11 +16596,13 @@ pub const Connection = struct {
         end_stream: bool,
     ) Error!void {
         var head_committed = false;
-        return self.writeHeadersThenDataUntil(stream_id, headers, data, end_stream, null, &head_committed);
+        var written: usize = 0;
+        return self.writeHeadersThenDataUntil(stream_id, headers, data, end_stream, null, &head_committed, &written);
     }
 
-    fn writeHeadersThenDataUntil(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, data: []const u8, end_stream: bool, deadline: ?std.Io.Clock.Timestamp, head_committed: *bool) Error!void {
+    fn writeHeadersThenDataUntil(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, data: []const u8, end_stream: bool, deadline: ?std.Io.Clock.Timestamp, head_committed: *bool, written: *usize) Error!void {
         head_committed.* = false;
+        written.* = 0;
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         std.debug.assert(data.len != 0);
@@ -16556,17 +16635,17 @@ pub const Connection = struct {
             };
             self.commitStagedHpackEncoder();
             head_committed.* = true;
-            var written: usize = 0;
-            try self.writeDataTrackedUntil(stream_id, data, end_stream, &written, deadline);
+            try self.writeDataTrackedUntil(stream_id, data, end_stream, written, deadline);
             return;
         }
 
+        var burst_committed = false;
         try self.send_connection_window.reserve(first_data_len);
-        errdefer self.send_connection_window.update(
+        errdefer if (!burst_committed) self.send_connection_window.update(
             @intCast(first_data_len),
         ) catch unreachable;
         try stream_window.reserve(first_data_len);
-        errdefer stream_window.update(
+        errdefer if (!burst_committed) stream_window.update(
             @intCast(first_data_len),
         ) catch unreachable;
 
@@ -16610,11 +16689,14 @@ pub const Connection = struct {
             if (submitted) self.aggregate_timeout_unusable = true;
             return err;
         };
+        burst_committed = true;
+        written.* = first_data_len;
         self.commitStagedHpackEncoder();
         head_committed.* = true;
         if (first_data_len < data.len) {
-            var written: usize = 0;
-            try self.writeDataTrackedUntil(stream_id, data[first_data_len..], end_stream, &written, deadline);
+            var suffix_written: usize = 0;
+            defer written.* += suffix_written;
+            try self.writeDataTrackedUntil(stream_id, data[first_data_len..], end_stream, &suffix_written, deadline);
         }
     }
 

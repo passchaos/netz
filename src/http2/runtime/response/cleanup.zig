@@ -64,3 +64,42 @@ pub fn callbackRejected(connection: anytype, id: u31, remote_ended: bool, compti
     }
     Hooks.forgetWindows(connection, id);
 }
+
+/// Refund and cancellation after an application callback failure retain one
+/// terminal write budget. A fully received frame permits healthy stream-local
+/// cleanup, while failed output forbids another frame on the shared transport.
+pub fn callbackRejectedBefore(connection: anytype, id: u31, remote_ended: bool, amount: usize, before: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) void {
+    if (!connection.terminal_write_failed and amount != 0) {
+        if (before) |deadline| {
+            Hooks.refund(connection, amount, deadline) catch {
+                connection.aggregate_timeout_unusable = true;
+                connection.terminal_write_failed = true;
+            };
+        } else {
+            connection.aggregate_timeout_unusable = true;
+            connection.terminal_write_failed = true;
+            var remaining = amount;
+            while (remaining != 0) {
+                const increment: u31 = @intCast(@min(remaining, std.math.maxInt(u31)));
+                connection.recv_connection_window.update(increment) catch {
+                    connection.aggregate_timeout_unusable = true;
+                    connection.terminal_write_failed = true;
+                    break;
+                };
+                remaining -= increment;
+            }
+        }
+    }
+    if (!remote_ended and !connection.terminal_write_failed) {
+        if (before) |deadline| {
+            Hooks.reset(connection, id, .cancel, deadline) catch {
+                connection.aggregate_timeout_unusable = true;
+                connection.terminal_write_failed = true;
+            };
+        } else {
+            connection.aggregate_timeout_unusable = true;
+            connection.terminal_write_failed = true;
+        }
+    }
+    Hooks.forgetWindows(connection, id);
+}
