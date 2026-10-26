@@ -736,9 +736,11 @@ zig build interop-grpc-response -Doptimize=ReleaseFast
 This separate process gate uses a raw Node HTTP/2 peer with one advertised
 concurrent stream slot. A pinned official `@grpc/grpc-js` 1.14.0 client and the
 zio-backed netz unary, sequential and duplex clients each reuse one channel
-across the same 19 cases. The peer validates exact request envelopes and counts
-all 76 exchanges. It covers every HTTP mapping, explicit status precedence,
-missing/trailing metadata, rich status and messages before terminal failure.
+across the same 22 cases. The peer validates exact request envelopes and counts
+all 88 exchanges. It covers every HTTP mapping, explicit status precedence,
+missing/trailing metadata, rich status, messages before terminal failure, and
+scheme-normalized Host/:authority pairs with default ports, percent-encoded
+unreserved host bytes and equivalent IPv6 representations.
 The two observed SDK differences are reported explicitly: grpc-js produces
 INTERNAL on DATA FIN without `grpc-status`, and RESOURCE_EXHAUSTED when it reads
 the fixture's HTML body as an oversized message envelope. Netz applies the
@@ -755,4 +757,6 @@ flow metadata stay out of the HTTP origin. TLS constructors retain their
 hostname or explicitly configured authority and certificate/SNI identity.
 The same independent response-policy gate now omits netz's per-call authority
 and requires the raw Node peer to observe the exact connected address/port in
-all 57 native RPCs, including correct `http` scheme and connection reuse.
+the 57 native RPCs that use the constructor default, including correct `http`
+scheme and connection reuse. Nine further native calls supply equivalent Host
+and authority fields and must complete successfully on that same connection.

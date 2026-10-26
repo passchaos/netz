@@ -4,6 +4,10 @@ const runtime = @import("../../runtime.zig");
 const pair_support = @import("test_support/message_pair.zig");
 const allocator = std.testing.allocator;
 
+test {
+    _ = @import("authority_tests.zig");
+}
+
 test "HTTP/3 field value rejection preserves QPACK state and healthy request streams" {
     try exercise(false);
 }

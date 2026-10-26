@@ -1,4 +1,5 @@
 const std = @import("std");
+const authority_semantics = @import("../../../http/authority/mod.zig");
 const http2 = @import("../../mod.zig");
 const connection_headers = @import("connection.zig");
 const http_method = @import("../../../internal/http_method.zig");
@@ -255,7 +256,7 @@ pub fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: Heade
                     // two different authorities.  Hyper/h2 builds a single URI
                     // authority; reject disagreement before forwarding can pick
                     // a different origin than application code observes.
-                    if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+                    if (!authority_semantics.equivalent(scheme_value orelse "", authority, host)) return error.InvalidHeader;
                 }
             }
             if (protocol_value) |protocol| {
@@ -354,37 +355,7 @@ fn validateUriPath(method: []const u8, path: []const u8) Error!void {
 }
 
 fn validateRequestAuthority(authority: []const u8) Error!void {
-    if (authority.len == 0) return error.InvalidHeader;
-    for (authority) |byte| {
-        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHeader;
-    }
-
-    if (authority[0] == '[') {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1) return error.InvalidHeader;
-        if (end + 1 < authority.len and authority[end + 1] != ':') return error.InvalidHeader;
-        if (end + 1 == authority.len) return;
-        try validateAuthorityPort(authority[end + 2 ..]);
-        return;
-    }
-
-    if (std.mem.indexOfScalar(u8, authority, '[') != null or
-        std.mem.indexOfScalar(u8, authority, ']') != null) return error.InvalidHeader;
-    const first_colon = std.mem.indexOfScalar(u8, authority, ':');
-    if (first_colon) |colon| {
-        if (colon == 0) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[colon + 1 ..], ':') != null) return error.InvalidHeader;
-        try validateAuthorityPort(authority[colon + 1 ..]);
-    }
-}
-
-fn validateAuthorityPort(port: []const u8) Error!void {
-    if (port.len == 0) return error.InvalidHeader;
-    for (port) |byte| {
-        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
-    }
-    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
-    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
+    _ = authority_semantics.parse(authority) catch return error.InvalidHeader;
 }
 
 fn validHeaderNameByte(byte: u8) bool {
@@ -421,18 +392,7 @@ fn markOnce(seen: *bool) Error!void {
 }
 
 fn validateConnectAuthority(authority: []const u8) Error!void {
-    try validateRequestAuthority(authority);
-    const port: []const u8 = if (authority[0] == '[') blk: {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
-        break :blk authority[end + 2 ..];
-    } else blk: {
-        const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return error.InvalidHeader;
-        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
-        break :blk authority[colon + 1 ..];
-    };
-    try validateAuthorityPort(port);
+    authority_semantics.validateConnect(authority) catch return error.InvalidHeader;
 }
 
 const connectionSpecificHeaderName =

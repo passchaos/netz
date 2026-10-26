@@ -1,6 +1,7 @@
 //! Shared HTTP semantics independent of wire version.
 
 pub const content_coding = @import("content_coding.zig");
+pub const authority = @import("authority/mod.zig");
 pub const early_data = @import("early_data.zig");
 pub const alt_svc_cache = @import("alt_svc_cache.zig");
 pub const cookies = @import("cookies/mod.zig");
@@ -76,6 +77,7 @@ pub const PoolError = client_pool.Error;
 pub const PoolOperationError = client_pool.OperationError;
 
 test {
+    _ = authority;
     _ = content_coding;
     _ = early_data;
     _ = alt_svc_cache;

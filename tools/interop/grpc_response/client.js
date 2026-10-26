@@ -34,10 +34,17 @@ const probes = [
   {name:'data-fin-no-status', status:2, referenceStatus:13, messages:1, payload:'before', headers:{'content-type':'application/grpc'}, body:frame('before')},
   {name:'html-entity-no-status', status:2, referenceStatus:8, headers:{'content-type':'text/html'}, body:Buffer.from('<html>proxy error</html>')},
   {name:'proxy-grpc-type-error-entity', http:503, status:14, headers:{'content-type':'application/grpc'}, body:Buffer.from('proxy error')},
+  ...[
+    ['normalized-default-port','EXAMPLE.test','example.test:80'],
+    ['normalized-percent-host','%65xample.test','example.test:80'],
+    ['normalized-ipv6-host','[2001:DB8::1]','[2001:db8:0:0:0:0:0:1]:80'],
+  ].map(([name,requestAuthority,requestHost]) => ({name,requestAuthority,requestHost,status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}})),
 ];
 
 async function reference(client, probe, index) {
-  const call = client.makeServerStreamRequest(`/fixture.Response/Case${index}`, x=>x, x=>x, Buffer.alloc(0), {deadline:Date.now()+5000});
+  const metadata = new grpc.Metadata();
+  if (probe.requestHost) metadata.set('host',probe.requestHost);
+  const call = client.makeServerStreamRequest(`/fixture.Response/Case${index}`, x=>x, x=>x, Buffer.alloc(0), metadata, {deadline:Date.now()+5000,host:probe.requestAuthority});
   const messages = [];
   call.on('data', message => messages.push(message));
   call.on('error', () => {});
@@ -91,10 +98,11 @@ async function main() {
         assert.ok(match);
         assert.equal(headers[':scheme'], 'http');
         assert.ok(headers[':authority']);
-        assert.equal(headers[':authority'], `127.0.0.1:${server.address().port}`);
         const index = Number(match[1]);
         const probe = probes[index];
         assert.ok(probe);
+        assert.equal(headers[':authority'], probe.requestAuthority ?? `127.0.0.1:${server.address().port}`);
+        if (probe.requestHost) assert.equal(headers.host,probe.requestHost);
         counts[index]++;
         const head = {':status':probe.http ?? 200, ...probe.headers};
         if (probe.trailers) {
@@ -114,7 +122,7 @@ async function main() {
     try { for (let i=0; i<probes.length; i++) observed.push(await reference(client, probes[i], i)); }
     finally {client.close();}
     const manifest = path.join(work, 'cases.json');
-    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false}))));
+    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null}))));
     try {await native(process.argv[2], port, manifest);}
     catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}`);}
     if (failure) throw failure;

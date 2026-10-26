@@ -1,4 +1,5 @@
 const std = @import("std");
+const authority_semantics = @import("../http/authority/mod.zig");
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
 const exact_range_set = @import("../internal/exact_range_set.zig");
@@ -2597,6 +2598,10 @@ pub const Request = struct {
         if (is_connect and !seen_protocol) {
             const authority = self.authority orelse return error.InvalidHeader;
             try validateConnectAuthority(authority);
+            if (host_value) |host| {
+                try validateRequestAuthority(host);
+                if (!authority_semantics.equivalent("", authority, host)) return error.InvalidHeader;
+            }
         } else {
             if (seen_protocol and !is_connect) return error.InvalidHeader;
             try validateUriScheme(self.scheme);
@@ -2607,7 +2612,7 @@ pub const Request = struct {
             if (host_value) |host| try validateRequestAuthority(host);
             if (self.authority) |authority| {
                 if (host_value) |host| {
-                    if (!std.ascii.eqlIgnoreCase(authority, host)) {
+                    if (!authority_semantics.equivalent(self.scheme, authority, host)) {
                         return error.InvalidHeader;
                     }
                 }
@@ -5343,7 +5348,12 @@ fn validateHeaderBlockImpl(
                 // omits :scheme and :path. Extended CONNECT (:protocol present)
                 // falls through to the regular request-target requirements.
                 if (!seen_authority or seen_scheme or seen_path) return error.InvalidHeader;
-                try validateConnectAuthority(authority_value orelse return error.InvalidHeader);
+                const authority = authority_value orelse return error.InvalidHeader;
+                try validateConnectAuthority(authority);
+                if (host_value) |host| {
+                    try validateRequestAuthority(host);
+                    if (!authority_semantics.equivalent("", authority, host)) return error.InvalidHeader;
+                }
             } else {
                 if (seen_protocol) {
                     try validateHttpToken(protocol_value orelse return error.InvalidHeader);
@@ -5357,7 +5367,7 @@ fn validateHeaderBlockImpl(
                 if (host_value) |host| try validateRequestAuthority(host);
                 if (authority_value) |authority| {
                     if (host_value) |host| {
-                        if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+                        if (!authority_semantics.equivalent(scheme, authority, host)) return error.InvalidHeader;
                     }
                 }
                 if ((std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) and
@@ -5401,48 +5411,11 @@ fn validateUriPath(method: []const u8, path: []const u8) Error!void {
 }
 
 fn validateRequestAuthority(authority: []const u8) Error!void {
-    if (authority.len == 0) return error.InvalidHeader;
-    for (authority) |byte| {
-        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHeader;
-    }
-    if (authority[0] == '[') {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1) return error.InvalidHeader;
-        if (end + 1 < authority.len and authority[end + 1] != ':') return error.InvalidHeader;
-        if (end + 1 == authority.len) return;
-        try validateAuthorityPort(authority[end + 2 ..]);
-        return;
-    }
-    if (std.mem.indexOfScalar(u8, authority, '[') != null or std.mem.indexOfScalar(u8, authority, ']') != null) return error.InvalidHeader;
-    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
-        if (colon == 0) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[colon + 1 ..], ':') != null) return error.InvalidHeader;
-        try validateAuthorityPort(authority[colon + 1 ..]);
-    }
+    _ = authority_semantics.parse(authority) catch return error.InvalidHeader;
 }
 
 fn validateConnectAuthority(authority: []const u8) Error!void {
-    try validateRequestAuthority(authority);
-    const port: []const u8 = if (authority[0] == '[') blk: {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
-        break :blk authority[end + 2 ..];
-    } else blk: {
-        const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return error.InvalidHeader;
-        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
-        break :blk authority[colon + 1 ..];
-    };
-    try validateAuthorityPort(port);
-}
-
-fn validateAuthorityPort(port: []const u8) Error!void {
-    if (port.len == 0) return error.InvalidHeader;
-    for (port) |byte| {
-        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
-    }
-    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
-    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
+    authority_semantics.validateConnect(authority) catch return error.InvalidHeader;
 }
 
 fn validateHeaderName(name: []const u8) Error!void {

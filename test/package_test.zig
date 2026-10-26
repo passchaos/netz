@@ -1,6 +1,14 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP authority compares normalized request origins" {
+    try std.testing.expect(netz.http.authority.equivalent("https", "Example.test:", "example.test:443"));
+    try std.testing.expect(netz.http.authority.equivalent("http", "[2001:db8::1]", "[2001:db8:0:0:0:0:0:1]:80"));
+    try std.testing.expect(!netz.http.authority.equivalent("https", "example.test", "example.test:80"));
+    try std.testing.expectError(error.InvalidAuthority, netz.http.authority.parse("[invalid]"));
+    try std.testing.expectError(error.InvalidAuthority, netz.http.authority.validateConnect("example.test:"));
+}
+
 test "public HTTP2 resolves Host before an implicit IP authority default" {
     const allocator = std.testing.allocator;
     const authority = try allocator.dupe(u8, "127.0.0.1:80");

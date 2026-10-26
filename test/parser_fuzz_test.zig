@@ -16,6 +16,9 @@ fn smithSliceSeed(comptime input: []const u8) [4 + input.len]u8 {
     return result;
 }
 
+const authority_pair_seed = smithSliceSeed("example.test\x00EXAMPLE.test:80");
+const authority_ipv6_seed = smithSliceSeed("[::ffff:192.0.2.1]:443");
+
 const http_get_seed = smithSliceSeed(
     "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
 );
@@ -61,6 +64,8 @@ const cookie_netscape_seed = smithSliceSeed(
 
 test "fuzz bounded cross-protocol parsers" {
     try std.testing.fuzz({}, fuzzAllParsers, .{ .corpus = &.{
+        &authority_pair_seed,
+        &authority_ipv6_seed,
         &http_get_seed,
         &http_chunked_seed,
         &http_ambiguous_seed,
@@ -97,6 +102,8 @@ test "fuzz bounded cross-protocol parsers" {
 
 test "bounded deterministic parser mutation smoke" {
     const seeds = [_][]const u8{
+        authority_pair_seed[4..],
+        authority_ipv6_seed[4..],
         http_get_seed[4..],
         http_chunked_seed[4..],
         http_ambiguous_seed[4..],
@@ -167,6 +174,15 @@ fn exerciseAll(bytes: []const u8) !void {
 }
 
 fn exerciseHttp(bytes: []const u8) !void {
+    if (netz.http.authority.parse(bytes)) |parsed| {
+        try std.testing.expect(parsed.host.len != 0 and parsed.host.len <= bytes.len);
+        try std.testing.expect(netz.http.authority.equivalent("https", bytes, bytes));
+    } else |_| {
+        try std.testing.expect(!netz.http.authority.equivalent("https", bytes, bytes));
+    }
+    _ = netz.http.authority.validateConnect(bytes) catch {};
+    const separator = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len / 2;
+    _ = netz.http.authority.equivalent("http", bytes[0..separator], bytes[@min(separator + 1, bytes.len)..]);
     try exerciseHttp1(bytes);
     try exerciseHttp2(bytes);
     try exerciseHttp3(bytes);

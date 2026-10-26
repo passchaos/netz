@@ -15,6 +15,7 @@ test {
     _ = @import("runtime/client/authority_tests.zig");
     _ = @import("runtime/client/authority_deadline_tests.zig");
     _ = @import("runtime/client/authority_uri_tests.zig");
+    _ = @import("runtime/headers/authority_reuse_tests.zig");
     _ = client_authority;
     _ = @import("runtime/connect/deadline_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");

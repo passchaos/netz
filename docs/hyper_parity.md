@@ -3498,4 +3498,31 @@ socket retirement and balanced allocation ownership. Additional tests cover
 URI pool origin binding and RFC 8441 virtual-host cookie isolation. The
 independent `interop-grpc-response` gate now omits netz's per-call authority and
 requires the Node HTTP/2 peer to receive the exact connected endpoint in all
-57 native RPCs on one connection.
+57 native RPCs on one connection. The runner additionally covers nine native
+RPCs with scheme-normalized Host/authority pairs.
+
+## Shared request authority syntax and comparison
+
+HTTP/2 and HTTP/3 request validation share `http.authority`'s allocation-free
+URI host/port parser and scheme-based comparison. Host and :authority retain
+their original wire values while equality accounts for case-insensitive host
+names, HTTP/HTTPS default and empty ports, leading zeroes in numeric ports,
+percent-encoded unreserved host bytes, and equivalent IPv6 forms. Generic
+schemes receive no invented default port; classic CONNECT requires an explicit
+numeric port and compares its Host without assuming HTTP or HTTPS defaults.
+
+The parser validates reg-name percent triplets, bounded port arithmetic,
+bracketed IPv6/IPvFuture syntax, IPv6 compression and dotted IPv4 final words.
+Invalid brackets, multiple compression gaps, invalid embedded IPv4, userinfo,
+URI delimiters and invalid host octets fail before forwarding. Reserved
+percent escapes remain distinct from their literal delimiters. IPv6 addresses
+are compared as sixteen bytes without DNS lookup or socket interface metadata.
+The bounded IPv6 parser also accepts valid mapped hexadecimal forms that Zig
+0.16's special IPv4-mapping parse path rejects.
+
+Codec tests cover HTTP/2 fields and HTTP/3 aggregate/owned-head decode as well
+as producer validation. TCP and protected QUIC message tests reject malformed
+authority on its stream, preserve HPACK/QPACK state, then admit a normalized
+healthy sibling. The parser fuzz corpus now includes authority pairs and
+IPv6 literals. The independent grpc-js/Node HTTP/2 runner adds default-port,
+percent-host and IPv6 normalization cases across all native gRPC client APIs.

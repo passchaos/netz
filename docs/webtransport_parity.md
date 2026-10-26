@@ -2185,3 +2185,13 @@ A fragmented Session ID remains buffered until its varint completes; a failed
 close socket write retains the protocol error and local closing state. Focused
 preconfigured-key QUIC/UDP regressions exercise these boundaries. Existing
 pending/unknown/closed valid Session IDs continue through their scoped handling.
+
+HTTP/3 request authority fields now use the shared `http.authority` parser and
+scheme-based Host comparison. Equivalent HTTP/HTTPS default ports, escaped
+unreserved host bytes and IPv6 representations pass request validation while
+malformed literals and different targets remain stream-local message errors.
+The owned aggregate and incremental-head paths preserve the original selected
+authority. A protected QUIC regression rejects a malformed authority, retains
+the QPACK dynamic entry and admits a normalized healthy sibling without closing
+the connection. Classical CONNECT Host fields are also validated and compared
+without assuming a default transport port.

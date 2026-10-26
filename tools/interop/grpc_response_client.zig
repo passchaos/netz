@@ -2,7 +2,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false };
+const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false, authority: ?[]const u8 = null, host: ?[]const u8 = null };
 const Collector = struct {
     probe: Probe,
     count: usize = 0,
@@ -11,6 +11,14 @@ const Collector = struct {
         self.count += 1;
     }
 };
+fn requestHeaders(probe: Probe, storage: *[1]netz.http2.Hpack.HeaderField) []const netz.http2.Hpack.HeaderField {
+    if (probe.host) |host| {
+        storage[0] = .{ .name = "host", .value = host };
+        return storage;
+    }
+    return &.{};
+}
+
 fn check(response: anytype, probe: Probe, count: usize) !void {
     try std.testing.expectEqual(probe.status, @intFromEnum(response.status));
     try std.testing.expectEqual(probe.messages, count);
@@ -34,13 +42,17 @@ pub fn main(init: std.process.Init) !void {
     var client = try netz.grpc.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(port) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
     defer client.deinit();
     for (probes.value) |probe| {
-        var response = try client.unary(.{ .path = probe.path, .message = "", .timeout = .{ .value = 5, .unit = .second } });
+        var storage: [1]netz.http2.Hpack.HeaderField = undefined;
+        const metadata = requestHeaders(probe, &storage);
+        var response = try client.unary(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .message = "", .timeout = .{ .value = 5, .unit = .second } });
         defer response.deinit();
         try check(response, probe, @intFromBool(response.message != null));
         if (response.message) |message| try std.testing.expectEqualStrings(probe.payload, message.payload);
     }
     for (probes.value) |probe| {
-        var stream = try client.startStreaming(.{ .path = probe.path, .timeout = .{ .value = 5, .unit = .second } });
+        var storage: [1]netz.http2.Hpack.HeaderField = undefined;
+        const metadata = requestHeaders(probe, &storage);
+        var stream = try client.startStreaming(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .timeout = .{ .value = 5, .unit = .second } });
         defer stream.deinit();
         try stream.writeMessage("");
         var collector: Collector = .{ .probe = probe };
@@ -49,7 +61,9 @@ pub fn main(init: std.process.Init) !void {
         try check(response, probe, collector.count);
     }
     for (probes.value) |probe| {
-        var stream = try client.startDuplex(.{ .path = probe.path, .timeout = .{ .value = 5, .unit = .second } });
+        var storage: [1]netz.http2.Hpack.HeaderField = undefined;
+        const metadata = requestHeaders(probe, &storage);
+        var stream = try client.startDuplex(.{ .path = probe.path, .authority = probe.authority, .metadata = metadata, .timeout = .{ .value = 5, .unit = .second } });
         defer stream.deinit();
         try std.testing.expectEqual(netz.grpc.DuplexWriteResult.complete, try stream.writeMessage(""));
         try std.testing.expectEqual(netz.grpc.DuplexWriteResult.complete, try stream.finishRequest());
