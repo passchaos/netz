@@ -77,11 +77,20 @@ existing HTTP/2 runtime:
   HTTP/2 exchange; expiration returns `error.Timeout`, while a null timeout
   remains unbounded. After expiry, best-effort CANCEL and connection-credit
   return share a separate bounded terminal cleanup budget, described below,
+- one default transparent unary retry for REFUSED_STREAM before response
+  commitment, without charging configured retry attempts or throttle tokens.
+  The same request body and metadata are replayed, and the original absolute
+  deadline supplies the remaining timeout on the retry. The caller can disable
+  this recovery through `UnaryCallOptions.transparent_retry`. Any observed
+  response head, including informational evidence, prevents this transparent
+  replay; a second refusal remains visible unless an explicit policy permits
+  another uncommitted attempt,
 - explicit opt-in unary retry policies for replay-safe methods, with at most
-  five total attempts, configured retryable status codes, exponential jittered
+  five configured attempts plus the independent transparent recovery,
+  configured retryable status codes, exponential jittered
   backoff, server `grpc-retry-pushback-ms`, and standard
   `grpc-previous-rpc-attempts` metadata. Retries occur only for trailers-only
-  responses before the call is committed; one absolute `std.Io` awake-clock
+  responses or typed pre-response resets before the call is committed; one absolute `std.Io` awake-clock
   deadline bounds every attempt and backoff while each retry advertises the
   remaining `grpc-timeout`. An optional thread-safe channel/service throttler
   applies gRPC's milli-token algorithm, debiting configured retryable failures
@@ -770,9 +779,10 @@ zig build interop-grpc-response -Doptimize=ReleaseFast
 This separate process gate uses a raw Node HTTP/2 peer with one advertised
 concurrent stream slot. A pinned official `@grpc/grpc-js` 1.14.0 client and the
 zio-backed netz unary, sequential and duplex clients each reuse one channel
-across 23 shared cases, with two additional large-message unary cases. The peer
+across 23 shared cases, with three additional unary cases. The peer
 validates complete request envelopes or exact rejected-upload prefixes and
-counts all 96 exchanges (25 reference calls and 71 native RPCs). It covers
+counts all 100 physical attempts (26 reference RPCs and 72 native RPCs,
+including one transparent refusal retry on each client). It covers
 every HTTP mapping, explicit status precedence,
 missing/trailing metadata, rich status, messages before terminal failure, and
 scheme-normalized Host/:authority pairs with default ports, percent-encoded
@@ -781,6 +791,8 @@ cases reject 32 KiB messages before request completion and require preserved
 status messages and custom trailers plus a subsequent successful call. A TCP
 relay triggers server NO_ERROR only after observing complete response
 END_STREAM and asserts both independent clients received that wire sequence.
+The refusal case checks that both physical attempts omit configured attempt
+metadata and return the successful message through the same connection.
 The reference runner waits for its asynchronous stream closure before starting
 another call; native calls reuse the one-slot channel directly.
 The two observed SDK differences are reported explicitly: grpc-js produces
@@ -799,6 +811,6 @@ flow metadata stay out of the HTTP origin. TLS constructors retain their
 hostname or explicitly configured authority and certificate/SNI identity.
 The same independent response-policy gate now omits netz's per-call authority
 and requires the raw Node peer to observe the exact connected address/port in
-the 62 native RPCs that use the constructor default, including correct `http`
+the 63 native RPCs that use the constructor default, including correct `http`
 scheme and connection reuse. Nine further native calls supply equivalent Host
 and authority fields and must complete successfully on that same connection.

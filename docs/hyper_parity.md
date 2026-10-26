@@ -3498,7 +3498,7 @@ socket retirement and balanced allocation ownership. Additional tests cover
 URI pool origin binding and RFC 8441 virtual-host cookie isolation. The
 independent `interop-grpc-response` gate now omits netz's per-call authority and
 requires the Node HTTP/2 peer to receive the exact connected endpoint in all
-62 native RPCs on one connection. The runner additionally covers nine native
+63 native RPCs on one connection. The runner additionally covers nine native
 RPCs with scheme-normalized Host/authority pairs.
 
 ## Shared request authority syntax and comparison

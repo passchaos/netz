@@ -6,6 +6,7 @@ const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
 const details_mod = @import("status_details.zig");
 const response_metadata = @import("response_metadata.zig");
+const retry = @import("call/retry.zig");
 const wire = @import("wire.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
@@ -221,10 +222,12 @@ pub const UnaryCallOptions = struct {
     compression_level: u4 = 6,
     /// Decoders advertised to the server for response messages.
     accepted_encodings: AlgorithmSet = .supported,
-    /// Propagated unchanged as `grpc-timeout` and enforced locally from one
-    /// awake-clock deadline captured when `unaryCall` begins. Null leaves the
-    /// transport operation unbounded.
+    /// Enforced from one awake-clock deadline captured at call entry. Every
+    /// attempt advertises the remaining `grpc-timeout`; null is unbounded.
     timeout: ?Timeout = null,
+    /// Retry one REFUSED_STREAM before response commitment without charging a
+    /// configured retry attempt. Disable for explicit single-attempt probes.
+    transparent_retry: bool = true,
     /// ASCII application metadata already suitable for HTTP/2.
     metadata: []const http2.Hpack.HeaderField = &.{},
     /// Raw application bytes encoded as unpadded Base64 `-bin` fields.
@@ -287,13 +290,6 @@ pub const RetryPolicy = struct {
         for (self.retryable_status_codes) |status| {
             if (status == .ok) return error.InvalidRetryPolicy;
         }
-    }
-
-    fn contains(self: RetryPolicy, status: Status) bool {
-        for (self.retryable_status_codes) |candidate| {
-            if (candidate == status) return true;
-        }
-        return false;
     }
 };
 
@@ -379,6 +375,9 @@ pub const UnaryResponse = struct {
     /// Null when the peer reset the stream before a complete HTTP response.
     transport: ?http2.runtime.OwnedResponse,
     reset: ?http2.ResetStreamPayload = null,
+    /// Conservative replay evidence: response heads commit a call, while a
+    /// pre-head peer reset can remain eligible for transparent/explicit retry.
+    response_committed: bool = true,
     status: Status,
     status_message: []u8,
     status_details: ?details_mod.Owned = null,
@@ -398,184 +397,16 @@ pub const UnaryResponse = struct {
     }
 };
 
-pub fn unaryCall(
-    connection: *http2.runtime.Connection,
-    allocator: std.mem.Allocator,
-    options: UnaryCallOptions,
-) Error!UnaryResponse {
-    // Establish the local budget before validation, compression, or metadata
-    // encoding. Passing the absolute timestamp through to HTTP/2 prevents any
-    // setup time from silently renewing the caller's timeout.
-    const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
-        std.Io.Clock.Timestamp.fromNow(connection.io, .{
-            .raw = timeout.duration(),
-            .clock = .awake,
-        })
-    else
-        null;
-    return unaryCallAttempt(
-        connection,
-        allocator,
-        options,
-        deadline,
-        options.timeout,
-        null,
-    );
+/// One unary RPC, including one transparent refusal recovery before any
+/// response head. Every physical attempt retains the original awake deadline.
+pub fn unaryCall(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions) Error!UnaryResponse {
+    return retry.run(connection, allocator, options, null, unaryCallAttempt);
 }
 
-/// Execute a replay-safe unary RPC with an explicit bounded retry policy.
-///
-/// The original `timeout`, when present, becomes one absolute awake-clock
-/// deadline shared by all attempts and backoff sleeps. Every retry sends the
-/// remaining budget as `grpc-timeout` and its standard
-/// `grpc-previous-rpc-attempts` metadata. Transport errors and committed
-/// responses are never retried implicitly.
-pub fn unaryCallWithRetry(
-    connection: *http2.runtime.Connection,
-    allocator: std.mem.Allocator,
-    options: UnaryCallOptions,
-    policy: RetryPolicy,
-) Error!UnaryResponse {
-    try policy.validate();
-    const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
-        std.Io.Clock.Timestamp.fromNow(connection.io, .{
-            .raw = timeout.duration(),
-            .clock = .awake,
-        })
-    else
-        null;
-    var attempts: u8 = 0;
-    var backoff = cappedBackoff(
-        policy.initial_backoff,
-        policy.max_backoff,
-    );
-    while (true) {
-        const timeout_header: ?Timeout = if (deadline) |absolute| blk: {
-            const remaining = absolute.durationFromNow(connection.io).raw;
-            if (remaining.nanoseconds <= 0) return error.Timeout;
-            break :blk try Timeout.fromDuration(remaining);
-        } else null;
-        var response = try unaryCallAttempt(
-            connection,
-            allocator,
-            options,
-            deadline,
-            timeout_header,
-            if (attempts == 0) null else attempts,
-        );
-        attempts += 1;
-        if (response.status == .ok) {
-            if (policy.throttler) |throttler| throttler.recordSuccess();
-            return response;
-        }
-        if (!retryableStatus(response, policy)) return response;
-        if (policy.throttler) |throttler| {
-            if (!throttler.recordFailure()) return response;
-        }
-        if (attempts >= policy.max_attempts or
-            !retryableTrailersOnly(response)) return response;
-
-        const pushback = retryPushback(response);
-        if (pushback == .stop) return response;
-        const delay = switch (pushback) {
-            .stop => unreachable,
-            .delay => |value| blk: {
-                backoff = cappedBackoff(
-                    policy.initial_backoff,
-                    policy.max_backoff,
-                );
-                break :blk value;
-            },
-            .absent => blk: {
-                const value = jitteredBackoff(connection.io, backoff);
-                backoff = nextBackoff(backoff, policy);
-                break :blk value;
-            },
-        };
-        response.deinit();
-        try sleepForRetry(connection.io, delay, deadline);
-    }
-}
-
-const RetryPushback = union(enum) {
-    absent,
-    stop,
-    delay: std.Io.Duration,
-};
-
-fn retryableTrailersOnly(
-    response: UnaryResponse,
-) bool {
-    const transport = response.transport orelse return false;
-    return transport.trailers_only and
-        findHeader(transport.headers, "grpc-status") != null;
-}
-
-fn retryableStatus(response: UnaryResponse, policy: RetryPolicy) bool {
-    return response.transport != null and policy.contains(response.status);
-}
-
-fn retryPushback(response: UnaryResponse) RetryPushback {
-    const transport = response.transport orelse return .stop;
-    const raw = findHeader(
-        transport.headers,
-        "grpc-retry-pushback-ms",
-    ) orelse return .absent;
-    const milliseconds = std.fmt.parseInt(i64, raw, 10) catch return .stop;
-    if (milliseconds < 0) return .stop;
-    return .{ .delay = .fromMilliseconds(milliseconds) };
-}
-
-fn cappedBackoff(
-    value: std.Io.Duration,
-    maximum: std.Io.Duration,
-) std.Io.Duration {
-    return if (value.nanoseconds < maximum.nanoseconds) value else maximum;
-}
-
-fn nextBackoff(
-    current: std.Io.Duration,
-    policy: RetryPolicy,
-) std.Io.Duration {
-    const scaled = @as(f64, @floatFromInt(current.nanoseconds)) *
-        policy.backoff_multiplier;
-    const maximum: f64 = @floatFromInt(policy.max_backoff.nanoseconds);
-    if (!std.math.isFinite(scaled) or scaled >= maximum) {
-        return policy.max_backoff;
-    }
-    return .fromNanoseconds(@intFromFloat(@ceil(scaled)));
-}
-
-fn jitteredBackoff(io: std.Io, backoff: std.Io.Duration) std.Io.Duration {
-    var random_bytes: [2]u8 = undefined;
-    std.Io.random(io, &random_bytes);
-    const per_mille: u16 = 800 +
-        std.mem.readInt(u16, &random_bytes, .little) % 401;
-    const scaled = @as(f64, @floatFromInt(backoff.nanoseconds)) *
-        @as(f64, @floatFromInt(per_mille)) / 1000.0;
-    const maximum: f64 = @floatFromInt(std.math.maxInt(i96));
-    if (!std.math.isFinite(scaled) or scaled >= maximum) {
-        return std.Io.Duration.max;
-    }
-    return .fromNanoseconds(@intFromFloat(scaled));
-}
-
-fn sleepForRetry(
-    io: std.Io,
-    delay: std.Io.Duration,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!void {
-    if (deadline) |absolute| {
-        const remaining = absolute.durationFromNow(io).raw;
-        if (remaining.nanoseconds <= 0) return error.Timeout;
-        if (delay.nanoseconds >= remaining.nanoseconds) {
-            try std.Io.sleep(io, remaining, .awake);
-            return error.Timeout;
-        }
-    }
-    if (delay.nanoseconds > 0) {
-        try std.Io.sleep(io, delay, .awake);
-    }
+/// Add explicit replay-safe retries to the transparent transport recovery.
+/// Logical attempts, pushback, throttling, and backoff share one RPC deadline.
+pub fn unaryCallWithRetry(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, policy: RetryPolicy) Error!UnaryResponse {
+    return retry.run(connection, allocator, options, policy, unaryCallAttempt);
 }
 
 /// Execute one unary attempt under a caller-owned absolute deadline.
@@ -698,8 +529,8 @@ fn unaryCallAttempt(
     else
         connection.request(request_options)) catch |err| switch (err) {
         error.StreamReset => {
-            const reset = connection.takeLastPeerReset() orelse return err;
-            return resetUnaryResponse(allocator, reset);
+            const info = connection.takeLastPeerResetInfo() orelse return err;
+            return resetUnaryResponse(allocator, info);
         },
         else => return err,
     };
@@ -974,6 +805,7 @@ fn parseUnaryResponse(
         .allocator = allocator,
         .transport = owned,
         .reset = null,
+        .response_committed = !owned.trailers_only,
         .status = status,
         .status_message = terminal.status_message,
         .status_details = terminal.status_details,
@@ -986,12 +818,14 @@ fn parseUnaryResponse(
 
 fn resetUnaryResponse(
     allocator: std.mem.Allocator,
-    reset: http2.ResetStreamPayload,
+    info: http2.runtime.PeerResetInfo,
 ) Error!UnaryResponse {
+    const reset = info.reset;
     return .{
         .allocator = allocator,
         .transport = null,
         .reset = reset,
+        .response_committed = info.response_started,
         .status = statusFromHttp2Error(reset.error_code),
         .status_message = try resetStatusMessageAlloc(
             allocator,

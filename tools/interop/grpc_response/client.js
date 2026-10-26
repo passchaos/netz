@@ -42,6 +42,7 @@ const probes = [
   ].map(([name,requestAuthority,requestHost]) => ({name,requestAuthority,requestHost,status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}})),
   ...[false,true].map(earlyReset => ({name:earlyReset?'early-upload-no-error-reset':'early-upload-error',status:7,headers:{'content-type':'application/grpc'},body:Buffer.alloc(0),trailers:{'grpc-status':'7','grpc-message':'early%20denial','x-early':'yes'},requestPayload:'x'.repeat(32*1024),statusMessage:'early denial',early:true,earlyReset,unaryOnly:true})),
   {name:'success-after-early-upload',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}},
+  {name:'unprocessed-refusal-once',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0','x-early':'yes'},unaryOnly:true,refusedOnce:true},
 ];
 
 async function reference(client, probe, index, relay) {
@@ -89,6 +90,8 @@ async function main() {
   const sessions = new Set();
   const counts = probes.map(() => 0);
   const closed = new Map();
+  const refusals = new WeakSet();
+  let transparentRetries = 0;
   let failure;
   let relay;
   let clientPort;
@@ -104,6 +107,7 @@ async function main() {
       const index = Number(match[1]);
       const probe = probes[index];
       assert.ok(probe);
+      if (probe.refusedOnce) assert.equal(headers['grpc-previous-rpc-attempts'],undefined,'transparent retry must not increment configured attempt metadata');
       if (probe.early) {
         let resolveClosed;
         const completion = new Promise(resolve => {resolveClosed = resolve;});
@@ -141,7 +145,17 @@ async function main() {
       });
       stream.on('end', () => {
         try {
-          if (!probe.early) {assert.deepEqual(Buffer.concat(chunks), expected); reply();}
+          if (!probe.early) {
+            assert.deepEqual(Buffer.concat(chunks), expected);
+            if (probe.refusedOnce && !refusals.has(stream.session)) {
+              refusals.add(stream.session);
+              transparentRetries++;
+              counts[index]++;
+              // Emit outside mem_recv so Node's own stream map is retired
+              // before either client immediately creates a transparent retry.
+              setImmediate(() => stream.close(http2.constants.NGHTTP2_REFUSED_STREAM));
+            } else reply();
+          }
         } catch (error) {failure ??= error; stream.close(1);}
       });
       // Respond before consuming DATA. The unary message exceeds the peer's
@@ -171,11 +185,12 @@ async function main() {
     try {await native(process.argv[2], port, manifest);}
     catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}; frames=${JSON.stringify([...relay.captures.values()].map(capture=>({client:capture.clientFrames,server:capture.serverFrames})))}`);}
     if (failure) throw failure;
-    assert.deepEqual(counts, probes.map(probe=>probe.unaryOnly?2:4));
+    assert.deepEqual(counts, probes.map(probe=>probe.refusedOnce?4:probe.unaryOnly?2:4));
     assert.equal(sessions.size, 2, 'each client must reuse its one HTTP/2 connection');
     const noErrorAfterEndStream = relay.assertResets(2);
+    assert.equal(transparentRetries,2);
     const differences = probes.flatMap((probe,i) => observed[i] === probe.status ? [] : [{case:probe.name, netz:probe.status, grpcJs:observed[i]}]);
-    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3),0), maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
+    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3),0), transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
   } finally {
     if (relay) await relay.close();
     for (const session of sessions) session.destroy();

@@ -814,10 +814,9 @@ test "gRPC unary call times out locally and cancels the HTTP2 stream" {
             // admitted HTTP/2 stream rather than relying on the peer.
             var request = try connection.readRequest();
             defer request.deinit(self.server.allocator);
-            try std.testing.expectEqualStrings(
-                "100m",
-                findHeader(request.headers, "grpc-timeout").?,
-            );
+            const advertised = try Timeout.parse(findHeader(request.headers, "grpc-timeout").?);
+            try std.testing.expect(advertised.duration().nanoseconds > 0);
+            try std.testing.expect(advertised.duration().nanoseconds <= 100 * std.time.ns_per_ms);
 
             var reset = try connection.readResetStreamWithTimeout(
                 .fromSeconds(2),
@@ -1017,6 +1016,7 @@ test "gRPC unary call returns typed status for HTTP2 reset" {
         .path = "/demo.Reset/Unary",
         .authority = "localhost",
         .message = "request",
+        .transparent_retry = false,
     });
     defer response.deinit();
 

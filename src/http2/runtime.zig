@@ -3675,6 +3675,14 @@ const ReceivedDataPayload = struct {
     adaptive_connection_increment: u31 = 0,
 };
 
+/// Reset evidence for adapters that need a conservative replay decision.
+/// Complete request readers set response_started=false only when no response
+/// head was observed. Other receive paths preserve the conservative default.
+pub const PeerResetInfo = struct {
+    reset: http2.ResetStreamPayload,
+    response_started: bool,
+};
+
 pub const Connection = struct {
     const RefusedHeaders = @import("runtime/headers/refusal.zig").Reader(.{
         .Error = Error,
@@ -3897,6 +3905,7 @@ pub const Connection = struct {
     /// immediately afterward to preserve the wire reason in their own error
     /// model. A later reset replaces an untaken value.
     last_peer_reset: ?http2.ResetStreamPayload = null,
+    last_peer_reset_response_started: bool = true,
     default_authority: ?[]u8 = null,
     /// An IP constructor supplies an implicit numeric default. Explicit Host
     /// may replace it; URI/TLS/adopted authorities retain their origin binding.
@@ -4233,12 +4242,19 @@ pub const Connection = struct {
     /// `error.StreamReset`. The connection allows only one active frame
     /// reader, so taking rather than retaining the payload prevents a stale
     /// reset from being attributed to a later operation.
-    pub fn takeLastPeerReset(
-        self: *Connection,
-    ) ?http2.ResetStreamPayload {
-        const reset = self.last_peer_reset;
+    pub fn takeLastPeerReset(self: *Connection) ?http2.ResetStreamPayload {
+        const info = self.takeLastPeerResetInfo() orelse return null;
+        return info.reset;
+    }
+
+    /// Take reset payload and response-commit evidence together, clearing both
+    /// so a later operation cannot inherit another stream's replay hint.
+    pub fn takeLastPeerResetInfo(self: *Connection) ?PeerResetInfo {
+        const reset = self.last_peer_reset orelse return null;
+        const info: PeerResetInfo = .{ .reset = reset, .response_started = self.last_peer_reset_response_started };
         self.last_peer_reset = null;
-        return reset;
+        self.last_peer_reset_response_started = true;
+        return info;
     }
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
@@ -4848,6 +4864,7 @@ pub const Connection = struct {
     }
 
     fn sendCompleteRequestUntil(self: *Connection, options: RequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!PendingResponse {
+        const requested_stream_id = self.next_client_stream_id;
         return complete_request.send(self, options, deadline, .{
             .ErrorType = Error,
             .PendingType = PendingResponse,
@@ -4860,7 +4877,14 @@ pub const Connection = struct {
             .headers = writeHeadersUntil,
             .burst = writeHeadersThenDataUntil,
             .data = writeDataTrackedUntil,
-        });
+        }) catch |err| {
+            if (err == error.StreamReset) {
+                if (self.last_peer_reset) |reset| {
+                    if (reset.stream_id == requested_stream_id and self.next_client_stream_id > requested_stream_id) self.last_peer_reset_response_started = false;
+                }
+            }
+            return err;
+        };
     }
 
     /// Start a client request whose DATA is supplied incrementally.
@@ -14747,6 +14771,8 @@ pub const Connection = struct {
         reset: http2.ResetStreamPayload,
     ) Error!void {
         self.last_peer_reset = reset;
+        self.last_peer_reset_response_started = true;
+        self.notePeerResetAdmission(reset.stream_id);
         const pending_accept_overflow =
             self.role == .server and self.markPendingRequestReset(reset.stream_id);
         // A reset is legal on a reserved stream even though that stream is not
@@ -15494,7 +15520,10 @@ pub const Connection = struct {
         }
 
         while (true) {
-            if (upload) |*remaining| try self.resumeCompleteUploadUntil(remaining, stream_id, deadline);
+            if (upload) |*remaining| self.resumeCompleteUploadUntil(remaining, stream_id, deadline) catch |err| {
+                if (err == error.StreamReset) self.last_peer_reset_response_started = headers != null or informational_count != 0;
+                return @as(Error!OwnedResponse, err);
+            };
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
                 owned.deinit(self.allocator);
@@ -15626,6 +15655,7 @@ pub const Connection = struct {
                         frame,
                     );
                     try self.recordResetStream(reset);
+                    self.last_peer_reset_response_started = headers != null or informational_count != 0;
                     return error.StreamReset;
                 },
                 else => continue,

@@ -102,8 +102,8 @@ pub const Client = struct {
     }
 
     /// Retry one explicitly replay-safe unary RPC on this persistent channel.
-    /// No retry occurs unless the caller supplies a policy and the server
-    /// returns a configured trailers-only status.
+    /// Explicit retries require a configured uncommitted status or reset;
+    /// one transparent pre-response refusal recovery remains independent.
     pub fn unaryWithRetry(
         self: *Client,
         options: call.UnaryCallOptions,
@@ -118,7 +118,8 @@ pub const Client = struct {
     }
 
     /// Apply the standard service-config selector for this method. A matching
-    /// config without a retry policy, or no match, performs exactly one call.
+    /// config without a retry policy disables configured replay while retaining
+    /// the caller's transparent refusal-recovery option.
     pub fn unaryWithServiceConfig(
         self: *Client,
         options: call.UnaryCallOptions,
