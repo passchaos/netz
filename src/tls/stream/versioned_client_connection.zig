@@ -164,6 +164,9 @@ pub const Connection = struct {
     tls13_session_ticket: ?vail.tls.ticket.Cached = null,
     tls12_session_ticket: ?vail.tls.tls12_ticket.Cached = null,
     resumed: bool,
+    /// Algorithm of the compressed Certificate received from the server
+    /// (RFC 8879), or null when the Certificate message was uncompressed.
+    certificate_compression: ?vail.tls.certificate_compression.Algorithm = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -841,6 +844,7 @@ fn fromEstablished(
     connection.* = switch (established.*) {
         .tls13 => |*value| blk: {
             const resumed = value.resumed;
+            const certificate_compression = value.certificate_compression;
             const selected_alpn = value.selected_alpn;
             value.selected_alpn = null;
             const peer_certificate_chain = value.peer_certificate_chain;
@@ -901,6 +905,7 @@ fn fromEstablished(
                 .tls13_session_ticket = null,
                 .tls12_session_ticket = null,
                 .resumed = resumed,
+                .certificate_compression = certificate_compression,
             };
         },
         .tls12 => |*value| blk: {
@@ -944,6 +949,7 @@ fn fromEstablished(
                 .tls13_session_ticket = null,
                 .tls12_session_ticket = session_ticket,
                 .resumed = resumed,
+                .certificate_compression = null,
             };
         },
     };

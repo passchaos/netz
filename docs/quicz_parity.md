@@ -2858,6 +2858,10 @@ uncompressed-size bound before allocation; both are overridable per connection
 through `certificate_compression_algorithms` (empty list disables the
 extension) and `max_decompressed_certificate_len`. A raw-socket ClientHello
 capture test proves the default algorithm list, the empty-list omission, a
-custom order, and duplicate-algorithm rejection. The netz-native QUIC TLS
-ClientHello and server-side compressed Certificate preparation remain
-separate work.
+custom order, and duplicate-algorithm rejection. TLS 1.3 stream servers
+compress their Certificate on demand with the same preference list through
+vail's RFC 8879 policy (brotli, zstd, zlib in the client's advertised order,
+emitted only when it saves bytes), and an authenticated loopback test with a
+repeated DER chain proves the client receives and verifies a compressed
+Certificate end to end. The netz-native QUIC TLS ClientHello remains the one
+transport path without certificate compression.

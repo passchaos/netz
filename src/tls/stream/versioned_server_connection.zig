@@ -9,6 +9,8 @@ const record_stream = @import("record_stream.zig");
 const server_handshake = @import("server_handshake.zig");
 const tls12_record_stream = @import("tls12_record_stream.zig");
 const version = @import("version.zig");
+const default_certificate_compression_algorithms =
+    @import("mod.zig").default_certificate_compression_algorithms;
 
 const net = std.Io.net;
 const max_handshake_size: usize = 256 * 1024;
@@ -64,6 +66,10 @@ pub const Options = struct {
     tls12_session_tickets: ?Tls12SessionTicketPolicy = null,
     alpn_protocols: []const []const u8 = &.{},
     require_alpn: bool = true,
+    /// RFC 8879 algorithms the TLS 1.3 server may use to compress its
+    /// Certificate message on demand when the client offers them.
+    certificate_compression_algorithms: []const vail.tls.certificate_compression.Algorithm =
+        &default_certificate_compression_algorithms,
 
     pub fn acquireIdentity(self: Options) Error!server_handshake.ServerIdentityLease {
         var lease = if (self.identity_provider) |provider|
@@ -283,6 +289,7 @@ pub const Connection = struct {
                     .cipher_suites = options.cipher_suites,
                     .groups = &tls13_groups,
                     .alpn_protocols = options.alpn_protocols,
+                    .auto_certificate_compression = options.certificate_compression_algorithms,
                 },
                 .server_random = tls13_random,
                 .key_material = &tls13_key,

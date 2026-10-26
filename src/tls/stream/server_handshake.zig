@@ -89,6 +89,10 @@ pub const Options = struct {
     /// Permit clients without ALPN while still selecting an offered protocol.
     /// This supports protocols such as MQTT whose TLS mapping makes ALPN optional.
     require_alpn: bool = true,
+    /// RFC 8879 algorithms the TLS 1.3 server may use to compress its
+    /// Certificate message on demand when the client offers them.
+    certificate_compression_algorithms: []const vail.tls.certificate_compression.Algorithm =
+        &@import("mod.zig").default_certificate_compression_algorithms,
 
     pub fn acquireIdentity(self: Options) Error!ServerIdentityLease {
         var lease = if (self.identity_provider) |provider|
@@ -243,6 +247,7 @@ fn performBefore(
                     // a share for which no secret can be derived.
                     .groups = &.{x25519_group},
                     .alpn_protocols = options.alpn_protocols,
+                    .auto_certificate_compression = options.certificate_compression_algorithms,
                 },
                 .server_random = server_random,
                 .server_key_share = &server_public,

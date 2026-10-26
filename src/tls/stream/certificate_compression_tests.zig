@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const client = @import("versioned_client_connection.zig");
+const server = @import("versioned_server_connection.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const tls_testing = @import("../testing.zig");
 
@@ -284,4 +285,104 @@ test "TLS client rejects duplicate or unsupported certificate compression algori
         error.InvalidProtocolPolicy,
         client.Connection.init(allocator, io, stream, invalid_options),
     );
+}
+
+test "TLS 1.3 server compresses its Certificate on the loopback connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    // Repeat the DER chain so RFC 8879 compression saves Certificate bytes.
+    const repeated_chain = [_][]const u8{
+        &certificate_der,
+        &certificate_der,
+        &certificate_der,
+        &certificate_der,
+        &certificate_der,
+        &certificate_der,
+    };
+    var listener = try (std.Io.net.IpAddress{
+        .ip4 = .loopback(0),
+    }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *std.Io.net.Server,
+        io: std.Io,
+        chain: []const []const u8,
+        key_pair: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            var owned = true;
+            defer if (owned) stream.close(self.io);
+            const connection = server.Connection.init(
+                std.testing.allocator,
+                self.io,
+                stream,
+                .{
+                    .identity = .{
+                        .certificate_chain = self.chain,
+                        .signer = .{ .ecdsa_p256_sha256 = .{
+                            .key_pair = self.key_pair,
+                        } },
+                    },
+                    .protocol_policy = .tls13_only,
+                    .require_alpn = false,
+                },
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.deinit();
+            owned = false;
+        }
+    };
+
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .chain = &repeated_chain,
+        .key_pair = key_pair,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try listener.socket.address.connect(io, .{
+        .mode = .stream,
+    });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+
+    var connection = try client.Connection.init(allocator, io, stream, .{
+        .server_name = "localhost",
+        .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = key_pair.public_key
+                .toUncompressedSec1(),
+        },
+        .protocol_policy = .tls13_only,
+        .request_tls12_session_ticket = false,
+        .request_tls13_session_ticket = false,
+    });
+    stream_owned = false;
+    try std.testing.expect(
+        connection.certificate_compression != null,
+    );
+    connection.deinit();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
