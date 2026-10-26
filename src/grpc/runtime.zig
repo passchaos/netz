@@ -552,6 +552,13 @@ pub const ServerConnection = struct {
             };
             break :blk parsed;
         };
+        const response_content_type = web.negotiateResponseContentType(
+            negotiated,
+            transport.headers,
+        ) catch |err| {
+            self.connection.abandonPeerRequest(transport.stream_id, .internal_error);
+            return err;
+        };
         var request = web.parseUnaryRequest(
             self.connection.allocator,
             transport.method,
@@ -571,7 +578,7 @@ pub const ServerConnection = struct {
         return .{
             .transport = transport,
             .request = request,
-            .content_type = negotiated,
+            .content_type = response_content_type,
         };
     }
 

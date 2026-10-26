@@ -4,7 +4,7 @@
 //! trailers. gRPC-Web keeps the same length-prefixed request messages but
 //! returns terminal status as an in-body frame with the high marker bit
 //! (`0x80`) instead of an HTTP trailer block. The `-text` variants carry the
-//! whole entity as standard padded base64. This module is transport neutral;
+//! entity as independently padded base64 chunks. This module is transport neutral;
 //! `runtime.ServerConnection` maps it onto the production HTTP/2 connection.
 
 const std = @import("std");
@@ -14,118 +14,23 @@ const wire = @import("wire.zig");
 const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
 const codec = @import("stream/codec.zig");
+const content_type_mod = @import("web/content_type.zig");
+const text = @import("web/text.zig");
 
-pub const Error = call.Error || codec.Error || error{
-    InvalidTextEncoding,
-    InvalidWebContentType,
-};
-
-/// gRPC-Web payload codec: protobuf is opaque bytes here, matching gRPC.
-pub const Format = enum {
-    proto,
-    json,
-
-    fn suffix(self: Format) []const u8 {
-        return switch (self) {
-            .proto => "+proto",
-            .json => "+json",
-        };
-    }
-};
-
-/// Whether the entity uses the base64 text wire (`application/grpc-web-text`).
-pub const ContentType = struct {
-    format: Format,
-    text: bool,
-
-    /// Canonical response media type. gRPC-Web clients accept any type that
-    /// begins with `application/grpc-web`; proto binary keeps the unsuffixed
-    /// form Envoy returns for an unsuffixed request.
-    pub fn canonical(self: ContentType) []const u8 {
-        if (self.text) {
-            return switch (self.format) {
-                .proto => "application/grpc-web-text",
-                .json => "application/grpc-web-text+json",
-            };
-        }
-        return switch (self.format) {
-            .proto => "application/grpc-web",
-            .json => "application/grpc-web+json",
-        };
-    }
-};
-
-const media = "application/grpc-web";
-const text_media = "application/grpc-web-text";
-
-/// Classify a gRPC-Web request content type. Unknown parameters after a
-/// semicolon are ignored, matching the HTTP content-type grammar. Plain
-/// `application/grpc` is rejected so the gRPC and gRPC-Web paths cannot be
-/// confused by shared server dispatch.
-pub fn parseContentType(raw: []const u8) Error!ContentType {
-    var value = std.mem.trim(u8, raw, " \t");
-    if (std.mem.indexOfScalar(u8, value, ';')) |semicolon| {
-        value = std.mem.trim(u8, value[0..semicolon], " \t");
-    }
-    if (value.len < media.len or
-        !std.ascii.eqlIgnoreCase(value[0..media.len], media))
-    {
-        return error.InvalidWebContentType;
-    }
-    const rest = value[media.len..];
-    if (rest.len == 0) {
-        return .{ .format = .proto, .text = false };
-    }
-    if (std.ascii.eqlIgnoreCase(rest, "+proto")) {
-        return .{ .format = .proto, .text = false };
-    }
-    if (std.ascii.eqlIgnoreCase(rest, "+json")) {
-        return .{ .format = .json, .text = false };
-    }
-    // The text forms replace the separator with "-text".
-    if (rest.len < "-text".len or
-        !std.ascii.eqlIgnoreCase(rest[0.."-text".len], "-text"))
-    {
-        return error.InvalidWebContentType;
-    }
-    const text_rest = rest["-text".len..];
-    if (text_rest.len == 0) {
-        return .{ .format = .proto, .text = true };
-    }
-    if (std.ascii.eqlIgnoreCase(text_rest, "+proto")) {
-        return .{ .format = .proto, .text = true };
-    }
-    if (std.ascii.eqlIgnoreCase(text_rest, "+json")) {
-        return .{ .format = .json, .text = true };
-    }
-    return error.InvalidWebContentType;
+test {
+    _ = @import("web/tests.zig");
+    _ = @import("web/streaming_tests.zig");
 }
 
-pub fn base64DecodeAlloc(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-) Error![]u8 {
-    const trimmed = std.mem.trim(u8, input, " \t\r\n");
-    var padded: []const u8 = trimmed;
-    var pad_storage: ?[]u8 = null;
-    defer if (pad_storage) |storage| allocator.free(storage);
-    if (trimmed.len % 4 != 0) {
-        const padded_len = std.mem.alignForward(usize, trimmed.len, 4);
-        const storage = try allocator.alloc(u8, padded_len);
-        @memcpy(storage[0..trimmed.len], trimmed);
-        @memset(storage[trimmed.len..], '=');
-        pad_storage = storage;
-        padded = storage;
-    }
-    const decoder = std.base64.standard.Decoder;
-    const decoded_len = decoder.calcSizeForSlice(padded) catch
-        return error.InvalidTextEncoding;
-    const decoded = try allocator.alloc(u8, decoded_len);
-    errdefer allocator.free(decoded);
-    decoder.decode(decoded, padded) catch
-        return error.InvalidTextEncoding;
-    return decoded;
-}
+pub const Error = call.Error || codec.Error || content_type_mod.Error || text.Error;
+
+pub const Format = content_type_mod.Format;
+pub const ContentType = content_type_mod.ContentType;
+pub const parseContentType = content_type_mod.parseContentType;
+pub const negotiateResponseContentType = content_type_mod.negotiateResponseContentType;
+
+pub const TextDecoder = text.Decoder;
+pub const base64DecodeAlloc = text.decodeAlloc;
 
 fn base64EncodeAlloc(
     allocator: std.mem.Allocator,
@@ -249,6 +154,24 @@ pub fn buildTrailerBlock(
     allocator: std.mem.Allocator,
     options: TerminalOptions,
 ) Error![]u8 {
+    try call.validateCustomMetadata(options.trailing_metadata);
+    try call.validateCustomBinaryMetadata(options.trailing_binary_metadata);
+    // These fields travel in DATA, bypassing HTTP/2's header validation. The
+    // gRPC-Web trailers block requires lowercase gRPC metadata names and
+    // printable ASCII values, including rejection of CR/LF injection.
+    for (options.trailing_metadata) |field| {
+        for (field.name) |byte| {
+            if (!((byte >= 'a' and byte <= 'z') or
+                (byte >= '0' and byte <= '9') or
+                byte == '_' or byte == '.' or byte == '-'))
+            {
+                return error.InvalidMetadata;
+            }
+        }
+        for (field.value) |byte| {
+            if (byte < 0x20 or byte > 0x7e) return error.InvalidMetadata;
+        }
+    }
     var trailer_block: std.ArrayList(u8) = .empty;
     errdefer trailer_block.deinit(allocator);
     var status_buffer: [2]u8 = undefined;
@@ -455,205 +378,6 @@ pub fn writeUnaryResponse(
     });
 }
 
-test "gRPC-Web classifies the four binary and text media types" {
-    const cases = [_]struct {
-        raw: []const u8,
-        format: Format,
-        text: bool,
-    }{
-        .{ .raw = "application/grpc-web", .format = .proto, .text = false },
-        .{ .raw = "application/grpc-web+proto", .format = .proto, .text = false },
-        .{ .raw = "application/grpc-web+json", .format = .json, .text = false },
-        .{ .raw = "application/grpc-web-text", .format = .proto, .text = true },
-        .{ .raw = "application/grpc-web-text+proto", .format = .proto, .text = true },
-        .{ .raw = "application/grpc-web-text+json", .format = .json, .text = true },
-    };
-    for (cases) |case| {
-        const parsed = try parseContentType(case.raw);
-        try std.testing.expectEqual(case.format, parsed.format);
-        try std.testing.expectEqual(case.text, parsed.text);
-    }
-    // Parameters and surrounding OWS follow the HTTP content-type grammar.
-    const parametrized = try parseContentType("application/grpc-web; charset=utf-8");
-    try std.testing.expectEqual(Format.proto, parametrized.format);
-    try std.testing.expect(!parametrized.text);
-
-    try std.testing.expectError(
-        error.InvalidWebContentType,
-        parseContentType("application/grpc"),
-    );
-    try std.testing.expectError(
-        error.InvalidWebContentType,
-        parseContentType("application/json"),
-    );
-    try std.testing.expectError(
-        error.InvalidWebContentType,
-        parseContentType("application/grpc-web-x"),
-    );
-}
-
-test "gRPC-Web canonical response types round trip" {
-    const binary = try parseContentType("application/grpc-web+proto");
-    try std.testing.expectEqualStrings(
-        "application/grpc-web",
-        binary.canonical(),
-    );
-    const json = try parseContentType("application/grpc-web+json");
-    try std.testing.expectEqualStrings(
-        "application/grpc-web+json",
-        json.canonical(),
-    );
-    const text = try parseContentType("application/grpc-web-text");
-    try std.testing.expectEqualStrings(
-        "application/grpc-web-text",
-        text.canonical(),
-    );
-    const text_json = try parseContentType("application/grpc-web-text+json");
-    try std.testing.expectEqualStrings(
-        "application/grpc-web-text+json",
-        text_json.canonical(),
-    );
-}
-
-test "gRPC-Web binary request decodes one framed message" {
-    const allocator = std.testing.allocator;
-    var entity: [10]u8 = undefined;
-    entity[0] = 0;
-    std.mem.writeInt(u32, entity[1..5], 5, .big);
-    @memcpy(entity[5..10], "hello");
-    const headers = [_]http2.Hpack.HeaderField{};
-    var request = try parseUnaryRequest(
-        allocator,
-        "POST",
-        "/demo.Echo/Unary",
-        &headers,
-        &entity,
-        .{ .format = .proto, .text = false },
-        1024,
-    );
-    defer request.deinit();
-    try std.testing.expectEqualStrings("hello", request.message.payload);
-    try std.testing.expect(request.owned_message == null);
-}
-
-test "gRPC-Web text request base64 decodes and owns its message" {
-    const allocator = std.testing.allocator;
-    var framed: [10]u8 = undefined;
-    framed[0] = 0;
-    std.mem.writeInt(u32, framed[1..5], 5, .big);
-    @memcpy(framed[5..10], "hello");
-    const encoded = try base64EncodeAlloc(allocator, &framed);
-    defer allocator.free(encoded);
-
-    const headers = [_]http2.Hpack.HeaderField{};
-    var request = try parseUnaryRequest(
-        allocator,
-        "POST",
-        "/demo.Echo/Unary",
-        &headers,
-        encoded,
-        .{ .format = .proto, .text = true },
-        1024,
-    );
-    defer request.deinit();
-    try std.testing.expectEqualStrings("hello", request.message.payload);
-    try std.testing.expect(request.owned_message != null);
-
-    try std.testing.expectError(
-        error.InvalidTextEncoding,
-        parseUnaryRequest(
-            allocator,
-            "POST",
-            "/demo.Echo/Unary",
-            &headers,
-            "%%%%",
-            .{ .format = .proto, .text = true },
-            1024,
-        ),
-    );
-}
-
-test "gRPC-Web rejects missing or duplicated request messages" {
-    const allocator = std.testing.allocator;
-    const headers = [_]http2.Hpack.HeaderField{};
-    try std.testing.expectError(
-        error.InvalidMessageCount,
-        parseUnaryRequest(
-            allocator,
-            "POST",
-            "/demo.Echo/Unary",
-            &headers,
-            "",
-            .{ .format = .proto, .text = false },
-            1024,
-        ),
-    );
-    var two: [20]u8 = undefined;
-    for (0..2) |index| {
-        two[index * 10] = 0;
-        std.mem.writeInt(u32, two[index * 10 + 1 ..][0..4], 5, .big);
-        @memcpy(two[index * 10 + 5 ..][0..5], "hello");
-    }
-    try std.testing.expectError(
-        error.InvalidMessageCount,
-        parseUnaryRequest(
-            allocator,
-            "POST",
-            "/demo.Echo/Unary",
-            &headers,
-            &two,
-            .{ .format = .proto, .text = false },
-            1024,
-        ),
-    );
-    try std.testing.expectError(
-        error.InvalidGrpcRequest,
-        parseUnaryRequest(
-            allocator,
-            "GET",
-            "/demo.Echo/Unary",
-            &headers,
-            two[0..10],
-            .{ .format = .proto, .text = false },
-            1024,
-        ),
-    );
-}
-
-test "gRPC-Web response body ends with one trailers frame" {
-    const allocator = std.testing.allocator;
-    const body = try buildResponseBody(allocator, .{
-        .status = .ok,
-        .message = "pong",
-    });
-    defer allocator.free(body);
-
-    // One data frame for the four-byte message.
-    try std.testing.expect(body[0] == 0);
-    try std.testing.expectEqual(
-        @as(u32, 4),
-        std.mem.readInt(u32, body[1..5], .big),
-    );
-    try std.testing.expectEqualStrings("pong", body[5..9]);
-    // The terminal frame carries the 0x80 marker and status trailer.
-    const trailer_offset = 9;
-    try std.testing.expectEqual(@as(u8, 0x80), body[trailer_offset]);
-    const trailer_len = std.mem.readInt(
-        u32,
-        body[trailer_offset + 1 ..][0..4],
-        .big,
-    );
-    try std.testing.expectEqual(
-        body.len - trailer_offset - 5,
-        trailer_len,
-    );
-    const trailer_block = body[trailer_offset + 5 ..];
-    try std.testing.expect(trailer_block.len > 0);
-    try std.testing.expect(std.mem.startsWith(u8, trailer_block, "grpc-status:0\r\n"));
-    try std.testing.expect(trailer_block[trailer_block.len - 2 ..][0] == '\r' and
-        trailer_block[trailer_block.len - 1] == '\n');
-}
-
 // ---------------------------------------------------------------------------
 // Server streaming
 // ---------------------------------------------------------------------------
@@ -669,77 +393,7 @@ pub const StreamResponseOptions = struct {
     max_message_size: usize = 16 * 1024 * 1024,
 };
 
-/// Allocation-free streaming standard-base64 filter for `grpc-web-text`.
-/// Three input bytes become four output characters; up to two final bytes
-/// stay buffered until `flushPadding` writes the padded terminal group.
-const Base64Sink = struct {
-    inner: ?*http2.runtime.ResponseWriter = null,
-    pending: [3]u8 = undefined,
-    pending_len: u2 = 0,
-
-    const encoder = std.base64.standard.Encoder;
-    /// Input chunk size (a multiple of three); 768 input bytes become 1024.
-    const chunk_input = 768;
-    const chunk_output: usize = chunk_input / 3 * 4;
-
-    pub fn write(self: *Base64Sink, bytes: []const u8) Error!void {
-        const inner = self.inner orelse return error.InvalidStreamState;
-        var input = bytes;
-        if (self.pending_len != 0) {
-            const take = @min(
-                @as(usize, 3) - self.pending_len,
-                input.len,
-            );
-            @memcpy(
-                self.pending[self.pending_len..][0..take],
-                input[0..take],
-            );
-            self.pending_len += @intCast(take);
-            input = input[take..];
-            if (self.pending_len == 3) {
-                var group: [4]u8 = undefined;
-                _ = encoder.encode(&group, &self.pending);
-                try inner.write(&group);
-                self.pending_len = 0;
-            }
-        }
-        var encoded: [chunk_output]u8 = undefined;
-        while (input.len >= chunk_input) {
-            _ = encoder.encode(
-                &encoded,
-                input[0..chunk_input],
-            );
-            try inner.write(&encoded);
-            input = input[chunk_input..];
-        }
-        // Fewer than one chunk remains, but it can still contain complete
-        // triplets; only the final 1-2 bytes stay buffered for padding.
-        const complete = (input.len / 3) * 3;
-        if (complete != 0) {
-            const out_len = encoder.calcSize(complete);
-            _ = encoder.encode(encoded[0..out_len], input[0..complete]);
-            try inner.write(encoded[0..out_len]);
-            input = input[complete..];
-        }
-        if (input.len != 0) {
-            std.debug.assert(input.len < 3);
-            @memcpy(self.pending[0..input.len], input);
-            self.pending_len = @intCast(input.len);
-        }
-    }
-
-    fn flushPadding(self: *Base64Sink) Error!void {
-        const inner = self.inner orelse return error.InvalidStreamState;
-        if (self.pending_len == 0) return;
-        var group: [4]u8 = undefined;
-        _ = encoder.encode(
-            &group,
-            self.pending[0..self.pending_len],
-        );
-        try inner.write(&group);
-        self.pending_len = 0;
-    }
-};
+const Base64Sink = text.EncoderSink(http2.runtime.ResponseWriter);
 
 /// Streaming gRPC-Web response: zero or more data frames followed by one
 /// `0x80` trailers frame, all carried in HTTP/2 DATA with END_STREAM.
@@ -767,11 +421,12 @@ pub const ServerStreamWriter = struct {
         if (self.finished) return error.InvalidStreamState;
         if (self.content_type.text) {
             self.base64_sink.inner = &self.transport;
-            return self.encoder.writeMessageWithOptions(
+            try self.encoder.writeMessageWithOptions(
                 &self.base64_sink,
                 payload,
                 options,
             );
+            return self.base64_sink.flushPadding();
         }
         return self.encoder.writeMessageWithOptions(
             &self.transport,

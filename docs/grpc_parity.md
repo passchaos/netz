@@ -59,8 +59,9 @@ existing HTTP/2 runtime:
   HTTP/2 fail-closed behavior because parser state is not resumable,
 - unary client deadlines captured once from `grpc-timeout` at API entry and
   enforced locally with the awake clock across request setup and the complete
-  HTTP/2 exchange; expiration returns `error.Timeout` and emits
-  `RST_STREAM(CANCEL)`, while a null timeout remains unbounded,
+  HTTP/2 exchange; expiration returns `error.Timeout`, while a null timeout
+  remains unbounded. Aggregate-response cancellation at expiry currently has
+  the open transport regression described below,
 - explicit opt-in unary retry policies for replay-safe methods, with at most
   five total attempts, configured retryable status codes, exponential jittered
   backoff, server `grpc-retry-pushback-ms`, and standard
@@ -398,6 +399,9 @@ framed message send credit, then verifies that the next write receives a
 trailers-only CANCELLED response with decoded `grpc-message` and without
 sending the second message, matching the request-stream behavior covered by
 upstream gRPC Core's `ServerEarlyReturnTest`.
+The fixture peer drains the request through its empty FIN before closing TCP
+and asserts that only the first framed message arrived, avoiding a transport
+reset race from closing with unread upload bytes.
 
 ## Remaining work before broad gRPC parity
 
@@ -441,7 +445,19 @@ The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
 parity.
 
-## gRPC-Web unary server support
+The 2026-10-26 gRPC-Web verification also exposed an existing HTTP/2 aggregate
+deadline regression: `gRPC unary call times out locally and cancels the HTTP2
+stream` fails because the peer observes connection closure instead of the
+required CANCEL reset. `readResponseUntil` unwinds through
+`failDiscardedResponseUntil`, which passes the expired operation deadline to
+`writeTerminalResetStreamUntil`; the tracked transport writer refuses the
+already-expired write. The full focused gRPC run therefore currently reports
+202/203 passing tests. This needs a bounded cancellation path that preserves
+the caller's deadline and terminal connection state; broad gRPC deadline parity
+remains unproven until that regression passes. The gRPC-Web ReleaseFast gate
+and public-package gate pass independently.
+
+## gRPC-Web unary and server streaming support
 
 The production h2c/TLS gRPC server now speaks the gRPC-Web wire protocol
 (https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md) for unary RPCs.
@@ -466,10 +482,39 @@ Server streaming is supported through the same server connection:
 (browser client streaming is not part of gRPC-Web and zero or multiple request
 messages reset the stream), and `startStreamingWeb` returns a streaming writer
 whose messages become data frames and whose `finish` appends the single `0x80`
-trailers frame. `-text` requests buffer and base64-decode the single entity at
-END_STREAM before frame validation, while `-text` responses stream through an
-allocation-free standard-base64 filter (768-byte input chunks, at most two
-buffered bytes) so large server streams never materialize a full response.
+trailers frame. `-text` uploads decode incrementally through bounded stack
+storage, including independently padded chunks split inside a frame or across
+HTTP/2 DATA writes. The message decoder enforces the declared and decompressed
+size limits before application delivery, rejects partial messages at END_STREAM,
+and rejects a second request message before invoking the application callback.
+`-text` responses stream through an allocation-free standard-base64 filter
+(768-byte input chunks, at most two buffered bytes). Each completed gRPC message
+flushes its padded tail immediately, so the client can decode it while the RPC
+remains open. Large server streams never materialize a full response.
 Real h2c loopback tests cover binary and base64 multi-message streams plus the
 multiple-request rejection. Browser client streaming and duplex remain out of
 scope for gRPC-Web itself.
+
+Request content type and response wire are negotiated independently. Both
+`readUnaryWeb` and `readStreamingWeb` return the response type in `content_type`;
+they decode the upload according to its own Content-Type and choose the response
+from repeated or combined Accept fields, including q weights and wildcard
+specificity. Without Accept the response retains the request's wire. The
+allocation-free `grpc.web.negotiateResponseContentType` helper exposes the same
+policy for custom adapters; explicit rejection of every compatible type returns
+`NoAcceptableWebContentType`. The payload's proto/json format is retained.
+
+Body trailers use the same reserved-name checks as ordinary gRPC metadata,
+plus lowercase key and printable-ASCII value validation because DATA bypasses
+the HTTP header validator. Duplicate reserved status fields, CR/LF, NUL, and
+invalid names are rejected before the terminal frame is written, so a streaming
+writer can retry `finish` with valid metadata. Binary metadata remains base64.
+Real h2c and certificate-pinned TLS tests wait for the client to independently
+decode each empty or short text message before sending the next one, then
+verify the exact terminal block and an inverse text-to-binary unary call on the
+same channel. Two-byte DATA uploads cover in-frame padding, size limits,
+truncation, malformed base64, a second request, and reuse after stream resets.
+
+These gates establish the HTTP/2 transport behavior. Native HTTP/1 adapters,
+CORS preflight/origin policy, and independent browser gRPC-Web interop still
+require completion before claiming broad browser support.

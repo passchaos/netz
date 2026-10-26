@@ -1,6 +1,17 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC-Web selects text responses and decodes padded flush chunks" {
+    const response_type = try netz.grpc.web.negotiateResponseContentType(
+        try netz.grpc.web.parseContentType("application/grpc-web+proto"),
+        &.{.{ .name = "accept", .value = "application/grpc-web-text" }},
+    );
+    try std.testing.expect(response_type.text);
+    const decoded = try netz.grpc.web.base64DecodeAlloc(std.testing.allocator, "AAAAAAQ=cGluZw==");
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 4, 'p', 'i', 'n', 'g' }, decoded);
+}
+
 test "public WebTransport required flow policy rejects contradictory initial quotas" {
     const limits: netz.webtransport.runtime.Limits = .{
         .require_session_flow_control = true,

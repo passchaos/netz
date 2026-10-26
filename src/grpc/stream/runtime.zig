@@ -477,7 +477,7 @@ pub fn readWebRequest(
     const finished = try finishRequest(connection, allocator, &bridge, request);
     return .{
         .request = finished,
-        .content_type = bridge.content_type orelse
+        .content_type = bridge.response_content_type orelse
             return error.InvalidWebContentType,
     };
 }
@@ -525,7 +525,7 @@ pub fn readWebRequestWithDeadline(
     const finished = try finishRequest(connection, allocator, &bridge, request);
     return .{
         .request = finished,
-        .content_type = bridge.content_type orelse
+        .content_type = bridge.response_content_type orelse
             return error.InvalidWebContentType,
     };
 }
@@ -1028,12 +1028,10 @@ fn ServerRequestBridge(
         context: Context,
         web: bool,
         metadata: ?call.RequestMetadata = null,
-        content_type: ?web.ContentType = null,
+        response_content_type: ?web.ContentType = null,
         decoder: ?codec.Decoder = null,
         message_count: usize = 0,
-        /// Base64 text entities are accumulated whole before decoding at
-        /// END_STREAM; they contain exactly one gRPC-Web request message.
-        text_entity: ?std.ArrayList(u8) = null,
+        text_decoder: ?web.TextDecoder = null,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -1051,7 +1049,6 @@ fn ServerRequestBridge(
 
         fn deinit(self: *@This()) void {
             if (self.decoder) |*decoder| decoder.deinit();
-            if (self.text_entity) |*entity| entity.deinit(self.allocator);
         }
 
         fn begin(
@@ -1064,9 +1061,9 @@ fn ServerRequestBridge(
                     "content-type",
                 ) orelse return error.InvalidContentType;
                 const negotiated = try web.parseContentType(raw);
-                self.content_type = negotiated;
+                self.response_content_type = try web.negotiateResponseContentType(negotiated, head.headers);
                 if (negotiated.text) {
-                    self.text_entity = .empty;
+                    self.text_decoder = .{};
                 }
                 const parsed = try call.parseWebRequestMetadata(
                     head.method,
@@ -1097,18 +1094,11 @@ fn ServerRequestBridge(
         }
 
         fn consumeData(self: *@This(), data: []const u8) !void {
-            if (self.text_entity) |*entity| {
-                // One framed message plus base64 expansion is the only valid
-                // text request entity; reject an oversized upload up front.
-                const bound = std.base64.standard.Encoder.calcSize(
-                    5 + self.max_message_size,
-                );
-                if (entity.items.len + data.len > bound) {
-                    return error.GrpcMessageTooLarge;
-                }
-                try entity.appendSlice(self.allocator, data);
-                return;
-            }
+            if (self.text_decoder) |*text_decoder| return text_decoder.feed(data, self, consumeDecoded);
+            return self.consumeDecoded(data);
+        }
+
+        fn consumeDecoded(self: *@This(), data: []const u8) !void {
             const decoder = if (self.decoder) |*value|
                 value
             else
@@ -1120,6 +1110,7 @@ fn ServerRequestBridge(
             self: *@This(),
             message: codec.DecodedMessage,
         ) !void {
+            if (self.web and self.message_count != 0) return error.InvalidMessageCount;
             try deliver(self.context, message);
             self.message_count += 1;
         }
@@ -1129,14 +1120,7 @@ fn ServerRequestBridge(
                 value
             else
                 return error.InvalidStreamState;
-            if (self.text_entity) |*entity| {
-                const decoded = try web.base64DecodeAlloc(
-                    self.allocator,
-                    entity.items,
-                );
-                defer self.allocator.free(decoded);
-                try decoder.feed(decoded, self, deliverMessage);
-            }
+            if (self.text_decoder) |*text_decoder| try text_decoder.finish(self, consumeDecoded);
             try decoder.finish();
         }
     };

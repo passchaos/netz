@@ -1473,6 +1473,20 @@ test "gRPC streaming upload returns early cancelled status while flow blocked" {
                 },
                 true,
             );
+            // Complete the request half before closing the TCP socket. A
+            // close with unread upload DATA can reset the transport and race
+            // the client's empty FIN, obscuring the response being tested.
+            var uploaded: usize = 0;
+            while (true) {
+                var frame = try http2.runtime.testing.readOwnedFrame(&connection);
+                defer frame.deinit(connection.allocator);
+                if (try http2.runtime.testing.handleConnectionFrame(&connection, frame.frame)) continue;
+                try std.testing.expectEqual(http2.FrameType.data, frame.frame.header.frame_type);
+                try std.testing.expectEqual(stream_id, frame.frame.header.stream_id);
+                uploaded += frame.frame.payload.len;
+                if (frame.frame.header.flags & 0x1 != 0) break;
+            }
+            try std.testing.expectEqual(try wire.encodedMessageLen("first".len), uploaded);
         }
     };
 
@@ -1484,6 +1498,8 @@ test "gRPC streaming upload returns early cancelled status while flow blocked" {
 
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
     var connection = try http2.runtime.Client.connect(
         allocator,
         io,
@@ -1523,6 +1539,7 @@ test "gRPC streaming upload returns early cancelled status while flow blocked" {
     defer early.deinit();
 
     thread.join();
+    joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(wire.Status.cancelled, early.status);
     try std.testing.expectEqualStrings(
