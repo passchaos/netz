@@ -139,10 +139,11 @@ fn acceptAndServe(
             if (err != error.ConnectionClosed and
                 err != error.ConnectionGoAway)
             {
-                connection.sendGoAway(
+                connection.sendGoAwayWithTimeout(
                     0,
                     .protocol_error,
                     @errorName(err),
+                    .fromSeconds(1),
                 ) catch {};
             }
             break;

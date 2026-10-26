@@ -1028,6 +1028,17 @@ Reusable implementation changes behind these H2 results:
   follows the existing connection-reuse safety boundary. Real blocked-socket
   tests cover both APIs, and the audited h2 interop server sends 103, 102 and
   the final 200 under one deadline;
+- application `sendResetStream` and `sendGoAway` calls now expose matching
+  timeout/deadline forms. Deadline validation precedes stream release,
+  Last-Stream-ID mutation and large debug-data allocation. A successful reset
+  releases both local/peer stream ownership only after the complete RST_STREAM
+  write; GOAWAY commits its non-increasing boundary only after the complete
+  frame. Any attempted control-frame write failure keeps the conservative
+  connection-unusable boundary because a partial frame prefix cannot be
+  recovered. Real blocked-socket, allocation-failure and ordered
+  RST_STREAM-before-GOAWAY tests cover the public APIs. The Hyper graceful-drain
+  fixture uses one absolute deadline for GOAWAY plus the final response, while
+  the h2spec adapter bounds its protocol-error GOAWAY;
 - `startRequest` provides the client-side counterpart. `RequestWriter` accepts
   bounded or length-unbounded DATA chunks, request trailers and transactional
   length retries, remains responsible for cancellation after request-body FIN,

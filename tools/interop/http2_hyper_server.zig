@@ -258,16 +258,21 @@ pub fn main(init: std.process.Init) !void {
     }
     // Stream 9 is already accepted, so the narrowed GOAWAY boundary permits
     // its response to drain while preventing Hyper from opening stream 11.
-    try connection.sendGoAway(
+    const drain_deadline = std.Io.Clock.Timestamp.fromNow(
+        connection.io,
+        .{ .clock = .awake, .raw = .fromSeconds(5) },
+    );
+    try connection.sendGoAwayWithDeadline(
         graceful_request.stream_id,
         .no_error,
         "netz-draining",
+        drain_deadline,
     );
-    try connection.writeResponse(graceful_request.stream_id, .{
+    try connection.writeResponseWithDeadline(graceful_request.stream_id, .{
         .status = 200,
         .body = "netz-drained",
         .request_method = graceful_request.method,
-    });
+    }, drain_deadline);
     std.debug.print(
         "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "h2c"},

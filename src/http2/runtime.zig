@@ -12,6 +12,7 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/control/output_deadline_tests.zig");
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
@@ -13869,6 +13870,42 @@ pub const Connection = struct {
         );
     }
 
+    /// Submit GOAWAY under one caller-owned awake-clock deadline. The local
+    /// monotonic Last-Stream-ID boundary changes only after the complete frame
+    /// reaches the transport.
+    pub fn sendGoAwayWithDeadline(
+        self: *Connection,
+        last_stream_id: u31,
+        error_code: http2.ErrorCode,
+        debug_data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        return self.sendGoAwayUntil(
+            last_stream_id,
+            error_code,
+            debug_data,
+            absolute,
+        );
+    }
+
+    pub fn sendGoAwayWithTimeout(
+        self: *Connection,
+        last_stream_id: u31,
+        error_code: http2.ErrorCode,
+        debug_data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendGoAwayWithDeadline(
+            last_stream_id,
+            error_code,
+            debug_data,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn sendGoAwayUntil(
         self: *Connection,
         last_stream_id: u31,
@@ -14077,10 +14114,47 @@ pub const Connection = struct {
     }
 
     pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
+        return self.sendResetStreamUntil(stream_id, error_code, null);
+    }
+
+    pub fn sendResetStreamWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendResetStreamUntil(
+            stream_id,
+            error_code,
+            absolute,
+        );
+    }
+
+    pub fn sendResetStreamWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResetStreamWithDeadline(
+            stream_id,
+            error_code,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn sendResetStreamUntil(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
-        try self.writeResetStreamFrame(stream_id, error_code);
+        try self.writeResetStreamFrameUntil(stream_id, error_code, deadline);
         self.releaseLocalStream(stream_id);
         self.releasePeerStream(stream_id);
         self.forgetStreamWindows(stream_id);
