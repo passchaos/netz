@@ -245,3 +245,80 @@ pub fn appendHeaderBlock(
         offset = end;
     }
 }
+
+/// Append one PUSH_PROMISE field section and every required CONTINUATION as a
+/// single prepared byte sequence. The promised stream identifier occupies the
+/// first four payload bytes and therefore reduces only the first frame's HPACK
+/// capacity.
+pub fn appendPushPromiseBlock(
+    batch: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    parent_stream_id: u31,
+    promised_stream_id: u31,
+    block: []const u8,
+    chunk_size: usize,
+) !void {
+    if (chunk_size <= 4 or chunk_size > std.math.maxInt(u24)) {
+        return error.InvalidFrameSize;
+    }
+    const first_len = @min(block.len, chunk_size - 4);
+    const remaining = block.len - first_len;
+    const continuation_count = if (remaining == 0)
+        0
+    else
+        std.math.divCeil(usize, remaining, chunk_size) catch
+            return error.InvalidFrameSize;
+    const frame_count = std.math.add(
+        usize,
+        continuation_count,
+        1,
+    ) catch return error.InvalidFrameSize;
+    const framing_len = std.math.mul(
+        usize,
+        frame_count,
+        http2.FrameHeader.encoded_len,
+    ) catch return error.InvalidFrameSize;
+    const payload_len = std.math.add(usize, block.len, 4) catch
+        return error.InvalidFrameSize;
+    const encoded_len = std.math.add(
+        usize,
+        framing_len,
+        payload_len,
+    ) catch return error.InvalidFrameSize;
+    try batch.ensureUnusedCapacity(allocator, encoded_len);
+
+    const start = batch.items.len;
+    batch.items.len = start + http2.FrameHeader.encoded_len + 4 + first_len;
+    const header: *[http2.FrameHeader.encoded_len]u8 =
+        @ptrCast(batch.items[start..].ptr);
+    encodeHeader(
+        header,
+        .push_promise,
+        if (first_len == block.len) flag_end_headers else 0,
+        parent_stream_id,
+        4 + first_len,
+    ) catch unreachable;
+    const payload_start = start + http2.FrameHeader.encoded_len;
+    std.mem.writeInt(
+        u32,
+        batch.items[payload_start..][0..4],
+        promised_stream_id,
+        .big,
+    );
+    @memcpy(
+        batch.items[payload_start + 4 ..][0..first_len],
+        block[0..first_len],
+    );
+    var offset = first_len;
+    while (offset < block.len) {
+        const end = @min(block.len, offset + chunk_size);
+        appendFrameAssumeCapacity(
+            batch,
+            .continuation,
+            if (end == block.len) flag_end_headers else 0,
+            parent_stream_id,
+            block[offset..end],
+        );
+        offset = end;
+    }
+}

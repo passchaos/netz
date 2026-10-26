@@ -988,6 +988,16 @@ Reusable implementation changes behind these H2 results:
   on a reserved push emit connection PROTOCOL_ERROR, and a zero WINDOW_UPDATE
   on an opened push remains a pushed-stream error. The state and orchestration
   live under `runtime/push/` with nearby allocation-failure and socket tests.
+  Server-side `promisePush` and `writePushedResponse` now also expose timeout
+  and absolute-deadline forms. Deadline-bound PUSH_PROMISE prepares its complete
+  field section, including every CONTINUATION, before one tracked transport
+  submission and commits staged HPACK only after success. Expired/foreign-clock
+  budgets do not reserve a push ID or activate its stream; allocation failures
+  release the provisional reservation and remain retryable. A pushed response
+  whose HEADERS committed before a later DATA timeout is reset and retired,
+  while a pre-output validation failure keeps the reservation retryable. Real
+  blocked-socket, flow-control, allocator-failure and 32-KiB fragmented-promise
+  round trips cover those boundaries.
   The Rust h2 process gate additionally flushes a complete push before queuing
   its parent, checks a shared HPACK field, and passes over h2c and verified TLS;
 - Hyper's `max_send_buffer_size` bounds DATA retained by its asynchronous

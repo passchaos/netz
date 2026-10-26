@@ -12,6 +12,7 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
@@ -105,6 +106,7 @@ const encodeFrameHeader = frame_wire.encodeHeader;
 const encodeWindowUpdateFrame = frame_wire.encodeWindowUpdate;
 const appendFrameBytes = frame_wire.appendFrame;
 const appendHeaderBlockBytes = frame_wire.appendHeaderBlock;
+const appendPushPromiseBlockBytes = frame_wire.appendPushPromiseBlock;
 const writeFrameTransport = frame_io.writeTransport;
 const writeFrameTransportWithDeadline = frame_io.writeTransportWithDeadline;
 
@@ -12138,6 +12140,28 @@ pub const Connection = struct {
         release_stream: bool,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        return self.writeResponseInternalTrackedUntil(
+            stream_id,
+            options,
+            release_stream,
+            deadline,
+            null,
+        );
+    }
+
+    const AggregateResponseWriteProgress = struct {
+        head_committed: bool = false,
+    };
+
+    fn writeResponseInternalTrackedUntil(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        release_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+        progress: ?*AggregateResponseWriteProgress,
+    ) Error!void {
+        if (progress) |value| value.* = .{};
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) {
@@ -12208,6 +12232,7 @@ pub const Connection = struct {
                 options.body,
                 true,
             );
+            if (progress) |value| value.head_committed = true;
         } else {
             try self.writeHeadersUntil(
                 stream_id,
@@ -12217,6 +12242,7 @@ pub const Connection = struct {
                 deadline,
             );
             output_started = true;
+            if (progress) |value| value.head_committed = true;
         }
         if (!suppress_body) {
             if (options.body.len != 0 and (deadline != null or options.trailers.len != 0)) {
@@ -12876,6 +12902,49 @@ pub const Connection = struct {
         parent_stream_id: u31,
         request_headers: []const http2.Hpack.HeaderField,
     ) Error!u31 {
+        return self.promisePushUntil(
+            parent_stream_id,
+            request_headers,
+            null,
+        );
+    }
+
+    /// Reserve a promised stream and submit its complete PUSH_PROMISE field
+    /// section under one caller-owned awake-clock deadline.
+    pub fn promisePushWithDeadline(
+        self: *Connection,
+        parent_stream_id: u31,
+        request_headers: []const http2.Hpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!u31 {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.promisePushUntil(
+            parent_stream_id,
+            request_headers,
+            absolute,
+        );
+    }
+
+    pub fn promisePushWithTimeout(
+        self: *Connection,
+        parent_stream_id: u31,
+        request_headers: []const http2.Hpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!u31 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.promisePushWithDeadline(
+            parent_stream_id,
+            request_headers,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn promisePushUntil(
+        self: *Connection,
+        parent_stream_id: u31,
+        request_headers: []const http2.Hpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!u31 {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server or !self.peerPushEnabled()) {
             return error.UnexpectedFrame;
@@ -12904,12 +12973,17 @@ pub const Connection = struct {
             self.allocator,
             request_headers,
         );
-        errdefer self.aggregate_timeout_unusable = true;
-        try self.writePushPromiseBlock(
+        var submitted = false;
+        self.writePushPromiseBlockUntil(
             parent_stream_id,
             promised_stream_id,
             block,
-        );
+            deadline,
+            &submitted,
+        ) catch |err| {
+            if (submitted) self.aggregate_timeout_unusable = true;
+            return err;
+        };
         self.commitStagedHpackEncoder();
         return promised_stream_id;
     }
@@ -12918,6 +12992,49 @@ pub const Connection = struct {
         self: *Connection,
         promised_stream_id: u31,
         response: ResponseOptions,
+    ) Error!void {
+        return self.writePushedResponseUntil(
+            promised_stream_id,
+            response,
+            null,
+        );
+    }
+
+    /// Write the promised response HEADERS, DATA and trailers without renewing
+    /// the deadline between phases.
+    pub fn writePushedResponseWithDeadline(
+        self: *Connection,
+        promised_stream_id: u31,
+        response: ResponseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.writePushedResponseUntil(
+            promised_stream_id,
+            response,
+            absolute,
+        );
+    }
+
+    pub fn writePushedResponseWithTimeout(
+        self: *Connection,
+        promised_stream_id: u31,
+        response: ResponseOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writePushedResponseWithDeadline(
+            promised_stream_id,
+            response,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn writePushedResponseUntil(
+        self: *Connection,
+        promised_stream_id: u31,
+        response: ResponseOptions,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
@@ -12946,9 +13063,17 @@ pub const Connection = struct {
             try self.addActiveLocalStream(promised_stream_id);
             activated = true;
         }
-        self.writeResponse(promised_stream_id, response) catch |err| {
-            if (self.push_state.localStatus(promised_stream_id) ==
-                .canceled)
+        var progress: AggregateResponseWriteProgress = .{};
+        self.writeResponseInternalTrackedUntil(
+            promised_stream_id,
+            response,
+            true,
+            deadline,
+            &progress,
+        ) catch |err| {
+            if (progress.head_committed or
+                self.aggregate_timeout_unusable or
+                self.push_state.localStatus(promised_stream_id) == .canceled)
             {
                 _ = self.push_state.releaseLocal(
                     promised_stream_id,
@@ -16733,14 +16858,35 @@ pub const Connection = struct {
         return .{ .bytes = block, .limit_exceeded = limit_exceeded };
     }
 
-    fn writePushPromiseBlock(
+    fn writePushPromiseBlockUntil(
         self: *Connection,
         parent_stream_id: u31,
         promised_stream_id: u31,
         block: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+        submitted: *bool,
     ) Error!void {
+        submitted.* = false;
         const chunk_size = self.outboundFramePayloadLimit();
         if (chunk_size <= 4) return error.InvalidFrame;
+        if (deadline) |absolute| {
+            self.write_batch.clearRetainingCapacity();
+            try appendPushPromiseBlockBytes(
+                &self.write_batch,
+                self.allocator,
+                parent_stream_id,
+                promised_stream_id,
+                block,
+                chunk_size,
+            );
+            var committed: usize = 0;
+            submitted.* = true;
+            return self.transportForIo().writeAllWithDeadline(
+                self.write_batch.items,
+                &committed,
+                absolute,
+            );
+        }
         const first_len = @min(block.len, chunk_size - 4);
         var prefix: [http2.FrameHeader.encoded_len + 4]u8 = undefined;
         try encodeFrameHeader(
@@ -16756,6 +16902,7 @@ pub const Connection = struct {
             promised_stream_id,
             .big,
         );
+        submitted.* = true;
         try self.transportForIo().writeAllParts(
             &prefix,
             block[0..first_len],

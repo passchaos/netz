@@ -83,19 +83,23 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     try std.testing.expectEqualStrings("/push-disabled", request.path);
+    const response_deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .clock = .awake, .raw = .fromSeconds(5) },
+    );
     try std.testing.expectError(
         error.UnexpectedFrame,
-        connection.promisePush(request.stream_id, &.{
+        connection.promisePushWithDeadline(request.stream_id, &.{
             .{ .name = ":method", .value = "GET" },
             .{ .name = ":path", .value = "/must-not-push" },
             .{ .name = ":scheme", .value = "https" },
             .{ .name = ":authority", .value = "localhost" },
-        }),
+        }, response_deadline),
     );
-    try connection.writeResponse(request.stream_id, .{
+    try connection.writeResponseWithDeadline(request.stream_id, .{
         .status = 204,
         .request_method = request.method,
-    });
+    }, response_deadline);
     std.debug.print(
         "netz HTTP/2 server honored h2 push opt-out: transport={s} request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "h2c"},
