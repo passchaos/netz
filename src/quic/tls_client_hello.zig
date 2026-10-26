@@ -130,7 +130,45 @@ const ext_alpn: u16 = 0x0010;
 const ext_supported_versions: u16 = 0x002b;
 const ext_key_share: u16 = 0x0033;
 const ext_quic_transport_parameters: u16 = 0x0039;
+const ext_compress_certificate: u16 =
+    quic.tls.certificate_compression.extension_type_compress_certificate;
 const ext_pre_shared_key = quic.resumption.tls_psk.ext_pre_shared_key;
+
+/// RFC 8879 algorithms offered by QUIC clients, brotli and zstd first for
+/// certificate-chain compression ratio, zlib last for peer compatibility.
+pub const default_certificate_compression_algorithms =
+    [_]quic.tls.certificate_compression.Algorithm{
+        .brotli,
+        .zstd,
+        .zlib,
+    };
+
+fn writeCompressCertificateExtension(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    algorithms: []const quic.tls.certificate_compression.Algorithm,
+) Error!void {
+    if (algorithms.len == 0 or algorithms.len > 255 / 2) {
+        return error.InvalidClientHello;
+    }
+    var payload: [1 + 254]u8 = undefined;
+    payload[0] = @intCast(algorithms.len * 2);
+    for (algorithms, 0..) |algorithm, index| {
+        if (!algorithm.supported()) return error.InvalidClientHello;
+        std.mem.writeInt(
+            u16,
+            payload[1 + index * 2 ..][0..2],
+            @intFromEnum(algorithm),
+            .big,
+        );
+    }
+    try writeExtension(
+        list,
+        allocator,
+        ext_compress_certificate,
+        payload[0 .. 1 + algorithms.len * 2],
+    );
+}
 
 pub const ClientHelloOptions = struct {
     random: [32]u8,
@@ -141,6 +179,9 @@ pub const ClientHelloOptions = struct {
     alpn_protocols: []const []const u8 = &.{"h3"},
     transport_parameters: []const u8 = &.{},
     cipher_suites: []const CipherSuite = &default_cipher_suites,
+    /// RFC 8879 compress_certificate algorithms. Empty omits the extension.
+    certificate_compression_algorithms: []const quic.tls.certificate_compression.Algorithm =
+        &default_certificate_compression_algorithms,
 };
 
 pub const ParsedClientHello = struct {
@@ -286,6 +327,13 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try writeAlpnExtension(&extensions, allocator, options.alpn_protocols);
     try writeSupportedVersionsExtension(&extensions, allocator);
     try writeKeyShareExtension(&extensions, allocator, key_shares);
+    if (options.certificate_compression_algorithms.len != 0) {
+        try writeCompressCertificateExtension(
+            &extensions,
+            allocator,
+            options.certificate_compression_algorithms,
+        );
+    }
     try writeExtension(&extensions, allocator, ext_quic_transport_parameters, options.transport_parameters);
 
     const cipher_suites_len = try cipherSuitesWireLen(options.cipher_suites);

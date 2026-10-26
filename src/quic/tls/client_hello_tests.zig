@@ -935,3 +935,101 @@ test "QUIC TLS server handshake flight travels over Handshake packet" {
 fn handshakeMessageLen(bytes: []const u8) usize {
     return 4 + ((@as(usize, bytes[1]) << 16) | (@as(usize, bytes[2]) << 8) | bytes[3]);
 }
+
+fn extensionDataForTest(
+    hello: []const u8,
+    extension_type: u16,
+) ?[]const u8 {
+    // Skip the four-byte handshake header, legacy_version and random.
+    if (hello.len < 4 + 38) return null;
+    var cursor: usize = 4 + 2 + 32;
+    const session_id_len = hello[cursor];
+    cursor += 1 + session_id_len;
+    const cipher_suites_len = std.mem.readInt(
+        u16,
+        hello[cursor..][0..2],
+        .big,
+    );
+    cursor += 2 + cipher_suites_len;
+    const compression_methods_len = hello[cursor];
+    cursor += 1 + compression_methods_len;
+    if (cursor + 2 > hello.len) return null;
+    const extensions_len = std.mem.readInt(
+        u16,
+        hello[cursor..][0..2],
+        .big,
+    );
+    cursor += 2;
+    const extensions = hello[cursor .. cursor + extensions_len];
+    var offset: usize = 0;
+    while (offset + 4 <= extensions.len) {
+        const kind = std.mem.readInt(
+            u16,
+            extensions[offset..][0..2],
+            .big,
+        );
+        const len = std.mem.readInt(
+            u16,
+            extensions[offset + 2 ..][0..2],
+            .big,
+        );
+        const start = offset + 4;
+        if (start + len > extensions.len) return null;
+        if (kind == extension_type) return extensions[start .. start + len];
+        offset = start + len;
+    }
+    return null;
+}
+
+test "QUIC TLS ClientHello advertises default and custom compress_certificate" {
+    const allocator = std.testing.allocator;
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try target.writeClientHello(&hello, allocator, .{
+        .random = [_]u8{0x11} ** 32,
+        .x25519_public_key = [_]u8{0x22} ** 32,
+    });
+    const default_data = extensionDataForTest(hello.items, 0x001b).?;
+    try std.testing.expectEqual(@as(usize, 7), default_data.len);
+    try std.testing.expectEqual(@as(u8, 6), default_data[0]);
+    const default_algorithms = [_]u16{
+        std.mem.readInt(u16, default_data[1..3], .big),
+        std.mem.readInt(u16, default_data[3..5], .big),
+        std.mem.readInt(u16, default_data[5..7], .big),
+    };
+    try std.testing.expectEqualSlices(u16, &.{
+        @intFromEnum(quic.tls.certificate_compression.Algorithm.brotli),
+        @intFromEnum(quic.tls.certificate_compression.Algorithm.zstd),
+        @intFromEnum(quic.tls.certificate_compression.Algorithm.zlib),
+    }, &default_algorithms);
+
+    var custom_hello: std.ArrayList(u8) = .empty;
+    defer custom_hello.deinit(allocator);
+    try target.writeClientHello(&custom_hello, allocator, .{
+        .random = [_]u8{0x11} ** 32,
+        .x25519_public_key = [_]u8{0x22} ** 32,
+        .certificate_compression_algorithms = &.{
+            quic.tls.certificate_compression.Algorithm.zstd,
+        },
+    });
+    const custom_data = extensionDataForTest(
+        custom_hello.items,
+        0x001b,
+    ).?;
+    try std.testing.expectEqual(@as(usize, 3), custom_data.len);
+    try std.testing.expectEqual(
+        @as(u16, @intFromEnum(quic.tls.certificate_compression.Algorithm.zstd)),
+        std.mem.readInt(u16, custom_data[1..3], .big),
+    );
+
+    var plain_hello: std.ArrayList(u8) = .empty;
+    defer plain_hello.deinit(allocator);
+    try target.writeClientHello(&plain_hello, allocator, .{
+        .random = [_]u8{0x11} ** 32,
+        .x25519_public_key = [_]u8{0x22} ** 32,
+        .certificate_compression_algorithms = &.{},
+    });
+    try std.testing.expect(
+        extensionDataForTest(plain_hello.items, 0x001b) == null,
+    );
+}

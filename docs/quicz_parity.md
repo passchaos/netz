@@ -2863,5 +2863,16 @@ compress their Certificate on demand with the same preference list through
 vail's RFC 8879 policy (brotli, zstd, zlib in the client's advertised order,
 emitted only when it saves bytes), and an authenticated loopback test with a
 repeated DER chain proves the client receives and verifies a compressed
-Certificate end to end. The netz-native QUIC TLS ClientHello remains the one
-transport path without certificate compression.
+Certificate end to end.
+
+The netz QUIC client (`src/quic/tls_client_hello.zig`) also advertises RFC
+8879 by default with the same brotli/zstd/zlib preference and accepts type-0x19
+compressed Certificate messages: the client handshake decompresses with vail
+(enforcing the advertised-algorithm and a 64 KiB bound before allocation) for
+chain verification while the transcript retains the compressed message as
+required by the spec. The QUIC server's ClientHello parser already ignores the
+unknown extension, so compressed-cert offers never break existing servers;
+the QUIC server does not yet emit compressed Certificates itself. Tests cover
+the extension encoding (default/custom/omitted), the 0x19 server-flight split
+with transcript boundaries, decompression round trip, and unoffered-algorithm
+rejection.

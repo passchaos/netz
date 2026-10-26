@@ -94,6 +94,13 @@ pub const ClientOptions = struct {
     /// TLS 1.3 cipher suites offered in preference order.
     cipher_suites: []const quic.tls_client_hello.CipherSuite =
         &quic.tls_client_hello.default_cipher_suites,
+    /// RFC 8879 algorithms advertised in compress_certificate. An empty
+    /// slice omits the extension.
+    certificate_compression_algorithms: []const quic.tls.certificate_compression.Algorithm =
+        &quic.tls_client_hello.default_certificate_compression_algorithms,
+    /// Reject a compressed Certificate above this uncompressed size before
+    /// allocation or inflation.
+    max_decompressed_certificate_len: usize = 64 * 1024,
 };
 
 pub const ServerPsk = struct {
@@ -1597,6 +1604,7 @@ fn connectAttempt(
         .alpn_protocols = options.alpn_protocols,
         .transport_parameters = transport_parameters,
         .cipher_suites = options.cipher_suites,
+        .certificate_compression_algorithms = options.certificate_compression_algorithms,
     });
     const resumption_session = if (options.early_data) |early_data|
         &early_data.lease.session
@@ -2112,11 +2120,30 @@ fn connectAttempt(
             return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         }
     } else if (options.server_auth) |verifier| {
-        const certificate_bytes = server_flight.certificate orelse
+        const raw_certificate_bytes = server_flight.certificate orelse
             return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         const certificate_verify_bytes =
             server_flight.certificate_verify orelse
             return peer_failure.rejectTls(error.InvalidHandshakeFlight);
+        // RFC 8879: a type-0x19 message is decompressed for chain parsing,
+        // while the transcript continues over the compressed bytes because
+        // server_flight.through_certificate keeps the original flight slice.
+        var owned_certificate_bytes: ?[]u8 = null;
+        defer if (owned_certificate_bytes) |owned| {
+            endpoint.allocator.free(owned);
+        };
+        const certificate_bytes = if (raw_certificate_bytes[0] ==
+            quic.tls.certificate_compression.handshake_type_compressed_certificate)
+        blk: {
+            const decompressed = quic.tls.certificate_compression.decompressCertificate(
+                endpoint.allocator,
+                raw_certificate_bytes,
+                options.certificate_compression_algorithms,
+                options.max_decompressed_certificate_len,
+            ) catch return peer_failure.rejectTls(error.InvalidHandshakeFlight);
+            owned_certificate_bytes = decompressed;
+            break :blk decompressed;
+        } else raw_certificate_bytes;
         peer_certificate = try peer_failure.guardTls(quic.tls.auth.parseCertificate(
             endpoint.allocator,
             certificate_bytes,
@@ -4941,7 +4968,8 @@ fn splitServerFlight(
         if (offset >= bytes.len) return error.InvalidHandshakeFlight;
     }
     const has_certificate = offset < bytes.len and
-        bytes[offset] == quic.tls.auth.handshake_type_certificate;
+        (bytes[offset] == quic.tls.auth.handshake_type_certificate or
+            bytes[offset] == quic.tls.certificate_compression.handshake_type_compressed_certificate);
     if (authenticated_server and !has_certificate) return error.InvalidHandshakeFlight;
     if (has_certificate) {
         const certificate_len = try handshakeMessageLen(bytes[offset..]);
@@ -5562,6 +5590,84 @@ test "QUIC handshake one-RTT config propagates spin-bit policy" {
     }, [_]u8{0x10} ** 32).enable_spin_bit);
     try std.testing.expect(!sampledSpinBitConfig(.{}, [_]u8{0x11} ** 32)
         .enable_spin_bit);
+}
+
+test "QUIC client accepts an RFC 8879 compressed server Certificate" {
+    const allocator = std.testing.allocator;
+    const large_certificate = [_]u8{0x7c} ** 4096;
+    var ordinary: std.ArrayList(u8) = .empty;
+    defer ordinary.deinit(allocator);
+    try quic.tls.auth.writeCertificate(
+        &ordinary,
+        allocator,
+        &.{&large_certificate},
+    );
+
+    var prepared = try quic.tls.certificate_compression.Prepared.initZlib(
+        allocator,
+        ordinary.items,
+        .amortized,
+    );
+    defer prepared.deinit();
+    var compressed_message: std.ArrayList(u8) = .empty;
+    defer compressed_message.deinit(allocator);
+    try prepared.view().write(&compressed_message, allocator);
+
+    // Fabricate EE + compressed Certificate + CertificateVerify + Finished
+    // messages. The splitter only consumes lengths and the first byte.
+    const ee_body = [_]u8{0x11} ** 32;
+    const verify_body = [_]u8{0x22} ** 80;
+    const finished_body = [_]u8{0x33} ** 48;
+    var flight: std.ArrayList(u8) = .empty;
+    defer flight.deinit(allocator);
+    try appendTestHandshakeMessage(&flight, allocator, 0x08, &ee_body);
+    try flight.appendSlice(allocator, compressed_message.items);
+    try appendTestHandshakeMessage(&flight, allocator, 0x0f, &verify_body);
+    try appendTestHandshakeMessage(&flight, allocator, 0x14, &finished_body);
+
+    const split = try splitServerFlight(flight.items, true);
+    try std.testing.expectEqual(
+        quic.tls.certificate_compression.handshake_type_compressed_certificate,
+        split.certificate.?[0],
+    );
+    // Transcript coverage retains the compressed message.
+    try std.testing.expect(split.through_certificate.?.len ==
+        4 + ee_body.len + compressed_message.items.len);
+
+    // Decompression restores the exact Certificate message.
+    const restored = try quic.tls.certificate_compression.decompressCertificate(
+        allocator,
+        split.certificate.?,
+        &.{.zlib},
+        ordinary.items.len,
+    );
+    defer allocator.free(restored);
+    try std.testing.expectEqualSlices(u8, ordinary.items, restored);
+
+    // An unoffered algorithm is rejected rather than inflated.
+    try std.testing.expectError(
+        error.SelectedUnofferedCompressionAlgorithm,
+        quic.tls.certificate_compression.decompressCertificate(
+            allocator,
+            split.certificate.?,
+            &.{.zstd},
+            ordinary.items.len,
+        ),
+    );
+}
+
+fn appendTestHandshakeMessage(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u8,
+    body: []const u8,
+) !void {
+    try list.ensureUnusedCapacity(allocator, 4 + body.len);
+    list.appendAssumeCapacity(typ);
+    list.appendAssumeCapacity(@truncate(body.len >> 16));
+    list.appendAssumeCapacity(@truncate(body.len >> 8));
+    list.appendAssumeCapacity(@truncate(body.len));
+    try list.appendSlice(allocator, body);
 }
 
 test {
