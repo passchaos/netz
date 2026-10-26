@@ -116,9 +116,7 @@ fn parseValidatedRequestMetadata(
         else
             null,
         .encoding = findHeader(headers, "grpc-encoding"),
-        .accepted_encodings = compression_mod.parseAcceptEncoding(
-            findHeader(headers, "grpc-accept-encoding"),
-        ),
+        .accepted_encodings = compression_mod.parseAcceptEncodingFields(headers),
     };
 }
 

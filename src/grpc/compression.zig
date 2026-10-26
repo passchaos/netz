@@ -7,6 +7,10 @@
 const std = @import("std");
 const deflate = @import("../internal/deflate.zig");
 
+test {
+    _ = @import("compression/negotiation_tests.zig");
+}
+
 pub const Error = error{
     CompressionFailed,
     DecompressedMessageTooLarge,
@@ -15,93 +19,11 @@ pub const Error = error{
     UnsupportedCompression,
 } || std.mem.Allocator.Error;
 
-pub const Algorithm = enum {
-    identity,
-    deflate,
-    gzip,
-
-    pub fn name(self: Algorithm) []const u8 {
-        return switch (self) {
-            .identity => "identity",
-            .deflate => "deflate",
-            .gzip => "gzip",
-        };
-    }
-
-    pub fn parse(value: []const u8) ?Algorithm {
-        inline for (std.enums.values(Algorithm)) |algorithm| {
-            if (std.mem.eql(u8, value, algorithm.name())) {
-                return algorithm;
-            }
-        }
-        return null;
-    }
-};
-
-/// The peer's advertised message decoders. Identity is always available:
-/// gRPC peers may send any individual message with its compressed flag clear.
-pub const AlgorithmSet = struct {
-    deflate: bool = false,
-    gzip: bool = false,
-
-    pub const supported: AlgorithmSet = .{
-        .deflate = true,
-        .gzip = true,
-    };
-
-    pub fn contains(self: AlgorithmSet, algorithm: Algorithm) bool {
-        return switch (algorithm) {
-            .identity => true,
-            .deflate => self.deflate,
-            .gzip => self.gzip,
-        };
-    }
-
-    pub fn insert(self: *AlgorithmSet, algorithm: Algorithm) void {
-        switch (algorithm) {
-            .identity => {},
-            .deflate => self.deflate = true,
-            .gzip => self.gzip = true,
-        }
-    }
-};
-
-/// Parses `grpc-accept-encoding`, ignoring extensions unknown to netz.
-///
-/// Unknown entries cannot be selected by this implementation but must not
-/// hide known entries in the same comma-separated field.
-pub fn parseAcceptEncoding(value: ?[]const u8) AlgorithmSet {
-    var result: AlgorithmSet = .{};
-    var tokens = std.mem.splitScalar(u8, value orelse "", ',');
-    while (tokens.next()) |token| {
-        if (Algorithm.parse(std.mem.trim(u8, token, " \t"))) |algorithm| {
-            result.insert(algorithm);
-        }
-    }
-    return result;
-}
-
-pub fn formatAcceptEncodingInto(
-    out: []u8,
-    algorithms: AlgorithmSet,
-) error{BufferTooSmall}![]u8 {
-    var used: usize = 0;
-    for ([_]Algorithm{
-        .identity,
-        .deflate,
-        .gzip,
-    }) |algorithm| {
-        if (!algorithms.contains(algorithm)) continue;
-        const delimiter: []const u8 = if (used == 0) "" else ",";
-        const required = delimiter.len + algorithm.name().len;
-        if (out.len -| used < required) return error.BufferTooSmall;
-        @memcpy(out[used..][0..delimiter.len], delimiter);
-        used += delimiter.len;
-        @memcpy(out[used..][0..algorithm.name().len], algorithm.name());
-        used += algorithm.name().len;
-    }
-    return out[0..used];
-}
+pub const Algorithm = @import("compression/algorithm.zig").Algorithm;
+pub const AlgorithmSet = @import("compression/algorithm.zig").AlgorithmSet;
+pub const parseAcceptEncoding = @import("compression/negotiation.zig").parseValue;
+pub const parseAcceptEncodingFields = @import("compression/negotiation.zig").parseFields;
+pub const formatAcceptEncodingInto = @import("compression/negotiation.zig").formatInto;
 
 /// Compression output borrows the input when identity was selected or when
 /// the wrapper would not reduce the message size. This mirrors gRPC Core and

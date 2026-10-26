@@ -45,6 +45,13 @@ existing HTTP/2 runtime:
   intermediary omits `grpc-status`, including HTTP 200 UNKNOWN results,
 - typed `identity`, `deflate`, and `gzip` algorithms plus
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
+- accepted-encoding field selection follows the most recent non-repeatable
+  `grpc-accept-encoding` declaration, matching gRPC Core metadata storage and
+  its compression policy. A later empty, identity-only, or unknown-only value
+  withdraws previously advertised gzip/deflate capabilities. Known algorithms
+  within the final comma-separated value remain usable. Unary, client/server
+  streaming, duplex and gRPC-Web requests share this selection, with real
+  response compression/fallback and decoded-message checks on reused channels,
 - per-message gzip and RFC 1950 zlib-wrapped `deflate` compression using the
   package-local focused DEFLATE backend, with no cross-message codec state,
 - per-message compression opt-out on sequential and duplex client/server

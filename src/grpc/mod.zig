@@ -44,6 +44,8 @@ pub const CompressionAlgorithm = compression.Algorithm;
 pub const CompressionAlgorithmSet = compression.AlgorithmSet;
 pub const parseCompressionAcceptEncoding =
     compression.parseAcceptEncoding;
+pub const parseCompressionAcceptEncodingFields =
+    compression.parseAcceptEncodingFields;
 pub const formatCompressionAcceptEncodingInto =
     compression.formatAcceptEncodingInto;
 pub const compressMessageAlloc = compression.compressAlloc;
@@ -103,6 +105,8 @@ pub const bearerAuthorizationValueLen = auth.bearerAuthorizationValueLen;
 pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
+    _ = compression;
+    _ = @import("compression/negotiation_runtime_tests.zig");
     _ = status_details;
     _ = @import("response_metadata.zig");
     _ = auth;

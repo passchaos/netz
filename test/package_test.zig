@@ -1,6 +1,16 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC compression field negotiation honors the last advertisement" {
+    const fields = [_]netz.http2.Hpack.HeaderField{
+        .{ .name = "grpc-accept-encoding", .value = "gzip" },
+        .{ .name = "grpc-accept-encoding", .value = "deflate" },
+    };
+    const accepted = netz.grpc.parseCompressionAcceptEncodingFields(&fields);
+    try std.testing.expect(!accepted.contains(.gzip));
+    try std.testing.expect(accepted.contains(.deflate));
+}
+
 test "public HTTP3 origin equality and keys recognize normalized hosts" {
     const allocator = std.testing.allocator;
     const original = try netz.http3.requestOrigin("https", "[2001:DB8:0:0:0:0:0:1]");
