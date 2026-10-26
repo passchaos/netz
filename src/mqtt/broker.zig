@@ -670,6 +670,7 @@ const SessionAckResult = struct {
 const subscription_change = @import("broker/subscription_change.zig");
 test {
     _ = subscription_change;
+    _ = @import("broker/prometheus.zig");
 }
 const subscriberId = session_route.connectionSubscriberId;
 const nextConnectionGeneration = session_route.nextConnectionGeneration;

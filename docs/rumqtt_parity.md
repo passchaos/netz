@@ -5764,3 +5764,14 @@ proxy evidence for the entire suite.
    The remaining upstream Python process suite still contains portable
    lifecycle and configuration behavior that the current curated gate does
    not cover.
+
+3. **Prometheus exposition (new).** `mqtt.broker_prometheus.render(allocator, broker.stats())`
+   emits deterministic Prometheus text exposition 0.0.4 from one coherent
+   stats snapshot: 31 fixed-order metric families (`# HELP`/`# TYPE` plus one
+   sample) covering connections, monotonic MQTT/publish/byte counters, session
+   and retained-store gauges, queue/inflight/QoS2/will ownership, and the
+   1/5/15-minute Mosquitto EWMA load rates as gauges with a `window` label.
+   Counter families use `_total`; instantaneous values and rates are gauges,
+   so a Prometheus counter reset cannot misclassify broker state. The broker
+   embeds no HTTP server; applications serve the bytes from their own admin
+   endpoint. Unit tests lock the sample mapping and byte-stable output.
