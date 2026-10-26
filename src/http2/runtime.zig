@@ -23,6 +23,9 @@ test {
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/request/complete_deadline_tests.zig");
+    _ = @import("runtime/request/batch_output_deadline_tests.zig");
+    _ = @import("runtime/request/batch_progress_tests.zig");
+    _ = @import("runtime/request/batch_tls_deadline_tests.zig");
     _ = @import("runtime/request/complete_early_response_tests.zig");
     _ = @import("runtime/request/upload_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
@@ -66,6 +69,7 @@ const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
 const complete_request = @import("runtime/request/complete.zig");
+const batch_output = @import("runtime/request/batch_output.zig");
 const complete_upload = @import("runtime/request/upload.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const response_start = @import("runtime/response/start.zig");
@@ -313,6 +317,18 @@ const RuntimeTransport = union(enum) {
     tls_client: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
 
+    pub fn hasPendingWrite(self: RuntimeTransport) bool {
+        return switch (self) {
+            .tcp => false,
+            .tls_client => |connection| switch (connection.records) {
+                inline else => |*records| records.pending_write_len != 0,
+            },
+            .tls_server => |connection| switch (connection.records) {
+                inline else => |*records| records.pending_write_len != 0,
+            },
+        };
+    }
+
     pub fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
@@ -338,7 +354,7 @@ const RuntimeTransport = union(enum) {
         };
     }
 
-    fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
+    pub fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls_client => |connection| connection.writeAll(bytes),
@@ -5354,6 +5370,7 @@ pub const Connection = struct {
             control,
         | {
             if (!control.reported) self.releaseLocalStream(state.stream_id);
+            self.forgetStreamWindows(state.stream_id);
             state.deinit(self.allocator);
         };
 
@@ -5457,21 +5474,49 @@ pub const Connection = struct {
 
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
-        self.transportForIo().writeAll(batch.items) catch |err| {
+        while (true) {
+            var progress: batch_output.Progress = .{};
+            batch_output.bytes(self.transportForIo(), batch.items, earliestIndividualBatchDeadline(controls[0..started]), &progress) catch |err| {
+                if (err == error.Timeout and progress.canDiscard(self.transportForIo())) {
+                    const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+                    var removed = false;
+                    for (states[0..started], controls[0..started]) |*state, *control| {
+                        if (control.reported) continue;
+                        if (control.deadline) |absolute| {
+                            if (absolute.raw.nanoseconds <= now) {
+                                self.releaseLocalStream(state.stream_id);
+                                self.forgetStreamWindows(state.stream_id);
+                                control.reported = true;
+                                state.done = true;
+                                state.request_done = true;
+                                observer.reportError(control.request_index, error.Timeout);
+                                removed = true;
+                            }
+                        }
+                    }
+                    if (!removed) return err;
+                    const rebuilt = try self.prepareStagedHpackEncoder();
+                    batch.clearRetainingCapacity();
+                    for (states[0..started], controls[0..started]) |state, control| {
+                        if (control.reported) continue;
+                        _ = try self.appendRequestHeadToBatchAt(requests[control.request_index], batch, rebuilt, state.stream_id);
+                    }
+                    if (batch.items.len == 0) return;
+                    continue;
+                }
+                self.commitStagedHpackEncoder();
+                request_heads_committed = true;
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+                self.reportIndividualBatchError(states[0..started], controls[0..started], observer, err);
+                return err;
+            };
             self.commitStagedHpackEncoder();
             request_heads_committed = true;
-            self.aggregate_timeout_unusable = true;
-            self.reportIndividualBatchError(
-                states[0..started],
-                controls[0..started],
-                observer,
-                err,
-            );
-            return err;
-        };
-        self.commitStagedHpackEncoder();
-        request_heads_committed = true;
+            break;
+        }
 
+        errdefer |err| self.abortIndividualResponseBatch(states[0..started], controls[0..started], observer, err);
         try self.writeRequestBodyBatchDataWithPerStreamDeadlines(
             views,
             offsets,
@@ -5490,20 +5535,7 @@ pub const Connection = struct {
             cancellation,
         );
 
-        self.readResponseBatchWithPerStreamDeadlines(
-            states[0..started],
-            controls[0..started],
-            observer,
-            cancellation,
-        ) catch |err| {
-            self.abortIndividualResponseBatch(
-                states[0..started],
-                controls[0..started],
-                observer,
-                err,
-            );
-            return err;
-        };
+        try self.readResponseBatchWithPerStreamDeadlines(states[0..started], controls[0..started], observer, cancellation);
     }
 
     /// Aggregate a bodyless response batch while observing each ordered 1xx
@@ -5604,8 +5636,12 @@ pub const Connection = struct {
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         const staged_encoder = try self.prepareStagedHpackEncoder();
+        const original_next_stream_id = self.next_client_stream_id;
         var started: usize = 0;
         var requests_written = false;
+        errdefer if (!requests_written) {
+            self.next_client_stream_id = original_next_stream_id;
+        };
         errdefer |err| {
             if (requests_written and err == error.Timeout) {
                 self.aggregate_timeout_unusable = true;
@@ -5615,12 +5651,11 @@ pub const Connection = struct {
                     self.serve_read_connection_error != null or
                     !self.aggregate_timeout_unusable))
             {
-                self.writeBatchResponseResets(
-                    states[0..started],
-                ) catch {};
+                self.writeBatchResponseResetsBefore(states[0..started], response_cleanup.cleanupDeadline(self, if (err == error.Timeout) null else deadline)) catch {};
             }
             for (states[0..started]) |*state| {
                 self.releaseLocalStream(state.stream_id);
+                self.forgetStreamWindows(state.stream_id);
                 state.deinit(self.allocator);
             }
         }
@@ -5637,9 +5672,14 @@ pub const Connection = struct {
             };
             started += 1;
         }
-        self.transportForIo().writeAll(batch.items) catch |err| {
-            self.commitStagedHpackEncoder();
-            self.aggregate_timeout_unusable = true;
+        var progress: batch_output.Progress = .{};
+        batch_output.bytes(self.transportForIo(), batch.items, deadline, &progress) catch |err| {
+            if (err != error.Timeout or !progress.canDiscard(self.transportForIo())) {
+                self.commitStagedHpackEncoder();
+                requests_written = true;
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            }
             return @errorCast(err);
         };
         self.commitStagedHpackEncoder();
@@ -5838,9 +5878,13 @@ pub const Connection = struct {
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         const staged_encoder = try self.prepareStagedHpackEncoder();
+        const original_next_stream_id = self.next_client_stream_id;
         var started: usize = 0;
         var requests_written = false;
         var read_timed_out = false;
+        errdefer if (!requests_written) {
+            self.next_client_stream_id = original_next_stream_id;
+        };
         errdefer {
             if (read_timed_out) {
                 self.aggregate_timeout_unusable = true;
@@ -5850,12 +5894,11 @@ pub const Connection = struct {
                     self.serve_read_connection_error != null or
                     !self.aggregate_timeout_unusable))
             {
-                self.writeBatchResponseResets(
-                    states[0..started],
-                ) catch {};
+                self.writeBatchResponseResetsBefore(states[0..started], response_cleanup.cleanupDeadline(self, if (read_timed_out) null else deadline)) catch {};
             }
             for (states[0..started]) |*state| {
                 self.releaseLocalStream(state.stream_id);
+                self.forgetStreamWindows(state.stream_id);
                 state.deinit(self.allocator);
             }
         }
@@ -5872,12 +5915,14 @@ pub const Connection = struct {
             };
             started += 1;
         }
-        self.transportForIo().writeAll(batch.items) catch |err| {
-            // Some HEADERS may already be visible. As with body-bearing
-            // batches, retain advanced HPACK state and consumed stream IDs so
-            // accidental reuse cannot pretend the transaction never started.
-            self.commitStagedHpackEncoder();
-            self.aggregate_timeout_unusable = true;
+        var progress: batch_output.Progress = .{};
+        batch_output.bytes(self.transportForIo(), batch.items, deadline, &progress) catch |err| {
+            if (err != error.Timeout or !progress.canDiscard(self.transportForIo())) {
+                self.commitStagedHpackEncoder();
+                requests_written = true;
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            }
             return err;
         };
         self.commitStagedHpackEncoder();
@@ -6282,9 +6327,7 @@ pub const Connection = struct {
                     self.serve_read_connection_error != null or
                     !self.aggregate_timeout_unusable))
             {
-                self.writeBatchResponseResets(
-                    states[0..started],
-                ) catch {};
+                self.writeBatchResponseResetsBefore(states[0..started], response_cleanup.cleanupDeadline(self, if (err == error.Timeout) null else deadline)) catch {};
             }
             // Before staged HPACK state is committed no HEADERS were written,
             // so local stream IDs roll back with the transaction. Once the
@@ -6294,6 +6337,7 @@ pub const Connection = struct {
             }
             for (states[0..started]) |*state| {
                 self.releaseLocalStream(state.stream_id);
+                self.forgetStreamWindows(state.stream_id);
                 state.deinit(self.allocator);
             }
         }
@@ -6353,13 +6397,14 @@ pub const Connection = struct {
             _ = try self.sendStreamWindow(state.stream_id);
         }
 
-        self.transportForIo().writeAll(batch.items) catch |err| {
-            // A transport failure may expose only a prefix of the staged HPACK
-            // sequence. It cannot be retried or rolled back; commit encoder
-            // state and stream IDs so any accidental reuse fails closed.
-            self.commitStagedHpackEncoder();
-            request_heads_committed = true;
-            self.aggregate_timeout_unusable = true;
+        var progress: batch_output.Progress = .{};
+        batch_output.bytes(self.transportForIo(), batch.items, deadline, &progress) catch |err| {
+            if (err != error.Timeout or !progress.canDiscard(self.transportForIo())) {
+                self.commitStagedHpackEncoder();
+                request_heads_committed = true;
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            }
             return @errorCast(err);
         };
         self.commitStagedHpackEncoder();
@@ -6448,6 +6493,16 @@ pub const Connection = struct {
         batch: *std.ArrayList(u8),
         encoder: *http2.Hpack.Encoder,
     ) Error!PendingResponse {
+        return self.appendRequestHeadToBatchAt(options, batch, encoder, null);
+    }
+
+    fn appendRequestHeadToBatchAt(
+        self: *Connection,
+        options: RequestOptions,
+        batch: *std.ArrayList(u8),
+        encoder: *http2.Hpack.Encoder,
+        existing_stream_id: ?u31,
+    ) Error!PendingResponse {
         var request_options = options;
         request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         const scheme =
@@ -6528,7 +6583,7 @@ pub const Connection = struct {
             self.peer_max_header_list_size,
         );
 
-        const stream_id = try self.reserveNextClientStreamId();
+        const stream_id = existing_stream_id orelse try self.reserveNextClientStreamId();
         errdefer self.releaseLocalStream(stream_id);
         const block = try encoder.encodeBlockRetained(
             self.allocator,
@@ -6590,10 +6645,15 @@ pub const Connection = struct {
                 return err;
             };
         }
-        self.transportForIo().writeAll(trailer_bytes) catch |err| {
+        var progress: batch_output.Progress = .{};
+        batch_output.bytes(self.transportForIo(), trailer_bytes, deadline, &progress) catch |err| {
             // A partial wide write cannot identify which terminal HEADERS
             // reached the peer, so the connection must not be reused.
-            self.aggregate_timeout_unusable = true;
+            read_timed_out.* = err == error.Timeout;
+            if (err != error.Timeout or !progress.canDiscard(self.transportForIo())) {
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            }
             return err;
         };
         self.commitStagedHpackEncoder();
@@ -6651,10 +6711,11 @@ pub const Connection = struct {
                         &committed,
                         absolute,
                     ) catch |err| {
-                        if (err == error.Timeout and committed == 0) {
+                        if (err == error.Timeout and committed == 0 and !self.transportForIo().hasPendingWrite()) {
                             continue;
                         }
                         self.aggregate_timeout_unusable = true;
+                        self.terminal_write_failed = true;
                         return err;
                     };
                 } else {
@@ -6767,16 +6828,17 @@ pub const Connection = struct {
                         return err;
                     };
                 }
-                wire_write_started = true;
-                const wire_parts = self.batch_data_parts.items;
-                const transport = self.transportForIo();
-                (if (wire_parts.len == 2)
-                    transport.writeAllParts(wire_parts[0], wire_parts[1])
-                else
-                    transport.writeAllSlices(wire_parts)) catch |err| {
-                    self.aggregate_timeout_unusable = true;
+                var progress: batch_output.Progress = .{};
+                batch_output.parts(self.allocator, self.transportForIo(), self.batch_data_parts.items, &self.write_batch, deadline, &progress) catch |err| {
+                    wire_write_started = progress.submitted;
+                    read_timed_out.* = err == error.Timeout;
+                    if (progress.submitted and (err != error.Timeout or !progress.canDiscard(self.transportForIo()))) {
+                        self.aggregate_timeout_unusable = true;
+                        self.terminal_write_failed = true;
+                    }
                     return err;
                 };
+                wire_write_started = true;
                 for (views, offsets, states, round_reserved) |
                     view,
                     offset,
@@ -6920,16 +6982,22 @@ pub const Connection = struct {
             }
 
             if (made_progress) {
-                wire_write_started = true;
-                const wire_parts = self.batch_data_parts.items;
-                const transport = self.transportForIo();
-                (if (wire_parts.len == 2)
-                    transport.writeAllParts(wire_parts[0], wire_parts[1])
-                else
-                    transport.writeAllSlices(wire_parts)) catch |err| {
-                    self.aggregate_timeout_unusable = true;
+                var progress: batch_output.Progress = .{};
+                batch_output.parts(self.allocator, self.transportForIo(), self.batch_data_parts.items, &self.write_batch, earliestIndividualBatchDeadline(controls), &progress) catch |err| {
+                    wire_write_started = progress.submitted;
+                    if (err == error.Timeout and progress.canDiscard(self.transportForIo())) {
+                        batch_output.undoRound(self, views, offsets, round_reserved, &remaining_streams, .{ .window = sendStreamWindow });
+                        wire_write_started = true;
+                        _ = try self.expireIndividualBatchDeadlines(states, controls, observer);
+                        continue;
+                    }
+                    if (progress.submitted) {
+                        self.aggregate_timeout_unusable = true;
+                        self.terminal_write_failed = true;
+                    }
                     return err;
                 };
+                wire_write_started = true;
                 for (views, offsets, states, controls, round_reserved) |
                     view,
                     offset,
@@ -7593,12 +7661,17 @@ pub const Connection = struct {
                 ) catch std.math.maxInt(usize);
             }
         }
+        const before = response_cleanup.cleanupDeadline(self, null);
         if (!self.aggregate_timeout_unusable and unreleased != 0) {
-            self.releaseConnectionCapacity(unreleased) catch {};
+            if (before) |absolute| self.releaseConnectionCapacityUntil(unreleased, absolute) catch {
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            } else {
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+            }
         }
-        if (!self.aggregate_timeout_unusable) {
-            self.writeBatchResponseResets(states) catch {};
-        }
+        if (!self.aggregate_timeout_unusable) self.writeBatchResponseResetsBefore(states, before) catch {};
         self.reportIndividualBatchError(states, controls, observer, err);
     }
 
@@ -7708,8 +7781,26 @@ pub const Connection = struct {
         }
         if (terminate_count == 0) return false;
 
+        var outer: ?std.Io.Clock.Timestamp = null;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        for (controls) |control| {
+            if (control.reported) continue;
+            if (control.deadline) |absolute| if (absolute.raw.nanoseconds > now) {
+                outer = deadline_policy.earlier(outer, absolute);
+            };
+        }
+        const before = response_cleanup.cleanupDeadline(self, outer);
+        if (before == null) {
+            self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
+            return error.Timeout;
+        }
         if (unreleased != 0) {
-            try self.releaseConnectionCapacity(unreleased);
+            self.releaseConnectionCapacityUntil(unreleased, before) catch |failure| {
+                self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
+                return failure;
+            };
         }
         try self.prepareLocallyResetStreams(terminate_count);
         const batch = &self.write_batch;
@@ -7723,8 +7814,10 @@ pub const Connection = struct {
                 .cancel,
             );
         }
-        self.transportForIo().writeAll(batch.items) catch |wire_err| {
+        var progress: batch_output.Progress = .{};
+        batch_output.bytes(self.transportForIo(), batch.items, before, &progress) catch |wire_err| {
             self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
             return wire_err;
         };
         for (states, controls) |*state, *control| {
@@ -8494,6 +8587,21 @@ pub const Connection = struct {
         self: *Connection,
         states: []const BatchResponseState,
     ) Error!void {
+        return self.writeBatchResponseResetsBefore(states, response_cleanup.cleanupDeadline(self, null));
+    }
+
+    fn writeBatchResponseResetsBefore(self: *Connection, states: []const BatchResponseState, before: ?std.Io.Clock.Timestamp) Error!void {
+        if (before) |absolute| return self.writeBatchResponseResetsUntil(states, absolute);
+        self.aggregate_timeout_unusable = true;
+        self.terminal_write_failed = true;
+        for (states) |state| self.forgetStreamWindows(state.stream_id);
+    }
+
+    fn writeBatchResponseResetsUntil(
+        self: *Connection,
+        states: []const BatchResponseState,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.terminal_write_failed) return error.ConnectionClosed;
         if (self.serve_read_connection_error != null) {
             self.sendServeReadError(error.InvalidFrame);
@@ -8510,7 +8618,7 @@ pub const Connection = struct {
                 }
             }
         }
-        if (has_local_error_reset) try self.ensureLocalErrorResetBudget();
+        if (has_local_error_reset) try self.ensureLocalErrorResetBudgetUntil(deadline);
         try self.prepareLocallyResetStreams(states.len);
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
@@ -8530,11 +8638,13 @@ pub const Connection = struct {
             );
         }
         if (batch.items.len != 0) {
-            self.transportForIo().writeAll(batch.items) catch |err| {
+            var progress: batch_output.Progress = .{};
+            batch_output.bytes(self.transportForIo(), batch.items, deadline, &progress) catch |err| {
                 // The transport cannot report how much of this RST_STREAM
                 // batch reached the peer. Even application-only cancellation
                 // therefore leaves the shared frame stream ambiguous.
                 self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
                 return err;
             };
         }

@@ -3594,3 +3594,29 @@ which can otherwise reject the next HEADERS with ENHANCE_YOUR_CALM even when
 CANCEL preceded it on TCP. A silent-peer regression proves expiry before
 reserving another stream; the independent Node gate verifies direct native
 reuse with one concurrent slot.
+
+## Batch request output under deadlines
+
+Complete batch request APIs now carry their captured deadline through staged
+HEADERS, multi-stream DATA bursts and request trailers. Per-stream variants
+use the earliest active member deadline for a shared output operation. The
+submission helper under `http2/runtime/request/batch_output.zig` retains
+application-byte commitment and the no-deadline vectored-write path.
+
+A zero-progress HEADERS timeout can remove expired members and rebuild the
+remaining HPACK blocks from live encoder state without sending a reset for an
+unopened peer stream. A zero-progress DATA timeout rewinds that round's body
+cursors and returns exactly its reserved connection/stream credit before
+canceling expired members and advancing later-deadline siblings. Shared-budget
+calls also restore unused stream IDs when no HEADERS reached the transport.
+
+Partial output closes connection reuse, reports every unfinished independent
+member, and forbids later cleanup frames. TLS record state participates in the
+decision: zero committed application bytes are insufficient when TLS retains
+an uncommitted ciphertext record. Expired-member refunds and batch CANCEL writes use
+a finite cleanup deadline, with zero-budget transport opt-out. Tests cover
+blocked TCP and real TLS 1.2/1.3 HEADERS/DATA, zero-progress recovery, exact later
+stream delivery, HPACK rollback, per-member error reporting and local window
+ownership after failure. The opening regression fails against the prior
+implementation with ConnectionResetByPeer after its 500 ms rescue instead of
+the requested 30 ms Timeout.
