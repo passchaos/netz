@@ -37,13 +37,14 @@ test "WebSocket RFC 8441 pending admission exposes metadata before 200" {
         fn runFallible(self: *@This()) !void {
             var h2 = try self.server.accept();
             defer h2.close();
-            var pending = try runtime.H2Server.receiveUpgradeRequest(
+            var pending = try runtime.H2Server.receiveUpgradeRequestWithTimeout(
                 self.server.allocator,
                 &h2,
                 .{
                     .protocols = &.{"chat.v1"},
                     .require_subprotocol = true,
                 },
+                .fromSeconds(2),
             );
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
@@ -110,7 +111,7 @@ test "WebSocket RFC 8441 pending admission exposes metadata before 200" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var response = try self.client.openExtendedConnect(.{
+            var response = try self.client.openExtendedConnectWithTimeout(.{
                 .method = "CONNECT",
                 .path = "/admission?room=1",
                 .authority = "localhost",
@@ -121,7 +122,7 @@ test "WebSocket RFC 8441 pending admission exposes metadata before 200" {
                     .{ .name = "authorization", .value = "Bearer secret" },
                     .{ .name = "cookie", .value = "session=abc" },
                 },
-            });
+            }, .fromSeconds(2));
             defer response.deinit(self.allocator);
             try std.testing.expectEqual(@as(u16, 200), response.status);
             try std.testing.expectEqualStrings(
@@ -206,10 +207,11 @@ test "WebSocket RFC 8441 rejection preserves body trailers and shared H2 connect
             var h2 = try self.server.accept();
             defer h2.close();
             for (0..2) |index| {
-                var pending = try runtime.H2Server.receiveUpgradeRequest(
+                var pending = try runtime.H2Server.receiveUpgradeRequestWithTimeout(
                     self.server.allocator,
                     &h2,
                     .{},
+                    .fromSeconds(2),
                 );
                 var pending_owned = true;
                 defer if (pending_owned) pending.deinit();
@@ -580,7 +582,7 @@ test "WebSocket RFC 8441 pending decision keeps the original deadline" {
     );
     defer client.close();
     try std.testing.expectError(
-        error.StreamReset,
+        error.ConnectionClosed,
         client.openExtendedConnectWithTimeout(
             .{
                 .method = "CONNECT",

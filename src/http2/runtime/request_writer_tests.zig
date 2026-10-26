@@ -268,14 +268,16 @@ test "HTTP/2 request writer preserves early response while flow blocked" {
     const Shared = struct {
         server: *Server,
         err: ?anyerror = null,
+        response_consumed: std.Io.Event = .unset,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            runFallible(shared) catch |err| {
                 shared.err = err;
             };
         }
 
-        fn runFallible(server_ptr: *Server) !void {
+        fn runFallible(shared: *@This()) !void {
+            const server_ptr = shared.server;
             var connection = try server_ptr.accept();
             defer connection.close();
             const stream_id = try readRequestHeadersStreamId(&connection);
@@ -294,6 +296,10 @@ test "HTTP/2 request writer preserves early response while flow blocked" {
                 "stop uploading",
                 true,
             );
+            // Closing with unread request DATA can reset TCP before the
+            // client consumes the final response. Keep this peer alive until
+            // the receive-side assertions have a complete response to inspect.
+            try shared.response_consumed.wait(server_ptr.io);
         }
     };
 
@@ -310,6 +316,11 @@ test "HTTP/2 request writer preserves early response while flow blocked" {
         .path = "/early-response",
         .authority = "localhost",
     });
+    var joined = false;
+    defer if (!joined) {
+        shared.response_consumed.set(io);
+        thread.join();
+    };
     defer writer.deinit();
 
     // Permit exactly the first chunk. The second write must wait for peer
@@ -329,7 +340,9 @@ test "HTTP/2 request writer preserves early response while flow blocked" {
     var response = try writer.readResponse();
     defer response.deinit(allocator);
 
+    shared.response_consumed.set(io);
     thread.join();
+    joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u16, 413), response.status);
     try std.testing.expectEqualStrings("stop uploading", response.body);

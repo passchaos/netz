@@ -38,9 +38,12 @@ const Observer = struct {
 };
 
 const PartialWriter = struct {
+    // Preserve Threaded's userdata for deadline task scheduling while only
+    // replacing netWrite. The test runner executes these scopes serially.
+    var active: std.atomic.Value(?*PartialWriter) = .init(null);
     calls: usize = 0,
-    fn write(context: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
+    fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
+        const self = active.load(.acquire).?;
         self.calls += 1;
         if (self.calls == 1) return @min(header.len, 4);
         return error.NetworkDown;
@@ -95,10 +98,12 @@ test "HTTP/2 response callback cleanup failure never writes after a partial refu
             try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0x08, 1, "\x02ab\x00\x00");
             var writer: PartialWriter = .{};
             var observer = Observer{ .reject_head = reject_head };
-            connection.io = .{ .userdata = &writer, .vtable = &vtable };
+            PartialWriter.active.store(&writer, .release);
+            connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
             var request = runtime.RequestWriter{ .connection = connection, .stream_id = 1, .expected_length = 0, .head_request = false, .body_finished = true };
             const result = if (bounded) request.readResponseStreamingWithHeadAndTimeout(.fromSeconds(1), &observer, Observer.head, Observer.data) else request.readResponseStreamingWithHead(&observer, Observer.head, Observer.data);
             connection.io = io;
+            PartialWriter.active.store(null, .release);
             try std.testing.expectError(error.OutOfMemory, result);
             try std.testing.expectEqual(@as(usize, 2), writer.calls);
             try std.testing.expect(connection.aggregate_timeout_unusable);
@@ -128,10 +133,12 @@ test "HTTP/2 response allocation cleanup never writes after a partial credit ref
         var writer: PartialWriter = .{};
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index, .resize_fail_index = 0 });
         connection.allocator = failing.allocator();
-        connection.io = .{ .userdata = &writer, .vtable = &vtable };
+        PartialWriter.active.store(&writer, .release);
+        connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
         const result = connection.readResponseWithTimeout(1, "POST", false, .fromSeconds(1));
         connection.allocator = allocator;
         connection.io = io;
+        PartialWriter.active.store(null, .release);
         if (result) |value| {
             var response = value;
             response.deinit(allocator);

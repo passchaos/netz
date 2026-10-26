@@ -20,6 +20,19 @@ superiority.
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | I/O abstraction | HTTP/1, HTTP/2, and HTTP/3 adapters consume only `std.Io`; backend selection stays outside the protocol API | Custom epoll/kqueue/Windows server backends |
 
+RFC 8441 handshake deadlines now cover actual opening HEADERS/CONTINUATION,
+acceptance/rejection response output, rejection DATA/trailers, discarded-response
+credit refunds, and pending admission cleanup. Shared HTTP/2 DATA writers also
+bound socket output when
+credit is already available, including slice-based tunnel writes and empty
+END_STREAM frames. Allocation failure before field-block submission preserves
+live HPACK and the admitted stream for retry. A timeout after a possibly partial
+HTTP/2 frame makes the parent unusable; an expired cancellation budget releases
+local ownership without starting an unbounded RST_STREAM write. Logical
+WebSocket prefixes remain resumable when carried by complete HTTP/2 frames.
+Adjacent `http2/runtime/connect/deadline_tests.zig` regressions exercise real
+blocked TCP output, allocator failures, deadline validation, and adapter cleanup.
+
 RFC 8441 now has process-boundary interoperability evidence in addition to the
 in-process tests and benchmark:
 

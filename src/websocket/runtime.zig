@@ -11276,7 +11276,7 @@ pub const H2Server = struct {
         errdefer if (request_owned) {
             const stream_id = request.stream_id;
             request.deinit(allocator);
-            connection.abandonExtendedConnect(stream_id);
+            if (deadline != null) connection.abortExtendedConnect(stream_id, deadline) else connection.abandonExtendedConnect(stream_id);
         };
         const version = try requiredH2SingletonHeader(
             request.headers,
@@ -11296,7 +11296,9 @@ pub const H2Server = struct {
                         absolute,
                     );
                 }
-                try connection.rejectExtendedConnect(
+                if (deadline) |absolute| {
+                    try connection.rejectExtendedConnectWithDeadline(request.stream_id, 426, &.{.{ .name = "sec-websocket-version", .value = "13" }}, absolute);
+                } else try connection.rejectExtendedConnect(
                     request.stream_id,
                     426,
                     &.{.{
@@ -11383,17 +11385,19 @@ pub const PendingH2Upgrade = struct {
     selected_extension: ?[]u8,
     negotiated_extension: websocket.ExtensionNegotiation,
 
-    /// Cancel only the pending stream. The shared HTTP/2 connection remains
-    /// caller-owned and can continue serving sibling streams.
+    /// Release the pending stream, using its original budget for cancellation.
+    /// A successful reset preserves siblings; a failed or expired reset makes
+    /// the caller-owned parent ineligible for further protocol I/O.
     pub fn deinit(self: *PendingH2Upgrade) void {
         const allocator = self.allocator;
         const connection = self.connection;
         const stream_id = self.request.stream_id;
+        const deadline = self.deadline;
         self.request.deinit(allocator);
         if (self.selected_protocol) |protocol| allocator.free(protocol);
         if (self.selected_extension) |extension| allocator.free(extension);
         self.* = undefined;
-        connection.abandonExtendedConnect(stream_id);
+        if (deadline != null) connection.abortExtendedConnect(stream_id, deadline) else connection.abandonExtendedConnect(stream_id);
     }
 
     pub fn streamId(self: PendingH2Upgrade) u31 {
@@ -11492,10 +11496,13 @@ pub const PendingH2Upgrade = struct {
                 absolute,
             );
         }
-        const tunnel = try self.connection.acceptExtendedConnect(
-            self.request,
-            response_headers,
-        );
+        const tunnel = if (self.deadline) |absolute|
+            try self.connection.acceptExtendedConnectWithDeadline(self.request, response_headers, absolute)
+        else
+            try self.connection.acceptExtendedConnect(
+                self.request,
+                response_headers,
+            );
 
         const options = self.options;
         const selected_protocol = self.selected_protocol;
@@ -11549,7 +11556,9 @@ pub const PendingH2Upgrade = struct {
                 absolute,
             );
         }
-        try self.connection.rejectExtendedConnectWithBody(
+        if (self.deadline) |absolute| {
+            try self.connection.rejectExtendedConnectWithBodyWithDeadline(self.request.stream_id, status, response_headers, body, trailers, absolute);
+        } else try self.connection.rejectExtendedConnectWithBody(
             self.request.stream_id,
             status,
             response_headers,

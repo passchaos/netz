@@ -7,7 +7,12 @@ const http1_runtime = http1.runtime;
 const frame_io = @import("runtime/frame/io.zig");
 const frame_wire = @import("runtime/frame/wire.zig");
 const flow_window = @import("runtime/flow/window.zig");
+const flow_output = @import("runtime/flow/output.zig");
 const outbound_headers = @import("runtime/headers/connection.zig");
+const header_output = @import("runtime/headers/output.zig");
+test {
+    _ = @import("runtime/connect/deadline_tests.zig");
+}
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
@@ -371,7 +376,7 @@ const RuntimeTransport = union(enum) {
         };
     }
 
-    fn writeAllSlices(
+    pub fn writeAllSlices(
         self: RuntimeTransport,
         parts: []const []const u8,
     ) Error!void {
@@ -9153,7 +9158,7 @@ pub const Connection = struct {
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(self.io, absolute);
         }
-        try self.writeHeaders(stream_id, fields.items, false);
+        try self.writeHeadersUntil(stream_id, fields.items, false, deadline);
         return self.readExtendedConnectAttemptUntil(stream_id, deadline);
     }
 
@@ -9533,8 +9538,38 @@ pub const Connection = struct {
         connect_request: ExtendedConnectRequest,
         response_headers: []const http2.Hpack.HeaderField,
     ) Error!Tunnel {
+        return self.acceptExtendedConnectUntil(connect_request, response_headers, null);
+    }
+
+    /// Submit the successful response under the handshake's original budget.
+    pub fn acceptExtendedConnectWithDeadline(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        response_headers: []const http2.Hpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!Tunnel {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acceptExtendedConnectUntil(connect_request, response_headers, deadline);
+    }
+
+    pub fn acceptExtendedConnectWithTimeout(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        response_headers: []const http2.Hpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!Tunnel {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptExtendedConnectWithDeadline(connect_request, response_headers, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn acceptExtendedConnectUntil(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        response_headers: []const http2.Hpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Tunnel {
         if (self.role != .server) return error.UnexpectedFrame;
-        try self.writeExtendedConnectResponse(connect_request.stream_id, 200, response_headers, false);
+        try self.writeExtendedConnectResponseUntil(connect_request.stream_id, 200, response_headers, false, deadline);
         return .{ .connection = self, .stream_id = connect_request.stream_id };
     }
 
@@ -9565,6 +9600,27 @@ pub const Connection = struct {
         );
     }
 
+    pub fn rejectExtendedConnectWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.rejectExtendedConnectWithBodyWithDeadline(stream_id, status, response_headers, &.{}, &.{}, deadline);
+    }
+
+    pub fn rejectExtendedConnectWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.rejectExtendedConnectWithDeadline(stream_id, status, response_headers, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
     /// Reject an Extended CONNECT request with an ordinary HTTP response
     /// entity. The stream ends after DATA or trailers while the parent HTTP/2
     /// connection remains available for sibling requests.
@@ -9576,18 +9632,57 @@ pub const Connection = struct {
         body: []const u8,
         trailers: []const http2.Hpack.HeaderField,
     ) Error!void {
+        return self.rejectExtendedConnectWithBodyUntil(stream_id, status, response_headers, body, trailers, null);
+    }
+
+    /// Bound response HEADERS, flow-control waits, DATA and trailers together.
+    pub fn rejectExtendedConnectWithBodyWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        body: []const u8,
+        trailers: []const http2.Hpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.rejectExtendedConnectWithBodyUntil(stream_id, status, response_headers, body, trailers, deadline);
+    }
+
+    pub fn rejectExtendedConnectWithBodyWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        body: []const u8,
+        trailers: []const http2.Hpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.rejectExtendedConnectWithBodyWithDeadline(stream_id, status, response_headers, body, trailers, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn rejectExtendedConnectWithBodyUntil(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        body: []const u8,
+        trailers: []const http2.Hpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
         if (status < 300 or statusIsInformational(status)) {
             return error.InvalidStatus;
         }
-        try self.writeResponseInternal(stream_id, .{
+        try self.writeResponseInternalUntil(stream_id, .{
             .status = status,
             .headers = response_headers,
             .body = body,
             .trailers = trailers,
             .request_method = "CONNECT",
             .extended_connect = true,
-        }, true);
+        }, true, deadline);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -11997,6 +12092,16 @@ pub const Connection = struct {
         options: ResponseOptions,
         release_stream: bool,
     ) Error!void {
+        return self.writeResponseInternalUntil(stream_id, options, release_stream, null);
+    }
+
+    fn writeResponseInternalUntil(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        release_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) {
@@ -12055,7 +12160,9 @@ pub const Connection = struct {
         try validateHeaderBlock(fields.items, .response);
         try validateHeaderBlock(options.trailers, .response_trailers);
         self.appendAutomaticDateHeader(&fields);
-        if (!suppress_body and
+        var output_started = false;
+        errdefer if (deadline != null and output_started) self.abortExtendedConnect(stream_id, deadline);
+        if (deadline == null and !suppress_body and
             options.body.len != 0 and
             options.trailers.len == 0)
         {
@@ -12066,18 +12173,21 @@ pub const Connection = struct {
                 true,
             );
         } else {
-            try self.writeHeaders(
+            try self.writeHeadersUntil(
                 stream_id,
                 fields.items,
                 suppress_body or
                     (options.body.len == 0 and options.trailers.len == 0),
+                deadline,
             );
+            output_started = true;
         }
         if (!suppress_body) {
-            if (options.body.len != 0 and options.trailers.len != 0) {
-                try self.writeData(stream_id, options.body, false);
+            if (options.body.len != 0 and (deadline != null or options.trailers.len != 0)) {
+                var committed: usize = 0;
+                try self.writeDataTrackedUntil(stream_id, options.body, options.trailers.len == 0, &committed, deadline);
             }
-            if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
+            if (options.trailers.len != 0) try self.writeHeadersUntil(stream_id, options.trailers, true, deadline);
         }
         if (release_stream) self.releasePeerStream(stream_id);
     }
@@ -13972,10 +14082,23 @@ pub const Connection = struct {
     /// Once reuse is forbidden, no reset-history allocation is needed to
     /// tolerate later input. Keep terminal cancellation possible under OOM.
     fn writeTerminalResetStream(self: *Connection, stream_id: u31, code: http2.ErrorCode) Error!void {
+        return self.writeTerminalResetStreamUntil(stream_id, code, null);
+    }
+
+    fn writeTerminalResetStreamUntil(self: *Connection, stream_id: u31, code: http2.ErrorCode, deadline: ?std.Io.Clock.Timestamp) Error!void {
         std.debug.assert(self.aggregate_timeout_unusable);
         if (self.terminal_write_failed) return error.ConnectionClosed;
         var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
-        self.transportForIo().writeAll(try http2.ResetStreamPayload.writeInto(&storage, stream_id, code)) catch |err| {
+        const bytes = try http2.ResetStreamPayload.writeInto(&storage, stream_id, code);
+        if (deadline) |absolute| {
+            var committed: usize = 0;
+            self.transportForIo().writeAllWithDeadline(bytes, &committed, absolute) catch |err| {
+                self.terminal_write_failed = true;
+                return err;
+            };
+            return;
+        }
+        self.transportForIo().writeAll(bytes) catch |err| {
             self.terminal_write_failed = true;
             return err;
         };
@@ -14796,6 +14919,14 @@ pub const Connection = struct {
         });
     }
 
+    fn failDiscardedResponseUntil(self: *Connection, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) void {
+        self.aggregate_timeout_unusable = true;
+        self.writeTerminalResetStreamUntil(stream_id, .cancel, deadline) catch {};
+        self.releaseLocalStream(stream_id);
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
     fn cancelPeerRequest(self: *Connection, stream_id: u31) void {
         // A transport or reset-history allocation failure must not retain
         // local ownership of a request the application has abandoned. Some
@@ -14816,8 +14947,12 @@ pub const Connection = struct {
     }
 
     fn releaseDiscardedMessageCapacity(self: *Connection, amount: usize) void {
+        self.releaseDiscardedMessageCapacityUntil(amount, null);
+    }
+
+    fn releaseDiscardedMessageCapacityUntil(self: *Connection, amount: usize, deadline: ?std.Io.Clock.Timestamp) void {
         if (self.terminal_write_failed) return;
-        self.releaseConnectionCapacity(amount) catch {
+        self.releaseConnectionCapacityUntil(amount, deadline) catch {
             // An indeterminate WINDOW_UPDATE prefix forbids any subsequent
             // refund or cancellation from extending the damaged byte stream.
             self.aggregate_timeout_unusable = true;
@@ -14906,7 +15041,7 @@ pub const Connection = struct {
             // keeps partially decoded headers/body only on its stack. Preserve
             // connection integrity by canceling the stream and preventing
             // reuse after that state is discarded.
-            self.failDiscardedResponse(stream_id);
+            self.failDiscardedResponseUntil(stream_id, deadline);
         };
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -14924,7 +15059,7 @@ pub const Connection = struct {
         var push_generation = self.pushedCreditGeneration();
         errdefer {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+            self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
         }
 
         while (true) {
@@ -15620,7 +15755,7 @@ pub const Connection = struct {
             // An aggregate CONNECT wait cannot resume after discarding decoded
             // informational heads or a partial HPACK block. Cancel the stream
             // and prevent a pooled caller from reusing ambiguous state.
-            self.failDiscardedResponse(stream_id);
+            self.failDiscardedResponseUntil(stream_id, deadline);
         };
         var informational_count: usize = 0;
         var headers: ?[]http2.Hpack.HeaderField = null;
@@ -15633,14 +15768,14 @@ pub const Connection = struct {
         var expected_body_len: ?usize = null;
         var rejection_started = false;
         errdefer |err| if (rejection_started and err != error.Timeout and err != error.OutOfMemory) {
-            self.abandonExtendedConnect(stream_id);
+            if (deadline != null) self.abortExtendedConnect(stream_id, deadline) else self.abandonExtendedConnect(stream_id);
         };
         var receive_credits = [_]flow_credit.Tracker{.{}};
         const receive_credit = &receive_credits[0];
         var push_generation = self.pushedCreditGeneration();
         errdefer {
             self.synchronizePushedCredit(&receive_credits, &push_generation);
-            self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+            self.releaseDiscardedMessageCapacityUntil(receive_credit.unreleased_connection_bytes, deadline);
         }
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
@@ -15973,7 +16108,12 @@ pub const Connection = struct {
     }
 
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
+        return self.writeHeadersUntil(stream_id, headers, end_stream, null);
+    }
+
+    fn writeHeadersUntil(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
         const activation = try self.ensureStreamTrackedForOutboundHeaders(stream_id);
         errdefer self.undoStreamActivation(activation, stream_id);
@@ -15985,8 +16125,11 @@ pub const Connection = struct {
         // Any partial frame prefix makes the transport unrecoverable. HPACK is
         // staged independently so an allocation failure before writing leaves
         // the live encoder unchanged.
-        errdefer self.aggregate_timeout_unusable = true;
-        try self.writeHeaderBlock(stream_id, block, end_stream);
+        var submitted = false;
+        header_output.writeBlock(self.allocator, self.transportForIo(), stream_id, block, end_stream, self.outboundFramePayloadLimit(), &self.write_batch, deadline, &submitted) catch |err| {
+            if (submitted) self.aggregate_timeout_unusable = true;
+            return err;
+        };
         self.commitStagedHpackEncoder();
     }
 
@@ -16125,6 +16268,17 @@ pub const Connection = struct {
         response_headers: []const http2.Hpack.HeaderField,
         end_stream: bool,
     ) Error!void {
+        return self.writeExtendedConnectResponseUntil(stream_id, status_code, response_headers, end_stream, null);
+    }
+
+    fn writeExtendedConnectResponseUntil(
+        self: *Connection,
+        stream_id: u31,
+        status_code: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         var status_buf: [3]u8 = undefined;
         if (status_code < 100 or status_code > 999) return error.InvalidStatus;
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
@@ -16161,7 +16315,7 @@ pub const Connection = struct {
         if (!statusIsInformational(status_code)) {
             self.appendAutomaticDateHeader(&fields);
         }
-        try self.writeHeaders(stream_id, fields.items, end_stream);
+        try self.writeHeadersUntil(stream_id, fields.items, end_stream, deadline);
     }
 
     fn handleConnectionOrGoAwayFrame(self: *Connection, frame: http2.Frame) Error!bool {
@@ -16390,29 +16544,8 @@ pub const Connection = struct {
     }
 
     fn writeHeaderBlock(self: *Connection, stream_id: u31, block: []const u8, end_stream: bool) Error!void {
-        const chunk_size = self.outboundFramePayloadLimit();
-        const first_len = @min(block.len, chunk_size);
-        var offset = first_len;
-        try writeFrameTransport(
-            self.allocator,
-            self.transportForIo(),
-            .headers,
-            (if (offset == block.len) flag_end_headers else 0) | if (end_stream) flag_end_stream else 0,
-            stream_id,
-            block[0..first_len],
-        );
-        while (offset < block.len) {
-            const end = @min(block.len, offset + chunk_size);
-            try writeFrameTransport(
-                self.allocator,
-                self.transportForIo(),
-                .continuation,
-                if (end == block.len) flag_end_headers else 0,
-                stream_id,
-                block[offset..end],
-            );
-            offset = end;
-        }
+        var submitted = false;
+        return header_output.writeBlock(self.allocator, self.transportForIo(), stream_id, block, end_stream, self.outboundFramePayloadLimit(), &self.write_batch, null, &submitted);
     }
 
     fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
@@ -16732,14 +16865,7 @@ pub const Connection = struct {
             if (deadline) |absolute| {
                 _ = try deadline_policy.usableAwake(self.io, absolute);
             }
-            writeFrameTransport(
-                self.allocator,
-                self.transportForIo(),
-                .data,
-                if (end_stream) flag_end_stream else 0,
-                stream_id,
-                &.{},
-            ) catch |err| {
+            flow_output.writeEmpty(self.allocator, self.transportForIo(), stream_id, end_stream, deadline) catch |err| {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
@@ -16802,8 +16928,8 @@ pub const Connection = struct {
                 chunk_size,
                 stream_window,
                 wire_parts,
+                deadline,
             ) catch |err| {
-                self.aggregate_timeout_unusable = true;
                 return err;
             };
             offset += burst_len;
@@ -16848,14 +16974,7 @@ pub const Connection = struct {
         }
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
-            writeFrameTransport(
-                self.allocator,
-                self.transportForIo(),
-                .data,
-                if (end_stream) flag_end_stream else 0,
-                stream_id,
-                &.{},
-            ) catch |err| {
+            flow_output.writeEmpty(self.allocator, self.transportForIo(), stream_id, end_stream, deadline) catch |err| {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
@@ -16887,8 +17006,8 @@ pub const Connection = struct {
                 end_stream and offset + burst_len == data.len,
                 chunk_size,
                 stream_window,
+                deadline,
             ) catch |err| {
-                self.aggregate_timeout_unusable = true;
                 return err;
             };
             offset += burst_len;
@@ -16941,14 +17060,7 @@ pub const Connection = struct {
             return error.ResponseAvailable;
         }
         if (data.len == 0) {
-            writeFrameTransport(
-                self.allocator,
-                self.transportForIo(),
-                .data,
-                if (end_stream) flag_end_stream else 0,
-                stream_id,
-                &.{},
-            ) catch |err| {
+            flow_output.writeEmpty(self.allocator, self.transportForIo(), stream_id, end_stream, deadline) catch |err| {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
@@ -16986,8 +17098,8 @@ pub const Connection = struct {
                 end_stream and offset + burst_len == data.len,
                 chunk_size,
                 stream_window,
+                deadline,
             ) catch |err| {
-                self.aggregate_timeout_unusable = true;
                 return err;
             };
             offset += burst_len;
@@ -17057,6 +17169,7 @@ pub const Connection = struct {
         end_stream: bool,
         chunk_size: usize,
         stream_window: *FlowWindow,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         std.debug.assert(payload.len != 0);
         std.debug.assert(payload.len <=
@@ -17071,35 +17184,11 @@ pub const Connection = struct {
             @intCast(payload.len),
         ) catch unreachable;
 
-        var headers: [max_data_frames_per_write][
-            http2.FrameHeader.encoded_len
-        ]u8 = undefined;
-        var parts: [2 * max_data_frames_per_write][]const u8 = undefined;
-        var part_count: usize = 0;
-        var offset: usize = 0;
-        while (offset < payload.len) {
-            const end = @min(payload.len, offset + chunk_size);
-            const frame_index = part_count / 2;
-            try encodeFrameHeader(
-                &headers[frame_index],
-                .data,
-                if (end_stream and end == payload.len)
-                    flag_end_stream
-                else
-                    0,
-                stream_id,
-                end - offset,
-            );
-            parts[part_count] = &headers[frame_index];
-            parts[part_count + 1] = payload[offset..end];
-            part_count += 2;
-            offset = end;
-        }
-        if (part_count == 2) {
-            try self.transportForIo().writeAllParts(parts[0], parts[1]);
-        } else {
-            try self.transportForIo().writeAllSlices(parts[0..part_count]);
-        }
+        var submitted = false;
+        flow_output.writeBurst(max_data_frames_per_write, self.allocator, self.transportForIo(), stream_id, payload, end_stream, chunk_size, &self.write_batch, deadline, &submitted) catch |err| {
+            if (submitted) self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     fn writeDataSlicesBurst(
@@ -17111,6 +17200,7 @@ pub const Connection = struct {
         chunk_size: usize,
         stream_window: *FlowWindow,
         wire_parts: [][]const u8,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         std.debug.assert(payload_len != 0);
         std.debug.assert(payload_len <=
@@ -17152,16 +17242,11 @@ pub const Connection = struct {
             cursor.appendTo(wire_parts, &wire_part_count, frame_len);
             frame_offset = frame_end;
         }
-        if (wire_part_count == 2) {
-            try self.transportForIo().writeAllParts(
-                wire_parts[0],
-                wire_parts[1],
-            );
-        } else {
-            try self.transportForIo().writeAllSlices(
-                wire_parts[0..wire_part_count],
-            );
-        }
+        var submitted = false;
+        flow_output.submit(self.allocator, self.transportForIo(), wire_parts[0..wire_part_count], &self.write_batch, deadline, &submitted) catch |err| {
+            if (submitted) self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {

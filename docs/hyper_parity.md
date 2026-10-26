@@ -2217,8 +2217,9 @@ Server-side `acceptUpgradeWithTimeout` and `acceptUpgradeWithDeadline` apply
 one outer budget after TCP accept through the complete Upgrade request and the
 HTTP/2 SETTINGS exchange rather than granting a fresh timeout after 101.
 HTTP/2 Extended CONNECT now exposes matching request/response timeout and
-absolute-deadline forms. The client checks the deadline before request emission,
-then preserves it across informational or connection-control frames, fragmented
+absolute-deadline forms. The client bounds actual opening HEADERS/CONTINUATION
+output, then preserves the same budget across informational or
+connection-control frames, fragmented
 HPACK, and the final successful response head; timeout cancels the stream and
 makes discarded aggregate state ineligible for pooled reuse. The server reader
 carries one deadline through the complete request header block and preserves a
@@ -2231,6 +2232,19 @@ available for a later sibling request; body overflow cancels only that stream,
 and the compatibility methods still drain the rejection before requiring a 2xx
 tunnel. The server's matching rejection helper uses ordinary HTTP/2 response
 framing and derives Content-Length from the supplied body.
+Server `acceptExtendedConnectWithTimeout`/`WithDeadline` and
+`rejectExtendedConnectWithTimeout`/`WithDeadline` apply that budget to response
+output. `rejectExtendedConnectWithBodyWithTimeout`/`WithDeadline` additionally
+cover DATA, flow-control waits and trailers. Shared ordinary, duplex and
+slice-based DATA writers now bound actual TCP/TLS submissions as well as credit
+waits, including empty END_STREAM frames. Field-block output is staged in
+`runtime/headers/output.zig` before any submission; allocation failure leaves
+the live HPACK encoder unchanged. DATA framing lives in
+`runtime/flow/output.zig`. A failed submitted frame or incomplete field block
+still forbids connection reuse, as RFC 9113 section 4.3 requires contiguous
+HEADERS/CONTINUATION. Aggregate response credit refunds, CONNECT timeout
+cleanup and RFC 8441 pending-admission destruction share the original deadline
+instead of starting unbounded WINDOW_UPDATE or reset output.
 The RFC 9220 adapter now applies the same rejection-entity contract over
 HTTP/3: attempt values retain bounded DATA and trailers, reject oversized
 declared Content-Length before body allocation, skip informational heads, and
