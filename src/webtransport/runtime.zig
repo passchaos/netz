@@ -4920,6 +4920,7 @@ pub const PendingHandshakeSession = struct {
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp = null,
     rejection_pending: ?connect_rejection.Pending = null,
+    early_streams: early_streams.State = .{},
 
     pub fn offeredApplicationProtocols(self: PendingHandshakeSession) ?application_protocol.Offered {
         return application_protocol.offered(self.request.request.headers);
@@ -4939,6 +4940,7 @@ pub const PendingHandshakeSession = struct {
 
     fn finish(self: *PendingHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
+        self.early_streams.deinit(allocator);
         self.request.deinit(allocator);
         if (self.restore_to) |destination| {
             destination.* = self.h3;
@@ -5019,6 +5021,23 @@ pub const PendingHandshakeSession = struct {
                 absolute,
             );
         }
+        self.early_streams.limits = self.limits.early_connect_streams;
+        if (self.h3.dispatcherBound()) {
+            if (!try early_streams.classifyBeforeAdmissionOnce(
+                &self.early_streams,
+                allocator,
+                &self.h3.established.connection,
+                early_streams.standaloneOwners(),
+            )) return error.PacingLimited;
+        } else {
+            try early_streams.classifyBeforeAdmission(
+                &self.early_streams,
+                allocator,
+                &self.h3.established.connection,
+                early_streams.standaloneOwners(),
+                self.deadline,
+            );
+        }
         var streams = try initHandshakeStreamRegistry(
             allocator,
             self.session_id,
@@ -5056,6 +5075,7 @@ pub const PendingHandshakeSession = struct {
         const selected = prepared_headers.selected_application_protocol;
         const request = self.request;
         const session_id = self.session_id;
+        self.early_streams.deinit(allocator);
         self.* = undefined;
         return .{
             .h3 = h3,
@@ -5115,10 +5135,12 @@ pub const PendingHandshakeSession = struct {
             );
         }
         try self.h3.finishRejectedRequest(self.session_id.value);
+        const allocator = self.h3.established.connection.endpoint.allocator;
         const h3 = self.h3;
         const restore_to = self.restore_to;
         const request = self.request;
         const session_id = self.session_id;
+        self.early_streams.deinit(allocator);
         self.* = undefined;
         return .{
             .h3 = h3,
@@ -11359,6 +11381,7 @@ pub const PendingHandshakeConnect = struct {
             .response_trailers = response.trailers,
             .stream_complete = response.stream_complete,
             .limits = self.limits,
+            .deadline = self.connect_deadline,
         };
     }
 
@@ -11409,6 +11432,7 @@ pub const PendingHandshakeConnect = struct {
             .response_trailers = ready_response.trailers,
             .stream_complete = ready_response.stream_complete,
             .limits = self.limits,
+            .deadline = self.connect_deadline,
         };
     }
 
@@ -11542,6 +11566,8 @@ pub const HandshakeConnectAttempt = struct {
     response_trailers: []http3.Qpack.HeaderField = &.{},
     stream_complete: bool = false,
     limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp = null,
+    early_streams: early_streams.State = .{},
     dispatcher_registered: bool = false,
     dispatcher: ?*quic.endpoint_dispatcher.Dispatcher = null,
     dispatcher_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
@@ -11573,6 +11599,7 @@ pub const HandshakeConnectAttempt = struct {
 
     pub fn deinit(self: *HandshakeConnectAttempt) void {
         const allocator = self.h3.?.allocator;
+        self.early_streams.deinit(allocator);
         self.response.deinit(allocator);
         allocator.free(self.response_body);
         http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
@@ -11614,6 +11641,23 @@ pub const HandshakeConnectAttempt = struct {
         std.debug.assert(!self.stream_complete);
         var h3 = &self.h3.?;
         _ = try connect_negotiation.clientVersionWithPolicy(h3, self.limits.require_session_flow_control);
+        self.early_streams.limits = self.limits.early_connect_streams;
+        if (single_attempt) {
+            if (!try early_streams.classifyBeforeAdmissionOnce(
+                &self.early_streams,
+                h3.allocator,
+                &h3.established.connection,
+                early_streams.standaloneOwners(),
+            )) return error.PacingLimited;
+        } else {
+            try early_streams.classifyBeforeAdmission(
+                &self.early_streams,
+                h3.allocator,
+                &h3.established.connection,
+                early_streams.standaloneOwners(),
+                self.deadline,
+            );
+        }
         var streams = try initHandshakeStreamRegistry(
             h3.allocator,
             self.session_id,
@@ -11641,6 +11685,7 @@ pub const HandshakeConnectAttempt = struct {
             .streams = streams,
             .control = control,
         };
+        self.early_streams.deinit(h3.allocator);
         self.* = undefined;
         return session;
     }
@@ -14297,6 +14342,7 @@ fn connectStatefulAttempt(
         .response_trailers = response.trailers,
         .stream_complete = response.stream_complete,
         .limits = retainedClientLimits(limits),
+        .deadline = deadline,
     };
 }
 
@@ -19103,6 +19149,7 @@ test {
 
 test {
     _ = @import("runtime/association/tests/early_streams.zig");
+    _ = @import("runtime/association/tests/admission.zig");
 }
 
 test {

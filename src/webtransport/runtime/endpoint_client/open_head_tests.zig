@@ -3,6 +3,7 @@ const quic = @import("../../../quic/mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const webtransport = @import("../../mod.zig");
 const control_sender = @import("../../../http3/runtime/control/send.zig");
+const prefix = @import("../stream/prefix.zig");
 const Fixture = @import("test_support.zig").Fixture;
 
 const PaceAfterFirstSend = struct {
@@ -209,6 +210,142 @@ test "WebTransport shared client fragmented CONNECT head resumes credit progress
     try std.testing.expectEqual(@as(usize, 2), fixture.client.sessionCount());
     try std.testing.expect(!sibling.control.state.closed);
     try std.testing.expectEqual(@as(u64, worker.head_len), fixture.client.h3.outbound_bodies.find(4).?.send.next_offset);
+}
+
+test "WebTransport shared client early STREAM admission rejects excess and preserves sibling" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(threaded.io());
+    defer fixture.deinit();
+    const sibling = try fixture.addSession();
+    fixture.client.early_connect_streams.max_streams = 1;
+
+    const Worker = struct {
+        fixture: *Fixture,
+        first: u62 = undefined,
+        excess: u62 = undefined,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const peer = &self.fixture.peer;
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                peer.endpoint.io,
+                .{ .clock = .awake, .raw = .fromSeconds(2) },
+            );
+            while (peer.recvStreamStats(4) == null or
+                peer.recvStreamStats(4).?.highest_received_offset == 0)
+            {
+                var packet = try peer.receivePacketServicingTimersDeadline(
+                    deadline,
+                );
+                defer packet.deinit(std.testing.allocator);
+            }
+
+            self.first = @intCast(try peer.tryOpenStream());
+            self.excess = @intCast(try peer.tryOpenStream());
+            var first_storage: [16]u8 = undefined;
+            var excess_storage: [16]u8 = undefined;
+            const first_header = try prefix.header(
+                .init(4),
+                .bidirectional,
+                &first_storage,
+            );
+            const excess_header = try prefix.header(
+                .init(4),
+                .bidirectional,
+                &excess_storage,
+            );
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(std.testing.allocator);
+            try (http3.Response{
+                .status = 200,
+                .extended_connect = true,
+            }).write(&response, std.testing.allocator);
+            try peer.send(&.{
+                .{ .stream = .{
+                    .stream_id = self.first,
+                    .data = first_header,
+                } },
+                .{ .stream = .{
+                    .stream_id = self.first,
+                    .offset = first_header.len,
+                    .data = "kept",
+                } },
+                .{ .stream = .{
+                    .stream_id = self.excess,
+                    .data = excess_header,
+                } },
+                .{ .stream = .{
+                    .stream_id = self.excess,
+                    .offset = excess_header.len,
+                    .data = "rejected",
+                } },
+            });
+            // Do not let QUIC's stream scheduler place the lower-numbered
+            // CONNECT response ahead of the early associated streams. Their
+            // recovery acknowledgement proves the client processed them
+            // before the response becomes visible to admission.
+            while (peer.pendingRecoveryCount() != 0) {
+                var packet = try peer.receivePacketServicingTimersDeadline(
+                    deadline,
+                );
+                packet.deinit(std.testing.allocator);
+            }
+            try peer.send(&.{.{ .stream = .{
+                .stream_id = 4,
+                .data = response.items,
+            } }});
+        }
+    };
+    var worker = Worker{ .fixture = &fixture };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+    const opened = fixture.client.openSessionWithTimeout(.{
+        .authority = "localhost",
+        .path = "/early-streams",
+    }, .fromSeconds(2));
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+    const accepted = try opened;
+    try std.testing.expectEqual(@as(u62, 4), accepted.session_id.value);
+    try std.testing.expect(!sibling.control.state.closed);
+
+    var body: [16]u8 = undefined;
+    const event = (try fixture.client.poll(accepted.session_id, &body)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(event == .stream and event.stream == .data);
+    try std.testing.expectEqual(worker.first, event.stream.data.stream_id);
+    try std.testing.expectEqualStrings(
+        "kept",
+        body[0..event.stream.data.bytes],
+    );
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        fixture.peer.endpoint.io,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    while (fixture.peer.sendStreamStats(worker.excess).?.stopped == null) {
+        var packet = try fixture.peer.receivePacketServicingTimersDeadline(
+            deadline,
+        );
+        packet.deinit(std.testing.allocator);
+    }
+    try std.testing.expect(
+        fixture.peer.sendStreamStats(worker.first).?.stopped == null,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.buffered_stream_rejected,
+        fixture.peer.sendStreamStats(worker.excess).?.stopped.?.application_error_code,
+    );
 }
 
 test "WebTransport shared client CONNECT head timeout retains QPACK references until cancellation" {

@@ -20,6 +20,7 @@ const incremental_stream = @import("stream_incremental.zig");
 const stream_association = @import("stream_association.zig");
 const terminal = @import("endpoint_client/terminal.zig");
 const open_cleanup = @import("endpoint_client/open_cleanup.zig");
+const early_streams = @import("association/early_streams.zig");
 const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_grant = @import("flow/grant.zig");
 const flow_open = @import("flow/open.zig");
@@ -50,6 +51,9 @@ pub const Options = struct {
     h3: http3.runtime.HandshakeClientOptions,
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
+    /// Connection-wide bounds for peer streams received before their CONNECT
+    /// response has been promoted into an active Session.
+    early_connect_streams: early_streams.Limits = .{},
     /// Optional SOCKS5 UDP route used by URI connection helpers.
     socks5_proxy: ?http3.socks5_runtime.Proxy = null,
 };
@@ -431,6 +435,7 @@ pub const Client = struct {
     h3: http3.runtime.HandshakeClient,
     max_sessions: usize,
     require_session_flow_control: bool = false,
+    early_connect_streams: early_streams.Limits = .{},
     sessions: std.AutoHashMapUnmanaged(u62, *Session) = .empty,
     pending_open_cleanup: open_cleanup.Pending = .{},
     last_ready_session_id: ?u62 = null,
@@ -485,6 +490,7 @@ pub const Client = struct {
             ),
             .max_sessions = options.max_sessions,
             .require_session_flow_control = options.require_session_flow_control,
+            .early_connect_streams = options.early_connect_streams,
         };
     }
 
@@ -510,6 +516,7 @@ pub const Client = struct {
             ),
             .max_sessions = options.max_sessions,
             .require_session_flow_control = options.require_session_flow_control,
+            .early_connect_streams = options.early_connect_streams,
         };
     }
 
@@ -650,6 +657,7 @@ pub const Client = struct {
             .h3 = h3_client,
             .max_sessions = options.max_sessions,
             .require_session_flow_control = options.require_session_flow_control,
+            .early_connect_streams = options.early_connect_streams,
         };
     }
 
@@ -909,6 +917,17 @@ pub const Client = struct {
                 absolute,
             );
         }
+        var early_state = early_streams.State{
+            .limits = self.early_connect_streams,
+        };
+        defer early_state.deinit(self.allocator);
+        try early_streams.classifyBeforeAdmission(
+            &early_state,
+            self.allocator,
+            &self.h3.established.connection,
+            self.earlyOwners(),
+            deadline,
+        );
         try self.h3.detachResponseStream(stream_id);
         session_value.* = .{
             .session_id = session_id,
@@ -1286,6 +1305,26 @@ pub const Client = struct {
             .scope = 0,
             .containsFn = containsSession,
         };
+    }
+
+    fn earlyOwners(self: *const Client) early_streams.Owners {
+        return .{
+            .sessions = self.sessionLookup(),
+            .ownsStreamFn = ownsActiveStream,
+        };
+    }
+
+    fn ownsActiveStream(
+        context: *const anyopaque,
+        _: u64,
+        stream_id: u62,
+    ) bool {
+        const self: *const Client = @ptrCast(@alignCast(context));
+        var sessions = self.sessions.valueIterator();
+        while (sessions.next()) |session_ptr| {
+            if (session_ptr.*.streams.get(stream_id) != null) return true;
+        }
+        return false;
     }
 
     fn containsSession(

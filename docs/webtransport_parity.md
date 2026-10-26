@@ -2157,8 +2157,23 @@ association headers, cancellation/allocator failure, already-owned data and
 invalid IDs. Real QUIC/TLS cases verify a stream arriving before CONNECT on an
 active sibling connection, idle expiry wakeup, delayed acceptance, and exact
 WT_SESSION_GONE after a 403 rejection with continued sibling DATAGRAM delivery.
-The dedicated early-stream policy currently applies to the shared server;
-standalone owning and client admission paths retain their QUIC receive bounds.
+
+Stateful standalone server/client promotion now applies the same policy before
+making a successful CONNECT an active Session. `PendingHandshakeSession` and
+`HandshakeConnectAttempt` retain classification metadata across allocation,
+output-backpressure and dispatcher-promotion retries; ordinary owning paths
+service ACK/loss/PTO under the original CONNECT deadline, while dispatcher
+promotion performs one nonblocking cancellation turn and remains retryable.
+The multiplexed client applies `EndpointClientOptions.early_connect_streams`
+before inserting a newly accepted Session and leaves established siblings and
+their registered streams untouched. QUIC receive-stream statistics record the
+first data/FIN timestamp, so standalone `max_age` starts at authenticated wire
+receipt rather than at the later promotion scan. Preconfigured stateful server
+and shared-client regressions send multiple associated streams before the 200,
+deliver the admitted stream, reject the excess one with exact
+WT_BUFFERED_STREAM_REJECTED and preserve sibling traffic. The legacy
+development/protected adapters do not own the stateful QUIC stream registry and
+retain their existing transport receive bounds.
 
 Ordinary stream association now uses the same connection-error boundary as
 early-stream discovery. An invalid Session ID on a peer bidi or uni stream

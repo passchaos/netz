@@ -490,6 +490,10 @@ const StreamRecvFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.RecvFlow,
     recv_state: quic.stream_state.RecvState,
+    /// Monotonic receipt time of the first STREAM frame that carried data or
+    /// FIN for this receive side. Protocols that buffer an unclaimed stream
+    /// can enforce an age bound from wire arrival rather than first discovery.
+    first_received_at_ns: ?u64 = null,
     stopped_prefix: reset_prefix.Received = .{},
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
@@ -708,6 +712,7 @@ pub const RecvStreamStats = struct {
     bytes_read: u64,
     highest_received_offset: u64,
     available_bytes: usize,
+    first_received_at_ns: ?u64,
     receive_limit: u64,
     receive_window_available: u64,
     final_size: ?u64,
@@ -762,6 +767,7 @@ fn recvStreamStatsFromEntry(entry: *const StreamRecvFlowEntry) RecvStreamStats {
             std.math.maxInt(u64),
         .highest_received_offset = entry.highest_received_end,
         .available_bytes = entry.recv_state.available().len,
+        .first_received_at_ns = entry.first_received_at_ns,
         .receive_limit = entry.flow.limit,
         .receive_window_available = entry.flow.limit -| entry.flow.highest_received,
         .final_size = entry.final_size,
@@ -13966,6 +13972,12 @@ pub const Connection = struct {
                 .stream => |stream| {
                     if (self.isClosedStream(stream.stream_id)) continue;
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
+                    if (recv_stream.first_received_at_ns == null and
+                        (stream.data.len != 0 or stream.fin))
+                    {
+                        recv_stream.first_received_at_ns = now_ns orelse
+                            self.monotonicNowNs();
+                    }
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
                     const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
                     const old_highest_received_end = recv_stream.highest_received_end;

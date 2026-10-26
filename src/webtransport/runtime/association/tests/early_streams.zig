@@ -75,6 +75,27 @@ test "WebTransport early STREAM byte quota includes out-of-order gaps" {
     try std.testing.expectEqual(webtransport.ApplicationErrorCode.buffered_stream_rejected, pair.connection(.server).recvStreamStats(id).?.stop_sending_sent.?.application_error_code);
 }
 
+test "WebTransport early STREAM age starts at wire receipt before discovery" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var pair: Pair = undefined;
+    try pair.init(threaded.io());
+    defer pair.deinit();
+    const id = try open(&pair, .unidirectional, 32, "old", false);
+    try std.Io.sleep(threaded.io(), .fromMilliseconds(1), .awake);
+    var state = early.State{ .limits = .{ .max_age = .fromNanoseconds(1) } };
+    defer state.deinit(std.testing.allocator);
+    try std.testing.expect(try state.poll(
+        std.testing.allocator,
+        pair.connection(.server),
+        owners(&pair),
+    ));
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.buffered_stream_rejected,
+        pair.connection(.server).recvStreamStats(id).?.stop_sending_sent.?.application_error_code,
+    );
+}
+
 test "WebTransport early STREAM expiry remains retryable after a failed cancellation send" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

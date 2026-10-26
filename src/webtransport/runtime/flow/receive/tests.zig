@@ -21,6 +21,7 @@ fn stats(highest: u64, final_size: ?u64) quic.one_rtt.RecvStreamStats {
         .bytes_read = 0,
         .highest_received_offset = highest,
         .available_bytes = 0,
+        .first_received_at_ns = null,
         .receive_limit = 1024,
         .receive_window_available = 1024,
         .final_size = final_size,

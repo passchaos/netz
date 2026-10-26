@@ -107,6 +107,14 @@ pub const State = struct {
                     continue;
                 }
             }
+            entry.received_ns = @min(
+                entry.received_ns,
+                firstReceivedNs(
+                    connection,
+                    entry.stream_id,
+                    entry.received_ns,
+                ),
+            );
             entry.bytes = retainedSpan(connection, entry.stream_id);
             self.bytes += entry.bytes;
             if (gone(self, connection, entry.header.session_id)) {
@@ -137,7 +145,8 @@ pub const State = struct {
                     if (active.contains(session_id)) continue;
                 }
                 const bytes = retainedSpan(connection, id);
-                const code: ?u64 = if (gone(self, connection, header.session_id)) webtransport.ApplicationErrorCode.session_gone else if (self.entries.items.len >= self.limits.max_streams or bytes > self.limits.max_bytes -| self.bytes or self.limits.max_age.nanoseconds <= 0)
+                const received_ns = firstReceivedNs(connection, id, now_ns);
+                const code: ?u64 = if (gone(self, connection, header.session_id)) webtransport.ApplicationErrorCode.session_gone else if (self.entries.items.len >= self.limits.max_streams or bytes > self.limits.max_bytes -| self.bytes or now_ns - received_ns >= self.limits.max_age.nanoseconds)
                     webtransport.ApplicationErrorCode.buffered_stream_rejected
                 else
                     null;
@@ -145,7 +154,7 @@ pub const State = struct {
                     self.pending = .{ .stream_id = id, .direction = direction, .code = value };
                     return self.submitPending(connection);
                 }
-                try self.entries.append(allocator, .{ .stream_id = id, .header = header, .received_ns = now_ns, .bytes = bytes });
+                try self.entries.append(allocator, .{ .stream_id = id, .header = header, .received_ns = received_ns, .bytes = bytes });
                 self.bytes += bytes;
             }
             if (ids.len < ids_buffer.len) return false;
@@ -170,9 +179,79 @@ pub const State = struct {
     }
 };
 
+/// Classify every stream already retained by a caller-owned connection before
+/// its CONNECT becomes an active WebTransport Session. Cancellation
+/// backpressure services the same connection and retains the caller's one
+/// absolute deadline across every rejection.
+pub fn classifyBeforeAdmission(
+    state: *State,
+    allocator: std.mem.Allocator,
+    connection: *quic.one_rtt.Connection,
+    owners: Owners,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
+    while (true) {
+        const submitted = state.poll(
+            allocator,
+            connection,
+            owners,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {
+                if (deadline) |absolute|
+                    try connection.servicePacketServicingTimersDeadline(
+                        absolute,
+                    )
+                else
+                    try connection.servicePacketServicingTimers();
+                continue;
+            },
+            else => return err,
+        };
+        if (!submitted) return;
+    }
+}
+
+/// Dispatcher-owned promotion may not read the shared socket. Return true
+/// only after one nonblocking turn proves that no early-stream work remains.
+pub fn classifyBeforeAdmissionOnce(
+    state: *State,
+    allocator: std.mem.Allocator,
+    connection: *quic.one_rtt.Connection,
+    owners: Owners,
+) Error!bool {
+    return !(try state.poll(allocator, connection, owners));
+}
+
+pub fn standaloneOwners() Owners {
+    return .{ .sessions = .{
+        .context = &no_session_context,
+        .scope = 0,
+        .containsFn = noSession,
+    } };
+}
+
+const no_session_context: u8 = 0;
+
+fn noSession(_: *const anyopaque, _: u64, _: u62) bool {
+    return false;
+}
+
 fn retainedSpan(connection: *const quic.one_rtt.Connection, stream_id: u62) u64 {
     const stats = connection.recvStreamStats(stream_id) orelse return 0;
     return stats.highest_received_offset -| stats.bytes_read;
+}
+
+fn firstReceivedNs(
+    connection: *const quic.one_rtt.Connection,
+    stream_id: u62,
+    fallback: i96,
+) i96 {
+    const received = connection.recvStreamStats(stream_id).?.first_received_at_ns orelse
+        return fallback;
+    return @intCast(received);
 }
 
 fn gone(self: *const State, connection: *const quic.one_rtt.Connection, session_id: ?u62) bool {
