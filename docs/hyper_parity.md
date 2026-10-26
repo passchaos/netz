@@ -1010,7 +1010,14 @@ Reusable implementation changes behind these H2 results:
 - aggregate and informational response writers require the peer request stream
   to remain active. Once a final response releases it, a second final or 1xx
   write returns `InvalidStreamId` without emitting bytes or reclaiming a stream
-  slot, and the same connection can serve the next request;
+  slot, and the same connection can serve the next request. Both writers now
+  expose timeout/deadline forms. One absolute timestamp spans final HEADERS,
+  DATA and trailers, while an informational HEADERS write consumes that same
+  caller-owned budget without ending the stream. Expired or non-awake budgets
+  fail before HPACK or stream mutation; a blocked/partial header submission
+  follows the existing connection-reuse safety boundary. Real blocked-socket
+  tests cover both APIs, and the audited h2 interop server sends 103, 102 and
+  the final 200 under one deadline;
 - `startRequest` provides the client-side counterpart. `RequestWriter` accepts
   bounded or length-unbounded DATA chunks, request trailers and transactional
   length retries, remains responsible for cancellation after request-body FIN,

@@ -6,7 +6,7 @@ const http2 = @import("../../mod.zig");
 const BlockedOutput = @import("../testing/blocked_output.zig").BlockedOutput;
 const allocator = std.testing.allocator;
 
-const Operation = enum { response_start, duplex_start, duplex_headers, request_trailers, response_trailers, client_trailers, server_trailers, client_fin };
+const Operation = enum { aggregate_response, informational, response_start, duplex_start, duplex_headers, request_trailers, response_trailers, client_trailers, server_trailers, client_fin };
 
 fn serverStream(connection: *runtime.Connection) runtime.ServerDuplexStream {
     return .{ .connection = connection, .stream_id = 1, .headers = &.{}, .method = "POST", .path = "/output", .scheme = "http", .authority = "localhost", .protocol = null, .priority = .{}, .expected_request_length = null };
@@ -14,6 +14,17 @@ fn serverStream(connection: *runtime.Connection) runtime.ServerDuplexStream {
 
 fn exercise(connection: *runtime.Connection, operation: Operation, fields: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) !void {
     switch (operation) {
+        .aggregate_response => try connection.writeResponseWithTimeout(
+            1,
+            .{ .headers = fields },
+            timeout,
+        ),
+        .informational => try connection.writeInformationalResponseWithTimeout(
+            1,
+            103,
+            fields,
+            timeout,
+        ),
         .response_start => {
             _ = try connection.startResponseWithTimeout(1, .{ .headers = fields }, timeout);
         },
@@ -73,6 +84,12 @@ fn blocked(operation: Operation) !void {
 test "HTTP/2 stream output deadline bounds blocked response start" {
     try blocked(.response_start);
 }
+test "HTTP/2 stream output deadline bounds blocked aggregate response" {
+    try blocked(.aggregate_response);
+}
+test "HTTP/2 stream output deadline bounds blocked informational response" {
+    try blocked(.informational);
+}
 test "HTTP/2 stream output deadline bounds blocked duplex response start" {
     try blocked(.duplex_start);
 }
@@ -120,6 +137,40 @@ test "HTTP/2 stream output deadline preserves trailer half-close ownership" {
         try std.testing.expectEqual(other_finished, response.released);
         try std.testing.expectEqual(@as(usize, @intFromBool(!other_finished)), server.connection.activePeerStreamCount());
     }
+}
+
+test "HTTP/2 aggregate and informational deadlines preserve response ownership" {
+    if (comptime builtin.os.tag != .linux) return;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    var fixture = try BlockedOutput.init(threaded.io(), .server);
+    defer fixture.deinit();
+    const connection = &fixture.connection;
+    try runtime.testing.addActivePeerStream(connection, 1);
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        connection.io,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    try connection.writeInformationalResponseWithDeadline(
+        1,
+        103,
+        &.{.{ .name = "link", .value = "</asset>; rel=preload" }},
+        deadline,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.activePeerStreamCount(),
+    );
+    try connection.writeResponseWithDeadline(
+        1,
+        .{ .body = "ok" },
+        deadline,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.activePeerStreamCount(),
+    );
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
 }
 
 test "HTTP/2 stream output deadline validates before trailer or response mutation" {

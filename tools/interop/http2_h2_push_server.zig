@@ -60,18 +60,22 @@ pub fn main(init: std.process.Init) !void {
     defer request.deinit(allocator);
     if (informational) {
         try std.testing.expectEqualStrings("/informational", request.path);
-        try connection.writeInformationalResponse(request.stream_id, 103, &.{
+        const response_deadline = std.Io.Clock.Timestamp.fromNow(
+            io,
+            .{ .clock = .awake, .raw = .fromSeconds(5) },
+        );
+        try connection.writeInformationalResponseWithDeadline(request.stream_id, 103, &.{
             .{ .name = "link", .value = "</style.css>; rel=preload" },
-        });
-        try connection.writeInformationalResponse(request.stream_id, 102, &.{
+        }, response_deadline);
+        try connection.writeInformationalResponseWithDeadline(request.stream_id, 102, &.{
             .{ .name = "x-progress", .value = "half" },
-        });
-        try connection.writeResponse(request.stream_id, .{
+        }, response_deadline);
+        try connection.writeResponseWithDeadline(request.stream_id, .{
             .status = 200,
             .headers = &.{.{ .name = "x-netz-final", .value = "yes" }},
             .body = "final",
             .request_method = request.method,
-        });
+        }, response_deadline);
         std.debug.print(
             "netz HTTP/2 server sent informational responses to h2: transport={s} statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io\n",
             .{if (tls_enabled) "tls" else "h2c"},

@@ -12090,6 +12090,38 @@ pub const Connection = struct {
         return self.writeResponseInternal(stream_id, options, true);
     }
 
+    /// Validate and write one complete response under a caller-owned
+    /// awake-clock deadline. HEADERS, DATA and trailers consume the same
+    /// budget; no phase can renew it.
+    pub fn writeResponseWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.writeResponseInternalUntil(
+            stream_id,
+            options,
+            true,
+            absolute,
+        );
+    }
+
+    pub fn writeResponseWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeResponseWithDeadline(
+            stream_id,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn writeResponseInternal(
         self: *Connection,
         stream_id: u31,
@@ -13230,6 +13262,53 @@ pub const Connection = struct {
     }
 
     pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
+        return self.writeInformationalResponseUntil(
+            stream_id,
+            status_code,
+            headers,
+            null,
+        );
+    }
+
+    pub fn writeInformationalResponseWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        status_code: u16,
+        headers: []const http2.Hpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.writeInformationalResponseUntil(
+            stream_id,
+            status_code,
+            headers,
+            absolute,
+        );
+    }
+
+    pub fn writeInformationalResponseWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        status_code: u16,
+        headers: []const http2.Hpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeInformationalResponseWithDeadline(
+            stream_id,
+            status_code,
+            headers,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn writeInformationalResponseUntil(
+        self: *Connection,
+        stream_id: u31,
+        status_code: u16,
+        headers: []const http2.Hpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) {
@@ -13253,7 +13332,7 @@ pub const Connection = struct {
         // response HEADERS still owns END_STREAM/body/trailer semantics.  This
         // mirrors h2's send_informational path rather than abusing the final
         // writeResponse helper.
-        try self.writeHeaders(stream_id, fields.items, false);
+        try self.writeHeadersUntil(stream_id, fields.items, false, deadline);
     }
 
     /// Send a PING and wait indefinitely for the ACK carrying the same opaque
