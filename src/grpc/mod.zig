@@ -104,6 +104,7 @@ pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
     _ = status_details;
+    _ = @import("response_metadata.zig");
     _ = auth;
     _ = web;
     _ = @import("tests.zig");

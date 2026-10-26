@@ -851,10 +851,11 @@ Current protocol coverage includes:
 - gRPC over HTTP/2 with bounded 5-byte length-prefixed message framing,
   compressed-flag validation, eight-digit `grpc-timeout` parse/format with
   non-shortening deadline rounding, all canonical status codes, HTTP-to-gRPC
-  fallback mapping, tolerant percent-encoded `grpc-message` handling,
+  shared unary/streaming/duplex fallback mapping with owned diagnostics for
+  missing or malformed status, tolerant percent-encoded `grpc-message` handling,
   owned `google.rpc.Status` error details with opaque `Any` iteration,
   status-consistency validation and dedicated unary/streaming/gRPC-Web output,
-  content-type/TE/method-path/custom-metadata validation, unpadded binary
+  request content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
   comparison, a caller-buffer client field constructor that always requests

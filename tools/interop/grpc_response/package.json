@@ -1,0 +1,6 @@
+{
+  "name": "netz-grpc-response-interop",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "@grpc/grpc-js": "1.14.0" }
+}

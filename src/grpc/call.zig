@@ -5,6 +5,7 @@ const http2 = @import("../http2/mod.zig");
 const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
 const details_mod = @import("status_details.zig");
+const response_metadata = @import("response_metadata.zig");
 const wire = @import("wire.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
@@ -930,52 +931,15 @@ fn parseUnaryResponse(
 ) Error!UnaryResponse {
     var owned = transport;
     errdefer owned.deinit(allocator);
-    const status_raw = findHeader(
-        owned.trailers,
-        "grpc-status",
-    ) orelse findHeader(owned.headers, "grpc-status");
-    const status = if (status_raw) |raw|
-        Status.parse(raw) catch .unknown
-    else
-        statusFromHttp(owned.status);
-    var status_details = try details_mod.fromMetadataAlloc(allocator, status, owned.headers, owned.trailers);
-    errdefer if (status_details) |*details| details.deinit();
-    const status_message_raw = findHeader(
-        owned.trailers,
-        "grpc-message",
-    ) orelse findHeader(owned.headers, "grpc-message");
-    const status_message = if (status_message_raw) |raw|
-        try decodeStatusMessageAlloc(allocator, raw)
-    else if (status_raw == null)
-        try std.fmt.allocPrint(
-            allocator,
-            "HTTP status {d} without grpc-status",
-            .{owned.status},
-        )
-    else
-        try allocator.alloc(u8, 0);
-    errdefer allocator.free(status_message);
-
-    const content_type = findHeader(
-        owned.headers,
-        "content-type",
-    );
-    const grpc_content_type = content_type != null and
-        isContentType(content_type.?);
-    if ((owned.status == 200 or status_raw != null) and
-        !grpc_content_type)
-    {
-        return error.InvalidContentType;
-    }
-
-    const encoding = findHeader(owned.headers, "grpc-encoding");
+    var terminal = try response_metadata.parseTerminal(allocator, owned.status, owned.headers, owned.trailers);
+    errdefer terminal.deinit(allocator);
+    const status = terminal.status;
+    const parse_grpc_body = response_metadata.parseBody(owned.status, owned.headers, owned.trailers);
+    const encoding = if (parse_grpc_body) findHeader(owned.headers, "grpc-encoding") else null;
     var message: ?Message = null;
     var owned_message: ?[]u8 = null;
     errdefer if (owned_message) |payload| allocator.free(payload);
     var was_compressed = false;
-    const parse_grpc_body =
-        grpc_content_type and
-        (status_raw != null or owned.status == 200);
     if (parse_grpc_body and owned.body.len != 0) {
         var iterator = MessageIterator.init(
             owned.body,
@@ -1013,8 +977,8 @@ fn parseUnaryResponse(
         .transport = owned,
         .reset = null,
         .status = status,
-        .status_message = status_message,
-        .status_details = status_details,
+        .status_message = terminal.status_message,
+        .status_details = terminal.status_details,
         .message = message,
         .was_compressed = was_compressed,
         .encoding = encoding,
@@ -1128,16 +1092,7 @@ pub fn headerValue(
     return findHeader(headers, name);
 }
 
-pub fn statusFromHttp(status: u16) Status {
-    return switch (status) {
-        400 => .internal,
-        401 => .unauthenticated,
-        403 => .permission_denied,
-        404 => .unimplemented,
-        429, 502, 503, 504 => .unavailable,
-        else => .unknown,
-    };
-}
+pub const statusFromHttp = response_metadata.statusFromHttp;
 
 /// Map an HTTP/2 RST_STREAM reason according to gRPC's HTTP/2 transport
 /// specification. Unknown extension codes are protocol failures and therefore

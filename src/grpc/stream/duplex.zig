@@ -7,6 +7,7 @@
 //! after the owning HTTP/2 event has been released.
 
 const std = @import("std");
+const response_metadata = @import("../response_metadata.zig");
 const details_mod = @import("../status_details.zig");
 const http2 = @import("../../http2/mod.zig");
 const auth = @import("../auth.zig");
@@ -555,16 +556,8 @@ pub const ClientDuplex = struct {
             var owned = head;
             owned.deinit(self.allocator);
         }
-        const content_type = call.headerValue(head.headers, "content-type");
-        const status_raw = call.headerValue(head.headers, "grpc-status");
-        const grpc_content_type = content_type != null and
-            wire.isContentType(content_type.?);
-        self.parse_response_body = grpc_content_type and
-            (head.status == 200 or status_raw != null);
-        if ((head.status == 200 or status_raw != null) and !grpc_content_type) {
-            return error.InvalidContentType;
-        }
-        self.response_encoding = call.headerValue(head.headers, "grpc-encoding");
+        self.parse_response_body = response_metadata.parseBody(head.status, head.headers, &.{});
+        self.response_encoding = if (self.parse_response_body) call.headerValue(head.headers, "grpc-encoding") else null;
         if (self.parse_response_body) {
             self.decoder = try codec.Decoder.init(
                 self.allocator,

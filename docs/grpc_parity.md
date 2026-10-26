@@ -41,7 +41,8 @@ existing HTTP/2 runtime:
   `UNAUTHENTICATED` without retiring the HTTP/2 channel. Duplex servers expose
   the same check immediately after request HEADERS and before reading DATA,
   after which the existing bounded drain safely retires a rejected upload,
-- HTTP status fallback mapping when a broken intermediary omits `grpc-status`,
+- shared unary, sequential and duplex HTTP status fallback when a broken
+  intermediary omits `grpc-status`, including HTTP 200 UNKNOWN results,
 - typed `identity`, `deflate`, and `gzip` algorithms plus
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
 - per-message gzip and RFC 1950 zlib-wrapped `deflate` compression using the
@@ -694,3 +695,53 @@ The generated pbz process fixture checks transferred details after a later
 successful call. The official Chromium grpc-web SDK also checks exact
 google.rpc.Status bytes exposed by CORS on its UNAUTHENTICATED response over
 HTTP/1.1 and TLS HTTP/2.
+
+## Intermediary response status policy
+
+All native client RPC shapes now share `src/grpc/response_metadata.zig` for
+terminal status and entity classification. A canonical `grpc-status` takes
+precedence over the HTTP status, including trailers-only errors with a missing
+or non-gRPC Content-Type. Trailing status takes precedence over an initial
+status. When no status is present, the upstream HTTP-to-gRPC table applies;
+HTTP 200 produces an owned UNKNOWN result with a diagnostic message. Sequential
+and duplex completion use the same result as unary completion. Malformed or
+duplicate status fields in the selected section also produce UNKNOWN with a
+diagnostic rather than allowing the first duplicate to report success.
+
+Non-gRPC entities are discarded without message callbacks or compression
+negotiation. A non-200 intermediary error entity is also discarded when the
+proxy preserved `application/grpc` but omitted status at classification time.
+Aggregate unary decoding can also use the already received terminal status
+to recognize a complete gRPC body on a non-200 response, preserving its earlier
+message behavior. Streamed readers classify the entity from initial metadata
+before delivering DATA. Proper gRPC messages
+retain bounded framing and compression checks, and messages received before a
+missing terminal status remain observable alongside the failed RPC result.
+Explicit unary OK still requires exactly one response message. Error details
+retain their independent protobuf/status consistency validation and ownership.
+
+TCP and certificate-pinned TLS matrices run all three client APIs through one
+concurrent stream slot, including empty HTTP 200 responses, proxy HTML,
+preserved gRPC media types on HTTP errors, explicit status over HTTP 503,
+missing media type with trailing status, messages before missing status,
+normal completion, rich errors, and malformed/duplicate status. Later calls
+on the same channel prove completion retires stream ownership. Allocation
+failure sweeps cover terminal diagnostics and decoded details, including errors
+after earlier successful allocations.
+
+```sh
+zig build interop-grpc-response -Doptimize=ReleaseFast
+```
+
+This separate process gate uses a raw Node HTTP/2 peer with one advertised
+concurrent stream slot. A pinned official `@grpc/grpc-js` 1.14.0 client and the
+zio-backed netz unary, sequential and duplex clients each reuse one channel
+across the same 19 cases. The peer validates exact request envelopes and counts
+all 76 exchanges. It covers every HTTP mapping, explicit status precedence,
+missing/trailing metadata, rich status and messages before terminal failure.
+The two observed SDK differences are reported explicitly: grpc-js produces
+INTERNAL on DATA FIN without `grpc-status`, and RESOURCE_EXHAUSTED when it reads
+the fixture's HTML body as an oversized message envelope. Netz applies the
+documented UNKNOWN fallback and discards that non-gRPC entity. The gate checks
+the pinned SDK's actual outcomes alongside netz's required behavior and does
+not claim those malformed responses have identical SDK results.

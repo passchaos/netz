@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const response_metadata = @import("../response_metadata.zig");
 const details_mod = @import("../status_details.zig");
 const call = @import("../call.zig");
 const compression = @import("../compression.zig");
@@ -899,24 +900,7 @@ fn ClientResponseBridge(
             head: http2.runtime.StreamingResponseHead,
         ) Error!void {
             self.head_seen = true;
-            const content_type = call.headerValue(
-                head.headers,
-                "content-type",
-            );
-            const status_raw = call.headerValue(
-                head.headers,
-                "grpc-status",
-            );
-            const grpc_content_type = content_type != null and
-                wire.isContentType(content_type.?);
-            self.parse_body =
-                grpc_content_type and
-                (head.status == 200 or status_raw != null);
-            if ((head.status == 200 or status_raw != null) and
-                !grpc_content_type)
-            {
-                return error.InvalidContentType;
-            }
+            self.parse_body = response_metadata.parseBody(head.status, head.headers, &.{});
             if (!self.parse_body) return;
             self.encoding = call.headerValue(
                 head.headers,
@@ -1073,36 +1057,11 @@ pub fn parseResponseTerminal(
     trailers: []const http2.Hpack.HeaderField,
     encoding: ?[]const u8,
 ) Error!ParsedResponseTerminal {
-    const status_raw = call.headerValue(
-        trailers,
-        "grpc-status",
-    ) orelse call.headerValue(headers, "grpc-status");
-    const status = if (status_raw) |raw|
-        wire.Status.parse(raw) catch .unknown
-    else
-        call.statusFromHttp(http_status);
-    if (status_raw == null and http_status == 200) {
-        return error.MissingGrpcStatus;
-    }
-    var status_details = try details_mod.fromMetadataAlloc(allocator, status, headers, trailers);
-    errdefer if (status_details) |*details| details.deinit();
-    const message_raw = call.headerValue(
-        trailers,
-        "grpc-message",
-    ) orelse call.headerValue(headers, "grpc-message");
+    const terminal = try response_metadata.parseTerminal(allocator, http_status, headers, trailers);
     return .{
-        .status = status,
-        .status_message = if (message_raw) |message|
-            try wire.decodeStatusMessageAlloc(allocator, message)
-        else if (status_raw == null)
-            try std.fmt.allocPrint(
-                allocator,
-                "HTTP status {d} without grpc-status",
-                .{http_status},
-            )
-        else
-            try allocator.alloc(u8, 0),
+        .status = terminal.status,
+        .status_message = terminal.status_message,
+        .status_details = terminal.status_details,
         .encoding = encoding,
-        .status_details = status_details,
     };
 }

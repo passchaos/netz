@@ -1,6 +1,15 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC streaming terminal synthesizes UNKNOWN without grpc-status" {
+    const allocator = std.testing.allocator;
+    var terminal = try netz.grpc.stream.runtime.parseResponseTerminal(allocator, 200, &.{}, &.{}, null);
+    defer allocator.free(terminal.status_message);
+    defer if (terminal.status_details) |*details| details.deinit();
+    try std.testing.expectEqual(netz.grpc.Status.unknown, terminal.status);
+    try std.testing.expectEqualStrings("HTTP status 200 without grpc-status", terminal.status_message);
+}
+
 test "public gRPC rich status details preserve opaque Any and reject inconsistent status" {
     const allocator = std.testing.allocator;
     const bytes = try netz.grpc.status_details.encodeAlloc(allocator, .invalid_argument, "bad input", &.{.{ .type_url = "type.googleapis.com/demo.Error", .value = "\x00\xff" }});

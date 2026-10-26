@@ -1860,6 +1860,20 @@ pub fn build(b: *std.Build) void {
     const grpc_web_chrome_step = b.step("interop-grpc-web-chrome", "Verify gRPC-Web/CORS with the official JS SDK in Chromium (--tls for HTTPS; --tls --http2 for HTTP/2)");
     grpc_web_chrome_step.dependOn(&grpc_web_chrome.step);
 
+    const grpc_response_client = b.addExecutable(.{
+        .name = "netz-grpc-response-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_response_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_response = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_response.py" });
+    grpc_response.addArtifactArg(grpc_response_client);
+    const grpc_response_step = b.step("interop-grpc-response", "Verify native gRPC response fallback with an independent HTTP/2 peer and official grpc-js");
+    grpc_response_step.dependOn(&grpc_response.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{
