@@ -22,6 +22,7 @@ test {
     _ = @import("runtime/control/output_deadline_tests.zig");
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
+    _ = @import("runtime/request/complete_deadline_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
 }
@@ -62,6 +63,7 @@ const checkedResponseBodyLength = message_headers.checkedResponseBodyLength;
 const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
+const complete_request = @import("runtime/request/complete.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
@@ -4275,7 +4277,7 @@ pub const Connection = struct {
     ) ResponseTimeoutError!OwnedResponse {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const pending = try self.sendCompleteRequest(options);
+        const pending = try self.sendCompleteRequestUntil(options, deadline);
         return self.readResponseUntil(
             pending.stream_id,
             pending.request_method,
@@ -4549,7 +4551,7 @@ pub const Connection = struct {
     ) !StreamingResponse {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const pending = try self.sendCompleteRequest(options);
+        const pending = try self.sendCompleteRequestUntil(options, deadline);
         return self.readResponseStreamingWithHeadUntil(
             pending,
             informational,
@@ -4813,123 +4815,22 @@ pub const Connection = struct {
         self: *Connection,
         options: RequestOptions,
     ) Error!PendingResponse {
-        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
-        if (self.role != .client) return error.UnexpectedFrame;
-        // A previous reset reason is useful only to the operation that
-        // returned StreamReset. Starting a new request invalidates any value
-        // that its caller chose not to consume.
-        self.last_peer_reset = null;
-        var request_options = options;
-        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
-        const scheme = request_options.scheme orelse self.default_scheme orelse "https";
+        return self.sendCompleteRequestUntil(options, null);
+    }
 
-        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
-        const fields_capacity = std.math.add(
-            usize,
-            request_options.headers.len,
-            7,
-        ) catch return error.MessageTooLarge;
-        const fields_buffer = try stackFirstHeaderFieldBuffer(
-            self.allocator,
-            &fields_stack,
-            fields_capacity,
-        );
-        defer freeStackFirstHeaderFieldBuffer(
-            self.allocator,
-            &fields_stack,
-            fields_buffer,
-        );
-        var fields: std.ArrayList(http2.Hpack.HeaderField) =
-            .initBuffer(fields_buffer);
-        const method_is_connect = methodIsConnect(request_options.method);
-        const extended_connect = request_options.protocol != null;
-        if (method_is_connect and !extended_connect and (request_options.body.len != 0 or request_options.trailers.len != 0)) {
-            return error.InvalidContentLength;
-        }
-        fields.appendAssumeCapacity(.{
-            .name = ":method",
-            .value = request_options.method,
+    fn sendCompleteRequestUntil(self: *Connection, options: RequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!PendingResponse {
+        return complete_request.send(self, options, deadline, .{
+            .ErrorType = Error,
+            .PendingType = PendingResponse,
+            .resolveAuthority = resolveRequestAuthorityFromHeaders,
+            .reserve = reserveNextClientStreamId,
+            .release = releaseLocalStream,
+            .forgetWindows = forgetStreamWindows,
+            .discard = failDiscardedResponseBefore,
+            .headers = writeHeadersUntil,
+            .burst = writeHeadersThenDataUntil,
+            .data = writeDataTrackedUntil,
         });
-        if (!method_is_connect or extended_connect) {
-            fields.appendAssumeCapacity(.{
-                .name = ":path",
-                .value = request_options.path,
-            });
-            fields.appendAssumeCapacity(.{
-                .name = ":scheme",
-                .value = scheme,
-            });
-        }
-        if (request_options.protocol) |protocol| {
-            if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
-            fields.appendAssumeCapacity(.{
-                .name = ":protocol",
-                .value = protocol,
-            });
-        }
-        if (request_options.authority) |authority| {
-            fields.appendAssumeCapacity(.{
-                .name = ":authority",
-                .value = authority,
-            });
-        }
-        var priority_buf: [16]u8 = undefined;
-        if (request_options.priority) |value| {
-            fields.appendAssumeCapacity(.{
-                .name = "priority",
-                .value = value.serialize(&priority_buf),
-            });
-        }
-        fields.appendSliceAssumeCapacity(request_options.headers);
-        try outbound_headers.stripConnectionHeaders(
-            self.allocator,
-            &fields,
-            .request,
-        );
-        var content_length_buf: [32]u8 = undefined;
-        if (requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
-            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
-            fields.appendAssumeCapacity(.{
-                .name = "content-length",
-                .value = content_length,
-            });
-        }
-        try validateHeaderBlock(fields.items, .request);
-        try validateHeaderBlock(request_options.trailers, .request_trailers);
-        try validateDeclaredRequestLength(fields.items, request_options.body.len);
-
-        const stream_id = try self.reserveNextClientStreamId();
-        errdefer self.releaseLocalStream(stream_id);
-        if (request_options.body.len != 0 and
-            request_options.trailers.len == 0)
-        {
-            try self.writeHeadersThenData(
-                stream_id,
-                fields.items,
-                request_options.body,
-                true,
-            );
-        } else {
-            try self.writeHeaders(
-                stream_id,
-                fields.items,
-                request_options.body.len == 0 and
-                    request_options.trailers.len == 0,
-            );
-            if (request_options.body.len != 0) {
-                try self.writeData(
-                    stream_id,
-                    request_options.body,
-                    false,
-                );
-            }
-        }
-        if (request_options.trailers.len != 0) try self.writeHeaders(stream_id, request_options.trailers, true);
-        return .{
-            .stream_id = stream_id,
-            .request_method = request_options.method,
-            .extended_connect = extended_connect,
-        };
     }
 
     /// Start a client request whose DATA is supplied incrementally.
@@ -16617,6 +16518,13 @@ pub const Connection = struct {
         data: []const u8,
         end_stream: bool,
     ) Error!void {
+        var head_committed = false;
+        return self.writeHeadersThenDataUntil(stream_id, headers, data, end_stream, null, &head_committed);
+    }
+
+    fn writeHeadersThenDataUntil(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, data: []const u8, end_stream: bool, deadline: ?std.Io.Clock.Timestamp, head_committed: *bool) Error!void {
+        head_committed.* = false;
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         std.debug.assert(data.len != 0);
         try validateHeaderListSize(
@@ -16641,12 +16549,15 @@ pub const Connection = struct {
             stream_window.available(),
         );
         if (block.len > frame_limit or first_data_len == 0) {
-            {
-                errdefer self.aggregate_timeout_unusable = true;
-                try self.writeHeaderBlock(stream_id, block, false);
-            }
+            var submitted = false;
+            header_output.writeBlock(self.allocator, self.transportForIo(), stream_id, block, false, frame_limit, &self.write_batch, deadline, &submitted) catch |err| {
+                if (submitted) self.aggregate_timeout_unusable = true;
+                return err;
+            };
             self.commitStagedHpackEncoder();
-            try self.writeData(stream_id, data, end_stream);
+            head_committed.* = true;
+            var written: usize = 0;
+            try self.writeDataTrackedUntil(stream_id, data, end_stream, &written, deadline);
             return;
         }
 
@@ -16694,17 +16605,16 @@ pub const Connection = struct {
             part_count += 2;
             offset = end;
         }
-        self.transportForIo().writeAllSlices(parts[0..part_count]) catch |err| {
-            self.aggregate_timeout_unusable = true;
+        var submitted = false;
+        flow_output.submit(self.allocator, self.transportForIo(), parts[0..part_count], &self.write_batch, deadline, &submitted) catch |err| {
+            if (submitted) self.aggregate_timeout_unusable = true;
             return err;
         };
         self.commitStagedHpackEncoder();
+        head_committed.* = true;
         if (first_data_len < data.len) {
-            try self.writeData(
-                stream_id,
-                data[first_data_len..],
-                end_stream,
-            );
+            var written: usize = 0;
+            try self.writeDataTrackedUntil(stream_id, data[first_data_len..], end_stream, &written, deadline);
         }
     }
 

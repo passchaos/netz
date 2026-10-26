@@ -473,6 +473,17 @@ aggregate and callback-streaming reads. Injected blocked/partial socket writes
 verify bounded cancellation, preserved original errors, task cancellation/join,
 stream retirement, zero-budget opt-out, and the earlier OOM deadline bound.
 
+The unary RPC deadline now also reaches complete HTTP/2 request output. The
+aggregate and callback HTTP/2 request APIs previously validated the deadline
+before sending but used an unbounded complete-request sender. HEADERS,
+CONTINUATION, batched HEADERS/DATA, subsequent DATA and upload flow-control
+waits, and trailers now retain the same absolute budget as the response read.
+Ordinary and explicit-retry unary tests block real TCP header/body writes and
+exhaust a one-byte peer stream window; Timeout retires the upload without a
+new RPC attempt. A complete-frame flow-control timeout may send CANCEL within
+the existing terminal cleanup budget, while an indeterminate partial wire
+write forbids another frame. Pre-output OOM retains channel reuse.
+
 TLS 1.3 KeyUpdate responses are included in bounded read/write budgets. A local
 timeout or executor failure retains the exact old-epoch response ciphertext;
 read, application-write, or explicit pending-write completion resumes that

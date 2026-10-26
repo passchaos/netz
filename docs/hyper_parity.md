@@ -3526,3 +3526,27 @@ authority on its stream, preserve HPACK/QPACK state, then admit a normalized
 healthy sibling. The parser fuzz corpus now includes authority pairs and
 IPv6 literals. The independent grpc-js/Node HTTP/2 runner adds default-port,
 percent-host and IPv6 normalization cases across all native gRPC client APIs.
+
+## Complete HTTP/2 request output deadlines
+
+Complete aggregate and callback-response request APIs now carry one absolute
+awake-clock deadline through request preparation, HEADERS/CONTINUATION, the
+combined HEADERS plus first DATA burst, subsequent DATA flow-control waits,
+request trailers, and response reads. The complete-request owner lives under
+`http2/runtime/request/complete.zig`; bounded output preserves the existing
+small-body batching path.
+
+An expired upload after a complete head sends CANCEL under the configured
+terminal cleanup budget and retires the discarded request state. An
+indeterminate partial frame terminates further writes without appending a
+cleanup frame. Both paths release local stream and flow-window ownership.
+Pre-output allocation failure leaves the channel reusable, and expired or
+non-awake deadlines fail before consuming a stream ID or modifying HPACK.
+
+Real TCP tests independently block opening headers, the combined first burst,
+separate DATA, and trailers on aggregate and callback APIs. A one-byte stream
+window then proves upload timeout and exact CANCEL after the committed prefix.
+Unary gRPC tests cover both ordinary and explicit-retry calls. The opening
+header regression was also run against the prior implementation: a 30 ms
+deadline returned only after the fixture closed its unread peer at 500 ms,
+with `ConnectionResetByPeer` instead of Timeout.
