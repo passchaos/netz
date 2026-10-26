@@ -3419,3 +3419,22 @@ state and returns transport `MAX_STREAMS` credit.
    retry semantics without a payload-sized join. This establishes reproducible
    API-shape and optimization evidence, not an external-library or equal-wire
    claim; no ratio is used as a gate threshold.
+
+Authenticated HTTP/3 client and server request cancellation now expose
+`cancelRequestWithTimeout`/`cancelRequestWithDeadline`, and the server adds
+matching `rejectRequestWithTimeout`/`rejectRequestWithDeadline` with
+H3_REQUEST_REJECTED. One absolute awake-clock timestamp bounds the complete
+RESET_STREAM plus STOP_SENDING output: every blocked turn repeats the same
+one-attempt atomic submission dispatcher owners use while servicing only this
+connection's receive/timer owner, so pacing, congestion, and flow-control
+backpressure never sleep past the caller's budget. Deadline and clock-domain
+validation precede every state change; a timeout leaves request lifecycle
+ownership, both QUIC stream halves, and the connection itself untouched and
+fully retryable, while a successful attempt commits QPACK stream cancellation,
+local/peer stream release, pending-failure retirement, and stream-ID reuse
+exactly once. Dispatcher-bound sessions keep `InvalidDispatcherState` and an
+active client callback reader keeps `ConcurrentRead`; zero-length timeouts fail
+before any attempt. Real authenticated loopback regressions cover paced
+timeout-then-retry in both endpoint roles, rejection with H3_REQUEST_REJECTED,
+foreign-clock and zero-budget rejection, and both ownership guards without
+mutating the request.

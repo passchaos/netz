@@ -238,6 +238,7 @@ const response_failure = @import("runtime/receive/response_failure.zig");
 pub const ResponseFailure = response_failure.Failure;
 pub const ResponseEventResult = response_failure.Result;
 test {
+    _ = @import("runtime/request/cancel_deadline_tests.zig");
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/field_value_tests.zig");
     _ = @import("runtime/receive/priority_metadata_tests.zig");
@@ -246,6 +247,7 @@ test {
     _ = @import("runtime/receive/failure_ownership_tests.zig");
     _ = @import("runtime/stream/push/failure_tests.zig");
 }
+
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
 pub const SessionTicketStats = ticket_receiver.Stats;
@@ -6405,6 +6407,39 @@ pub const HandshakeServer = struct {
     }
 };
 
+/// Deadline-bound cancellation pump shared by the authenticated HTTP/3
+/// client and server. Each turn repeats the same one-attempt RESET_STREAM
+/// plus STOP_SENDING submission dispatcher owners use; transport backpressure
+/// services only this connection's receive/timer owner under one absolute
+/// awake-clock deadline. A timeout before socket submission leaves both QUIC
+/// stream halves and all HTTP/3 request ownership untouched and retryable.
+fn cancelHandshakeRequestWithDeadline(
+    owner: anytype,
+    stream_id: u62,
+    application_error_code: u64,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    const connection = &owner.established.connection;
+    while (true) {
+        _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+        owner.cancelRequestInternalOnce(
+            stream_id,
+            application_error_code,
+            false,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {
+                try connection.servicePacketServicingTimersDeadline(deadline);
+                continue;
+            },
+            else => |other| return other,
+        };
+        return;
+    }
+}
+
 pub const HandshakeServerSession = struct {
     const ConnectDatagramProgress = connect_datagram_progress.Pump(.{
         .Error = ReceiveTimeoutError,
@@ -11331,6 +11366,48 @@ pub const HandshakeServerSession = struct {
         );
     }
 
+    pub fn cancelRequestWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        application_error_code: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelRequestWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Cancel RESET_STREAM and STOP_SENDING under one caller-owned deadline.
+    /// Backpressure drives only this connection's ACK/loss/PTO owner; before
+    /// socket submission the request and QPACK cancellation stay retryable.
+    pub fn cancelRequestWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        application_error_code: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        defer if (!self.request_lifecycle.contains(stream_id) and
+            !self.request_streams.contains(stream_id) and
+            !self.streaming_requests.contains(stream_id))
+        {
+            _ = self.pending_request_failures.take(stream_id);
+        };
+        return cancelHandshakeRequestWithDeadline(
+            self,
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     /// Cancel one request without waiting for transport pacing. Endpoint-wide
     /// protocol adapters retry this after dispatcher progress so they retain a
     /// single UDP receive owner and never sleep inside packet routing.
@@ -11417,6 +11494,33 @@ pub const HandshakeServerSession = struct {
         try self.cancelRequest(
             stream_id,
             http3.ApplicationErrorCode.request_rejected,
+        );
+    }
+
+    pub fn rejectRequestWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.rejectRequestWithDeadline(
+            stream_id,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn rejectRequestWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.cancelRequestWithDeadline(
+            stream_id,
+            http3.ApplicationErrorCode.request_rejected,
+            deadline,
         );
     }
 
@@ -19446,6 +19550,46 @@ pub const HandshakeClient = struct {
             stream_id,
             application_error_code,
             false,
+        );
+    }
+
+    pub fn cancelRequestWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        application_error_code: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelRequestWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn cancelRequestWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        application_error_code: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        defer if (!self.request_lifecycle.contains(stream_id)) {
+            _ = self.pending_response_failures.take(stream_id);
+        };
+        return cancelHandshakeRequestWithDeadline(
+            self,
+            stream_id,
+            application_error_code,
+            deadline,
         );
     }
 
