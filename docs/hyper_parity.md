@@ -3438,3 +3438,18 @@ before any attempt. Real authenticated loopback regressions cover paced
 timeout-then-retry in both endpoint roles, rejection with H3_REQUEST_REJECTED,
 foreign-clock and zero-budget rejection, and both ownership guards without
 mutating the request.
+
+Server rejection cleanup after a non-success Extended CONNECT response now
+shares the caller's budget: `finishRejectedRequest` adds
+`finishRejectedRequestWithTimeout`/`finishRejectedRequestWithDeadline`, and
+its STOP_SENDING, returned receive credit and QPACK decoder feedback all run
+under one absolute awake-clock timestamp. Validation, dispatcher ownership
+and stream existence are checked before any output; a timeout leaves the
+request lifecycle, streaming reader credit and receive half untouched for an
+identical retry, while success commits STOP_SENDING with
+H3_REQUEST_CANCELLED without emitting a RESET_STREAM. WebSocket-over-HTTP/3
+and WebTransport CONNECT rejection paths now thread their existing handshake
+deadline through this cleanup instead of dropping it between the error
+response and the request-direction retirement. Authenticated loopback tests
+cover paced timeout-then-retry, zero and foreign-clock budgets, the
+dispatcher guard and unknown-stream rejection.

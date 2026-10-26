@@ -67,3 +67,18 @@ pub fn releaseCapacityOnce(connection: *quic.one_rtt.Connection, reader: *Reader
     try connection.tryReleaseReceivedCapacity(reader.streamId(), amount);
     reader.markCredited(amount);
 }
+
+pub fn releaseCapacityWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    reader: *Reader,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    const amount = reader.uncreditedConsumed();
+    if (amount == 0) return;
+    try connection.releaseReceivedCapacityWithDeadline(
+        reader.streamId(),
+        amount,
+        deadline,
+    );
+    reader.markCredited(amount);
+}

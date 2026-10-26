@@ -239,6 +239,7 @@ pub const ResponseFailure = response_failure.Failure;
 pub const ResponseEventResult = response_failure.Result;
 test {
     _ = @import("runtime/request/cancel_deadline_tests.zig");
+    _ = @import("runtime/request/finish_rejected_deadline_tests.zig");
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
     _ = @import("runtime/receive/field_value_tests.zig");
     _ = @import("runtime/receive/priority_metadata_tests.zig");
@@ -11532,6 +11533,45 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!void {
+        return self.finishRejectedRequestUntil(stream_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn finishRejectedRequestWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRejectedRequestWithDeadline(
+            stream_id,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Bound the STOP_SENDING, receive-credit return and QPACK feedback that
+    /// follow a rejected CONNECT or error response. A timeout before socket
+    /// submission leaves the request, streaming reader and receive half
+    /// untouched so the caller can retry the identical rejection cleanup.
+    pub fn finishRejectedRequestWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.finishRejectedRequestUntil(stream_id, deadline);
+    }
+
+    fn finishRejectedRequestUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const exists = self.request_lifecycle.contains(stream_id) or
             self.request_streams.contains(stream_id) or
@@ -11540,15 +11580,31 @@ pub const HandshakeServerSession = struct {
         if (!exists) return error.UnexpectedStream;
         const cancel_qpack = self.qpack_decode.table.max_capacity != 0;
         if (self.streaming_requests.find(stream_id)) |entry| {
-            try releaseStreamingReaderCapacity(
-                &self.established.connection,
-                &entry.reader,
+            if (deadline) |absolute| {
+                try message_data.releaseCapacityWithDeadline(
+                    &self.established.connection,
+                    &entry.reader,
+                    absolute,
+                );
+            } else {
+                try releaseStreamingReaderCapacity(
+                    &self.established.connection,
+                    &entry.reader,
+                );
+            }
+        }
+        if (deadline) |absolute| {
+            try self.established.connection.sendStopSendingWithDeadline(
+                stream_id,
+                http3.ApplicationErrorCode.request_cancelled,
+                absolute,
+            );
+        } else {
+            try self.established.connection.sendStopSending(
+                stream_id,
+                http3.ApplicationErrorCode.request_cancelled,
             );
         }
-        try self.established.connection.sendStopSending(
-            stream_id,
-            http3.ApplicationErrorCode.request_cancelled,
-        );
         if (cancel_qpack) {
             try self.qpack_decode.recordStreamCancellation(stream_id);
         }
@@ -11556,7 +11612,11 @@ pub const HandshakeServerSession = struct {
         self.streaming_requests.remove(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        try self.sendQpackFeedback();
+        if (deadline) |absolute| {
+            try self.sendQpackFeedbackWithDeadline(absolute);
+        } else {
+            try self.sendQpackFeedback();
+        }
     }
 
     /// Release local request bookkeeping after a final non-success response
@@ -11817,6 +11877,21 @@ pub const HandshakeServerSession = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             self.options,
+        );
+    }
+
+    fn sendQpackFeedbackWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try sendConnectionQpackFeedbackWithDeadline(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            deadline,
         );
     }
 

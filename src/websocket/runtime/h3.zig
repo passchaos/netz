@@ -5436,7 +5436,14 @@ pub const PendingUpgrade = struct {
                 response,
             );
         }
-        try self.h3.finishRejectedRequest(self.request.stream_id);
+        if (self.deadline) |absolute| {
+            try self.h3.finishRejectedRequestWithDeadline(
+                self.request.stream_id,
+                absolute,
+            );
+        } else {
+            try self.h3.finishRejectedRequest(self.request.stream_id);
+        }
         const rejected = RejectedUpgrade{
             .allocator = self.allocator,
             .h3 = self.h3,

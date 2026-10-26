@@ -5134,7 +5134,14 @@ pub const PendingHandshakeSession = struct {
                 response,
             );
         }
-        try self.h3.finishRejectedRequest(self.session_id.value);
+        if (self.deadline) |absolute| {
+            try self.h3.finishRejectedRequestWithDeadline(
+                self.session_id.value,
+                absolute,
+            );
+        } else {
+            try self.h3.finishRejectedRequest(self.session_id.value);
+        }
         const allocator = self.h3.established.connection.endpoint.allocator;
         const h3 = self.h3;
         const restore_to = self.restore_to;
