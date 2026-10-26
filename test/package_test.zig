@@ -1,6 +1,20 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public gRPC-Web HTTP1 adapter validates CORS before transport work" {
+    const policy: netz.grpc.web.cors.Policy = .{ .allowed_origins = &.{"https://app.example"} };
+    const decision = try netz.grpc.web.cors.evaluate(policy, "POST", &.{.{ .name = "origin", .value = "https://app.example" }});
+    try std.testing.expectEqual(.allowed, decision.kind);
+    try std.testing.expect(@hasDecl(netz.grpc.web.http1.Request, "writeUnary"));
+    try std.testing.expect(@hasDecl(netz.grpc.web.http1.ServerStreamWriter, "finish"));
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var connection: netz.http1.runtime.Connection = .{ .allocator = failing.allocator(), .io = undefined, .stream = undefined };
+    try std.testing.expectError(error.InvalidCorsPolicy, netz.grpc.web.http1.readRequest(&connection, .{
+        .cors_policy = .{ .allow_any_origin = true, .allow_credentials = true },
+    }));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "public HTTP2 terminal cleanup policy rejects negative budgets before I/O" {
     try std.testing.expectEqual(std.Io.Duration.fromMilliseconds(10), (netz.http2.runtime.Limits{}).terminal_cleanup_timeout);
     const disabled: netz.grpc.runtime.ClientOptions = .{ .limits = .{ .terminal_cleanup_timeout = .zero } };

@@ -532,6 +532,76 @@ verify the exact terminal block and an inverse text-to-binary unary call on the
 same channel. Two-byte DATA uploads cover in-frame padding, size limits,
 truncation, malformed base64, a second request, and reuse after stream resets.
 
-These gates establish the HTTP/2 transport behavior. Native HTTP/1 adapters,
-CORS preflight/origin policy, and independent browser gRPC-Web interop still
-require completion before claiming broad browser support.
+`grpc.web.http1` provides the corresponding HTTP/1.1 server adapter. Use
+`readRequest(&connection, options)` with an existing cleartext or TLS HTTP/1
+connection. Its result is either an owned `request` or a `handled` HTTP status
+for a completed preflight or rejection. A request exposes `writeUnary` and
+`startServerStream`, with the same binary/text negotiation, compression,
+message limits and body trailers as HTTP/2. HTTP/1.1 server streams use chunked
+transfer coding with one final gRPC-Web status frame and no HTTP trailers;
+each text message flushes independently. Incoming field names are normalized
+for standard binary-metadata and authorization helpers. Request-selected
+Connection: close retires the connection, and dropping a request without a
+response prevents a later reply from being assigned to the wrong exchange.
+This adapter targets HTTP/1.1; no additional obsolete HTTP support is provided.
+
+An application can dispatch one accepted HTTP/1.1 connection as follows (the
+HTTP/1 server owns the listener and the connection is closed by its caller):
+
+```zig
+const options: netz.grpc.web.http1.Options = .{ .cors_policy = .{
+    .allowed_origins = &.{"https://app.example"},
+    .allow_credentials = true,
+} };
+switch (try netz.grpc.web.http1.readRequest(&connection, options)) {
+    .handled => {}, // Preflight or rejection already has its response.
+    .request => |value| {
+        var request = value;
+        defer request.deinit();
+        try request.writeUnary(.{ .message = request.request.message.payload });
+    },
+}
+```
+
+CORS is opt-in through `Options.cors_policy`. The transport-neutral
+`grpc.web.cors` policy validates serialized origins, compares scheme/host and
+normalized default ports, checks POST preflight methods and every requested
+header name, and produces owned response fields. Credentialed requests require
+an explicit origin list; wildcard origins with credentials are rejected before
+I/O. No-Origin clients continue normally. Policies control allowed request
+headers, exposed response metadata, credentials and preflight max-age. Responses
+vary on Origin and preflight request fields; HTTP/1.1 responses also vary on
+Accept. Duplicate Origin/method fields and malformed values are rejected, and
+denied origins receive no permission headers or application callback. CORS
+permission checks complement the existing authentication helpers.
+
+The HTTP/1.1 loopback gate covers cleartext and certificate-pinned TLS,
+preflight and forbidden origins, malformed requests, binary and text unary,
+gzip responses, multi-message streams, trailers-only authentication failures,
+connection reuse, close semantics, and exhaustive request-admission allocation
+failures. Shared response-field construction also covers the heap-field branch
+and exhaustive allocation failures.
+Shared initial-field construction now lives in `web/response_headers.zig`,
+including stable storage for status text and retry pushback across both HTTP
+transports.
+
+An independent Chromium gate runs the official pinned `grpc-web` 2.1.1 JS SDK
+against a zio-backed netz endpoint. It verifies credentialed binary/text unary,
+exposed custom metadata, a blocked foreign-Origin preflight, trailers-only
+UNAUTHENTICATED, and text server streaming. The server waits for a separate Ack
+RPC triggered by the first decoded 32-KiB message before sending message two
+or terminal status, so successful delivery requires incremental SDK parsing.
+The JS codecs are opaque fixture messages, not production language bindings.
+
+```sh
+zig build interop-grpc-web-chrome -Doptimize=ReleaseFast
+zig build interop-grpc-web-chrome -Doptimize=ReleaseFast -- --tls
+```
+
+The HTTPS gate also abandons an authenticated idle TLS connection without
+close_notify and requires the endpoint to continue serving all RPCs. Partial
+HTTP requests retain their failure behavior. The HTTPS gate pins only its
+temporary certificate's SPKI in Chromium. The
+runner defaults to `/usr/bin/chromium`; set `CHROME` to another compatible
+Chromium executable. The CORS helper can also be used by custom HTTP/2 routers;
+the existing gRPC HTTP/2 owning server does not automatically route OPTIONS.

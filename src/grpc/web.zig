@@ -16,8 +16,14 @@ const metadata_mod = @import("metadata.zig");
 const codec = @import("stream/codec.zig");
 const content_type_mod = @import("web/content_type.zig");
 const text = @import("web/text.zig");
+const response_headers = @import("web/response_headers.zig");
+pub const cors = @import("web/cors/mod.zig");
+pub const http1 = @import("web/http1/mod.zig");
 
 test {
+    _ = response_headers;
+    _ = cors;
+    _ = http1;
     _ = @import("web/tests.zig");
     _ = @import("web/streaming_tests.zig");
 }
@@ -140,13 +146,7 @@ pub fn buildResponseBody(
 }
 
 /// Terminal gRPC-Web metadata serialized as one `0x80` frame.
-pub const TerminalOptions = struct {
-    status: wire.Status,
-    status_message: ?[]const u8 = null,
-    retry_pushback_ms: ?i64 = null,
-    trailing_metadata: []const http2.Hpack.HeaderField = &.{},
-    trailing_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
-};
+pub const TerminalOptions = response_headers.TerminalOptions;
 
 /// Build the `Name: Value\r\n` trailer block for a terminal gRPC-Web frame.
 /// The returned bytes are allocator-owned and omit the five-byte prefix.
@@ -257,113 +257,23 @@ pub fn writeUnaryResponse(
         else
             .identity;
 
-    var initial_binary = try metadata_mod.encodeFieldsAlloc(
-        allocator,
-        options.initial_binary_metadata,
-    );
-    defer initial_binary.deinit();
-    var trailing_binary = try metadata_mod.encodeFieldsAlloc(
-        allocator,
-        options.trailing_binary_metadata,
-    );
-    defer trailing_binary.deinit();
-
-    var status_buffer: [2]u8 = undefined;
-    const status_value = std.fmt.bufPrint(
-        &status_buffer,
-        "{d}",
-        .{@intFromEnum(options.status)},
-    ) catch unreachable;
-    const encoded_status_message = if (options.status_message) |message|
-        try wire.encodeStatusMessageAlloc(allocator, message)
-    else
-        try allocator.alloc(u8, 0);
-    defer allocator.free(encoded_status_message);
-
-    const trailing_count = std.math.add(
-        usize,
-        std.math.add(
-            usize,
-            options.trailing_metadata.len,
-            trailing_binary.fields.len,
-        ) catch return error.MessageTooLarge,
-        @as(usize, 1) +
-            @as(usize, @intFromBool(options.status_message != null)) +
-            @as(usize, @intFromBool(options.retry_pushback_ms != null)),
-    ) catch return error.MessageTooLarge;
-    var header_storage: [32]http2.Hpack.HeaderField = undefined;
-    const initial_count = std.math.add(
-        usize,
-        std.math.add(
-            usize,
-            std.math.add(
-                usize,
-                3,
-                @as(usize, @intFromBool(response_algorithm != .identity)),
-            ) catch return error.MessageTooLarge,
-            options.initial_metadata.len,
-        ) catch return error.MessageTooLarge,
-        initial_binary.fields.len +
-            @as(usize, @intFromBool(options.trailers_only)) * trailing_count,
-    ) catch return error.MessageTooLarge;
-    const initial_buffer = if (initial_count <= header_storage.len)
-        header_storage[0..initial_count]
-    else
-        try allocator.alloc(http2.Hpack.HeaderField, initial_count);
-    defer if (initial_buffer.ptr != header_storage[0..].ptr) {
-        allocator.free(initial_buffer);
-    };
-    var initial: std.ArrayList(http2.Hpack.HeaderField) =
-        .initBuffer(initial_buffer);
-    initial.appendAssumeCapacity(.{
-        .name = "content-type",
-        .value = content_type.canonical(),
+    var headers: response_headers.Block = .{};
+    try headers.prepare(allocator, .{
+        .content_type = content_type,
+        .compression = response_algorithm,
+        .accepted_encodings = options.accepted_encodings,
+        .initial_metadata = options.initial_metadata,
+        .initial_binary_metadata = options.initial_binary_metadata,
+        .terminal = if (options.trailers_only) .{
+            .status = options.status,
+            .status_message = options.status_message,
+            .retry_pushback_ms = options.retry_pushback_ms,
+            .trailing_metadata = options.trailing_metadata,
+            .trailing_binary_metadata = options.trailing_binary_metadata,
+        } else null,
     });
-    if (response_algorithm != .identity) {
-        initial.appendAssumeCapacity(.{
-            .name = "grpc-encoding",
-            .value = response_algorithm.name(),
-        });
-    }
-    var accept_encoding_buffer: [32]u8 = undefined;
-    initial.appendAssumeCapacity(.{
-        .name = "grpc-accept-encoding",
-        .value = try compression_mod.formatAcceptEncodingInto(
-            &accept_encoding_buffer,
-            options.accepted_encodings,
-        ),
-    });
-    initial.appendSliceAssumeCapacity(options.initial_metadata);
-    initial.appendSliceAssumeCapacity(initial_binary.fields);
-
-    if (options.trailers_only) {
-        initial.appendAssumeCapacity(.{
-            .name = "grpc-status",
-            .value = status_value,
-        });
-        if (options.status_message != null) {
-            initial.appendAssumeCapacity(.{
-                .name = "grpc-message",
-                .value = encoded_status_message,
-            });
-        }
-        if (options.retry_pushback_ms) |milliseconds| {
-            var pushback_buffer: [21]u8 = undefined;
-            initial.appendAssumeCapacity(.{
-                .name = "grpc-retry-pushback-ms",
-                .value = std.fmt.bufPrint(
-                    &pushback_buffer,
-                    "{d}",
-                    .{milliseconds},
-                ) catch unreachable,
-            });
-        }
-        initial.appendSliceAssumeCapacity(options.trailing_metadata);
-        initial.appendSliceAssumeCapacity(trailing_binary.fields);
-        return connection.writeResponse(stream_id, .{
-            .headers = initial.items,
-        });
-    }
+    defer headers.deinit(allocator);
+    if (options.trailers_only) return connection.writeResponse(stream_id, .{ .headers = headers.fields.items });
 
     const framed_body = try buildResponseBody(allocator, options);
     defer allocator.free(framed_body);
@@ -373,7 +283,7 @@ pub fn writeUnaryResponse(
         framed_body;
     defer if (content_type.text) allocator.free(entity);
     return connection.writeResponse(stream_id, .{
-        .headers = initial.items,
+        .headers = headers.fields.items,
         .body = entity,
     });
 }
@@ -495,50 +405,19 @@ pub fn startServerStream(
         else
             .identity;
 
-    var initial_binary = try metadata_mod.encodeFieldsAlloc(
-        allocator,
-        options.initial_binary_metadata,
-    );
-    defer initial_binary.deinit();
-
-    const initial_count = 3 +
-        @as(usize, @intFromBool(response_algorithm != .identity)) +
-        options.initial_metadata.len +
-        initial_binary.fields.len;
-    var header_storage: [32]http2.Hpack.HeaderField = undefined;
-    const initial_buffer = if (initial_count <= header_storage.len)
-        header_storage[0..initial_count]
-    else
-        try allocator.alloc(http2.Hpack.HeaderField, initial_count);
-    defer if (initial_buffer.ptr != header_storage[0..].ptr) {
-        allocator.free(initial_buffer);
-    };
-    var initial: std.ArrayList(http2.Hpack.HeaderField) =
-        .initBuffer(initial_buffer);
-    initial.appendAssumeCapacity(.{
-        .name = "content-type",
-        .value = content_type.canonical(),
+    var headers: response_headers.Block = .{};
+    try headers.prepare(allocator, .{
+        .content_type = content_type,
+        .compression = response_algorithm,
+        .accepted_encodings = options.accepted_encodings,
+        .initial_metadata = options.initial_metadata,
+        .initial_binary_metadata = options.initial_binary_metadata,
     });
-    if (response_algorithm != .identity) {
-        initial.appendAssumeCapacity(.{
-            .name = "grpc-encoding",
-            .value = response_algorithm.name(),
-        });
-    }
-    var accept_encoding_buffer: [32]u8 = undefined;
-    initial.appendAssumeCapacity(.{
-        .name = "grpc-accept-encoding",
-        .value = try compression_mod.formatAcceptEncodingInto(
-            &accept_encoding_buffer,
-            options.accepted_encodings,
-        ),
-    });
-    initial.appendSliceAssumeCapacity(options.initial_metadata);
-    initial.appendSliceAssumeCapacity(initial_binary.fields);
+    defer headers.deinit(allocator);
 
     const transport = try connection.startResponse(stream_id, .{
         .status = 200,
-        .headers = initial.items,
+        .headers = headers.fields.items,
     });
     return .{
         .allocator = allocator,

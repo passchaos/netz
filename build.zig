@@ -1845,6 +1845,21 @@ pub fn build(b: *std.Build) void {
     );
     websocket_chrome_step.dependOn(&websocket_chrome.step);
 
+    const grpc_web_chrome_server = b.addExecutable(.{
+        .name = "netz-grpc-web-chrome-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_web_chrome_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_web_chrome = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_web_chrome.py" });
+    grpc_web_chrome.addArtifactArg(grpc_web_chrome_server);
+    if (b.args) |args| grpc_web_chrome.addArgs(args);
+    const grpc_web_chrome_step = b.step("interop-grpc-web-chrome", "Verify HTTP/1.1 gRPC-Web and CORS with the official JS SDK in Chromium (pass --tls for HTTPS)");
+    grpc_web_chrome_step.dependOn(&grpc_web_chrome.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{
