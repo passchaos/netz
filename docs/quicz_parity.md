@@ -2875,4 +2875,11 @@ unknown extension, so compressed-cert offers never break existing servers;
 the QUIC server does not yet emit compressed Certificates itself. Tests cover
 the extension encoding (default/custom/omitted), the 0x19 server-flight split
 with transcript boundaries, decompression round trip, and unoffered-algorithm
-rejection.
+rejection. QUIC servers now also emit compressed Certificates: the server
+parses the client offer, compresses on demand with the first mutually
+supported algorithm in client preference order (brotli/zstd/zlib by default),
+and keeps the transcript over the compressed message so CertificateVerify
+stays valid; an authenticated handshake with a six-copy DER chain proves the
+client decompresses and verifies it, while a server with compression disabled
+still completes the same handshake with an uncompressed Certificate. The
+negotiated algorithm is exposed on the established connection.

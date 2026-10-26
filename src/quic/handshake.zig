@@ -210,6 +210,11 @@ pub const ServerOptions = struct {
         &quic.tls_client_hello.default_cipher_suites,
     cipher_suite_policy: quic.tls_client_hello.CipherSuiteSelectionPolicy =
         .server_order,
+    /// RFC 8879 algorithms the QUIC server may use to compress its
+    /// Certificate message on demand. Compression is applied only when the
+    /// client offered the algorithm and it reduces the message size.
+    certificate_compression_algorithms: []const quic.tls.certificate_compression.Algorithm =
+        &quic.tls_client_hello.default_certificate_compression_algorithms,
 };
 
 pub const OneRttConfig = struct {
@@ -435,6 +440,9 @@ pub const EstablishedConnection = struct {
     /// Exposing the fact lets process-level interop gates prove address
     /// validation instead of inferring it from a successful connection.
     retry_processed: bool = false,
+    /// RFC 8879 algorithm used by the server's compressed Certificate, or
+    /// null when the Certificate message was uncompressed.
+    certificate_compression: ?quic.tls.certificate_compression.Algorithm = null,
     resumed: bool = false,
     early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
     /// Application packet numbers consumed by 0-RTT protection and the subset
@@ -2113,6 +2121,7 @@ fn connectAttempt(
     defer if (peer_certificate) |*certificate| {
         certificate.deinit(endpoint.allocator);
     };
+    var established_certificate_compression: ?quic.tls.certificate_compression.Algorithm = null;
     if (resumed) {
         if (server_flight.certificate != null or
             server_flight.certificate_verify != null)
@@ -2135,6 +2144,13 @@ fn connectAttempt(
         const certificate_bytes = if (raw_certificate_bytes[0] ==
             quic.tls.certificate_compression.handshake_type_compressed_certificate)
         blk: {
+            const compression_algorithm = blk2: {
+                if (raw_certificate_bytes.len < 5) break :blk2 null;
+                break :blk2 @as(quic.tls.certificate_compression.Algorithm, @enumFromInt(
+                    std.mem.readInt(u16, raw_certificate_bytes[4..6], .big),
+                ));
+            };
+            established_certificate_compression = compression_algorithm;
             const decompressed = quic.tls.certificate_compression.decompressCertificate(
                 endpoint.allocator,
                 raw_certificate_bytes,
@@ -2312,6 +2328,7 @@ fn connectAttempt(
         encrypted_extensions.alpn,
         parsed_server.cipher_suite,
         retry_processed,
+        established_certificate_compression,
         resumed,
         early_data_status,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
@@ -3042,8 +3059,53 @@ fn acceptInternal(
             endpoint.allocator,
             identity.certificate_chain,
         );
-        try server_flight.appendSlice(endpoint.allocator, certificate.items);
-        transcript.append(certificate.items);
+        // RFC 8879: follow the client's offered algorithm order and emit a
+        // CompressedCertificate only when compression saves bytes; the
+        // transcript covers the compressed message actually sent.
+        const offered = parsed_client.certificateCompressionAlgorithms();
+        var compressed_certificate: std.ArrayList(u8) = .empty;
+        defer compressed_certificate.deinit(endpoint.allocator);
+        var certificate_wire: []const u8 = certificate.items;
+        for (offered) |algorithm| {
+            if (!algorithm.supported()) continue;
+            var enabled = false;
+            for (options.certificate_compression_algorithms) |server_algorithm| {
+                if (server_algorithm == algorithm) {
+                    enabled = true;
+                    break;
+                }
+            }
+            if (!enabled) continue;
+            var prepared = switch (algorithm) {
+                .zlib => quic.tls.certificate_compression.Prepared.initZlib(
+                    endpoint.allocator,
+                    certificate.items,
+                    .interactive,
+                ) catch continue,
+                .brotli => quic.tls.certificate_compression.Prepared.initBrotli(
+                    endpoint.allocator,
+                    certificate.items,
+                    .interactive,
+                ) catch continue,
+                .zstd => quic.tls.certificate_compression.Prepared.initZstd(
+                    endpoint.allocator,
+                    certificate.items,
+                    .interactive,
+                ) catch continue,
+                else => continue,
+            };
+            defer prepared.deinit();
+            if (prepared.view().savesBytes(certificate.items.len)) {
+                prepared.view().write(
+                    &compressed_certificate,
+                    endpoint.allocator,
+                ) catch continue;
+                certificate_wire = compressed_certificate.items;
+                break;
+            }
+        }
+        try server_flight.appendSlice(endpoint.allocator, certificate_wire);
+        transcript.append(certificate_wire);
 
         var certificate_verify: std.ArrayList(u8) = .empty;
         defer certificate_verify.deinit(endpoint.allocator);
@@ -3229,6 +3291,7 @@ fn acceptInternal(
         alpn,
         cipher_suite,
         effective_options.retry_source_connection_id.len != 0,
+        null,
         selected_psk != null,
         if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
@@ -4603,6 +4666,7 @@ fn establishedConnection(
     alpn: []const u8,
     cipher_suite: quic.tls.cipher_suite.Suite,
     retry_processed: bool,
+    certificate_compression: ?quic.tls.certificate_compression.Algorithm,
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
     resumption_master_secret: ?quic.tls.secret.Secret,
@@ -4668,6 +4732,7 @@ fn establishedConnection(
         .alpn = alpn_owned,
         .cipher_suite = cipher_suite,
         .retry_processed = retry_processed,
+        .certificate_compression = certificate_compression,
         .resumed = resumed,
         .early_data_status = early_data_status,
         .early_data_protected_packet_count = promotion.protected_packet_count,

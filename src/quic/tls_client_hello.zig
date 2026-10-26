@@ -218,6 +218,14 @@ pub const ParsedClientHello = struct {
     supports_secp256r1_mlkem768: bool = false,
     supports_secp384r1_mlkem1024: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
+    /// RFC 8879 algorithms offered by the client in preference order.
+    certificate_compression: CompressionAlgorithms = .{},
+
+    pub fn certificateCompressionAlgorithms(
+        self: *const ParsedClientHello,
+    ) []const quic.tls.certificate_compression.Algorithm {
+        return self.certificate_compression.slice();
+    }
 
     pub fn keyShare(
         self: ParsedClientHello,
@@ -484,6 +492,7 @@ pub fn parseClientHello(bytes: []const u8) Error!ParsedClientHello {
     var secp256r1_mlkem768: ?[]const u8 = null;
     var secp384r1_mlkem1024: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
+    var certificate_compression = CompressionAlgorithms{};
     var saw_supported_versions = false;
     var saw_supported_groups = false;
     var supports_x25519 = false;
@@ -597,6 +606,10 @@ pub fn parseClientHello(bytes: []const u8) Error!ParsedClientHello {
                 secp384r1_mlkem1024 = shares.secp384r1_mlkem1024;
             },
             ext_quic_transport_parameters => transport_parameters = payload,
+            ext_compress_certificate => {
+                certificate_compression =
+                    try parseCompressionAlgorithms(payload);
+            },
             else => {},
         }
     }
@@ -659,6 +672,7 @@ pub fn parseClientHello(bytes: []const u8) Error!ParsedClientHello {
         .supports_secp256r1_mlkem768 = supports_secp256r1_mlkem768,
         .supports_secp384r1_mlkem1024 = supports_secp384r1_mlkem1024,
         .psk_offer = psk_offer,
+        .certificate_compression = certificate_compression,
     };
 }
 
@@ -1362,6 +1376,46 @@ fn appendU16AssumeCapacity(list: *std.ArrayList(u8), value: u16) void {
     const start = list.items.len;
     list.items.len = start + 2;
     std.mem.writeInt(u16, list.items[start..][0..2], value, .big);
+}
+
+const max_compression_algorithms: usize = 255 / 2;
+
+/// Copied algorithm list from one compress_certificate extension. The inner
+/// length is one byte, so the complete list fits inline without allocation.
+pub const CompressionAlgorithms = struct {
+    storage: [max_compression_algorithms]quic.tls.certificate_compression.Algorithm = undefined,
+    count: usize = 0,
+
+    pub fn slice(self: *const CompressionAlgorithms) []const quic.tls.certificate_compression.Algorithm {
+        return self.storage[0..self.count];
+    }
+};
+
+fn parseCompressionAlgorithms(
+    payload: []const u8,
+) Error!CompressionAlgorithms {
+    if (payload.len < 1) return error.InvalidClientHello;
+    const algorithm_bytes = payload[0];
+    if (algorithm_bytes == 0 or algorithm_bytes % 2 != 0 or
+        1 + algorithm_bytes != payload.len)
+    {
+        return error.InvalidClientHello;
+    }
+    const count = algorithm_bytes / 2;
+    var result: CompressionAlgorithms = .{};
+    result.count = count;
+    for (result.storage[0..count], 0..) |*slot, index| {
+        slot.* = @enumFromInt(
+            std.mem.readInt(u16, payload[1 + index * 2 ..][0..2], .big),
+        );
+    }
+    const algorithms = result.slice();
+    for (algorithms, 0..) |algorithm, index| {
+        for (algorithms[0..index]) |previous| {
+            if (algorithm == previous) return error.InvalidClientHello;
+        }
+    }
+    return result;
 }
 
 fn parseServerName(payload: []const u8) Error![]const u8 {
