@@ -12,6 +12,7 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/control/extension_deadline_tests.zig");
     _ = @import("runtime/control/output_deadline_tests.zig");
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
@@ -8695,9 +8696,39 @@ pub const Connection = struct {
         value: http2.ExtensiblePriority,
     ) Error!void {
         var field_value_buf: [16]u8 = undefined;
-        return self.sendPriorityUpdateRaw(
+        return self.sendPriorityUpdateRawUntil(
             stream_id,
             value.serialize(&field_value_buf),
+            null,
+        );
+    }
+
+    pub fn sendPriorityUpdateWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        value: http2.ExtensiblePriority,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        var field_value_buf: [16]u8 = undefined;
+        return self.sendPriorityUpdateRawUntil(
+            stream_id,
+            value.serialize(&field_value_buf),
+            absolute,
+        );
+    }
+
+    pub fn sendPriorityUpdateWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        value: http2.ExtensiblePriority,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPriorityUpdateWithDeadline(
+            stream_id,
+            value,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
@@ -8706,6 +8737,47 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
         field_value: []const u8,
+    ) Error!void {
+        return self.sendPriorityUpdateRawUntil(
+            stream_id,
+            field_value,
+            null,
+        );
+    }
+
+    pub fn sendPriorityUpdateRawWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        field_value: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendPriorityUpdateRawUntil(
+            stream_id,
+            field_value,
+            absolute,
+        );
+    }
+
+    pub fn sendPriorityUpdateRawWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        field_value: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPriorityUpdateRawWithDeadline(
+            stream_id,
+            field_value,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn sendPriorityUpdateRawUntil(
+        self: *Connection,
+        stream_id: u31,
+        field_value: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
@@ -8746,10 +8818,7 @@ pub const Connection = struct {
             stream_id,
             field_value,
         );
-        self.transportForIo().writeAll(encoded.items) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        try self.writeEncodedControlUntil(encoded.items, deadline);
     }
 
     /// Read and apply the next peer PRIORITY_UPDATE, skipping ordinary
@@ -14004,6 +14073,35 @@ pub const Connection = struct {
         self: *Connection,
         origins: []const []const u8,
     ) Error!void {
+        return self.sendOriginsUntil(origins, null);
+    }
+
+    pub fn sendOriginsWithDeadline(
+        self: *Connection,
+        origins: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendOriginsUntil(origins, absolute);
+    }
+
+    pub fn sendOriginsWithTimeout(
+        self: *Connection,
+        origins: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendOriginsWithDeadline(
+            origins,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn sendOriginsUntil(
+        self: *Connection,
+        origins: []const []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         var encoded: std.ArrayList(u8) = .empty;
@@ -14013,10 +14111,7 @@ pub const Connection = struct {
             self.allocator,
             origins,
         );
-        self.transportForIo().writeAll(encoded.items) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        try self.writeEncodedControlUntil(encoded.items, deadline);
     }
 
     pub fn sendAlternativeService(
@@ -14024,6 +14119,53 @@ pub const Connection = struct {
         stream_id: u31,
         origin: []const u8,
         field_value: []const u8,
+    ) Error!void {
+        return self.sendAlternativeServiceUntil(
+            stream_id,
+            origin,
+            field_value,
+            null,
+        );
+    }
+
+    pub fn sendAlternativeServiceWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        origin: []const u8,
+        field_value: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendAlternativeServiceUntil(
+            stream_id,
+            origin,
+            field_value,
+            absolute,
+        );
+    }
+
+    pub fn sendAlternativeServiceWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        origin: []const u8,
+        field_value: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendAlternativeServiceWithDeadline(
+            stream_id,
+            origin,
+            field_value,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn sendAlternativeServiceUntil(
+        self: *Connection,
+        stream_id: u31,
+        origin: []const u8,
+        field_value: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
@@ -14036,10 +14178,7 @@ pub const Connection = struct {
             origin,
             field_value,
         );
-        self.transportForIo().writeAll(encoded.items) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        try self.writeEncodedControlUntil(encoded.items, deadline);
     }
 
     fn validateLocalGoAway(self: Connection, last_stream_id: u31) Error!void {
@@ -14683,24 +14822,105 @@ pub const Connection = struct {
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
+        return self.sendWindowUpdateUntil(stream_id, increment, null);
+    }
+
+    pub fn sendWindowUpdateWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        increment: u31,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendWindowUpdateUntil(stream_id, increment, absolute);
+    }
+
+    pub fn sendWindowUpdateWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        increment: u31,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendWindowUpdateWithDeadline(
+            stream_id,
+            increment,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn sendWindowUpdateUntil(
+        self: *Connection,
+        stream_id: u31,
+        increment: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (stream_id == 0) {
-            try self.sendWindowUpdates(null, increment, null);
+            try self.sendWindowUpdatesUntil(
+                null,
+                increment,
+                null,
+                deadline,
+            );
         } else {
-            try self.sendWindowUpdates(stream_id, null, increment);
+            try self.sendWindowUpdatesUntil(
+                stream_id,
+                null,
+                increment,
+                deadline,
+            );
         }
     }
 
     pub fn releaseReceivedCapacity(self: *Connection, stream_id: u31, amount: usize) Error!void {
+        return self.releaseReceivedCapacityUntil(stream_id, amount, null);
+    }
+
+    pub fn releaseReceivedCapacityWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        amount: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.releaseReceivedCapacityUntil(
+            stream_id,
+            amount,
+            absolute,
+        );
+    }
+
+    pub fn releaseReceivedCapacityWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        amount: usize,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.releaseReceivedCapacityWithDeadline(
+            stream_id,
+            amount,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn releaseReceivedCapacityUntil(
+        self: *Connection,
+        stream_id: u31,
+        amount: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (amount == 0) return;
         var remaining = amount;
         while (remaining != 0) {
             const increment: u31 = @intCast(@min(remaining, std.math.maxInt(u31)));
-            try self.sendWindowUpdates(
+            try self.sendWindowUpdatesUntil(
                 stream_id,
                 increment,
                 increment,
+                deadline,
             );
             remaining -= increment;
         }
@@ -21990,6 +22210,18 @@ fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField)
 }
 
 pub const testing = struct {
+    pub fn enablePeerExtensiblePriorities(
+        connection: *Connection,
+    ) void {
+        connection.peer_no_rfc7540_priorities = true;
+    }
+
+    pub fn recvConnectionWindowValue(
+        connection: *const Connection,
+    ) i64 {
+        return connection.recv_connection_window.value;
+    }
+
     pub fn recvStreamWindow(connection: *Connection, stream_id: u31) Error!*FlowWindow {
         return connection.recvStreamWindow(stream_id);
     }

@@ -1039,6 +1039,16 @@ Reusable implementation changes behind these H2 results:
   RST_STREAM-before-GOAWAY tests cover the public APIs. The Hyper graceful-drain
   fixture uses one absolute deadline for GOAWAY plus the final response, while
   the h2spec adapter bounds its protocol-error GOAWAY;
+- the remaining application control writers now follow the same contract:
+  typed/raw PRIORITY_UPDATE, ORIGIN, ALTSVC, explicit WINDOW_UPDATE and
+  `releaseReceivedCapacity` all expose timeout/deadline forms. ORIGIN/ALTSVC
+  encode completely before transport submission; a failed speculative idle
+  priority write removes its reservation; WINDOW_UPDATE rolls back the current
+  connection/stream increment on failure. Multi-frame credit release uses one
+  absolute timestamp instead of renewing it per `u31` chunk. Any attempted
+  partial control write still forbids connection reuse. Blocked-socket tests
+  cover every writer, invalid-clock tests prove pre-mutation failure, and a
+  real connection verifies deadline-bound ORIGIN/ALTSVC metadata delivery;
 - `startRequest` provides the client-side counterpart. `RequestWriter` accepts
   bounded or length-unbounded DATA chunks, request trailers and transactional
   length retries, remains responsible for cancellation after request-body FIN,
