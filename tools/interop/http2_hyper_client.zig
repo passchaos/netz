@@ -180,25 +180,26 @@ pub fn main(init: std.process.Init) !void {
     // Open both requests before reading either response. Hyper deliberately
     // withholds the sibling until it observes cancellation of the large body,
     // so completing it proves that only the target stream was retired.
-    var cancel_request = try connection.startRequest(.{
+    const request_deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake });
+    var cancel_request = try connection.startRequestWithDeadline(.{
         .method = "GET",
         .path = "/cancel?from=netz",
         .scheme = "http",
         .authority = "localhost",
         .body_length = 0,
-    });
+    }, request_deadline);
     defer cancel_request.deinit();
-    try cancel_request.finish();
+    try cancel_request.finishWithDeadline(request_deadline);
 
-    var sibling_request = try connection.startRequest(.{
+    var sibling_request = try connection.startRequestWithDeadline(.{
         .method = "GET",
         .path = "/sibling?from=netz",
         .scheme = "http",
         .authority = "localhost",
         .body_length = 0,
-    });
+    }, request_deadline);
     defer sibling_request.deinit();
-    try sibling_request.finish();
+    try sibling_request.finishWithDeadline(request_deadline);
 
     var cancellation: CancelContext = .{};
     const cancel_result = cancel_request.readResponseStreamingWithHead(

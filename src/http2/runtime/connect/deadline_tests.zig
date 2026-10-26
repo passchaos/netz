@@ -10,44 +10,7 @@ const frame_io = @import("../frame/io.zig");
 const allocator = std.testing.allocator;
 const large_value = "x" ** (256 * 1024);
 
-const BlockedOutput = struct {
-    connection: runtime.Connection,
-    peer: std.Io.net.Stream,
-    rescue: ?std.Thread = null,
-
-    fn init(io: std.Io, role: runtime.Role) !BlockedOutput {
-        var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
-        defer listener.deinit(io);
-        const sender = try listener.socket.address.connect(io, .{ .mode = .stream });
-        errdefer sender.close(io);
-        const peer = try listener.accept(io);
-        errdefer peer.close(io);
-        const buffer_size: c_int = 4096;
-        try std.posix.setsockopt(sender.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buffer_size));
-        try std.posix.setsockopt(peer.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buffer_size));
-        return .{
-            .connection = .{ .allocator = allocator, .io = io, .stream = sender, .role = role, .peer_enable_connect_protocol = true },
-            .peer = peer,
-        };
-    }
-
-    fn startRescue(self: *@This()) !void {
-        // Close the unread peer eventually so the old unbounded path fails
-        // with an assertion instead of leaving the test process hung.
-        self.rescue = try std.Thread.spawn(.{}, struct {
-            fn run(io: std.Io, peer: std.Io.net.Stream) void {
-                std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
-                peer.close(io);
-            }
-        }.run, .{ self.connection.io, self.peer });
-    }
-
-    fn deinit(self: *@This()) void {
-        const io = self.connection.io;
-        self.connection.close();
-        if (self.rescue) |thread| thread.join() else self.peer.close(io);
-    }
-};
+const BlockedOutput = @import("../testing/blocked_output.zig").BlockedOutput;
 
 test "HTTP/2 CONNECT deadline bounds blocked opening HEADERS and CONTINUATION" {
     if (comptime builtin.os.tag != .linux) return;

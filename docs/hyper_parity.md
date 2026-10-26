@@ -1023,6 +1023,23 @@ Reusable implementation changes behind these H2 results:
   receive mode instead of discarding it. The pending storage stays bounded to
   one frame because control returns to the caller immediately, paralleling
   Hyper's independently driven response future/body pipe;
+- incremental HTTP/2 request starts now bound actual opening
+  HEADERS/CONTINUATION output under `startRequestWithTimeout`/`WithDeadline`.
+  Early-response request-half FIN output uses the same write budget and
+  preserves `ResponseAvailable` plus committed-byte state if that FIN fails.
+  `Connection.startResponse`, `ServerDuplexStream.startResponse` and
+  `finishResponseHeaders` have matching timeout/deadline entry points, as do
+  request/response `finishTrailers`, duplex `finishRequestTrailers` and
+  `finishResponseTrailers`, and client `closeRequestAfterResponse`. Preparation
+  failure before response HEADERS submission retains the admitted stream and
+  live HPACK encoder for retry; a submitted-frame failure forbids parent reuse.
+  Content-Length validation remains transactional, and successful duplex FIN
+  or trailers release concurrency only after the other half has also ended.
+  Response-head preparation lives in `runtime/response/start.zig`; the common
+  early-response upload finish lives in `runtime/request/early_response.zig`.
+  Real blocked-socket, allocator-failure and same-connection round-trip tests
+  sit beside their modules, while the Hyper gate uses bounded request starts
+  and streaming response HEADERS/DATA/trailers over h2c and verified TLS;
 - an early response can finish with DATA or trailers before the server's
   `RST_STREAM(NO_ERROR)` stopping the unfinished request body reaches the
   client. Once the response owner has consumed `END_STREAM`, the connection

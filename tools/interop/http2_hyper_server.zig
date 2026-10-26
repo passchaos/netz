@@ -92,21 +92,22 @@ pub fn main(init: std.process.Init) !void {
     // Exercise netz's stateful response writer instead of collapsing the
     // response into the single-frame convenience path. Hyper must reassemble
     // both DATA chunks and observe trailing HEADERS with END_STREAM.
-    var response = try connection.startResponse(request.stream_id, .{
+    const response_deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake });
+    var response = try connection.startResponseWithDeadline(request.stream_id, .{
         .status = 201,
         .headers = &.{.{
             .name = "x-netz-response",
             .value = "response-header",
         }},
         .request_method = request.method,
-    });
+    }, response_deadline);
     defer response.deinit();
-    try response.write("netz-");
-    try response.write("response");
-    try response.finishTrailers(&.{.{
+    try response.writeWithDeadline("netz-", response_deadline);
+    try response.writeWithDeadline("response", response_deadline);
+    try response.finishTrailersWithDeadline(&.{.{
         .name = "x-netz-trailer",
         .value = "response-trailer",
-    }});
+    }}, response_deadline);
 
     std.debug.print(
         "netz HTTP/2 server interoperated with Hyper: transport={s} alpn={s} method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1\n",

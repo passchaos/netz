@@ -12,6 +12,9 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/request/output_deadline_tests.zig");
+    _ = @import("runtime/response/output_deadline_tests.zig");
+    _ = @import("runtime/response/stream_roundtrip_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -51,6 +54,8 @@ const checkedBodyLength = message_headers.checkedBodyLength;
 const request_batch_cleanup = @import("runtime/request/batch_cleanup.zig");
 const request_cleanup = @import("runtime/request/cleanup.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
+const response_start = @import("runtime/response/start.zig");
+const request_early_response = @import("runtime/request/early_response.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
 const response_trailers = @import("runtime/response/trailers.zig");
 const header_block_limits = @import("runtime/headers/block_limits.zig");
@@ -4911,9 +4916,8 @@ pub const Connection = struct {
     }
 
     /// Start an incremental request under a caller-owned awake-clock
-    /// deadline. The timestamp is checked again immediately before the
-    /// opening HEADERS are written, so local preparation cannot renew or
-    /// silently overrun the caller's budget.
+    /// deadline. Local preparation and actual HEADERS/CONTINUATION output
+    /// use the same timestamp without renewing the caller's budget.
     pub fn startRequestWithDeadline(
         self: *Connection,
         options: StreamingRequestOptions,
@@ -5032,7 +5036,7 @@ pub const Connection = struct {
         const stream_id = try self.reserveNextClientStreamId();
         var stream_owned = true;
         errdefer if (stream_owned) self.releaseLocalStream(stream_id);
-        try self.writeHeaders(stream_id, fields.items, false);
+        try self.writeHeadersUntil(stream_id, fields.items, false, deadline);
         stream_owned = false;
         return .{
             .connection = self,
@@ -12206,112 +12210,41 @@ pub const Connection = struct {
         return self.startResponseInternal(stream_id, options, true);
     }
 
+    pub fn startResponseWithDeadline(self: *Connection, stream_id: u31, options: StreamingResponseOptions, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!ResponseWriter {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.startResponseInternalUntil(stream_id, options, true, deadline);
+    }
+
+    pub fn startResponseWithTimeout(self: *Connection, stream_id: u31, options: StreamingResponseOptions, timeout: std.Io.Duration) ResponseTimeoutError!ResponseWriter {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithDeadline(stream_id, options, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
     fn startResponseInternal(
         self: *Connection,
         stream_id: u31,
         options: StreamingResponseOptions,
         release_at_headers: bool,
     ) Error!ResponseWriter {
-        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
-        if (self.role != .server) return error.UnexpectedFrame;
-        if (!self.outboundStreamIsActive(stream_id)) {
-            return error.InvalidStreamId;
-        }
-        if (options.status < 100 or options.status > 999 or
-            statusIsInformational(options.status))
-        {
-            return error.InvalidStatus;
-        }
-        const semantics = self.responseSemanticsFor(stream_id, .{
-            .status = options.status,
-            .request_method = options.request_method,
-            .extended_connect = options.extended_connect,
-        });
-        const suppress_body =
-            responseWriteSuppressesBodySemantics(options.status, semantics);
-        var status_buffer: [3]u8 = undefined;
-        const status = std.fmt.bufPrint(
-            &status_buffer,
-            "{}",
-            .{options.status},
-        ) catch return error.InvalidStatus;
+        return self.startResponseInternalUntil(stream_id, options, release_at_headers, null);
+    }
 
-        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
-        const fields_capacity = std.math.add(
-            usize,
-            options.headers.len,
-            3,
-        ) catch return error.MessageTooLarge;
-        const fields_buffer = if (fields_capacity <= fields_stack.len)
-            fields_stack[0..fields_capacity]
-        else
-            try self.allocator.alloc(
-                http2.Hpack.HeaderField,
-                fields_capacity,
-            );
-        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
-            self.allocator.free(fields_buffer);
-        };
-        var fields: std.ArrayList(http2.Hpack.HeaderField) =
-            .initBuffer(fields_buffer);
-        fields.appendAssumeCapacity(.{
-            .name = ":status",
-            .value = status,
+    fn startResponseInternalUntil(
+        self: *Connection,
+        stream_id: u31,
+        options: StreamingResponseOptions,
+        release_at_headers: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ResponseWriter {
+        return response_start.start(self, stream_id, options, release_at_headers, deadline, .{
+            .ErrorType = Error,
+            .WriterType = ResponseWriter,
+            .active = outboundStreamIsActive,
+            .semantics = responseSemanticsFor,
+            .date = appendAutomaticDateHeader,
+            .write = writeHeadersUntil,
+            .release = releasePeerStream,
         });
-        fields.appendSliceAssumeCapacity(options.headers);
-        try outbound_headers.stripConnectionHeaders(
-            self.allocator,
-            &fields,
-            .response,
-        );
-        if (semantics.traditional_connect and
-            options.status >= 200 and options.status < 300)
-        {
-            try stripSuccessfulConnectContentLength(&fields);
-        }
-        const declared_length = try contentLength(fields.items);
-        try validateOutgoingResponseBodyForStatusWithLength(
-            options.status,
-            declared_length,
-            &.{},
-            &.{},
-        );
-        if (semantics.traditional_connect and
-            options.status >= 200 and options.status < 300 and
-            (declared_length orelse 0) != 0)
-        {
-            return error.InvalidContentLength;
-        }
-        try validateHeaderBlock(fields.items, .response);
-        self.appendAutomaticDateHeader(&fields);
-
-        // HEAD/204/304 and successful traditional CONNECT end at HEADERS.
-        // An ordinary zero-length response stays open so the writer may choose
-        // either an empty END_STREAM DATA frame or response trailers.
-        const ends_at_headers = suppress_body;
-        self.writeHeaders(
-            stream_id,
-            fields.items,
-            ends_at_headers,
-        ) catch |err| {
-            // `writeHeaders` stages HPACK and marks a transport write failure
-            // terminal. Release this stream rather than leaving a half-started
-            // writer hidden in connection state.
-            self.releasePeerStream(stream_id);
-            return err;
-        };
-        if (ends_at_headers and release_at_headers) {
-            self.releasePeerStream(stream_id);
-        }
-        return .{
-            .connection = self,
-            .stream_id = stream_id,
-            .expected_length = if (options.status == 205)
-                0
-            else
-                declared_length,
-            .finished = ends_at_headers,
-        };
     }
 
     /// Validate, HPACK-encode, and submit bodyless responses as one TCP write.
@@ -18367,22 +18300,7 @@ pub const RequestWriter = struct {
             deadline,
         ) catch |err| switch (err) {
             error.ResponseAvailable => {
-                self.written += sent;
-                self.body_finished = true;
-                // Stop the request half while preserving the peer's already
-                // buffered response frame for readResponse*. Use the raw frame
-                // writer because the tracked DATA helper intentionally refuses
-                // further request DATA once a response is pending.
-                writeFrameTransport(
-                    self.connection.allocator,
-                    self.connection.transportForIo(),
-                    .data,
-                    flag_end_stream,
-                    self.stream_id,
-                    &.{},
-                ) catch {
-                    self.connection.aggregate_timeout_unusable = true;
-                };
+                request_early_response.finish(self, sent, deadline, .{ .transport = Connection.transportForIo });
                 return error.ResponseAvailable;
             },
             else => {
@@ -18437,18 +18355,7 @@ pub const RequestWriter = struct {
             deadline,
         ) catch |err| switch (err) {
             error.ResponseAvailable => {
-                self.written += sent;
-                self.body_finished = true;
-                writeFrameTransport(
-                    self.connection.allocator,
-                    self.connection.transportForIo(),
-                    .data,
-                    flag_end_stream,
-                    self.stream_id,
-                    &.{},
-                ) catch {
-                    self.connection.aggregate_timeout_unusable = true;
-                };
+                request_early_response.finish(self, sent, deadline, .{ .transport = Connection.transportForIo });
                 return error.ResponseAvailable;
             },
             else => {
@@ -18485,17 +18392,29 @@ pub const RequestWriter = struct {
         return self.written;
     }
 
-    pub fn finishTrailers(
-        self: *RequestWriter,
-        trailers: []const http2.Hpack.HeaderField,
-    ) Error!void {
+    pub fn finishTrailers(self: *RequestWriter, trailers: []const http2.Hpack.HeaderField) Error!void {
+        return self.finishTrailersUntil(trailers, null);
+    }
+
+    pub fn finishTrailersWithDeadline(self: *RequestWriter, trailers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishTrailersUntil(trailers, deadline);
+    }
+
+    pub fn finishTrailersWithTimeout(self: *RequestWriter, trailers: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishTrailersWithDeadline(trailers, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn finishTrailersUntil(self: *RequestWriter, trailers: []const http2.Hpack.HeaderField, deadline: ?std.Io.Clock.Timestamp) Error!void {
         try self.ensureWritable();
         try self.reserveLength(0, true);
         try validateHeaderBlock(trailers, .request_trailers);
-        try self.connection.writeHeaders(
+        try self.connection.writeHeadersUntil(
             self.stream_id,
             trailers,
             true,
+            deadline,
         );
         self.body_finished = true;
     }
@@ -19357,10 +19276,21 @@ pub const ClientDuplexStream = struct {
         );
     }
 
-    pub fn finishRequestTrailers(
-        self: *ClientDuplexStream,
-        trailers: []const http2.Hpack.HeaderField,
-    ) Error!void {
+    pub fn finishRequestTrailers(self: *ClientDuplexStream, trailers: []const http2.Hpack.HeaderField) Error!void {
+        return self.finishRequestTrailersUntil(trailers, null);
+    }
+
+    pub fn finishRequestTrailersWithDeadline(self: *ClientDuplexStream, trailers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishRequestTrailersUntil(trailers, deadline);
+    }
+
+    pub fn finishRequestTrailersWithTimeout(self: *ClientDuplexStream, trailers: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRequestTrailersWithDeadline(trailers, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn finishRequestTrailersUntil(self: *ClientDuplexStream, trailers: []const http2.Hpack.HeaderField, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.request_finished or self.released) {
             return error.ConnectionClosed;
         }
@@ -19370,7 +19300,7 @@ pub const ClientDuplexStream = struct {
             }
         }
         try validateHeaderBlock(trailers, .request_trailers);
-        try self.connection.writeHeaders(self.stream_id, trailers, true);
+        try self.connection.writeHeadersUntil(self.stream_id, trailers, true, deadline);
         self.request_finished = true;
         self.maybeRelease();
     }
@@ -19737,17 +19667,30 @@ pub const ClientDuplexStream = struct {
     /// Stop an upload after observing a terminal early response. This emits
     /// only the request-half FIN; the response result remains available until
     /// its terminal event has been reported.
-    pub fn closeRequestAfterResponse(
-        self: *ClientDuplexStream,
-    ) Error!void {
+    pub fn closeRequestAfterResponse(self: *ClientDuplexStream) Error!void {
+        return self.closeRequestAfterResponseUntil(null);
+    }
+
+    pub fn closeRequestAfterResponseWithDeadline(self: *ClientDuplexStream, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.closeRequestAfterResponseUntil(deadline);
+    }
+
+    pub fn closeRequestAfterResponseWithTimeout(self: *ClientDuplexStream, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeRequestAfterResponseWithDeadline(.fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn closeRequestAfterResponseUntil(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (!self.response_finished) return error.UnexpectedFrame;
         if (self.request_finished) return;
         var sent: usize = 0;
-        try self.connection.writeDataDuplexTracked(
+        try self.connection.writeDataDuplexTrackedUntil(
             self.stream_id,
             &.{},
             true,
             &sent,
+            deadline,
         );
         self.request_finished = true;
         self.maybeRelease();
@@ -19824,17 +19767,29 @@ pub const ServerDuplexStream = struct {
         self.* = undefined;
     }
 
-    pub fn startResponse(
-        self: *ServerDuplexStream,
-        options: StreamingResponseOptions,
-    ) Error!void {
+    pub fn startResponse(self: *ServerDuplexStream, options: StreamingResponseOptions) Error!void {
+        return self.startResponseUntil(options, null);
+    }
+
+    pub fn startResponseWithDeadline(self: *ServerDuplexStream, options: StreamingResponseOptions, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.startResponseUntil(options, deadline);
+    }
+
+    pub fn startResponseWithTimeout(self: *ServerDuplexStream, options: StreamingResponseOptions, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithDeadline(options, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn startResponseUntil(self: *ServerDuplexStream, options: StreamingResponseOptions, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.response_started or self.released) {
             return error.UnexpectedFrame;
         }
-        var writer = try self.connection.startResponseInternal(
+        var writer = try self.connection.startResponseInternalUntil(
             self.stream_id,
             options,
             false,
+            deadline,
         );
         self.response_started = true;
         self.response_finished = writer.finished;
@@ -19847,10 +19802,21 @@ pub const ServerDuplexStream = struct {
     /// Send one response HEADERS block carrying END_STREAM. This is the
     /// trailers-only response shape used by an early gRPC status while the
     /// request half can remain open and be drained separately.
-    pub fn finishResponseHeaders(
-        self: *ServerDuplexStream,
-        options: ResponseOptions,
-    ) Error!void {
+    pub fn finishResponseHeaders(self: *ServerDuplexStream, options: ResponseOptions) Error!void {
+        return self.finishResponseHeadersUntil(options, null);
+    }
+
+    pub fn finishResponseHeadersWithDeadline(self: *ServerDuplexStream, options: ResponseOptions, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishResponseHeadersUntil(options, deadline);
+    }
+
+    pub fn finishResponseHeadersWithTimeout(self: *ServerDuplexStream, options: ResponseOptions, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseHeadersWithDeadline(options, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn finishResponseHeadersUntil(self: *ServerDuplexStream, options: ResponseOptions, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.response_started or self.released) {
             return error.UnexpectedFrame;
         }
@@ -19860,10 +19826,11 @@ pub const ServerDuplexStream = struct {
         var response_options = options;
         response_options.request_method = self.method;
         response_options.extended_connect = self.protocol != null;
-        try self.connection.writeResponseInternal(
+        try self.connection.writeResponseInternalUntil(
             self.stream_id,
             response_options,
             false,
+            deadline,
         );
         self.response_started = true;
         self.response_finished = true;
@@ -20111,10 +20078,21 @@ pub const ServerDuplexStream = struct {
         return self.response_written;
     }
 
-    pub fn finishResponseTrailers(
-        self: *ServerDuplexStream,
-        trailers: []const http2.Hpack.HeaderField,
-    ) Error!void {
+    pub fn finishResponseTrailers(self: *ServerDuplexStream, trailers: []const http2.Hpack.HeaderField) Error!void {
+        return self.finishResponseTrailersUntil(trailers, null);
+    }
+
+    pub fn finishResponseTrailersWithDeadline(self: *ServerDuplexStream, trailers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishResponseTrailersUntil(trailers, deadline);
+    }
+
+    pub fn finishResponseTrailersWithTimeout(self: *ServerDuplexStream, trailers: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseTrailersWithDeadline(trailers, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn finishResponseTrailersUntil(self: *ServerDuplexStream, trailers: []const http2.Hpack.HeaderField, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (!self.response_started or self.response_finished or self.released) {
             return error.ConnectionClosed;
         }
@@ -20124,7 +20102,7 @@ pub const ServerDuplexStream = struct {
             }
         }
         try validateHeaderBlock(trailers, .response_trailers);
-        try self.connection.writeHeaders(self.stream_id, trailers, true);
+        try self.connection.writeHeadersUntil(self.stream_id, trailers, true, deadline);
         self.response_finished = true;
         self.maybeRelease();
     }
@@ -20581,17 +20559,29 @@ pub const ResponseWriter = struct {
     }
 
     /// Finish with response trailers. Trailers carry END_STREAM themselves.
-    pub fn finishTrailers(
-        self: *ResponseWriter,
-        trailers: []const http2.Hpack.HeaderField,
-    ) Error!void {
+    pub fn finishTrailers(self: *ResponseWriter, trailers: []const http2.Hpack.HeaderField) Error!void {
+        return self.finishTrailersUntil(trailers, null);
+    }
+
+    pub fn finishTrailersWithDeadline(self: *ResponseWriter, trailers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishTrailersUntil(trailers, deadline);
+    }
+
+    pub fn finishTrailersWithTimeout(self: *ResponseWriter, trailers: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishTrailersWithDeadline(trailers, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn finishTrailersUntil(self: *ResponseWriter, trailers: []const http2.Hpack.HeaderField, deadline: ?std.Io.Clock.Timestamp) Error!void {
         try self.ensureWritable();
         try self.reserveLength(0, true);
         try validateHeaderBlock(trailers, .response_trailers);
-        try self.connection.writeHeaders(
+        try self.connection.writeHeadersUntil(
             self.stream_id,
             trailers,
             true,
+            deadline,
         );
         self.finishState();
     }
