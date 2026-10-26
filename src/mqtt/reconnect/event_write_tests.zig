@@ -100,7 +100,7 @@ test "MQTT reconnect interrupted PUBREC preserves alias-only delivery before res
         seed.deinit(allocator);
         const id = (try peer.writePublish("", "original message", .{ .qos = .exactly_once, .properties = &alias_properties })).?;
         blocked.armed.store(true, .release);
-        try std.testing.expectError(error.ConnectionResetByPeer, client.pollWithTimeout(.fromSeconds(1)));
+        try std.testing.expect((try client.pollWithOptions(.{ .timeout = .fromSeconds(1), .reconnect_after_transport_error = false })) == null);
         try std.testing.expect(client.connection() == null);
         if (visible) {
             var ack = try peer.readPubRec();

@@ -67,6 +67,10 @@ fn controlReply(protocol: mqtt.ProtocolVersion, packet_type: mqtt.PacketType, ab
     try std.testing.expect(client.connection() == null);
     var snapshot: std.ArrayList(u8) = .empty;
     defer snapshot.deinit(allocator);
+    try std.testing.expectError(error.SnapshotBusy, client.writeSessionSnapshot(&snapshot));
+    var retained = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer retained.deinit(allocator);
+    try std.testing.expect(if (packet_type == .pubrel) retained == .pubrec else retained == .pubrel);
     try client.writeSessionSnapshot(&snapshot);
     var restored = try reconnect.Client.init(allocator, io, .{ .ip4 = .loopback(1) }, options, .{}, &shutdown);
     defer restored.deinit();
@@ -128,7 +132,10 @@ fn identifierReuse(qos: mqtt.QoS, dup: bool) !void {
     received.deinit(allocator);
     try peer.writePubRel(id, 0);
     blocked.armed.store(true, .release);
-    try std.testing.expectError(error.ConnectionResetByPeer, client.pollWithTimeout(.fromSeconds(1)));
+    try std.testing.expect((try client.pollWithOptions(.{ .timeout = .fromSeconds(1), .reconnect_after_transport_error = false })) == null);
+    var retained = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer retained.deinit(allocator);
+    try std.testing.expect(retained == .pubrel);
     try std.testing.expect(!try client.outgoing.containsIncomingQoS2(client.outgoing_handle, id));
     var complete = try peer.readPubComp();
     complete.deinit(allocator);
@@ -179,7 +186,7 @@ test "MQTT reconnect automatic duplicate PUBREC is bounded without another appli
         blocked.armed.store(true, .release);
         try std.testing.expect((try client.pollWithTimeout(.fromMilliseconds(50))) == null);
         try std.testing.expect(blocked.canceled.load(.acquire));
-        try std.testing.expect(client.pending_publish == null);
+        try std.testing.expect(client.pending_event == null);
         try std.testing.expect(try client.outgoing.containsIncomingQoS2(client.outgoing_handle, 17));
     }
 }

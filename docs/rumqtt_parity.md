@@ -9,6 +9,20 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Reconnect polling now recovers retryable automatic output failures under its
+original budget instead of terminating `serveUntil`. One bounded owned-event
+slot retains applied PUBLISH, PUBREC, PUBREL and AUTH metadata through response
+or PUBREL-replay failure. An event ready within the remaining budget is returned
+before reconnect; an expired/disabled-reconnect call leaves it for the next
+poll. Known QoS 2 PUBLISH retransmissions do not refill this slot and reconnect
+directly when their repeated PUBREC fails. Snapshot writes/restores remain busy
+until the retained event has been returned. Socket failure is observed before
+callback cleanup, so a local authentication callback returning a network-shaped
+error still propagates rather than being retried as transport loss. Polling
+lives in `reconnect/poll.zig`; adjacent real TCP tests verify continued serving,
+alias-backed delivery ordering, duplicate suppression, owned control properties,
+callback-error propagation and refusal of PUBREL before manual PUBREC.
+
 Synchronous fanout now validates the selected recipient's connection generation
 while holding its writer lock. A disconnected target's stale route plan cannot
 touch a reused slot, and its socket failure wakes only that target's reader
@@ -39,12 +53,12 @@ reauthentication roles, poll diagnostics and post-write expiry ownership.
 
 Reconnect polling now applies the caller's original deadline to automatic
 PUBACK/PUBREC/PUBCOMP output, outbound PUBREL replay, and authentication callback
-responses. An interrupted first PUBLISH acknowledgement retains one owned
-Application Message for the next poll, before another connection attempt or
-later wire event; known QoS 2 retransmissions never refill that delivery slot.
+responses. An interrupted first PUBLISH acknowledgement retains its owned
+Application Message before another connection attempt or later wire event;
+known QoS 2 retransmissions never refill that delivery slot.
 The pending message also retains alias-resolved names after transport teardown.
 Session snapshot writes/restores return `SnapshotBusy` until the application
-drains this message, preventing a marker-only snapshot from losing its delivery.
+drains a retained event, preventing a marker-only snapshot from losing delivery.
 Automatic PUBREL handling completes its Session marker before PUBCOMP output;
 the Application Message was already delivered. Repeated PUBREL is answered
 idempotently without a marker, so an ambiguously visible PUBCOMP cannot leave

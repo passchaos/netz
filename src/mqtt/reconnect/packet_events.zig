@@ -18,7 +18,7 @@ pub fn Controller(comptime Context: type) type {
                             .at_most_once => unreachable,
                             .at_least_once => if (!self.client_options.manual_acknowledgements) {
                                 active.writePubAckWithDeadline(packet_id, 0, deadline) catch |err| {
-                                    self.pending_publish = owned;
+                                    self.pending_event = .{ .publish = owned };
                                     return err;
                                 };
                             },
@@ -54,7 +54,7 @@ pub fn Controller(comptime Context: type) type {
                                             packet_id,
                                         );
                                     active.writePubRecWithDeadline(packet_id, 0, deadline) catch |err| {
-                                        if (!duplicate) self.pending_publish = owned;
+                                        if (!duplicate) self.pending_event = .{ .publish = owned };
                                         return err;
                                     };
                                     Context.noteControlSent(self);
@@ -99,7 +99,10 @@ pub fn Controller(comptime Context: type) type {
                         self.client_options.outbound_qos2_release_policy ==
                             .automatic)
                     {
-                        try Context.replayPending(self, deadline);
+                        Context.replayPending(self, deadline) catch |err| {
+                            self.pending_event = .{ .pubrec = owned };
+                            return err;
+                        };
                         Context.noteControlSent(self);
                     } else if (action == .completed) {
                         // A negative PUBREC terminates the QoS 2 transaction and
@@ -119,6 +122,11 @@ pub fn Controller(comptime Context: type) type {
                         self.outgoing_handle,
                         packet_id,
                     );
+                    if (incoming_state == null and active.hasPendingIncomingPublish(packet_id, .exactly_once)) {
+                        // This includes manual acknowledgement with automatic
+                        // release: PUBREL cannot precede the first PUBREC.
+                        return error.UnexpectedPacket;
+                    }
                     if (self.client_options.inbound_qos2_release_policy ==
                         .deferred)
                     {
@@ -132,15 +140,6 @@ pub fn Controller(comptime Context: type) type {
                             // PUBCOMP until it explicitly completes the
                             // transaction.
                             break :blk .{ .pubrel = owned };
-                        }
-                        if (active.hasPendingIncomingPublish(
-                            packet_id,
-                            .exactly_once,
-                        )) {
-                            // A PUBLISH that has not reached PUBREC cannot legally
-                            // advance to PUBREL. Do not let an early packet erase
-                            // the receive slot or masquerade as a lost PUBCOMP.
-                            return error.UnexpectedPacket;
                         }
                         // A lost PUBCOMP makes the peer repeat PUBREL after local
                         // completion. Re-acknowledge it, but never manufacture a
@@ -162,7 +161,10 @@ pub fn Controller(comptime Context: type) type {
                     }
                     // Unknown/repeated PUBREL is idempotently acknowledged: the
                     // prior PUBCOMP may have been lost after durable completion.
-                    try active.writePubCompWithDeadline(packet_id, 0, deadline);
+                    active.writePubCompWithDeadline(packet_id, 0, deadline) catch |err| {
+                        self.pending_event = .{ .pubrel = owned };
+                        return err;
+                    };
                     Context.noteControlSent(self);
                     break :blk .{ .pubrel = owned };
                 },
@@ -220,6 +222,7 @@ pub fn Controller(comptime Context: type) type {
                             response,
                             deadline,
                         ) catch |err| {
+                            self.pending_event = .{ .auth = owned };
                             Context.retireUnusableConnection(self);
                             return err;
                         };

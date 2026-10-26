@@ -32,6 +32,10 @@ test {
     _ = @import("reconnect/qos_write_tests.zig");
     _ = @import("reconnect/auth_write_tests.zig");
     _ = @import("reconnect/diagnostic_deadline_tests.zig");
+    _ = @import("reconnect/recovery/serve_tests.zig");
+    _ = @import("reconnect/recovery/event_tests.zig");
+    _ = @import("reconnect/recovery/protocol_tests.zig");
+    _ = @import("reconnect/recovery/duplicate_tests.zig");
 }
 
 pub const CommandQueue = command_queue.CommandQueue;
@@ -1230,9 +1234,9 @@ pub const Client = struct {
     subscription_replay_index: ?usize = null,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
-    // At most the one PUBLISH consumed by a failed automatic ACK write. Keep
-    // its Application Message even when the peer may already have seen PUBREC.
-    pending_publish: ?runtime.OwnedPublish = null,
+    // At most one applied incoming event whose automatic response/replay
+    // failed. Its owned packet must precede reconnect and later wire events.
+    pending_event: ?ClientEvent = null,
     tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
     tls13_session_ticket: ?tls_stream.Tls13SessionTicket = null,
     last_connect_refusal: ?runtime.OwnedConnAck = null,
@@ -1452,7 +1456,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
-        if (self.pending_publish) |*value| value.deinit(self.allocator);
+        if (self.pending_event) |*value| value.deinit(self.allocator);
         self.clearLastConnectRefusal();
         if (self.tls12_session_ticket) |*ticket| ticket.deinit();
         if (self.tls13_session_ticket) |*ticket| ticket.deinit();
@@ -2022,7 +2026,7 @@ pub const Client = struct {
         monotonic_now: std.Io.Timestamp,
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
-        if (self.pending_publish != null) return error.SnapshotBusy;
+        if (self.pending_event != null) return error.SnapshotBusy;
         if (self.options.value.clean_start or
             (!configuredPersistentSession(self.options.value) and self.retention.interval == 0))
         {
@@ -2160,7 +2164,7 @@ pub const Client = struct {
     fn validateSessionSnapshotRestore(
         self: *Client,
     ) SessionSnapshotError!void {
-        if (self.connection_state != null or self.pending_publish != null) return error.SnapshotBusy;
+        if (self.connection_state != null or self.pending_event != null) return error.SnapshotBusy;
         if (self.options.value.clean_start) {
             return error.SessionPersistenceDisabled;
         }
@@ -2899,9 +2903,10 @@ pub const Client = struct {
     /// `reconnect_after_transport_error` is false. The method is the sole
     /// reader and performs all QoS acknowledgements, keep-alive probes, and
     /// enabled retryable reconnects itself.
-    /// An interrupted automatic PUBLISH reply retains that message for the
-    /// next poll, ahead of reconnects or later packets. QoS 2 retries continue
-    /// the existing handshake without a second application delivery.
+    /// An interrupted automatic reply retains its applied incoming event.
+    /// Retryable socket failures may return that event before reconnecting;
+    /// expired calls leave it for the next poll. QoS 2 PUBLISH retries continue
+    /// the handshake without a second application delivery.
     /// Applications must not mix it concurrently with typed reads or
     /// `completeNextPublish`.
     pub fn pollWithOptions(
@@ -2935,119 +2940,20 @@ pub const Client = struct {
         );
     }
 
-    fn pollUntil(
-        self: *Client,
-        call_deadline: std.Io.Timestamp,
-        ping_response_timeout: ?std.Io.Duration,
-        cancellation_check_interval: std.Io.Duration,
-        reconnect_after_transport_error: bool,
-    ) (Error || std.Io.Cancelable)!?ClientEvent {
-        if (ping_response_timeout) |timeout| {
-            if (timeout.nanoseconds <= 0) return error.Timeout;
-        }
-        if (cancellation_check_interval.nanoseconds <= 0) {
-            return error.Timeout;
-        }
+    const PollController = @import("reconnect/poll.zig").Controller(struct {
+        pub const ClientType = Client;
+        pub const EventType = ClientEvent;
+        pub const ErrorType = Error || std.Io.Cancelable;
+        pub const connectBefore = Client.connectEventBefore;
+        pub const keepAlive = Client.keepAliveDeadline;
+        pub const retryable = retryableConnectError;
+        pub const retireAfterError = Client.retireConnectionAfterOperationError;
+        pub const nextDeadline = Client.nextPollDeadline;
+        pub const diagnose = Client.disconnectForPeerProtocolViolation;
+        pub const apply = Client.applyPacketEvent;
+    });
 
-        while (true) {
-            if (self.shutdown.isSet()) return error.Canceled;
-            if (self.pending_publish) |publish_value| {
-                if (std.Io.Clock.awake.now(self.io).nanoseconds >= call_deadline.nanoseconds) return null;
-                self.pending_publish = null;
-                return .{ .publish = publish_value };
-            }
-            if (self.reconnect_requested.swap(false, .acq_rel)) {
-                self.disconnectTransport();
-            }
-            if (self.connection_state == null) {
-                return try self.connectEventBefore(call_deadline);
-            }
-
-            const now = std.Io.Clock.awake.now(self.io);
-            if (now.nanoseconds >= call_deadline.nanoseconds) return null;
-            if (self.ping_response_deadline) |deadline| {
-                if (now.nanoseconds >= deadline.nanoseconds) {
-                    self.disconnectTransport();
-                    if (!reconnect_after_transport_error) return null;
-                    return try self.connectEventBefore(call_deadline);
-                }
-            } else if (self.keepAliveDeadline()) |deadline| {
-                if (now.nanoseconds >= deadline.nanoseconds) {
-                    const active = self.connection().?;
-                    active.writePingReqWithDeadline(call_deadline.withClock(.awake)) catch |err| {
-                        const retryable = retryableConnectError(err);
-                        self.retireConnectionAfterOperationError(err);
-                        if (!retryable) return err;
-                        if (!reconnect_after_transport_error) return null;
-                        return try self.connectEventBefore(call_deadline);
-                    };
-                    const sent_at = std.Io.Clock.awake.now(self.io);
-                    self.keep_alive_deadline = sent_at.addDuration(
-                        .fromSeconds(active.keep_alive_seconds),
-                    );
-                    self.ping_response_deadline = sent_at.addDuration(
-                        ping_response_timeout orelse
-                            .fromSeconds(active.keep_alive_seconds),
-                    );
-                    return .{ .pingreq = {} };
-                }
-            }
-            const read_deadline = self.nextPollDeadline(
-                call_deadline,
-                now,
-                cancellation_check_interval,
-            );
-            const active = self.connection().?;
-            var packet_event = active.readClientPacketEventWithDeadline(
-                read_deadline.withClock(.awake),
-            ) catch |err| {
-                if (err == error.Timeout) continue;
-                if (self.disconnectForPeerProtocolViolation(err, call_deadline.withClock(.awake))) return err;
-                if (!retryableConnectError(err)) {
-                    self.disconnectTransport();
-                    return err;
-                }
-                self.disconnectTransport();
-                if (!reconnect_after_transport_error) return null;
-                return try self.connectEventBefore(call_deadline);
-            };
-            var packet_owned = true;
-            defer if (packet_owned) packet_event.deinit(self.allocator);
-            const client_event = self.applyPacketEvent(&packet_event, call_deadline.withClock(.awake)) catch |err| {
-                // The automatic ACK writer may have transferred this complete
-                // PUBLISH to the bounded delivery slot before failing. Its
-                // resolved Topic Name also outlives the retired transport.
-                if (self.pending_publish != null) packet_owned = false;
-                // A complete packet has already been consumed. Peer protocol
-                // faults receive an MQTT 5 diagnostic; local state/allocation
-                // and authentication callback failures close silently. Only
-                // failed automatic PUBLISH replies retain application data.
-                // A valid negative publish acknowledgement is the sole terminal
-                // application result and leaves the connection usable.
-                const valid_publish_refusal = err == error.PublishRefused and
-                    (packet_event == .puback or
-                        packet_event == .pubrec or
-                        packet_event == .pubcomp);
-                if (packet_event == .auth) {
-                    // Authentication peer-state errors were diagnosed by the
-                    // runtime before this callback boundary. Callback/local
-                    // response errors are not peer violations, but the
-                    // consumed challenge still prevents safe reuse.
-                    self.disconnectTransport();
-                } else if (!valid_publish_refusal and
-                    !self.disconnectForPeerProtocolViolation(err, call_deadline.withClock(.awake)))
-                {
-                    self.disconnectTransport();
-                }
-                if (err == error.Timeout and std.Io.Clock.awake.now(self.io).nanoseconds >= call_deadline.nanoseconds) return null;
-                return err;
-            };
-            if (client_event) |event| {
-                packet_owned = false;
-                return event;
-            }
-        }
-    }
+    const pollUntil = PollController.run;
 
     fn connectEventBefore(
         self: *Client,
