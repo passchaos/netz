@@ -70,9 +70,27 @@ pub const Options = struct {
     request_tls13_session_ticket: bool = true,
     tls13_ticket_resumption: ?*const vail.tls.ticket.Cached = null,
     request_ocsp: bool = true,
+    /// RFC 8879 algorithms advertised in the TLS 1.3 compress_certificate
+    /// extension. All three vail-supported algorithms are offered by
+    /// default; an empty slice disables the extension entirely.
+    certificate_compression_algorithms: []const vail.tls.certificate_compression.Algorithm =
+        &default_certificate_compression_algorithms,
+    /// Reject a compressed Certificate whose declared uncompressed size
+    /// exceeds this bound before allocating or inflating any bytes.
+    max_decompressed_certificate_len: usize = default_max_decompressed_certificate_len,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
 };
+
+/// Brotli and zstd compress real certificate chains substantially better than
+/// zlib while remaining in vail's pure-Zig support set; keep zlib last for
+/// maximum server interoperability.
+pub const default_certificate_compression_algorithms = [_]vail.tls.certificate_compression.Algorithm{
+    .brotli,
+    .zstd,
+    .zlib,
+};
+pub const default_max_decompressed_certificate_len: usize = 64 * 1024;
 
 pub const VerifiedOptions = struct {
     server_name: []const u8,
@@ -95,6 +113,9 @@ pub const VerifiedOptions = struct {
     tls12_ticket_resumption: ?*const vail.tls.tls12_ticket.Cached = null,
     request_tls13_session_ticket: bool = true,
     tls13_ticket_resumption: ?*const vail.tls.ticket.Cached = null,
+    certificate_compression_algorithms: []const vail.tls.certificate_compression.Algorithm =
+        &default_certificate_compression_algorithms,
+    max_decompressed_certificate_len: usize = default_max_decompressed_certificate_len,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
 };
@@ -201,6 +222,12 @@ pub const Connection = struct {
         if (!options.protocol_policy.offersTls13() and
             options.tls13_ticket_resumption != null)
         {
+            return error.InvalidProtocolPolicy;
+        }
+        vail.tls.certificate_compression.validateAlgorithms(
+            options.certificate_compression_algorithms,
+        ) catch return error.InvalidProtocolPolicy;
+        if (options.max_decompressed_certificate_len == 0) {
             return error.InvalidProtocolPolicy;
         }
         if (options.max_server_handshake_size == 0 or
@@ -310,7 +337,8 @@ pub const Connection = struct {
             .offer_extended_master_secret = options.protocol_policy.offersTls12(),
             .alpn_protocols = options.alpn_protocols,
             .request_ocsp = options.request_ocsp,
-            .certificate_compression_algorithms = &.{},
+            .certificate_compression_algorithms = options.certificate_compression_algorithms,
+            .max_decompressed_certificate_len = options.max_decompressed_certificate_len,
             .server_verifier = options.server_verifier,
             .client_identity = options.client_identity,
             .request_resumption = options.request_tls13_session_ticket or
@@ -496,6 +524,8 @@ pub const Connection = struct {
             .request_tls13_session_ticket = options.request_tls13_session_ticket,
             .tls13_ticket_resumption = options.tls13_ticket_resumption,
             .request_ocsp = options.request_ocsp,
+            .certificate_compression_algorithms = options.certificate_compression_algorithms,
+            .max_decompressed_certificate_len = options.max_decompressed_certificate_len,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
         };
@@ -1090,5 +1120,11 @@ fn validateVerifiedOptions(options: VerifiedOptions) Error!void {
     }
     if (options.server_verifier != null and options.stapled_ocsp != .ignore) {
         return error.ConflictingOcspVerifier;
+    }
+    vail.tls.certificate_compression.validateAlgorithms(
+        options.certificate_compression_algorithms,
+    ) catch return error.InvalidProtocolPolicy;
+    if (options.max_decompressed_certificate_len == 0) {
+        return error.InvalidProtocolPolicy;
     }
 }

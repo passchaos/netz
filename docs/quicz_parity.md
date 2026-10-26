@@ -2847,3 +2847,17 @@ cost and tail scheduling.
    needs a larger-rmem host to show a throughput benefit.
 4. Continue broadening public HTTP/3 interop beyond the independently verified
    ByteDance, Cloudflare, and quiche deployments.
+
+## RFC 8879 certificate compression on stream TLS clients
+
+The blocking TLS 1.3 client used by HTTP/1, HTTP/2, gRPC, WebSocket, and MQTT
+over TLS now advertises the `compress_certificate` extension by default with
+brotli, zstd, and zlib in preference order (`src/tls/stream/versioned_client_connection.zig`).
+The vail stack enforces the advertised-algorithm check and a 64 KiB
+uncompressed-size bound before allocation; both are overridable per connection
+through `certificate_compression_algorithms` (empty list disables the
+extension) and `max_decompressed_certificate_len`. A raw-socket ClientHello
+capture test proves the default algorithm list, the empty-list omission, a
+custom order, and duplicate-algorithm rejection. The netz-native QUIC TLS
+ClientHello and server-side compressed Certificate preparation remain
+separate work.

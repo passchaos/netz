@@ -65,6 +65,7 @@ test {
     _ = @import("versioned_client_connection.zig");
     _ = @import("versioned_server_connection.zig");
     _ = @import("versioned_tests.zig");
+    _ = @import("certificate_compression_tests.zig");
     _ = @import("client_ticket_cache.zig");
     _ = @import("server_handshake.zig");
     _ = @import("alpn_tests.zig");
