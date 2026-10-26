@@ -4,6 +4,10 @@ const http2_runtime = @import("../../http2/runtime.zig");
 const http_cookies = @import("../../http/cookies/mod.zig");
 const runtime = @import("../runtime.zig");
 
+test {
+    _ = @import("cookie_h2_authority_tests.zig");
+}
+
 fn requiredCookie(
     headers: []const http2.Hpack.HeaderField,
 ) !http2.Hpack.HeaderField {

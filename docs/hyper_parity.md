@@ -3462,3 +3462,40 @@ deadline through this cleanup instead of dropping it between the error
 response and the request-direction retirement. Authenticated loopback tests
 cover paced timeout-then-retry, zero and foreign-clock budgets, the
 dispatcher guard and unknown-stream rejection.
+
+## HTTP/2 numeric endpoint authority
+
+`http2.runtime.Client.connect`, `connectWithTimeout` and `connectWithDeadline`
+retain a connection-owned numeric `:authority` for later requests. IPv4 uses
+`address:port`, IPv6 uses `[address]:port`, and IPv6 socket interface/flow
+metadata is omitted from the HTTP origin. The default scheme is `http`.
+This also makes owning gRPC calls through an IP-address channel valid when
+their per-call authority is omitted.
+
+For the IP constructor's implicit default, an explicit request authority takes
+precedence, followed by a caller-provided Host field. Aggregate, incremental,
+batch, duplex and CONNECT writers use the same resolution policy. A request
+override leaves the connection default available for later requests.
+URI, hostname, TLS and adopted-stream authorities retain their existing origin
+binding; conflicting Host fields are rejected before request output. The
+connection's `resolveRequestAuthorityFromHeaders` helper exposes this exact
+selection to protocol adapters. RFC 8441 CookieJar requests use it before
+selecting cookies, so a virtual Host cannot receive the numeric endpoint's
+cookies while its own origin cookies remain available.
+
+Numeric authority preparation shares the captured connect deadline. Expiry
+during allocation returns Timeout before socket creation, and constructor
+failure releases the authority alongside its owned connection resources. URI
+and pooled connections replace authority by allocating the new value before
+freeing the previous value. OOM retains the prior value for cleanup; a
+replacement that borrows the old value is also safe.
+
+IPv4/IPv6 loopback tests cover all three TCP constructors, explicit overrides,
+Host translation, streamed requests, two-stream batches and subsequent reuse.
+Deterministic clock/allocator probes expire the connect budget during authority
+preparation and require zero network calls. A post-TCP allocation fault checks
+socket retirement and balanced allocation ownership. Additional tests cover
+URI pool origin binding and RFC 8441 virtual-host cookie isolation. The
+independent `interop-grpc-response` gate now omits netz's per-call authority and
+requires the Node HTTP/2 peer to receive the exact connected endpoint in all
+57 native RPCs on one connection.

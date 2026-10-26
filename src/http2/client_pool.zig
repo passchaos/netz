@@ -5,6 +5,7 @@
 //! release returns only quiescent, non-GOAWAY connections to the idle pool.
 
 const std = @import("std");
+const client_authority = @import("runtime/client/authority.zig");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const http_method = @import("../internal/http_method.zig");
@@ -850,13 +851,8 @@ pub const Pool = struct {
                 );
             }
         }
-        if (connection.default_authority) |authority| {
-            self.allocator.free(authority);
-        }
-        connection.default_authority = try self.allocator.dupe(
-            u8,
-            endpoint.authority,
-        );
+        try client_authority.replace(self.allocator, &connection.default_authority, endpoint.authority);
+        connection.default_authority_is_ip = false;
         connection.default_scheme = if (transport == .tls) "https" else "http";
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
         reserved = false;

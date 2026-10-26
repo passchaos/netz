@@ -9,8 +9,13 @@ const frame_wire = @import("runtime/frame/wire.zig");
 const flow_window = @import("runtime/flow/window.zig");
 const flow_output = @import("runtime/flow/output.zig");
 const outbound_headers = @import("runtime/headers/connection.zig");
+const client_authority = @import("runtime/client/authority.zig");
 const header_output = @import("runtime/headers/output.zig");
 test {
+    _ = @import("runtime/client/authority_tests.zig");
+    _ = @import("runtime/client/authority_deadline_tests.zig");
+    _ = @import("runtime/client/authority_uri_tests.zig");
+    _ = client_authority;
     _ = @import("runtime/connect/deadline_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");
     _ = @import("runtime/control/output_deadline_tests.zig");
@@ -1943,8 +1948,16 @@ pub const Client = struct {
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Connection {
         try validateLocalLimits(limits);
-        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
+        const connect_deadline = try deadline_policy.fromTimeout(io, limits.connect_timeout);
+        const authority = try client_authority.ipAlloc(allocator, address);
+        errdefer allocator.free(authority);
+        const stream = if (connect_deadline) |deadline|
+            try tcp_connect.ipWithDeadline(io, address, deadline)
+        else
+            try tcp_connect.ip(io, address, null);
         var connection = try connectStream(allocator, io, stream, limits);
+        connection.default_authority = authority;
+        connection.default_authority_is_ip = true;
         connection.default_scheme = "http";
         return connection;
     }
@@ -1959,14 +1972,13 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
+        const connect_deadline = try deadline_policy.capTimeout(io, deadline, limits.connect_timeout);
+        const authority = try client_authority.ipAlloc(allocator, address);
+        errdefer allocator.free(authority);
         const stream = try tcp_connect.ipWithDeadline(
             io,
             address,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
+            connect_deadline,
         );
         var connection = try connectStreamBefore(
             allocator,
@@ -1975,6 +1987,8 @@ pub const Client = struct {
             limits,
             deadline,
         );
+        connection.default_authority = authority;
+        connection.default_authority_is_ip = true;
         connection.default_scheme = "http";
         return connection;
     }
@@ -3385,13 +3399,8 @@ pub const Client = struct {
             break :blk established;
         };
         defer connection.close();
-        if (connection.default_authority) |authority| {
-            allocator.free(authority);
-        }
-        connection.default_authority = try allocator.dupe(
-            u8,
-            endpoint.authority,
-        );
+        try client_authority.replace(allocator, &connection.default_authority, endpoint.authority);
+        connection.default_authority_is_ip = false;
         connection.default_scheme = uri.scheme;
         var options = request_options;
         options.path = target;
@@ -3502,11 +3511,8 @@ pub const Client = struct {
             ),
         };
         defer connection.close();
-        if (connection.default_authority) |authority| allocator.free(authority);
-        connection.default_authority = try allocator.dupe(
-            u8,
-            endpoint.authority,
-        );
+        try client_authority.replace(allocator, &connection.default_authority, endpoint.authority);
+        connection.default_authority_is_ip = false;
         connection.default_scheme = uri.scheme;
         var options = request_options;
         options.path = target;
@@ -3882,6 +3888,9 @@ pub const Connection = struct {
     /// model. A later reset replaces an untaken value.
     last_peer_reset: ?http2.ResetStreamPayload = null,
     default_authority: ?[]u8 = null,
+    /// An IP constructor supplies an implicit numeric default. Explicit Host
+    /// may replace it; URI/TLS/adopted authorities retain their origin binding.
+    default_authority_is_ip: bool = false,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// constructors set this to `http`, while the ALPN-authenticated TLS
     /// constructor sets it to `https`.
@@ -3918,6 +3927,17 @@ pub const Connection = struct {
         explicit: ?[]const u8,
     ) ?[]const u8 {
         return explicit orelse self.default_authority;
+    }
+
+    /// Resolve the exact request authority, including a caller-provided Host
+    /// header. Protocol adapters can use this same origin for cookie policy.
+    pub fn resolveRequestAuthorityFromHeaders(
+        self: *const Connection,
+        explicit: ?[]const u8,
+        headers: []const http2.Hpack.HeaderField,
+    ) ?[]const u8 {
+        if (!self.default_authority_is_ip and self.default_authority != null) return self.resolveRequestAuthority(explicit);
+        return client_authority.resolve(explicit, headers, self.default_authority);
     }
 
     pub fn close(self: *Connection) void {
@@ -4799,7 +4819,7 @@ pub const Connection = struct {
         // that its caller chose not to consume.
         self.last_peer_reset = null;
         var request_options = options;
-        if (request_options.authority == null) request_options.authority = self.default_authority;
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         const scheme = request_options.scheme orelse self.default_scheme orelse "https";
 
         var fields_stack: [16]http2.Hpack.HeaderField = undefined;
@@ -4959,9 +4979,7 @@ pub const Connection = struct {
             return error.InvalidContentLength;
         }
         var request_options = options;
-        if (request_options.authority == null) {
-            request_options.authority = self.default_authority;
-        }
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         const scheme = request_options.scheme orelse
             self.default_scheme orelse "https";
 
@@ -6467,9 +6485,7 @@ pub const Connection = struct {
         encoder: *http2.Hpack.Encoder,
     ) Error!PendingResponse {
         var request_options = options;
-        if (request_options.authority == null) {
-            request_options.authority = self.default_authority;
-        }
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         const scheme =
             request_options.scheme orelse self.default_scheme orelse "https";
 
@@ -7270,9 +7286,7 @@ pub const Connection = struct {
         encoder: *http2.Hpack.Encoder,
     ) Error!PendingResponse {
         var request_options = options;
-        if (request_options.authority == null) {
-            request_options.authority = self.default_authority;
-        }
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         const scheme =
             request_options.scheme orelse self.default_scheme orelse "https";
 
@@ -9183,8 +9197,9 @@ pub const Connection = struct {
     ) ResponseTimeoutError!ExtendedConnectAttempt {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
-        request_options.authority = self.resolveRequestAuthority(
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(
             request_options.authority,
+            request_options.headers,
         );
         if (!methodIsConnect(request_options.method)) return error.InvalidHeader;
         const protocol = request_options.protocol orelse return error.InvalidHeader;
@@ -9245,7 +9260,7 @@ pub const Connection = struct {
     pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
-        if (request_options.authority == null) request_options.authority = self.default_authority;
+        request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
         if (!methodIsConnect(request_options.method) or request_options.protocol != null) return error.InvalidHeader;
         if (request_options.authority == null) return error.MissingPseudoHeader;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;

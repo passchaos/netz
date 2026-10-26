@@ -1,6 +1,16 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP2 resolves Host before an implicit IP authority default" {
+    const allocator = std.testing.allocator;
+    const authority = try allocator.dupe(u8, "127.0.0.1:80");
+    defer allocator.free(authority);
+    const connection: netz.http2.runtime.Connection = .{ .allocator = allocator, .io = undefined, .stream = undefined, .role = .client, .default_authority = authority, .default_authority_is_ip = true };
+    try std.testing.expectEqualStrings("127.0.0.1:80", connection.resolveRequestAuthorityFromHeaders(null, &.{}).?);
+    try std.testing.expectEqualStrings("virtual.example", connection.resolveRequestAuthorityFromHeaders(null, &.{.{ .name = "host", .value = "virtual.example" }}).?);
+    try std.testing.expectEqualStrings("explicit.example", connection.resolveRequestAuthorityFromHeaders("explicit.example", &.{.{ .name = "host", .value = "virtual.example" }}).?);
+}
+
 test "public gRPC streaming terminal synthesizes UNKNOWN without grpc-status" {
     const allocator = std.testing.allocator;
     var terminal = try netz.grpc.stream.runtime.parseResponseTerminal(allocator, 200, &.{}, &.{}, null);

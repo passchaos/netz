@@ -34,13 +34,13 @@ pub fn main(init: std.process.Init) !void {
     var client = try netz.grpc.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(port) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
     defer client.deinit();
     for (probes.value) |probe| {
-        var response = try client.unary(.{ .path = probe.path, .authority = "localhost", .message = "", .timeout = .{ .value = 5, .unit = .second } });
+        var response = try client.unary(.{ .path = probe.path, .message = "", .timeout = .{ .value = 5, .unit = .second } });
         defer response.deinit();
         try check(response, probe, @intFromBool(response.message != null));
         if (response.message) |message| try std.testing.expectEqualStrings(probe.payload, message.payload);
     }
     for (probes.value) |probe| {
-        var stream = try client.startStreaming(.{ .path = probe.path, .authority = "localhost", .timeout = .{ .value = 5, .unit = .second } });
+        var stream = try client.startStreaming(.{ .path = probe.path, .timeout = .{ .value = 5, .unit = .second } });
         defer stream.deinit();
         try stream.writeMessage("");
         var collector: Collector = .{ .probe = probe };
@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         try check(response, probe, collector.count);
     }
     for (probes.value) |probe| {
-        var stream = try client.startDuplex(.{ .path = probe.path, .authority = "localhost", .timeout = .{ .value = 5, .unit = .second } });
+        var stream = try client.startDuplex(.{ .path = probe.path, .timeout = .{ .value = 5, .unit = .second } });
         defer stream.deinit();
         try std.testing.expectEqual(netz.grpc.DuplexWriteResult.complete, try stream.writeMessage(""));
         try std.testing.expectEqual(netz.grpc.DuplexWriteResult.complete, try stream.finishRequest());

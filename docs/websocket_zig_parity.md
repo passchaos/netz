@@ -363,7 +363,10 @@ through `CookieHandshakeOptions`. No caller-supplied scope is accepted: H2
 derives it from the transport-resolved `:scheme` and actual
 `:authority`/`:path`, while H3 uses its HTTPS authority/path or parsed URI.
 Cookie selection therefore cannot diverge from the Extended CONNECT request's
-host or Path. The adapters reject Cookie/Cookie2 ownership conflicts and
+host or Path. On IP-addressed H2 channels, a caller Host field can override the
+implicit numeric default; CookieJar uses that exact selection. URI and TLS
+authority bindings retain their consistency checks. A real RFC 8441 exchange
+checks that only the virtual Host's cookies are sent. The adapters reject Cookie/Cookie2 ownership conflicts and
 invalid targets/authorities before request I/O, derive WebSocket state with GET
 and HTTP-API semantics, encode Cookie as HPACK/QPACK Never Indexed, and ingest
 every Set-Cookie field before returning either an accepted or rejected attempt.

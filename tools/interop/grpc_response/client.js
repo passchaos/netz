@@ -89,6 +89,9 @@ async function main() {
         assert.deepEqual(Buffer.concat(chunks), Buffer.alloc(5));
         const match = /^\/fixture.Response\/Case(\d+)$/.exec(headers[':path']);
         assert.ok(match);
+        assert.equal(headers[':scheme'], 'http');
+        assert.ok(headers[':authority']);
+        assert.equal(headers[':authority'], `127.0.0.1:${server.address().port}`);
         const index = Number(match[1]);
         const probe = probes[index];
         assert.ok(probe);

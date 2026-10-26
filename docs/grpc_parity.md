@@ -745,3 +745,14 @@ the fixture's HTML body as an oversized message envelope. Netz applies the
 documented UNKNOWN fallback and discards that non-gRPC entity. The gate checks
 the pinned SDK's actual outcomes alongside netz's required behavior and does
 not claim those malformed responses have identical SDK results.
+
+The owning h2c client's IP-address connection now also supplies its numeric
+`address:port` authority automatically through the HTTP/2 runtime. Unary,
+sequential, duplex, generated pbz, health and reflection calls may omit the
+per-call authority when using that endpoint. An explicit per-call authority
+retains precedence. IPv6 defaults use `[address]:port`; socket interface and
+flow metadata stay out of the HTTP origin. TLS constructors retain their
+hostname or explicitly configured authority and certificate/SNI identity.
+The same independent response-policy gate now omits netz's per-call authority
+and requires the raw Node peer to observe the exact connected address/port in
+all 57 native RPCs, including correct `http` scheme and connection reuse.

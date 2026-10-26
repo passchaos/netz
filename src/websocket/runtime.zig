@@ -10923,7 +10923,7 @@ pub const H2Client = struct {
             try cookie_handshake.scopeUriAlloc(
                 allocator,
                 connection.resolveRequestScheme(options.scheme),
-                connection.resolveRequestAuthority(options.authority) orelse
+                connection.resolveRequestAuthorityFromHeaders(options.authority, options.extra_headers) orelse
                     return error.InvalidUri,
                 options.path,
             )
