@@ -4635,11 +4635,11 @@ pub const Broker = struct {
         // pending by SnapshotBusy. Attachment retries that snapshot and any
         // journal correction deferred by a concurrent CONNECT rollback.
         registration_persistence.settled(RegistrationPersistenceContext, self);
-        errdefer self.unregister(
+        errdefer _ = self.unregister(
             index,
             registration.subscriber_id,
             null,
-        ) catch {};
+        ) catch null;
         try self.flushSlot(index, &self.slots[index]);
         const task = ClientTask{
             .broker = self,
@@ -5483,7 +5483,7 @@ pub const Broker = struct {
         slot_index: usize,
         id: router_mod.SubscriberId,
         listener_capacity: ?*ListenerCapacity,
-    ) Error!void {
+    ) Error!?anyerror {
         // Release the listener claim on every terminal path. The successful
         // path transfers this cleanup to the precise inactive-slot boundary
         // below, before the old socket close becomes visible to its peer.
@@ -5494,6 +5494,10 @@ pub const Broker = struct {
         const slot = &self.slots[slot_index];
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
+        // The old reader can finish before an in-flight shared writer records
+        // its result. Collect only after owning this quiescence boundary, and
+        // before publishing the slot as reusable by another connection.
+        const session_writer_error = self.session_delivery_writers.takeError(self.io, slot_index);
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = false;
@@ -5619,6 +5623,7 @@ pub const Broker = struct {
             persistent_changed,
             persistent_changed,
         );
+        return session_writer_error;
     }
 
     fn handleDisconnect(
@@ -9214,27 +9219,20 @@ const ClientTask = struct {
         // OwnedConnect releases the packet or replacement identity.
         defer connect.deinit(task.broker.allocator);
         const connection = slot.connection.?;
-        defer task.broker.unregister(
-            task.slot_index,
-            task.subscriber_id,
-            task.listener_capacity,
-        ) catch |err| {
-            task.result.* = err;
-        };
+        defer @import("broker/session_writer/retirement.zig").settle(struct {
+            pub fn unregister(value: ClientTask) Error!?anyerror {
+                return value.broker.unregister(value.slot_index, value.subscriber_id, value.listener_capacity);
+            }
+            pub const transportClosed = ungracefulTransportClose;
+        }, task);
 
         var read_error: ?anyerror = null;
         task.runLoop(slot, connection, connect.connect) catch |err| {
             if (!ungracefulTransportClose(err)) read_error = err;
         };
         const writer_error = task.stopDeliveryWriter(slot);
-        const session_writer_error = task.takeSessionDeliveryWriterError(slot);
         if (read_error) |err| task.result.* = err;
         if (writer_error) |err| {
-            if (!ungracefulTransportClose(err) and task.result.* == null) {
-                task.result.* = err;
-            }
-        }
-        if (session_writer_error) |err| {
             if (!ungracefulTransportClose(err) and task.result.* == null) {
                 task.result.* = err;
             }
@@ -9298,16 +9296,6 @@ const ClientTask = struct {
             else => err,
         };
         return null;
-    }
-
-    fn takeSessionDeliveryWriterError(
-        task: ClientTask,
-        _: *ClientSlot,
-    ) ?anyerror {
-        return task.broker.session_delivery_writers.takeError(
-            task.broker.io,
-            task.slot_index,
-        );
     }
 
     /// Finish one acknowledgement while retaining the connection's writer
@@ -10525,6 +10513,16 @@ test {
     _ = @import("broker/router_churn_tests.zig");
     _ = @import("broker/fanout/transport_tests.zig");
     _ = @import("broker/fanout/flush_tests.zig");
+}
+
+test "MQTT broker teardown collects late shared writer errors before slot reuse" {
+    try @import("broker/session_writer/retirement_tests.zig").lateErrorBeforeReuse(struct {
+        pub const BrokerType = Broker;
+        pub const claim = Broker.claimSlot;
+        pub const release = Broker.releaseClaimedSlot;
+        pub const unregister = Broker.unregister;
+        pub const id = subscriberId;
+    });
 }
 
 test "broker retained expiry scan persists physical removal" {

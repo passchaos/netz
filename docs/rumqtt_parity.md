@@ -9,6 +9,16 @@ and same-client broker results are kept separate.
 
 ## Current feature comparison
 
+Broker teardown now collects shared Session-writer errors while holding the
+slot writer lock, after any in-flight flush has finished publishing its result
+and before the slot becomes reusable. A writer failure arriving after the
+reader exits therefore reaches that connection's result instead of leaking
+into the next connection generation. Expected transport-close errors remain
+filtered, earlier reader/delivery errors retain precedence, and durable cleanup
+failures keep their existing precedence. Error settlement lives in
+`broker/session_writer/retirement.zig`; adjacent regressions cover late fatal
+and transport errors, error precedence, and clean reuse of a one-slot Broker.
+
 Reconnect polling now recovers retryable automatic output failures under its
 original budget instead of terminating `serveUntil`. One bounded owned-event
 slot retains applied PUBLISH, PUBREC, PUBREL and AUTH metadata through response
