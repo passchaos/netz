@@ -102,7 +102,10 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
         if (self.aggregate_timeout_unusable) {
             self.terminal_write_failed = true;
         } else if (head_committed and (err == error.Timeout or err == error.OutOfMemory)) {
-            Context.discard(self, stream_id, cleanup.cleanupDeadline(self, deadline));
+            // Timeout is authoritative even when a transport's timer rounds
+            // before the clock's exact timestamp. Do not spend the last few
+            // sub-millisecond operation ticks on terminal cancellation.
+            Context.discard(self, stream_id, cleanup.cleanupDeadline(self, if (err == error.Timeout) null else deadline));
         }
         Context.release(self, stream_id);
         Context.forgetWindows(self, stream_id);

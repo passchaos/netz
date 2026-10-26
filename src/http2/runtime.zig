@@ -30,6 +30,7 @@ test {
     _ = @import("runtime/request/upload_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
+    _ = @import("runtime/stream/termination_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -72,6 +73,7 @@ const complete_request = @import("runtime/request/complete.zig");
 const batch_output = @import("runtime/request/batch_output.zig");
 const complete_upload = @import("runtime/request/upload.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
+const stream_termination = @import("runtime/stream/termination.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
@@ -498,9 +500,10 @@ pub const Limits = struct {
     /// can be advertised to peers and must stay within RFC 9113 bounds.
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
-    /// Best-effort WINDOW_UPDATE/CANCEL cleanup after a discarded response.
-    /// The RPC read keeps its original deadline; cleanup may add at most this
-    /// separate shared transport budget to the return path. Zero skips writes.
+    /// Best-effort control output after a discarded response, owned client
+    /// stream cancellation/destruction, or a terminal early response. The RPC
+    /// keeps its original deadline; cleanup may add at most this separate
+    /// shared transport budget to the return path. Zero skips writes.
     terminal_cleanup_timeout: std.Io.Duration = .fromMilliseconds(10),
     max_header_fields: usize = 256,
     /// Maximum interim response heads accepted before a final response. This
@@ -14392,6 +14395,20 @@ pub const Connection = struct {
         self.forgetStreamWindows(stream_id);
     }
 
+    const local_stream_termination_hooks = .{
+        .active = outboundStreamIsActive,
+        .reset = writeResetStreamFrameUntil,
+        .emptyData = flow_output.writeEmpty,
+        .transport = transportForIo,
+        .releaseLocal = releaseLocalStream,
+        .releasePeer = releasePeerStream,
+        .forgetWindows = forgetStreamWindows,
+    };
+
+    fn terminateLocalStream(self: *Connection, id: u31, code: http2.ErrorCode) Error!void {
+        return stream_termination.reset(self, id, code, response_cleanup.cleanupDeadline(self, null), local_stream_termination_hooks);
+    }
+
     /// Best-effort cleanup for an admitted Extended CONNECT stream whose
     /// protocol adapter is being dropped before a final response. Unlike
     /// `sendResetStream`, local state is released even if the reset cannot be
@@ -18939,13 +18956,7 @@ pub const RequestWriter = struct {
     /// a no-op.
     pub fn deinit(self: *RequestWriter) void {
         if (self.completed) return;
-        self.connection.sendResetStream(
-            self.stream_id,
-            .cancel,
-        ) catch {
-            self.connection.releaseLocalStream(self.stream_id);
-        };
-        self.completed = true;
+        self.cancel(.cancel) catch {};
     }
 
     pub fn write(
@@ -19465,21 +19476,22 @@ pub const RequestWriter = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         try self.ensureWritable();
-        try self.connection.sendResetStream(self.stream_id, error_code);
-        self.body_finished = true;
-        self.completed = true;
+        return self.cancel(error_code);
     }
 
     /// Cancel an unconsumed response even after the request body has been
-    /// half-closed. Repeated cancellation is a no-op.
+    /// half-closed. The terminal cleanup budget bounds output, and local state
+    /// is retired even on failure. Repeated cancellation is a no-op.
     pub fn cancel(
         self: *RequestWriter,
         error_code: http2.ErrorCode,
     ) Error!void {
         if (self.completed) return;
-        try self.connection.sendResetStream(self.stream_id, error_code);
-        self.body_finished = true;
-        self.completed = true;
+        defer {
+            self.body_finished = true;
+            self.completed = true;
+        }
+        return self.connection.terminateLocalStream(self.stream_id, error_code);
     }
 
     fn ensureWritable(self: RequestWriter) Error!void {
@@ -19547,6 +19559,7 @@ const DuplexHeaderBlock = struct {
     end_headers: bool,
     continuation_count: usize = 0,
     limit_exceeded: bool = false,
+    decode_complete: bool = false,
     bytes: std.ArrayList(u8) = .empty,
 
     fn init(
@@ -19585,6 +19598,7 @@ const DuplexHeaderBlock = struct {
             }
             return @errorCast(err);
         };
+        self.decode_complete = true;
         return &.{};
     }
 
@@ -19620,15 +19634,24 @@ const DuplexHeaderBlock = struct {
             };
             // A caller may observe the same terminal error again. Do not
             // replay the rejected block's dynamic-table updates on retry.
+            self.decode_complete = true;
             self.bytes.clearRetainingCapacity();
             return error.MessageTooLarge;
         }
-        return decodeOwnedHeaders(
+        const fields = decodeOwnedHeaders(
             connection.allocator,
             self.bytes.items,
             connection.limits,
             &connection.hpack_decoder,
-        );
+        ) catch |err| {
+            // Output limits still consume the complete HPACK block. OOM or a
+            // compression failure can stop partway through dynamic updates.
+            self.decode_complete = err == error.MessageTooLarge and
+                !connection.hpack_decoder.lastDecodeWasCompressionError();
+            return err;
+        };
+        self.decode_complete = true;
+        return fields;
     }
 
     fn appendContinuation(self: *DuplexHeaderBlock, connection: *Connection, frame: http2.Frame) Error!void {
@@ -19775,18 +19798,14 @@ pub const ClientDuplexStream = struct {
     released: bool = false,
 
     pub fn deinit(self: *ClientDuplexStream) void {
-        self.pending_header.deinit(self.connection.allocator);
         if (!self.released) {
             if (self.request_finished and self.response_finished) {
                 self.release();
             } else {
-                self.connection.sendResetStream(self.stream_id, .cancel) catch {
-                    self.connection.releaseLocalStream(self.stream_id);
-                    self.connection.forgetStreamWindows(self.stream_id);
-                };
-                self.released = true;
+                self.reset(.cancel) catch {};
             }
         }
+        self.pending_header.deinit(self.connection.allocator);
         self.connection.duplex_reader_active = false;
         self.* = undefined;
     }
@@ -19894,12 +19913,19 @@ pub const ClientDuplexStream = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         if (self.released) return error.ConnectionClosed;
-        try self.connection.sendResetStream(self.stream_id, error_code);
-        self.request_finished = true;
-        self.response_finished = true;
-        self.response_finished_reported = true;
-        self.released = true;
-        self.connection.duplex_reader_active = false;
+        defer {
+            self.request_finished = true;
+            self.response_finished = true;
+            self.response_finished_reported = true;
+            self.released = true;
+            self.connection.duplex_reader_active = false;
+        }
+        if (self.pending_header.getPtr()) |pending| {
+            // Both incomplete frame input and an interrupted HPACK decode
+            // lose state needed to keep the shared decoder synchronized.
+            if (!pending.decode_complete) self.connection.aggregate_timeout_unusable = true;
+        }
+        return self.connection.terminateLocalStream(self.stream_id, error_code);
     }
 
     pub fn finishRequestData(
@@ -20356,11 +20382,12 @@ pub const ClientDuplexStream = struct {
         }
     }
 
-    /// Stop an upload after observing a terminal early response. This emits
-    /// only the request-half FIN; the response result remains available until
-    /// its terminal event has been reported.
+    /// Stop an upload after observing a terminal early response. The default
+    /// terminal cleanup budget bounds request-half FIN (or CANCEL when FIN
+    /// would violate Content-Length). Local ownership is retired on failure;
+    /// the committed response remains available to its caller.
     pub fn closeRequestAfterResponse(self: *ClientDuplexStream) Error!void {
-        return self.closeRequestAfterResponseUntil(null);
+        return self.closeRequestAfterResponseUntil(response_cleanup.cleanupDeadline(self.connection, null));
     }
 
     pub fn closeRequestAfterResponseWithDeadline(self: *ClientDuplexStream, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
@@ -20376,16 +20403,17 @@ pub const ClientDuplexStream = struct {
     fn closeRequestAfterResponseUntil(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (!self.response_finished) return error.UnexpectedFrame;
         if (self.request_finished) return;
-        var sent: usize = 0;
-        try self.connection.writeDataDuplexTrackedUntil(
-            self.stream_id,
-            &.{},
-            true,
-            &sent,
-            deadline,
-        );
-        self.request_finished = true;
-        self.maybeRelease();
+        defer {
+            self.request_finished = true;
+            self.released = true;
+            self.connection.duplex_reader_active = false;
+        }
+        if (self.expected_request_length) |expected| {
+            if (self.request_written != expected) {
+                return stream_termination.reset(self.connection, self.stream_id, http2.ErrorCode.cancel, deadline, Connection.local_stream_termination_hooks);
+            }
+        }
+        return stream_termination.finish(self.connection, self.stream_id, deadline, Connection.local_stream_termination_hooks);
     }
 
     fn release(self: *ClientDuplexStream) void {
@@ -22816,8 +22844,8 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
         const connection_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 1_856,
-            .ReleaseFast, .ReleaseSmall => 1_776,
+            .Debug, .ReleaseSafe => 1_872,
+            .ReleaseFast, .ReleaseSmall => 1_792,
         };
         try std.testing.expectEqual(connection_size, @sizeOf(Connection));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
@@ -34608,35 +34636,47 @@ test "HTTP/2 partial extension control write fails connection closed" {
 test "HTTP/2 application batch reset partial write fails closed" {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
-        writes: usize = 0,
+        var active: std.atomic.Value(?*@This()) = .init(null);
+        writes: std.atomic.Value(usize) = .init(0),
 
         fn write(
-            context: ?*anyopaque,
+            _: ?*anyopaque,
             _: net.Socket.Handle,
             bytes: []const u8,
             _: []const []const u8,
             _: usize,
         ) net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.writes += 1;
-            if (self.writes == 1) return @min(bytes.len, 4);
+            const self = active.load(.acquire).?;
+            if (self.writes.fetchAdd(1, .monotonic) == 0) return @min(bytes.len, 4);
             return error.NetworkDown;
         }
     };
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    errdefer stream.close(io);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
     var writer: PartialWriter = .{};
+    PartialWriter.active.store(&writer, .release);
+    defer PartialWriter.active.store(null, .release);
     var vtable = threaded.io().vtable.*;
     vtable.netWrite = PartialWriter.write;
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = undefined,
+        .stream = stream,
         .role = .client,
         .limits = .{ .max_reset_stream_history = 0 },
     };
-    defer connection.write_batch.deinit(allocator);
+    defer {
+        connection.io = io;
+        connection.close();
+    }
 
     const states = [_]Connection.BatchResponseState{
         .{
@@ -34654,7 +34694,7 @@ test "HTTP/2 application batch reset partial write fails closed" {
         error.NetworkDown,
         connection.writeBatchResponseResets(&states),
     );
-    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(usize, 2), writer.writes.load(.acquire));
     try std.testing.expect(connection.aggregate_timeout_unusable);
     try std.testing.expectError(
         error.ConnectionClosed,
@@ -34668,7 +34708,7 @@ test "HTTP/2 application batch reset partial write fails closed" {
             &responses,
         ),
     );
-    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(usize, 2), writer.writes.load(.acquire));
 }
 
 test "HTTP/2 adaptive window partial write fails closed without local commit" {

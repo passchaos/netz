@@ -3620,3 +3620,35 @@ stream delivery, HPACK rollback, per-member error reporting and local window
 ownership after failure. The opening regression fails against the prior
 implementation with ConnectionResetByPeer after its 500 ms rescue instead of
 the requested 30 ms Timeout.
+
+## Owned client stream termination
+
+`RequestWriter` cancellation/destruction and `ClientDuplexStream` reset or
+early-response upload completion now share the finite terminal cleanup policy
+under `http2/runtime/stream/termination.zig`. Successful resets keep sibling
+streams reusable. Timeout, partial output, OOM before reset-history reservation,
+and the zero-budget opt-out all release local stream ownership, priority state,
+and both flow-control windows; failed output blocks subsequent terminal writes
+and destructor retries. Dropping an incomplete consumed HEADERS/CONTINUATION
+context or an HPACK decode interrupted by OOM retires reuse, while completely
+decoded oversized HPACK blocks retain the existing stream-local reset behavior.
+
+An early-response FIN is submitted without waiting on already buffered sibling
+response events. Its failure cannot replace the committed response status, and
+an unfinished Content-Length entity uses CANCEL rather than a short FIN. Real
+TCP and pinned TLS 1.2/1.3 regressions exercise blocked output and ownership
+retirement; injected failures cover partial writes, zero cleanup budget,
+allocation failure, and the absence of later cleanup writes.
+
+The broader HTTP/2 gate also refreshes the connection layout assertion for the
+16-byte frame-reader retry span introduced by `e40e429c`; this termination work
+adds no per-connection fields. The earlier batch-reset partial-write fixture now
+uses a real socket and retains the executor's userdata when overriding netWrite,
+so bounded submission can safely schedule and join its write task.
+The upload-flow-control wire probe carries one bounded peer-read deadline and
+an explicit successful-cleanup budget. Its TCP rescue shuts down both directions
+before closing the descriptor, so an absent CANCEL cannot strand a blocked read.
+Upload Timeout now always selects the independent cleanup deadline, including
+transports that report timeout before the exact awake timestamp due to timer
+granularity. OOM still retains the earlier operation deadline. A deterministic
+submission-hook regression verifies both budgets without relying on poll timing.

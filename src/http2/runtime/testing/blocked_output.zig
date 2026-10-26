@@ -30,6 +30,9 @@ pub const BlockedOutput = struct {
         self.rescue = try std.Thread.spawn(.{}, struct {
             fn run(io: std.Io, peer: std.Io.net.Stream) void {
                 std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
+                // Closing a descriptor alone does not interrupt a read that
+                // already holds the socket. Wake both endpoints before close.
+                peer.shutdown(io, .both) catch {};
                 peer.close(io);
             }
         }.run, .{ self.connection.io, self.peer });

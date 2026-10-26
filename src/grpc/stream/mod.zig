@@ -36,5 +36,7 @@ pub const acceptDuplexWithDeadline = duplex.acceptDuplexWithDeadline;
 
 test {
     _ = @import("tests.zig");
+    _ = @import("termination_tests.zig");
+    _ = @import("termination_tls_tests.zig");
     _ = @import("terminal.zig");
 }

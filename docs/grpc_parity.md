@@ -525,6 +525,23 @@ application progress. A bounded call that encounters another write owner returns
 after zero-byte and partial-ciphertext failures and after a blocked read-side
 KeyUpdate response, checking that the epoch transition happens once.
 
+Sequential and duplex client stream termination now uses the same finite
+`terminal_cleanup_timeout` budget. Deadline-triggered CANCEL, explicit stream
+cancellation, and destruction retire local ownership and both indexed windows
+even when a reset cannot be sent. An output failure prevents destructor retry
+and further terminal writes; successful cancellation remains stream-local.
+The duplex client's request-half FIN after an early terminal response is also
+bounded, preserving the parsed gRPC status when output fails. Buffered sibling
+responses remain available, and an unfinished declared Content-Length uses
+CANCEL instead of a malformed FIN. A consumed but incompletely decoded HPACK
+block retires channel reuse, while a completely decoded oversized block can still be
+reset without losing the shared decoder. Regression coverage includes blocked
+TCP and certificate-pinned TLS 1.2/1.3 output, partial control writes, reset
+history OOM, and zero cleanup budget.
+The TLS probes hold the actual encrypted socket write after the verified
+handshake and check retained ciphertext plus task cancellation/join and no
+destructor resubmission, avoiding a TCP ACK race for tiny control frames.
+
 ## gRPC-Web unary and server streaming support
 
 The production h2c/TLS gRPC server now speaks the gRPC-Web wire protocol
