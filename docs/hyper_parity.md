@@ -1027,7 +1027,10 @@ Reusable implementation changes behind these H2 results:
   fail before HPACK or stream mutation; a blocked/partial header submission
   follows the existing connection-reuse safety boundary. Real blocked-socket
   tests cover both APIs, and the audited h2 interop server sends 103, 102 and
-  the final 200 under one deadline;
+  the final 200 under one deadline. When that operation budget expires after
+  committed HEADERS, aggregate response cancellation captures a separate
+  bounded terminal budget so a writable connection can preserve its siblings.
+  Already-captured terminal budgets retain their original expiry;
 - application `sendResetStream` and `sendGoAway` calls now expose matching
   timeout/deadline forms. Deadline validation precedes stream release,
   Last-Stream-ID mutation and large debug-data allocation. A successful reset

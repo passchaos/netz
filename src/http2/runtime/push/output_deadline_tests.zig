@@ -169,6 +169,50 @@ test "HTTP/2 pushed response deadline retires a promise after committed HEADERS"
         .fromSeconds(1),
     );
     runtime.testing.setSendConnectionWindow(connection, 0);
+    const AfterHeaders = struct {
+        var active: ?*@This() = null;
+        delegate: std.Io,
+        initial: std.Io.Timestamp,
+        total: usize = 0,
+        written: usize = 0,
+        committed: std.atomic.Value(bool) = .init(false),
+        reset_committed: std.atomic.Value(bool) = .init(false),
+
+        fn now(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self = active.?;
+            if (clock != .awake) return clock.now(self.delegate);
+            return self.initial.addDuration(if (self.committed.load(.acquire)) .fromNanoseconds(30 * std.time.ns_per_ms + 1) else .zero);
+        }
+
+        fn write(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+            const self = active.?;
+            if (!self.committed.load(.acquire)) {
+                if (self.total == 0) {
+                    std.debug.assert(header.len >= http2.FrameHeader.encoded_len and header[3] == @intFromEnum(http2.FrameType.headers));
+                    self.total = header.len;
+                }
+                const count = try self.delegate.vtable.netWrite(userdata, socket, header, data, splat);
+                self.written += count;
+                if (self.written == self.total) self.committed.store(true, .release);
+                return count;
+            }
+            const count = try self.delegate.vtable.netWrite(userdata, socket, header, data, splat);
+            if (header.len >= http2.FrameHeader.encoded_len and header[3] == @intFromEnum(http2.FrameType.rst_stream) and count == header.len) self.reset_committed.store(true, .release);
+            return count;
+        }
+    };
+    // This fixture tests retirement after committed HEADERS, not whether the
+    // scheduler can start that write in 30 ms. Keep the virtual clock fixed
+    // through HEADERS, then expire the unchanged DATA budget deterministically.
+    const delegate = connection.io;
+    var probe = AfterHeaders{ .delegate = delegate, .initial = std.Io.Clock.awake.now(delegate).addDuration(.fromSeconds(60)) };
+    AfterHeaders.active = &probe;
+    defer AfterHeaders.active = null;
+    var vtable = delegate.vtable.*;
+    vtable.now = AfterHeaders.now;
+    vtable.netWrite = AfterHeaders.write;
+    connection.io = .{ .userdata = delegate.userdata, .vtable = &vtable };
+    defer connection.io = delegate;
     try std.testing.expectError(
         error.Timeout,
         connection.writePushedResponseWithTimeout(
@@ -177,6 +221,8 @@ test "HTTP/2 pushed response deadline retires a promise after committed HEADERS"
             .fromMilliseconds(30),
         ),
     );
+    try std.testing.expect(probe.committed.load(.acquire));
+    try std.testing.expect(probe.reset_committed.load(.acquire));
     try std.testing.expect(!connection.aggregate_timeout_unusable);
     try std.testing.expectEqual(
         @as(usize, 0),

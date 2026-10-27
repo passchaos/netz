@@ -12729,7 +12729,7 @@ pub const Connection = struct {
         try validateHeaderBlock(options.trailers, .response_trailers);
         self.appendAutomaticDateHeader(&fields);
         var output_started = false;
-        errdefer if (deadline != null and output_started) self.abortExtendedConnect(stream_id, deadline);
+        errdefer if (deadline != null and output_started) self.abortExtendedConnect(stream_id, response_cleanup.cleanupDeadline(self, deadline));
         if (deadline == null and !suppress_body and
             options.body.len != 0 and
             options.trailers.len == 0)
