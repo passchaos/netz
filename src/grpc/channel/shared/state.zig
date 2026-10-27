@@ -7,7 +7,7 @@ const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const Job = @import("job.zig").Job;
 pub const Options = @import("options.zig").Options;
-pub const Error = health.WatchError || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions };
+pub const Error = health.WatchError || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -37,6 +37,7 @@ pub const State = struct {
     pub const Membership = @import("membership.zig").Membership(State);
     pub const Resolution = @import("resolution.zig").Resolution(State);
     pub const Failure = @import("state.zig").Error;
+    pub const StreamCall = @import("stream/call.zig").Call(State);
 
     pub fn retain(self: *State) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -127,6 +128,7 @@ pub const State = struct {
     fn finishLocked(self: *State, job: *Job, result: ?call.UnaryResponse, err: ?anyerror) void {
         job.result = result;
         job.err = if (self.closed and err != null) error.SharedChannelClosed else err;
+        if (job.stream) |stream| if (job.err) |failure| stream.retireLocked(failure);
         job.phase = .completed;
         job.done.set(self.io);
     }
@@ -303,8 +305,7 @@ pub const State = struct {
         self.wakeAllLocked();
         return job;
     }
-    pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, _: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
-        var job: Job = .{ .options = options, .deadline = deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous };
+    pub fn enqueue(self: *State, job: *Job) Error!void {
         self.lock();
         if (self.closed) {
             self.unlock();
@@ -318,23 +319,26 @@ pub const State = struct {
             self.unlock();
             return error.ConnectionUnavailable;
         }
-        if (self.tail) |tail| tail.next = &job else self.head = &job;
-        self.tail = &job;
+        if (self.tail) |tail| tail.next = job else self.head = job;
+        self.tail = job;
         self.queued += 1;
         self.demand = true;
         self.tracker.setState(self.aggregateLocked());
         self.wakeAllLocked();
         self.unlock();
-        const waited = self.waitForJob(&job, deadline);
+    }
+    pub fn awaitJob(self: *State, job: *Job) Error!void {
+        const waited = self.waitForJob(job, job.deadline);
         waited catch |err| {
             self.lock();
             if (job.phase == .queued) {
-                self.removeQueuedLocked(&job);
+                self.removeQueuedLocked(job);
                 self.unlock();
                 return err;
             }
             if (job.phase != .completed) {
                 job.cancel_requested = true;
+                if (job.stream) |stream| stream.cancel_requested = true;
                 self.wakeAllLocked();
             }
             self.unlock();
@@ -343,6 +347,11 @@ pub const State = struct {
             return err;
         };
         if (job.err) |err| return @errorCast(err);
+    }
+    pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, _: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
+        var job: Job = .{ .options = options, .deadline = deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous };
+        try self.enqueue(&job);
+        try self.awaitJob(&job);
         return job.result.?;
     }
     fn waitForJob(self: *State, job: *Job, deadline: ?std.Io.Clock.Timestamp) std.Io.Event.WaitTimeoutError!void {

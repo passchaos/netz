@@ -6,6 +6,7 @@ pub const Job = struct {
     deadline: ?std.Io.Clock.Timestamp,
     wait_for_ready: bool,
     previous_attempts: ?u8,
+    stream: ?*@import("state.zig").State.StreamCall = null,
     next: ?*Job = null,
     phase: enum { queued, assigned, completed } = .queued,
     cancel_requested: bool = false,

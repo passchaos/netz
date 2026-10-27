@@ -23,6 +23,7 @@ pub fn Worker(comptime State: type) type {
         local_state: connectivity.State = .idle,
         connection: ?*http2.runtime.Connection = null,
         active: std.ArrayList(Active) = .empty,
+        streams: std.ArrayList(StreamOwner.Active) = .empty,
         watch: ?health.ClientWatch = null,
         health_disabled: bool = false,
         health_seen: bool = false,
@@ -32,18 +33,20 @@ pub fn Worker(comptime State: type) type {
         health_at: ?std.Io.Clock.Timestamp = null,
 
         const Self = @This();
+        const StreamOwner = @import("stream/owner.zig").Owner(State);
         pub fn run(self: *Self) std.Io.Cancelable!void {
             const parent = self.parent;
             defer {
                 self.disconnect(error.SharedChannelClosed);
                 self.active.deinit(self.parent.allocator);
+                self.streams.deinit(self.parent.allocator);
                 self.parent.publish(self, .shutdown, 0);
                 self.owner.deinit();
                 parent.workerStopped(self);
                 self.tracker.release();
                 parent.allocator.destroy(self);
             }
-            while (!self.parent.shouldStop(self, self.active.items.len == 0)) {
+            while (!self.parent.shouldStop(self, self.active.items.len == 0 and self.streams.items.len == 0)) {
                 self.tick() catch |err| {
                     if (err == error.Canceled and (self.parent.isClosed() or self.parent.isRetired(self))) return error.Canceled;
                     self.disconnect(err);
@@ -84,6 +87,7 @@ pub fn Worker(comptime State: type) type {
         fn disconnect(self: *Self, err: anyerror) void {
             self.dropWatch();
             while (self.active.items.len != 0) self.failActive(0, err);
+            while (self.streams.items.len != 0) StreamOwner.fail(self, 0, err);
             self.owner.disconnect() catch {};
             self.connection = null;
             self.health_disabled = false;
@@ -105,7 +109,7 @@ pub fn Worker(comptime State: type) type {
                 self.parent.publish(self, self.local_state, 0);
                 return;
             };
-            const room = self.parent.options.max_active_calls_per_endpoint - self.active.items.len;
+            const room = self.parent.options.max_active_calls_per_endpoint - self.active.items.len - self.streams.items.len;
             const capacity = @min(room, connection.availableLocalStreamCapacity() orelse room);
             self.parent.publish(self, self.local_state, if (self.local_state == .ready) capacity else 0);
         }
@@ -115,7 +119,7 @@ pub fn Worker(comptime State: type) type {
             const retiring = self.parent.isRetired(self);
             if (retiring) self.dropWatch();
             self.parent.expireQueued();
-            if (!demand and self.active.items.len == 0) return self.sleepUntilWake(null);
+            if (!demand and self.active.items.len == 0 and self.streams.items.len == 0) return self.sleepUntilWake(null);
             if (self.connection == null) {
                 if (retiring) return;
                 if (self.connect_at != null and !self.expired(self.connect_at)) return self.sleepUntilWake(minimum(self.connect_at, self.parent.nextQueuedDeadline()));
@@ -133,7 +137,7 @@ pub fn Worker(comptime State: type) type {
                 self.dropWatch();
                 self.local_state = .transient_failure;
                 self.publish();
-                if (self.active.items.len == 0) {
+                if (self.active.items.len == 0 and self.streams.items.len == 0) {
                     self.disconnect(error.ConnectionGoAway);
                     self.connect_at = null;
                     return;
@@ -197,9 +201,18 @@ pub fn Worker(comptime State: type) type {
                 i += 1;
             }
             if (connection.aggregate_timeout_unusable) return error.ConnectionClosed;
+            progress = try StreamOwner.tick(self, self.outputDeadline()) or progress;
             self.publish();
             while (self.parent.claim(self)) |job| {
                 progress = true;
+                if (job.stream != null) {
+                    StreamOwner.open(self, job, self.outputDeadline()) catch |err| {
+                        self.parent.finish(job, null, err);
+                        if (connection.aggregate_timeout_unusable) return err;
+                    };
+                    self.publish();
+                    continue;
+                }
                 self.active.ensureUnusedCapacity(self.parent.allocator, 1) catch |err| {
                     self.parent.finish(job, null, err);
                     continue;
@@ -234,6 +247,12 @@ pub fn Worker(comptime State: type) type {
             if (progress) return;
             var until = minimum(self.parent.nextQueuedDeadline(), self.health_at);
             for (self.active.items) |item| until = minimum(until, item.job.deadline);
+            for (self.streams.items) |item| {
+                until = minimum(until, item.call.deadline);
+                self.parent.lock();
+                if (item.call.write) |write| until = minimum(until, write.deadline);
+                self.parent.unlock();
+            }
             _ = connection.pumpClientUntilOrWake(until, self.parent.options.operation_timeout, &self.wake) catch |err| {
                 if (err == error.Timeout and !connection.aggregate_timeout_unusable) return;
                 return err;

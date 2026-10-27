@@ -445,8 +445,8 @@ reset race from closing with unread upload bytes.
    obtains both endpoint handles from zio-backed `std.Io`, schedules its local
    server through `std.Io.async`, and reports both runtimes as `zio-std-io`.
    The background SharedChannel now schedules concurrent unary calls through
-   per-endpoint owners, as described below. Shared streaming and duplex send
-   handles remain above the single-owner duplex step loop.
+   per-endpoint owners, as described below. Shared streaming and duplex
+   capabilities now use those owners for independent send and receive progress.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
@@ -475,11 +475,11 @@ reset race from closing with unread upload bytes.
    Health `Check` and `Watch` transport semantics are implemented, including
    incremental delivery, cancellation, and consumption-driven client Watch
    reconnection/backoff. SharedChannel now applies healthCheckConfig to
-   same-connection endpoint admission for concurrent unary calls. Unary
-   transport deadlines are already enforced locally as described above.
+   same-connection endpoint admission for concurrent unary and streaming calls.
+   Unary transport deadlines are already enforced locally as described above.
 
-The current tests establish concurrent shared unary calls, sequential streaming,
-and single-owner step-driven bidirectional streaming; broader gRPC Core feature
+The current tests establish concurrent shared unary and streaming calls,
+sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature
 parity remains open.
 
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
@@ -1239,9 +1239,8 @@ The local suite proves reversed completion of simultaneous unary calls on one
 connection, same-connection health admission and endpoint switch, active-RPC
 survival after NOT_SERVING, timeout and caller cancellation, reference-counted
 shutdown, transparent refusal recovery, configured retry metadata, exact staged
-upload suffixes, and allocator/concurrency-admission cleanup. Shared streaming
-and duplex send handles and broader
-production scheduling evidence remain beyond this unary manager surface.
+upload suffixes, and allocator/concurrency-admission cleanup. Broader production
+scheduling and conformance evidence remain open beyond these manager surfaces.
 
 
 The initial shared-unary verification passed 1071/1071 combined HTTP/2 and gRPC
@@ -1291,3 +1290,70 @@ frame while a sibling RPC completes, short-operation-timeout recovery, and
 callback rejection followed by connection reuse. The combined HTTP/2 and gRPC
 suite passed 1083/1083 tests, public package checks passed 20/20, and the pinned
 grpc-cpp forward gate passed h2c and certificate-verified TLS.
+
+## Shared streaming capabilities and bounded receive credit
+
+SharedChannelSender.startDuplex accepts StreamingRequestOptions and returns an
+owning SharedClientDuplex. Its writer() and reader() methods create retained
+SharedStreamWriter and SharedStreamReader capabilities. A read may run
+concurrently with a write on the same RPC; each direction allows one outstanding
+operation and reports InvalidStreamState for overlapping operations in that
+direction. Writer/Reader clones share the same RPC. The owning duplex cancels
+and joins transport retirement on destruction, while retained capabilities
+observe the completed cancellation or channel closure.
+
+The shared queue applies method timeout, directional message limits and
+waitForReady from the owned service config. One absolute RPC deadline begins
+before admission and is emitted in grpc-timeout when HEADERS are committed.
+Each endpoint exclusively owns the HTTP/2 stream and encoder. Writers submit
+borrowed message commands, stage compression/framing once, and wait for the
+exact final byte to be committed. writeFinalMessage finishes the request with
+that message; finishRequest sends an empty FIN after earlier messages. An
+operation deadline or task cancellation on a write cancels/joins the RPC before
+return, so an abandoned command cannot expose caller-owned bytes to a worker.
+Reader operation timeouts leave the RPC available for later reads.
+Caller operation deadlines must use the awake clock; other clock domains
+return Timeout before composition with the RPC deadline or transport progress.
+
+The endpoint copies encoded response DATA into a bounded per-RPC ring. Its
+capacity is the transport's maximum receive stream window (including configured
+adaptive growth), limited by SharedChannelOptions.max_buffered_stream_bytes
+(default 16 MiB). A receive window above this ceiling fails stream admission
+with InvalidSharedOptions. Connection WINDOW_UPDATE is returned as DATA is
+accepted, while stream credit is withheld until the reader dequeues encoded
+bytes. Padding credit returns immediately. This keeps a paused reader from
+exhausting connection credit needed by siblings. A reader retains at most one
+dequeued chunk plus its bounded message decoder, so a message larger than the
+stream window can still complete without buffering an unbounded message list.
+
+The reader owns framing/decompression and returns owned events for information,
+initial metadata, one decoded message, and terminal gRPC status. Metadata and
+status retain typed resets, compression flags and rich status details. A wire
+terminal received before the deadline remains readable after queued DATA is
+consumed. Decoder/protocol or allocation failure preserves its original error
+and cancels the transport. Known terminal socket-close errors during credit
+output restore local accounting so complete buffered DATA/trailers can still
+be delivered; uncertain partial output retires connection writes/reuse.
+
+Unary, server-streaming, client-streaming and bidi patterns all use the same
+shared transport primitive. Health admission and DNS candidate selection apply
+before opening. A retired endpoint rejects later calls and drains its existing
+shared streams before transport teardown, under their original deadlines.
+Channel destruction joins all active shared streams before returning.
+
+    var rpc = try sender.startDuplex(.{
+        .path = "/demo.Echo/Bidi", .wait_for_ready = true,
+        .timeout = .{ .value = 5, .unit = .second },
+    });
+    defer rpc.deinit();
+    var writer = rpc.writer();
+    defer writer.deinit();
+    var reader = rpc.reader();
+    defer reader.deinit();
+    try writer.writeMessage(payload);
+    try writer.finishRequest();
+    while (true) {
+        var event = try reader.next();
+        defer event.deinit(allocator);
+        if (event == .terminal) break;
+    }

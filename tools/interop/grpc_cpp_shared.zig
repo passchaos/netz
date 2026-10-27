@@ -7,6 +7,57 @@ fn call(sender: netz.grpc.SharedChannelSender, request: []const u8) !netz.grpc.U
     return sender.unary(.{ .path = "/grpc.testing.TestService/UnaryCall", .message = request, .timeout = .{ .value = 10, .unit = .second }, .wait_for_ready = true });
 }
 
+fn readShared(reader: netz.grpc.SharedStreamReader, size: usize, allocator: std.mem.Allocator) !void {
+    var count: usize = 0;
+    while (true) {
+        var event = try reader.nextWithTimeout(.fromSeconds(10));
+        defer event.deinit(allocator);
+        switch (event) {
+            .message => |message| {
+                try messages.validateStreamingOutputCallResponse(message.payload, size);
+                count += 1;
+            },
+            .terminal => |response| {
+                if (response.status != .ok or count != 1) return error.InvalidSharedDuplexResponse;
+                return;
+            },
+            else => {},
+        }
+    }
+}
+
+fn runDuplex(allocator: std.mem.Allocator, io: std.Io, sender: netz.grpc.SharedChannelSender) !void {
+    const options: netz.grpc.StreamingRequestOptions = .{ .path = "/grpc.testing.TestService/FullDuplexCall", .wait_for_ready = true, .timeout = .{ .value = 10, .unit = .second } };
+    var a = try sender.startDuplex(options);
+    defer a.deinit();
+    var b = try sender.startDuplex(options);
+    defer b.deinit();
+    var aw = a.writer();
+    defer aw.deinit();
+    var bw = b.writer();
+    defer bw.deinit();
+    var ar = a.reader();
+    defer ar.deinit();
+    var br = b.reader();
+    defer br.deinit();
+    const request_a = try messages.encodeStreamingOutputCallRequestAlloc(allocator, .{ .response_size = 65553, .request_body_size = 127 });
+    defer allocator.free(request_a);
+    const request_b = try messages.encodeStreamingOutputCallRequestAlloc(allocator, .{ .response_size = 131101, .request_body_size = 257 });
+    defer allocator.free(request_b);
+    var wa = try io.concurrent(netz.grpc.SharedStreamWriter.writeFinalMessage, .{ aw, request_a });
+    defer _ = wa.cancel(io) catch {};
+    var wb = try io.concurrent(netz.grpc.SharedStreamWriter.writeFinalMessage, .{ bw, request_b });
+    defer _ = wb.cancel(io) catch {};
+    var ra = try io.concurrent(readShared, .{ ar, 65553, allocator });
+    defer _ = ra.cancel(io) catch {};
+    var rb = try io.concurrent(readShared, .{ br, 131101, allocator });
+    defer _ = rb.cancel(io) catch {};
+    try wa.await(io);
+    try wb.await(io);
+    try rb.await(io);
+    try ra.await(io);
+}
+
 fn resolve(_: *anyopaque, allocator: std.mem.Allocator, _: std.Io, host: []const u8, port: u16, _: ?std.Io.Clock.Timestamp) netz.grpc.ChannelAddressResolver.ResolveError![]std.Io.net.IpAddress {
     if (!std.mem.eql(u8, host, "localhost") and !std.mem.eql(u8, host, "foo.test.google.fr")) return error.NameServerFailure;
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
@@ -44,4 +95,5 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     try messages.validateStreamingOutputCallResponse(response_a.message.?.payload, 65553);
     try messages.validateStreamingOutputCallResponse(response_b.message.?.payload, 131101);
     if (channel.endpointCount() != 1 or try channel.refreshNameResolutionWithTimeout(.fromSeconds(10)) != 1) return error.InvalidSharedAddressMembership;
+    try runDuplex(allocator, io, sender);
 }

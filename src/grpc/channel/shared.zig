@@ -5,6 +5,11 @@ const call = @import("../call.zig");
 const connectivity = @import("connectivity.zig");
 const state_module = @import("shared/state.zig");
 const State = state_module.State;
+const streaming = @import("../stream/runtime.zig");
+pub const Duplex = @import("shared/stream.zig").Duplex;
+pub const StreamWriter = @import("shared/stream.zig").Writer;
+pub const StreamReader = @import("shared/stream.zig").Reader;
+pub const StreamEvent = @import("shared/stream.zig").Event;
 pub const Error = state_module.Error;
 pub const Options = state_module.Options;
 
@@ -23,6 +28,10 @@ pub const Sender = struct {
     }
     pub fn unaryWithRetry(self: Sender, options: call.UnaryCallOptions, policy: call.RetryPolicy) Error!call.UnaryResponse {
         return self.unaryResolved(options, policy);
+    }
+    pub fn startDuplex(self: Sender, options: streaming.RequestOptions) Error!Duplex {
+        const entered = std.Io.Clock.awake.now(self.state.io);
+        return .{ .call = try @import("shared/stream/open.zig").open(self.state, options, entered) };
     }
     fn unaryResolved(self: Sender, options: call.UnaryCallOptions, policy: ?call.RetryPolicy) Error!call.UnaryResponse {
         const entered = std.Io.Clock.awake.now(self.state.io);
@@ -87,4 +96,5 @@ pub const SharedChannel = struct {
 test {
     _ = @import("shared/tests.zig");
     _ = @import("shared/resolution/tests.zig");
+    _ = @import("shared/stream/tests.zig");
 }

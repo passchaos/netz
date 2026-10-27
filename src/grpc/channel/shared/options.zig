@@ -8,6 +8,7 @@ pub const Options = struct {
     max_active_calls_per_endpoint: usize = 32,
     max_write_bytes_per_turn: usize = 64 * 1024,
     operation_timeout: std.Io.Duration = .fromSeconds(20),
+    max_buffered_stream_bytes: usize = 16 * 1024 * 1024,
     health_service: ?[]const u8 = null,
     disable_health_check: bool = false,
     health_metadata: health.WatchOptions = .{},

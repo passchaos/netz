@@ -18,6 +18,7 @@ fn pending(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: 
     }
     if (self.receive_state != .active) return error.ConnectionClosed;
     if (self.pending_data != null) {
+        if (comptime Hooks.raw) return error.InvalidStreamState;
         if (deadline) |until| _ = deadline_policy.usableAwake(self.transport.connection.io, until) catch |err| {
             if (cancel_on_timeout) Hooks.fail(self, .cancel);
             return err;
@@ -144,6 +145,32 @@ pub fn transport(
         },
         .data => |value| {
             event = undefined;
+            if (comptime Hooks.raw) {
+                var data = value;
+                const deliver = self.parse_response_body;
+                const ended = self.transport.responseFinished();
+                if (!deliver) data.deinit(self.allocator);
+                if (ended) {
+                    Hooks.finished(self, deadline) catch |err| {
+                        if (deliver) data.deinit(self.allocator);
+                        Hooks.fail(self, .internal_error);
+                        return err;
+                    };
+                    const response = Hooks.terminal(self, null) catch |err| {
+                        if (deliver) data.deinit(self.allocator);
+                        Hooks.fail(self, .internal_error);
+                        return err;
+                    };
+                    Hooks.closeRequest(self) catch {};
+                    if (!deliver) {
+                        self.receive_state = .terminal_delivered;
+                        return .{ .terminal = response };
+                    }
+                    self.pending_terminal = response;
+                    self.receive_state = .terminal_pending;
+                }
+                return if (deliver) .{ .data = data } else .progress;
+            }
             self.pending_data = .{ .data = value, .end_stream = self.transport.responseFinished() };
             return drain(self, deadline, max_messages, context, consume, Hooks);
         },

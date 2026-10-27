@@ -44,6 +44,7 @@ test {
     _ = client_duplex_owner;
     _ = @import("runtime/duplex/client_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
+    _ = @import("runtime/duplex/response_capacity_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -20162,6 +20163,12 @@ pub const DuplexResponseEvent = union(enum) {
 /// One client-owned HTTP/2 stream whose request and response halves progress
 /// independently while one connection owner alternates its client handles.
 pub const ClientDuplexStream = struct {
+    const response_capacity = @import("runtime/duplex/response_capacity.zig").Capacity(.{
+        .Error = Error,
+        .automatic = Connection.releaseReceivedDataCapacityUntil,
+        .update = Connection.sendWindowUpdatesUntil,
+        .window = Connection.recvStreamWindow,
+    });
     connection: *Connection,
     stream_id: u31,
     expected_request_length: ?usize,
@@ -20175,6 +20182,9 @@ pub const ClientDuplexStream = struct {
     response_content_length: ?usize = null,
     response_body_forbidden: bool = false,
     informational_count: usize = 0,
+    // The high bit denotes automatic credit. Deferred debt is bounded by the
+    // HTTP/2 31-bit stream window and fits the remaining bits.
+    deferred_response_credit: u32 = 0x80000000,
     pending_header: DuplexHeaderBlockSlot = .{},
     released: bool = false,
     registered: bool = false,
@@ -20194,6 +20204,18 @@ pub const ClientDuplexStream = struct {
 
     pub fn streamId(self: ClientDuplexStream) u31 {
         return self.stream_id;
+    }
+
+    /// Enable before response input begins. The sole connection owner keeps
+    /// stream credit until an application consumer acknowledges encoded bytes.
+    pub fn deferResponseStreamCredit(self: *ClientDuplexStream) Error!void {
+        if (self.response_head_seen or self.response_finished) return error.UnexpectedFrame;
+        self.deferred_response_credit = 0;
+    }
+
+    pub fn releaseResponseStreamCreditWithDeadline(self: *ClientDuplexStream, amount: usize, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return response_capacity.release(self, amount, deadline);
     }
 
     pub fn write(
@@ -20699,8 +20721,8 @@ pub const ClientDuplexStream = struct {
                         self.maybeRelease();
                     }
                     if (payload.data.len == 0) {
-                        try self.connection.releaseReceivedDataCapacityUntil(
-                            self.stream_id,
+                        try response_capacity.receive(
+                            self,
                             payload,
                             end_stream,
                             deadline,
@@ -20712,8 +20734,8 @@ pub const ClientDuplexStream = struct {
                         }
                         continue;
                     }
-                    try self.connection.releaseReceivedDataCapacityUntil(
-                        self.stream_id,
+                    try response_capacity.receive(
+                        self,
                         payload,
                         end_stream,
                         deadline,

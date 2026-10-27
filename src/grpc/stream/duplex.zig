@@ -91,6 +91,27 @@ pub const ClientEvent = union(enum) {
     }
 };
 
+/// Internal adapter event for an application-owned message decoder. Metadata
+/// and terminal status are validated here; DATA remains encoded gRPC bytes.
+pub const RawClientEvent = union(enum) {
+    informational: http2.runtime.DuplexResponseHead,
+    initial_metadata: ResponseHead,
+    data: http2.runtime.DuplexData,
+    progress,
+    terminal: Response,
+    pub fn deinit(self: *RawClientEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .informational => |*head| head.deinit(allocator),
+            .data => |*data| data.deinit(allocator),
+            .terminal => |*response| response.deinit(),
+            .initial_metadata, .progress => {},
+        }
+        self.* = undefined;
+    }
+};
+
+const ReceiveMode = enum { unselected, decoded, raw };
+
 const PendingMessage = struct {
     bytes: []u8,
     offset: usize = 0,
@@ -170,6 +191,7 @@ pub const ClientDuplex = struct {
     pending_data: ?client_receive.PendingData = null,
     pending_terminal: ?Response = null,
     receive_state: ReceiveState = .active,
+    receive_mode: ReceiveMode = .unselected,
     deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn deinit(self: *ClientDuplex) void {
@@ -452,6 +474,7 @@ pub const ClientDuplex = struct {
 
     const receive_hooks = .{
         .Event = ClientEvent,
+        .raw = false,
         .begin = beginResponse,
         .finishDecoder = finishResponseDecoder,
         .finished = consumeTransportFinished,
@@ -463,24 +486,59 @@ pub const ClientDuplex = struct {
         .readTransport = readClientTransportEvent,
         .Counter = MessageCounter,
     };
+    const raw_receive_hooks = .{
+        .Event = RawClientEvent,
+        .raw = true,
+        .begin = beginResponse,
+        .finishDecoder = finishResponseDecoder,
+        .finished = consumeTransportFinished,
+        .terminal = takeTerminal,
+        .resetTerminal = takeResetTerminal,
+        .closeRequest = closeRequestAfterTerminal,
+        .discardPending = discardPendingMessage,
+        .fail = fail,
+    };
+
+    fn selectReceiveMode(self: *ClientDuplex, mode: ReceiveMode) Error!void {
+        if (self.receive_mode == .unselected) self.receive_mode = mode;
+        if (self.receive_mode != mode) return error.InvalidStreamState;
+    }
 
     fn pollResponseEventUntil(self: *ClientDuplex, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, context: anytype, comptime consume: anytype) !?ClientEvent {
+        try self.selectReceiveMode(.decoded);
         return client_receive.poll(self, deadline, cancel_on_timeout, std.math.maxInt(usize), context, consume, receive_hooks);
     }
     fn readResponseEventWithRpcDeadline(self: *ClientDuplex, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, context: anytype, comptime consume: anytype) !ClientEvent {
+        try self.selectReceiveMode(.decoded);
         return client_receive.read(self, deadline, cancel_on_timeout, context, consume, receive_hooks);
     }
 
     /// Bound callback delivery without reading the socket. A partial DATA
     /// frame stays owned until subsequent polls consume its exact suffix.
     pub fn pollResponseEventLimited(self: *ClientDuplex, max_messages: usize, context: anytype, comptime consume: anytype) !?ClientEvent {
+        try self.selectReceiveMode(.decoded);
         return client_receive.poll(self, self.deadline, self.deadline != null, max_messages, context, consume, receive_hooks);
     }
     pub fn pollResponseEventLimitedWithDeadline(self: *ClientDuplex, max_messages: usize, deadline: std.Io.Clock.Timestamp, context: anytype, comptime consume: anytype) !?ClientEvent {
+        try self.selectReceiveMode(.decoded);
         if (deadline.clock != .awake) return error.Timeout;
         const effective = earlierDeadline(self.deadline, deadline);
         const rpc_limited = if (self.deadline) |rpc| !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc) else false;
         return client_receive.poll(self, effective, rpc_limited, max_messages, context, consume, receive_hooks);
+    }
+
+    /// Route encoded DATA to a consumer-owned decoder. Use one receive mode
+    /// for the entire RPC; raw and decoded event reads cannot be mixed.
+    pub fn pollRawResponseEventWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
+        try self.selectReceiveMode(.raw);
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
+        const rpc_limited = if (self.deadline) |rpc| !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc) else false;
+        return client_receive.poll(self, effective, rpc_limited, 1, {}, unusedMessage, raw_receive_hooks);
+    }
+
+    fn unusedMessage(_: void, _: codec.DecodedMessage) Error!void {
+        unreachable;
     }
 
     fn beginResponse(
@@ -506,6 +564,7 @@ pub const ClientDuplex = struct {
     }
 
     fn finishResponseDecoder(self: *ClientDuplex) Error!void {
+        if (self.receive_mode == .raw) return;
         if (!self.parse_response_body) return;
         const decoder = if (self.decoder) |*value| value else return error.InvalidStreamState;
         try decoder.finish();

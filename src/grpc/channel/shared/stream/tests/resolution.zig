@@ -1,0 +1,67 @@
+const std = @import("std");
+const support = @import("../../resolution/test_support.zig");
+const grpc = support.grpc;
+const shared = support.shared;
+const stream = @import("../../stream.zig");
+const allocator = std.testing.allocator;
+const testing = @import("../testing.zig");
+
+test "gRPC shared duplex DNS retirement drains old RPC before endpoint teardown" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer a_server.deinit();
+    var b_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer b_server.deinit();
+    const authority = try std.fmt.allocPrint(allocator, "resolve.test:{d}", .{a_server.address().getPort()});
+    defer allocator.free(authority);
+    var admitted: std.Io.Event = .unset;
+    var release: std.Io.Event = .unset;
+    var a_peer = support.Peer{ .server = &a_server, .authority = authority, .reply = "A", .requests = 1, .admitted = &admitted, .release = &release };
+    var b_peer = support.Peer{ .server = &b_server, .authority = authority, .reply = "B", .requests = 1 };
+    var a_task = io.async(support.Peer.run, .{&a_peer});
+    defer _ = a_task.cancel(io) catch {};
+    var b_task = io.async(support.Peer.run, .{&b_peer});
+    defer _ = b_task.cancel(io) catch {};
+    const first = [_]support.Address{a_server.address()};
+    const next = [_]support.Address{b_server.address()};
+    var resolver = support.Resolver{ .addresses = &first };
+    var client = try shared.SharedChannel.init(allocator, io, .{ .cleartext_host = .{ .host = "resolve.test", .port = a_server.address().getPort() } }, support.options(&resolver));
+    var live = true;
+    defer if (live) client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    const options: grpc.StreamingRequestOptions = .{ .path = "/demo.Shared/Bidi", .timeout = .{ .value = 5, .unit = .second }, .wait_for_ready = true };
+    var a = try sender.startDuplex(options);
+    defer a.deinit();
+    var writer_a = a.writer();
+    defer writer_a.deinit();
+    var reader_a = a.reader();
+    defer reader_a.deinit();
+    var old_watch = client.watchEndpointConnectivity(0).?;
+    defer old_watch.deinit();
+    try writer_a.writeFinalMessage("active");
+    try support.wait(&admitted, io);
+    resolver.set(io, &next, null);
+    try std.testing.expectEqual(@as(usize, 1), try client.refreshNameResolutionWithTimeout(.fromSeconds(5)));
+    var new_watch = client.watchEndpointConnectivity(0).?;
+    defer new_watch.deinit();
+    try support.ready(&new_watch);
+    while ((try old_watch.nextWithTimeout(.fromSeconds(5))).state != .shutdown) {}
+    var b = try sender.startDuplex(options);
+    defer b.deinit();
+    var writer_b = b.writer();
+    defer writer_b.deinit();
+    var reader_b = b.reader();
+    defer reader_b.deinit();
+    try writer_b.writeFinalMessage("new");
+    try testing.readReply(reader_b, "B");
+    release.set(io);
+    try testing.readReply(reader_a, "A");
+    // The retired endpoint closes only after the shared stream completes.
+    try a_task.await(io);
+    client.deinit();
+    live = false;
+    try b_task.await(io);
+}
