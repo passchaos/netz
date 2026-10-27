@@ -10,8 +10,9 @@ const Mode = @import("../testing/blocked_tls_write.zig").Mode;
 
 test "HTTP/2 handshake protocol error bounds TLS12 and TLS13 GOAWAY and close notify" {
     if (comptime builtin.os.tag != .linux) return;
+    const modes = [_]Mode{ .healthy, .disabled, .blocked, .partial, .close_blocked };
     for ([_]bool{ false, true }) |tls12| {
-        for (std.enums.values(Mode)) |mode| try exercise(tls12, mode);
+        for (modes) |mode| try exercise(tls12, mode);
     }
 }
 
@@ -86,6 +87,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
         .disabled => 0,
         .blocked => 1,
         .healthy, .partial, .close_blocked => 2,
+        .alert_blocked => unreachable,
     }), writer.calls.load(.acquire));
     if (mode == .blocked or mode == .close_blocked) try std.testing.expect(writer.canceled.load(.acquire));
     if (mode == .healthy) {

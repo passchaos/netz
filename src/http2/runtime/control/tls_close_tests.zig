@@ -100,7 +100,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
         .disabled => 0,
         .partial => 2,
         .healthy, .blocked => 1,
-        .close_blocked => unreachable,
+        .close_blocked, .alert_blocked => unreachable,
     }), writer.calls.load(.acquire));
     if (mode == .blocked) {
         try std.testing.expect(writer.canceled.load(.acquire));
@@ -119,4 +119,114 @@ fn exercise(tls12: bool, mode: Mode) !void {
             inline else => |records| records.receivedCloseNotify(),
         });
     }
+}
+
+test "HTTP/2 TLS connect without h2 ALPN bounds rejected close notify" {
+    if (comptime builtin.os.tag != .linux) return;
+    const modes = [_]Mode{ .healthy, .alert_blocked, .disabled };
+    for ([_]bool{ false, true }) |tls12| {
+        for (modes) |mode| try exerciseAlpnRejection(tls12, mode);
+    }
+}
+
+fn exerciseAlpnRejection(tls12: bool, mode: Mode) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate: [tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate, tls.testing.certificate_base64);
+    const key = try tls.testing.serverKeyPair();
+    const policy = if (tls12) tls.stream.VersionPolicy.tls12_only else tls.stream.VersionPolicy.tls13_only;
+
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const Peer = struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        listener: *std.Io.net.Server,
+        certificate: []const u8,
+        key: @TypeOf(key),
+        policy: tls.stream.VersionPolicy,
+        done: std.Io.Event = .unset,
+        received_close_notify: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.done.set(self.io);
+            const raw = self.listener.accept(self.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            var raw_owned = true;
+            defer if (raw_owned) raw.close(self.io);
+            var server = tls.stream.ServerConnection.init(self.allocator, self.io, raw, .{
+                .identity = .{
+                    .certificate_chain = &.{self.certificate},
+                    .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = self.key } },
+                },
+                .alpn_protocols = &.{},
+                .require_alpn = false,
+                .protocol_policy = self.policy,
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+            raw_owned = false;
+            defer server.deinit();
+            var buffer: [256]u8 = undefined;
+            while (true) {
+                const len = server.readWithDeadline(
+                    &buffer,
+                    .fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(2) }),
+                ) catch break;
+                if (len == 0) break;
+            }
+            self.received_close_notify = server.receivedCloseNotify();
+        }
+    };
+    var peer = Peer{
+        .io = io,
+        .allocator = allocator,
+        .listener = &listener,
+        .certificate = &certificate,
+        .key = key,
+        .policy = policy,
+    };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    defer thread.join();
+
+    var writer = BlockedTlsWrite{
+        .io = io,
+        .mode = mode,
+        .socket = @as(std.Io.net.Socket.Handle, std.math.maxInt(std.posix.fd_t)),
+    };
+    var vtable: std.Io.VTable = undefined;
+    const client_io = writer.install(&vtable, io);
+    defer BlockedTlsWrite.clear();
+    writer.armed.store(true, .release);
+    const rescue = try std.Thread.spawn(.{}, BlockedTlsWrite.rescue, .{&writer});
+    defer rescue.join();
+    const started = std.Io.Clock.awake.now(io);
+    const result = runtime.Client.connectTlsHost(
+        allocator,
+        client_io,
+        "localhost",
+        listener.socket.address.ip4.port,
+        .{
+            .terminal_cleanup_timeout = if (mode == .disabled) .zero else .fromMilliseconds(20),
+        },
+        .{
+            .verify_host = false,
+            .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() },
+            .protocol_policy = policy,
+        },
+    );
+    try std.testing.expectError(error.InvalidAlpn, result);
+    try std.testing.expect(started.untilNow(io, .awake).nanoseconds < 400 * std.time.ns_per_ms);
+    if (mode == .alert_blocked) {
+        try std.testing.expect(writer.canceled.load(.acquire));
+    }
+    try peer.done.wait(io);
+    if (peer.err) |err| return err;
+    try std.testing.expectEqual(mode == .healthy, peer.received_close_notify);
 }

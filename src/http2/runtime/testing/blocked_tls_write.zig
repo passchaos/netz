@@ -13,6 +13,10 @@ pub const Mode = enum {
     partial,
     /// Let one write through, then block the next.
     close_blocked,
+    /// Block the armed TLS close_notify on any socket: plaintext 0x15 alerts
+    /// (TLS 1.2) block immediately, while in TLS 1.3 the first encrypted
+    /// 0x17 record (the Finished flight) passes and the next one blocks.
+    alert_blocked,
 };
 
 pub const BlockedTlsWrite = struct {
@@ -24,6 +28,9 @@ pub const BlockedTlsWrite = struct {
     armed: std.atomic.Value(bool) = .init(false),
     calls: std.atomic.Value(usize) = .init(0),
     canceled: std.atomic.Value(bool) = .init(false),
+    // Counts encrypted (0x17) client writes so alert_blocked lets the
+    // post-ServerHello Finished flight pass before the TLS 1.3 close_notify.
+    post_hello_writes: std.atomic.Value(usize) = .init(0),
     wait: std.Io.Event = .unset,
 
     /// Replace netWrite on a caller-owned vtable copy and target this socket.
@@ -50,6 +57,14 @@ pub const BlockedTlsWrite = struct {
         splat: usize,
     ) std.Io.net.Stream.Writer.Error!usize {
         const self = active.load(.acquire).?;
+        if (self.armed.load(.acquire) and self.mode == .alert_blocked and
+            header.len >= 1 and shouldBlockAlert(header[0], &self.post_hello_writes))
+        {
+            self.wait.wait(self.io) catch |err| {
+                self.canceled.store(true, .release);
+                return err;
+            };
+        }
         if (socket != self.socket or !self.armed.load(.acquire)) {
             return self.io.vtable.netWrite(
                 self.io.userdata,
@@ -71,7 +86,7 @@ pub const BlockedTlsWrite = struct {
                     };
                 }
             },
-            .healthy => {},
+            .healthy, .alert_blocked => {},
         }
         return self.io.vtable.netWrite(
             self.io.userdata,
@@ -88,3 +103,17 @@ pub const BlockedTlsWrite = struct {
         self.wait.set(self.io);
     }
 };
+
+/// TLS 1.2 sends alerts as plaintext content type 0x15. In TLS 1.3 every
+/// post-ServerHello record uses 0x17, so let the single encrypted Finished
+/// flight through and treat the next 0x17 write as the close_notify.
+fn shouldBlockAlert(
+    content_type: u8,
+    post_hello_writes: *std.atomic.Value(usize),
+) bool {
+    return switch (content_type) {
+        0x15 => true,
+        0x17 => post_hello_writes.fetchAdd(1, .monotonic) != 0,
+        else => false,
+    };
+}

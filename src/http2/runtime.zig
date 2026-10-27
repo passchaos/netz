@@ -446,6 +446,21 @@ const RuntimeTransport = union(enum) {
         }
     }
 
+    /// Close a transport whose protocol lifetime is over. TLS gets one finite
+    /// terminal close_notify budget instead of the destructor's unbounded
+    /// write; zero or expired budgets and failed records close without alert.
+    fn closeWithTerminalBudget(
+        self: RuntimeTransport,
+        io: std.Io,
+        limits: Limits,
+    ) void {
+        terminal_tls_output.closeNotify(
+            self,
+            response_cleanup.cleanupDeadline(.{ .io = io, .limits = limits }, null),
+        );
+        self.close();
+    }
+
     fn updateTrafficKeys(
         self: RuntimeTransport,
         request_peer_update: bool,
@@ -1451,7 +1466,10 @@ pub const TlsServer = struct {
             );
         stream_owned = false;
         var tls_owned = true;
-        errdefer if (tls_owned) tls_connection.deinit();
+        errdefer if (tls_owned) {
+            const transport = RuntimeTransport{ .tls_server = tls_connection };
+            transport.closeWithTerminalBudget(self.io, self.limits);
+        };
         if (tls_connection.selected_alpn == null or
             !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
         {
@@ -1955,7 +1973,10 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         var tls_owned = true;
-        errdefer if (tls_owned) tls_connection.deinit();
+        errdefer if (tls_owned) {
+            const transport = RuntimeTransport{ .tls_client = tls_connection };
+            transport.closeWithTerminalBudget(io, limits);
+        };
         try validateLocalLimits(limits);
         if (authority.len == 0) return error.InvalidHeader;
         const selected = tls_connection.negotiatedAlpn() orelse
@@ -2483,7 +2504,10 @@ pub const Client = struct {
             );
         stream_owned = false;
         var tls_owned = true;
-        errdefer if (tls_owned) tls_connection.deinit();
+        errdefer if (tls_owned) {
+            const transport = RuntimeTransport{ .tls_client = tls_connection };
+            transport.closeWithTerminalBudget(io, limits);
+        };
         if (tls_connection.selected_alpn == null or
             !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
         {
@@ -4044,15 +4068,9 @@ pub const Connection = struct {
         self.pending_duplex_request_head.deinit(self.allocator);
         self.duplex_pending_frame.deinit(self.allocator);
         self.frame_reader.deinit(self.allocator);
-        const transport = self.transportForIo();
-        // The TLS destructor otherwise sends close_notify with no budget. Give
-        // terminal alert output the same finite cleanup bound as GOAWAY frames;
-        // a blocked peer cannot extend the connection lifetime past teardown.
-        terminal_tls_output.closeNotify(
-            transport,
-            response_cleanup.cleanupDeadline(self, null),
-        );
-        transport.close();
+        // A blocked peer cannot extend the connection lifetime past teardown:
+        // the TLS close_notify gets the same finite bound as GOAWAY frames.
+        self.transportForIo().closeWithTerminalBudget(self.io, self.limits);
         self.* = undefined;
     }
 
