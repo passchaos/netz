@@ -472,9 +472,10 @@ reset race from closing with unread upload bytes.
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including
-   incremental Watch delivery and cancellation, but automatic client Watch
-   reconnection/backoff remains application policy. Unary transport deadlines
-   are already enforced locally as described above.
+   incremental delivery, cancellation, and consumption-driven client Watch
+   reconnection/backoff. Integrating health into a concurrent subchannel
+   picker's service-config policy remains open. Unary transport deadlines are
+   already enforced locally as described above.
 
 The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
@@ -953,3 +954,56 @@ concurrent subchannel manager must therefore own stable heap subchannels and
 publish quiescent connections into that boundary; running `Connection` methods
 from watcher tasks would violate the current ownership contract and is not
 implied by these observation APIs.
+
+
+## Reconnecting client Health Watch
+
+`grpc.health.ReconnectingWatch` owns a dedicated lazy Channel and automatically
+rebuilds `grpc.health.v1.Health/Watch` as the caller drives next-event or
+wait-for-SERVING operations. It follows the locally audited gRPC Core
+`subchannel_stream_client.cc` and `health_check_client.cc` policy: a stream
+that ends before delivering a valid health response uses exponential jittered
+backoff (1 s initial, 1.6 multiplier, 0.2 jitter, 120 s maximum base). A stream
+that delivered any valid status restarts immediately and resets that backoff.
+Even terminal OK restarts Watch. UNIMPLEMENTED disables further watches and
+assumes the backend is healthy; UNKNOWN, NOT_SERVING, and SERVICE_UNKNOWN do
+not make it healthy.
+
+Events expose decoded health status, retry deadline and typed RPC/reset or
+transport failure, and explicit check disablement. A failure clears the last
+observed serving state. `waitForServingWith{Timeout,Deadline}` consumes retry
+and unhealthy events under one caller budget. The owning handle can move
+because its private Channel lives on the heap; the service name is copied,
+while target configuration and metadata remain borrowed for its lifetime.
+Task cancellation and retry-wait timeout retain the scheduled retry deadline.
+Explicit cancellation is terminal and releases the active stream under the
+existing finite HTTP/2 terminal cleanup policy.
+
+```zig
+var health_watch = try netz.grpc.health.ReconnectingWatch.init(
+    allocator,
+    io,
+    .{ .tls_host = .{ .host = "backend.example", .port = 443 } },
+    .{ .watch = .{ .service = "demo.Echo" } },
+);
+defer health_watch.deinit();
+try health_watch.waitForServingWithTimeout(.fromSeconds(30));
+```
+
+The caller must continue driving the handle to observe later state changes.
+This dedicated connection preserves single-owner HTTP/2 frame reading; it
+does not modify another application's Channel picker. A concurrent per-backend
+health-gated picker and standard `healthCheckConfig` integration remain work
+for the subchannel manager.
+
+`health.startWatchWith{Timeout,Deadline}` and the matching runtime.Client
+methods also bound request HEADERS and DATA output. They intentionally omit
+`grpc-timeout`: the setup operation's deadline is not the lifetime of Health
+Watch. Later bounded reads retain a live stream on timeout, and any pending
+request suffix uses that read's operation budget. Real h2c tests cover
+consecutive failures, terminal OK, backoff reset, UNIMPLEMENTED, malformed
+protobuf, retry sleep cancellation, resumable active reads, explicit
+cancellation, and zero peer-window request-output timeout. Certificate-pinned
+TLS tests check reconnects, logical authority, `h2` ALPN, and retained peer
+certificates; the pre-existing ordinary streaming deadline gates verify the
+shared request builder still advertises and enforces actual RPC lifetimes.

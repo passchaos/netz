@@ -305,6 +305,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.health, "check"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "ClientWatch"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "startWatch"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "startWatchWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "startWatchWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "ReconnectingWatch"));
+    try std.testing.expect(@hasDecl(netz.grpc.health.ReconnectingWatch, "nextWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.health.ReconnectingWatch, "waitForServingWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Channel"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelTarget"));
@@ -433,6 +438,8 @@ test "public modules are reachable" {
         netz.grpc.runtime.Client,
         "startHealthWatch",
     ));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "startHealthWatchWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "startHealthWatchWithDeadline"));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Client,
         "startReflection",

@@ -905,6 +905,8 @@ Current protocol coverage includes:
   subchannels across address updates, retain healthy addresses across resolver
   failures, expose explicit refresh plus connectivity state, and provide
   generation-stamped concurrent watches that survive Channel shutdown,
+  dedicated client Health Watch with automatic reconnect/backoff, bounded
+  setup and resumable reads, SERVING waits and UNIMPLEMENTED disablement,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

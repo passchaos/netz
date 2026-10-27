@@ -541,6 +541,18 @@ pub const Channel = struct {
         return null;
     }
 
+    /// Establish/select a quiescent connection without starting an RPC.
+    /// The caller borrows it until stream teardown; other Channel operations
+    /// must wait for that stream to release ownership. Connection failures
+    /// retain their original cause rather than becoming a warm-count result.
+    pub fn connectWithDeadline(
+        self: *Channel,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*http2.runtime.Connection {
+        if (deadline.clock != .awake) return error.Timeout;
+        return (try self.ready(false, deadline)).connection;
+    }
+
     pub fn negotiatedAlpn(self: *Channel) ?[]const u8 {
         const connection = self.connected() orelse return null;
         return connection.negotiatedAlpn();

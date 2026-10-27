@@ -267,6 +267,16 @@ pub fn startClientUnderDeadline(
     options: RequestOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!ClientWriter {
+    return startClientWithDeadlines(connection, allocator, options, deadline, deadline);
+}
+
+fn startClientWithDeadlines(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    rpc_deadline: ?std.Io.Clock.Timestamp,
+    io_deadline: ?std.Io.Clock.Timestamp,
+) Error!ClientWriter {
     _ = try call.parseRequestMetadata(
         "POST",
         options.path,
@@ -309,7 +319,7 @@ pub fn startClientUnderDeadline(
         .value = "trailers",
     });
     var timeout_buffer: [9]u8 = undefined;
-    if (deadline) |absolute| {
+    if (rpc_deadline) |absolute| {
         const remaining = absolute.durationFromNow(connection.io).raw;
         if (remaining.nanoseconds <= 0) return error.Timeout;
         headers.appendAssumeCapacity(.{
@@ -337,7 +347,7 @@ pub fn startClientUnderDeadline(
 
     return .{
         .allocator = allocator,
-        .transport = if (deadline) |absolute|
+        .transport = if (io_deadline) |absolute|
             try connection.startRequestWithDeadline(.{
                 .method = "POST",
                 .path = options.path,
@@ -361,7 +371,7 @@ pub fn startClientUnderDeadline(
         },
         .accepted_encodings = options.accepted_encodings,
         .max_message_size = options.responseMessageLimit(),
-        .deadline = deadline,
+        .deadline = rpc_deadline,
     };
 }
 
@@ -392,6 +402,28 @@ pub fn startClientDuplexTransportUnderDeadline(
         connection,
         allocator,
         options,
+        deadline,
+    );
+    return beginClientDuplexTransport(&writer);
+}
+
+/// Bound request setup without advertising a lifetime for a long-lived RPC.
+pub fn startClientDuplexTransportWithIoDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!ClientDuplexTransport {
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(connection.io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+    var writer = try startClientWithDeadlines(
+        connection,
+        allocator,
+        options,
+        null,
         deadline,
     );
     return beginClientDuplexTransport(&writer);

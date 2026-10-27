@@ -166,6 +166,32 @@ pub const Client = struct {
         );
     }
 
+    pub fn startHealthWatchWithTimeout(
+        self: *Client,
+        options: health.WatchOptions,
+        timeout: std.Io.Duration,
+    ) health.WatchError!health.ClientWatch {
+        return health.startWatchWithTimeout(
+            &self.connection,
+            self.connection.allocator,
+            options,
+            timeout,
+        );
+    }
+
+    pub fn startHealthWatchWithDeadline(
+        self: *Client,
+        options: health.WatchOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) health.WatchError!health.ClientWatch {
+        return health.startWatchWithDeadline(
+            &self.connection,
+            self.connection.allocator,
+            options,
+            deadline,
+        );
+    }
+
     pub fn startReflection(
         self: *Client,
         options: reflection.ClientOptions,
