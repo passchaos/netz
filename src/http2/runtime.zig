@@ -20,6 +20,7 @@ test {
     _ = @import("runtime/connect/deadline_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");
     _ = @import("runtime/control/output_deadline_tests.zig");
+    _ = @import("runtime/control/protocol_error_deadline_tests.zig");
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/request/complete_deadline_tests.zig");
@@ -76,6 +77,7 @@ const batch_output = @import("runtime/request/batch_output.zig");
 const complete_upload = @import("runtime/request/upload.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const stream_termination = @import("runtime/stream/termination.zig");
+const protocol_error_output = @import("runtime/control/protocol_error.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
@@ -503,9 +505,10 @@ pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     /// Best-effort control output after a discarded response, owned
-    /// stream cancellation/destruction, or a terminal early response. The RPC
-    /// keeps its original deadline; cleanup may add at most this separate
-    /// shared transport budget to the return path. Zero skips writes.
+    /// stream cancellation/destruction, terminal early response, or protocol
+    /// error. The RPC keeps its original deadline; cleanup may add at most
+    /// this separate shared transport budget to the return path. Zero skips
+    /// writes.
     terminal_cleanup_timeout: std.Io.Duration = .fromMilliseconds(10),
     max_header_fields: usize = 256,
     /// Maximum interim response heads accepted before a final response. This
@@ -3730,7 +3733,7 @@ pub const Connection = struct {
         .grantAdaptive = sendQueuedAdaptiveWindowUpdateAfterData,
         .budgetMaximum = dataFrameBudgetMaximum,
         .lastProcessed = lastPeerProcessedStreamId,
-        .sendGoAway = sendGoAwayUntil,
+        .sendGoAway = sendProtocolGoAway,
         .endStreamFlag = flag_end_stream,
     });
     const PushLifecycle = @import("runtime/push/connection.zig").Lifecycle(.{
@@ -3753,7 +3756,7 @@ pub const Connection = struct {
         .wasReset = wasLocallyReset,
         .discardReset = discardLateFrameForLocallyResetStreamUntil,
         .activate = addActivePeerStream,
-        .goAway = sendGoAwayUntil,
+        .goAway = sendProtocolGoAway,
         .processed = lastPeerProcessedStreamId,
         .takeData = receiveDataPayload,
         .releaseData = releaseDataFrameBudget,
@@ -11272,7 +11275,7 @@ pub const Connection = struct {
                     if (!pending.header.end_headers and (borrowed.frame.header.frame_type != .continuation or borrowed.frame.header.stream_id != pending.header.stream_id)) {
                         self.serve_read_connection_error = .frame_sequence;
                         self.aggregate_timeout_unusable = true;
-                        self.sendGoAwayUntil(self.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline) catch {};
+                        self.sendProtocolGoAway(self.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline);
                         return error.UnexpectedFrame;
                     }
                 }
@@ -11309,7 +11312,7 @@ pub const Connection = struct {
                                     if (state.received.get(stream_id)) |entry| {
                                         reserved_push = !entry.started and !entry.finished;
                                         if (entry.started) {
-                                            try self.ensureLocalErrorResetBudget();
+                                            try self.ensureLocalErrorResetBudgetUntil(deadline);
                                             state.received.fail(self.allocator, stream_id, error.InvalidFrame);
                                             self.writeResetStreamFrameUntil(stream_id, violation.error_code, deadline) catch |reset_err| switch (reset_err) {
                                                 error.SocketUnconnected, error.ConnectionResetByPeer => {},
@@ -11325,17 +11328,19 @@ pub const Connection = struct {
                             }
                             if (self.push_ingress_headers_active or reserved_push or self.streamIsIdle(stream_id)) {
                                 self.aggregate_timeout_unusable = true;
-                                self.sendGoAwayUntil(
+                                self.sendProtocolGoAway(
                                     self.lastPeerProcessedStreamId(),
                                     .protocol_error,
                                     "frame-envelope",
                                     deadline,
-                                ) catch {};
+                                );
                             } else {
-                                self.writeLocalErrorResetStream(
-                                    stream_id,
-                                    violation.error_code,
-                                ) catch {};
+                                if (response_cleanup.cleanupDeadline(self, deadline)) |before| {
+                                    self.writeLocalErrorResetStreamUntil(stream_id, violation.error_code, before) catch {};
+                                } else {
+                                    self.aggregate_timeout_unusable = true;
+                                    self.terminal_write_failed = true;
+                                }
                                 self.releaseLocalStream(stream_id);
                                 self.releasePeerStream(stream_id);
                                 self.forgetResponseSemantics(stream_id);
@@ -11343,12 +11348,12 @@ pub const Connection = struct {
                             }
                         } else {
                             self.aggregate_timeout_unusable = true;
-                            self.sendGoAwayUntil(
+                            self.sendProtocolGoAway(
                                 self.lastPeerProcessedStreamId(),
                                 violation.error_code,
                                 "frame-envelope",
                                 deadline,
-                            ) catch {};
+                            );
                         }
                     }
                 }
@@ -12074,10 +12079,9 @@ pub const Connection = struct {
         return false;
     }
 
-    fn cancelPendingAcceptOverflow(self: *Connection) void {
+    fn cancelPendingAcceptOverflowBefore(self: *Connection, before: ?std.Io.Clock.Timestamp) void {
         self.aggregate_timeout_unusable = true;
         self.pending_accept_reset_overflowed = true;
-        const before = if (self.active_peer_index.count() != 0) response_cleanup.cleanupDeadline(self, null) else null;
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
             self.abandonPeerRequestBefore(pending.streamId(), .cancel, before);
             pending.deinit(self.allocator);
@@ -13330,20 +13334,12 @@ pub const Connection = struct {
             .excessive_header_block => .{ .code = .enhance_your_calm, .debug_data = "header-block-limit" },
             .push_disabled => .{ .code = .protocol_error, .debug_data = "push-disabled" },
         };
-        self.aggregate_timeout_unusable = true;
-        if (self.terminal_write_failed) return;
-        if (before == null) {
-            self.terminal_write_failed = true;
-            return;
-        }
-        self.sendGoAwayUntil(
+        self.sendProtocolGoAwayBefore(
             self.lastPeerProcessedStreamId(),
             mapping.code,
             mapping.debug_data,
             before,
-        ) catch {
-            self.terminal_write_failed = true;
-        };
+        );
     }
 
     pub fn serve(
@@ -14133,6 +14129,16 @@ pub const Connection = struct {
         self.local_goaway_last_stream_id = last_stream_id;
     }
 
+    fn sendProtocolGoAway(self: *Connection, last: u31, code: http2.ErrorCode, detail: []const u8, operation_deadline: ?std.Io.Clock.Timestamp) void {
+        self.aggregate_timeout_unusable = true;
+        if (self.terminal_write_failed) return;
+        self.sendProtocolGoAwayBefore(last, code, detail, response_cleanup.cleanupDeadline(self, operation_deadline));
+    }
+
+    fn sendProtocolGoAwayBefore(self: *Connection, last: u31, code: http2.ErrorCode, detail: []const u8, before: ?std.Io.Clock.Timestamp) void {
+        protocol_error_output.goAway(self, last, code, detail, before, sendGoAwayUntil);
+    }
+
     fn writeControlFrameUntil(
         self: *Connection,
         frame_type: http2.FrameType,
@@ -14674,6 +14680,7 @@ pub const Connection = struct {
             // A transport write does not report whether a prefix reached the
             // peer. Never append more HTTP/2 frames to a possibly partial RST.
             self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
             return err;
         };
         self.local_error_reset_streams +|= 1;
@@ -14688,12 +14695,12 @@ pub const Connection = struct {
         if (self.local_error_reset_streams < limit) return;
 
         self.aggregate_timeout_unusable = true;
-        self.sendGoAwayUntil(
+        self.sendProtocolGoAway(
             self.lastPeerProcessedStreamId(),
             .enhance_your_calm,
             "too_many_internal_resets",
             deadline,
-        ) catch {};
+        );
         return error.ConnectionGoAway;
     }
 
@@ -14970,13 +14977,14 @@ pub const Connection = struct {
     }
 
     fn failPendingAcceptResetOverflow(self: *Connection) Error {
-        self.cancelPendingAcceptOverflow();
-        self.sendGoAwayUntil(
+        const before = response_cleanup.cleanupDeadline(self, null);
+        self.cancelPendingAcceptOverflowBefore(before);
+        self.sendProtocolGoAwayBefore(
             self.lastPeerProcessedStreamId(),
             .enhance_your_calm,
             "too_many_resets",
-            null,
-        ) catch {};
+            before,
+        );
         return error.ConnectionGoAway;
     }
 
@@ -17004,12 +17012,12 @@ pub const Connection = struct {
                 // A connection-window overflow terminates the whole HTTP/2
                 // connection with the precise RFC 9113 wire error.
                 self.aggregate_timeout_unusable = true;
-                self.sendGoAwayUntil(
+                self.sendProtocolGoAway(
                     self.lastPeerProcessedStreamId(),
                     .flow_control_error,
                     "connection-window-overflow",
                     deadline,
-                ) catch {};
+                );
                 return error.ConnectionGoAway;
             };
             return;
@@ -18188,12 +18196,12 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
         const code = settingsFailureErrorCode(payload, err) orelse return;
-        self.sendGoAwayUntil(
+        self.sendProtocolGoAway(
             self.lastPeerProcessedStreamId(),
             code,
             "settings-value",
             deadline,
-        ) catch {};
+        );
         self.aggregate_timeout_unusable = true;
     }
 
@@ -19656,7 +19664,7 @@ const DuplexHeaderBlock = struct {
             {
                 connection.serve_read_connection_error = .frame_sequence;
                 connection.aggregate_timeout_unusable = true;
-                connection.sendGoAwayUntil(connection.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline) catch {};
+                connection.sendProtocolGoAway(connection.lastPeerProcessedStreamId(), .protocol_error, "header-sequence", deadline);
                 return error.UnexpectedFrame;
             }
             try self.appendContinuation(connection, continuation.frame);
@@ -37321,16 +37329,17 @@ test "HTTP/2 configured reset history controls late-frame tolerance" {
 test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
     const allocator = std.testing.allocator;
     const RecordingWriter = struct {
+        var active: std.atomic.Value(?*@This()) = .init(null);
         bytes: std.ArrayList(u8) = .empty,
 
         fn write(
-            context: ?*anyopaque,
+            _: ?*anyopaque,
             _: net.Socket.Handle,
             header: []const u8,
             data: []const []const u8,
             splat: usize,
         ) net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const self = active.load(.acquire).?;
             var total = header.len;
             self.bytes.appendSlice(allocator, header) catch
                 return error.SystemResources;
@@ -37355,12 +37364,14 @@ test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
     defer threaded.deinit();
     var writer: RecordingWriter = .{};
     defer writer.bytes.deinit(allocator);
+    RecordingWriter.active.store(&writer, .release);
+    defer RecordingWriter.active.store(null, .release);
     var vtable = threaded.io().vtable.*;
     vtable.netWrite = RecordingWriter.write;
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = undefined,
+        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
         .role = .server,
         .limits = .{ .max_local_error_reset_streams = 1 },
         .last_peer_processed_stream_id = 3,
@@ -37428,16 +37439,17 @@ test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
 test "HTTP/2 excessive padded empty DATA emits terminal GOAWAY" {
     const allocator = std.testing.allocator;
     const RecordingWriter = struct {
+        var active: std.atomic.Value(?*@This()) = .init(null);
         bytes: std.ArrayList(u8) = .empty,
 
         fn write(
-            context: ?*anyopaque,
+            _: ?*anyopaque,
             _: net.Socket.Handle,
             header: []const u8,
             data: []const []const u8,
             splat: usize,
         ) net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const self = active.load(.acquire).?;
             var total = header.len;
             self.bytes.appendSlice(allocator, header) catch
                 return error.SystemResources;
@@ -37460,12 +37472,14 @@ test "HTTP/2 excessive padded empty DATA emits terminal GOAWAY" {
     defer threaded.deinit();
     var writer: RecordingWriter = .{};
     defer writer.bytes.deinit(allocator);
+    RecordingWriter.active.store(&writer, .release);
+    defer RecordingWriter.active.store(null, .release);
     var vtable = threaded.io().vtable.*;
     vtable.netWrite = RecordingWriter.write;
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = undefined,
+        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
         .role = .server,
         .last_peer_processed_stream_id = 1,
     };

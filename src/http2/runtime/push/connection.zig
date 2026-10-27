@@ -141,7 +141,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 if (err == error.Timeout) return err;
                 if (self.hpack_decoder.lastDecodeWasCompressionError()) {
                     self.aggregate_timeout_unusable = true;
-                    hooks.goAway(self, hooks.processed(self.*), .compression_error, "push-hpack", deadline) catch {};
+                    hooks.goAway(self, hooks.processed(self.*), .compression_error, "push-hpack", deadline);
                 } else if (err == error.MessageTooLarge and pending.end_headers) {
                     const id = pending.stream_id;
                     hooks.deinitHeader(pending, self.allocator);
@@ -193,7 +193,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                         const fields = hooks.decodeHeaders(self.allocator, parsed.header_block, self.limits, &self.hpack_decoder) catch |err| {
                             if (self.hpack_decoder.lastDecodeWasCompressionError()) {
                                 self.aggregate_timeout_unusable = true;
-                                hooks.goAway(self, hooks.processed(self.*), .compression_error, "push-hpack", deadline) catch {};
+                                hooks.goAway(self, hooks.processed(self.*), .compression_error, "push-hpack", deadline);
                             } else if (err == error.MessageTooLarge) {
                                 try failPushedReceive(self, id, error.MessageTooLarge, 0, deadline);
                                 return true;
@@ -226,7 +226,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                     }
                     if (!entry.started) {
                         self.aggregate_timeout_unusable = true;
-                        try hooks.goAway(self, hooks.processed(self.*), .protocol_error, "data-on-reserved-push", deadline);
+                        hooks.goAway(self, hooks.processed(self.*), .protocol_error, "data-on-reserved-push", deadline);
                         return error.InvalidFrame;
                     }
                     const before = self.recv_connection_window.value;
@@ -254,7 +254,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 .window_update => {
                     if (!entry.started and !entry.finished) {
                         self.aggregate_timeout_unusable = true;
-                        try hooks.goAway(self, hooks.processed(self.*), .protocol_error, "window-on-reserved-push", deadline);
+                        hooks.goAway(self, hooks.processed(self.*), .protocol_error, "window-on-reserved-push", deadline);
                         return error.InvalidFrame;
                     }
                     return false;

@@ -31,16 +31,13 @@ fn exercise(mode: Mode) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const Recorder = struct {
+        var active: std.atomic.Value(?*@This()) = .init(null);
         bytes: std.ArrayList(u8) = .empty,
         fail_prefix: bool = false,
         calls: usize = 0,
 
-        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-            return .zero;
-        }
-
-        fn write(context: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+        fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+            const self = active.load(.acquire).?;
             if (self.fail_prefix) {
                 self.calls += 1;
                 if (self.calls == 1) {
@@ -65,13 +62,14 @@ fn exercise(mode: Mode) !void {
     };
     var recorder: Recorder = .{};
     defer recorder.bytes.deinit(allocator);
+    Recorder.active.store(&recorder, .release);
+    defer Recorder.active.store(null, .release);
     var vtable = threaded.io().vtable.*;
     vtable.netWrite = Recorder.write;
-    vtable.now = Recorder.now;
     var connection = runtime.Connection{
-        .io = .{ .userdata = &recorder, .vtable = &vtable },
+        .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = undefined,
+        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
         .role = .server,
         .last_peer_processed_stream_id = 1,
     };

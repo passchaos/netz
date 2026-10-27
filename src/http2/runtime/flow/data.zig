@@ -65,7 +65,7 @@ pub fn Receiver(comptime Context: anytype) type {
                     .enhance_your_calm,
                     "too_many_data_frames",
                     null,
-                ) catch {};
+                );
                 return error.ConnectionGoAway;
             };
             return .{
