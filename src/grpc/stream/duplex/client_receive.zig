@@ -149,7 +149,18 @@ pub fn transport(
                 var data = value;
                 const deliver = self.parse_response_body;
                 const ended = self.transport.responseFinished();
-                if (!deliver) data.deinit(self.allocator);
+                if (!deliver) {
+                    const consumed = data.data.len;
+                    data.deinit(self.allocator);
+                    // Discarding a non-gRPC fallback body consumes its bytes
+                    // just as reading them into the application would.
+                    if (self.transport.responseStreamCreditDeferred()) {
+                        self.transport.releaseResponseStreamCreditWithDeadline(consumed, deadline.?) catch |err| {
+                            Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
+                            return err;
+                        };
+                    }
+                }
                 if (ended) {
                     Hooks.finished(self, deadline) catch |err| {
                         if (deliver) data.deinit(self.allocator);

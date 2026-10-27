@@ -83,3 +83,67 @@ test "gRPC shared duplex supports client and server streaming RPC shapes" {
     live = false;
     try peer.await(io);
 }
+
+test "gRPC shared duplex discards HTTP fallback bodies beyond its window and reuses the channel" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    const Peer = struct {
+        fn run(server_ptr: *grpc.runtime.Server) !void {
+            var connection = try server_ptr.acceptWithTimeout(.fromSeconds(5));
+            defer connection.deinit();
+            {
+                var request = try connection.connection.readRequestWithTimeout(.fromSeconds(5));
+                defer request.deinit(allocator);
+                var writer = try connection.connection.startResponseWithTimeout(request.stream_id, .{
+                    .status = 404,
+                    .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                }, .fromSeconds(5));
+                defer writer.deinit();
+                const body = "broken-intermediary-body-" ** 8192;
+                try writer.writeWithTimeout(body, .fromSeconds(5));
+                try writer.finishWithTimeout(.fromSeconds(5));
+            }
+            var next = try connection.readUnaryWithTimeout(.fromSeconds(5));
+            defer next.deinit();
+            try connection.writeUnary(next.request.stream_id, .{ .message = "reused" });
+            var end = connection.connection.readResetStreamWithTimeout(.fromSeconds(5)) catch |err| switch (err) {
+                error.ConnectionClosed, error.SocketUnconnected, error.ConnectionResetByPeer, error.UnexpectedEof => return,
+                else => return err,
+            };
+            defer end.deinit(allocator);
+            return error.UnexpectedReset;
+        }
+    };
+    var peer = io.async(Peer.run, .{&server});
+    defer _ = peer.cancel(io) catch {};
+    var client = try shared.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address() } }, .{});
+    var live = true;
+    defer if (live) client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var rpc = try sender.startDuplex(.{ .path = "/demo.Shared/Fallback", .wait_for_ready = true, .timeout = .{ .value = 2, .unit = .second } });
+    defer rpc.deinit();
+    var writer = rpc.writer();
+    defer writer.deinit();
+    var reader = rpc.reader();
+    defer reader.deinit();
+    try writer.finishRequest();
+    while (true) {
+        var event = try reader.nextWithTimeout(.fromSeconds(5));
+        defer event.deinit(allocator);
+        if (event == .message) return error.UnexpectedMessage;
+        if (event == .terminal) {
+            try std.testing.expectEqual(grpc.Status.unimplemented, event.terminal.status);
+            break;
+        }
+    }
+    var reply = try sender.unary(.{ .path = "/demo.Shared/Unary", .message = "next", .wait_for_ready = true, .timeout = .{ .value = 5, .unit = .second } });
+    defer reply.deinit();
+    try std.testing.expectEqualStrings("reused", reply.message.?.payload);
+    client.deinit();
+    live = false;
+    try peer.await(io);
+}

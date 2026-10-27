@@ -20213,6 +20213,10 @@ pub const ClientDuplexStream = struct {
         self.deferred_response_credit = 0;
     }
 
+    pub fn responseStreamCreditDeferred(self: ClientDuplexStream) bool {
+        return self.deferred_response_credit != 0x80000000;
+    }
+
     pub fn releaseResponseStreamCreditWithDeadline(self: *ClientDuplexStream, amount: usize, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return response_capacity.release(self, amount, deadline);

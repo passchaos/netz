@@ -1338,6 +1338,11 @@ and cancels the transport. Known terminal socket-close errors during credit
 output restore local accounting so complete buffered DATA/trailers can still
 be delivered; uncertain partial output retires connection writes/reuse.
 
+HTTP fallback bodies with a non-gRPC media type are discarded under the RPC
+deadline and return deferred stream credit as their bytes are consumed. A
+broken intermediary's body can exceed the stream window without stalling the
+fallback status; the same channel remains available for subsequent RPCs.
+
 Unary, server-streaming, client-streaming and bidi patterns all use the same
 shared transport primitive. Health admission and DNS candidate selection apply
 before opening. A retired endpoint rejects later calls and drains its existing
