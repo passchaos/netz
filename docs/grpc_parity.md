@@ -444,8 +444,9 @@ reset race from closing with unread upload bytes.
    four RPC shapes, including owned typed failure details. The process gate now
    obtains both endpoint handles from zio-backed `std.Io`, schedules its local
    server through `std.Io.async`, and reports both runtimes as `zio-std-io`.
-   Higher-level concurrent scheduling policy remains above the intentionally
-   single-owner duplex step loop.
+   The background SharedChannel now schedules concurrent unary calls through
+   per-endpoint owners, as described below. Shared streaming and duplex send
+   handles remain above the single-owner duplex step loop.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
@@ -473,13 +474,13 @@ reset race from closing with unread upload bytes.
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including
    incremental delivery, cancellation, and consumption-driven client Watch
-   reconnection/backoff. Integrating health into a concurrent subchannel
-   picker's service-config policy remains open. Unary transport deadlines are
-   already enforced locally as described above.
+   reconnection/backoff. SharedChannel now applies healthCheckConfig to
+   same-connection endpoint admission for concurrent unary calls. Unary
+   transport deadlines are already enforced locally as described above.
 
-The current tests establish unary, sequential streaming, and single-owner
-step-driven bidirectional streaming; this is still not broad gRPC Core feature
-parity.
+The current tests establish concurrent shared unary calls, sequential streaming,
+and single-owner step-driven bidirectional streaming; broader gRPC Core feature
+parity remains open.
 
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial
@@ -1024,9 +1025,10 @@ and business deflate negotiation exercise independent decoder state.
 This establishes the shared-connection stream primitive needed by a background
 subchannel owner. The existing Channel still waits for quiescent stream state
 before connection selection, and `ReconnectingWatch` still owns its dedicated
-Channel. Background dispatch and per-backend health-gated selection remain the next
-integration work. Standard `healthCheckConfig` now constructs reconnecting
-client Health Watches as described below.
+Channel. SharedChannel now uses this primitive for background unary dispatch
+and per-backend health-gated selection, as described in its section below.
+Standard `healthCheckConfig` also constructs reconnecting client Health Watches
+as described below.
 
 
 The pinned grpc-cpp forward gate independently verifies two concurrent
