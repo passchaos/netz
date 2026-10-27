@@ -225,6 +225,9 @@ pub const UnaryCallOptions = struct {
     /// Enforced from one awake-clock deadline captured at call entry. Every
     /// attempt advertises the remaining `grpc-timeout`; null is unbounded.
     timeout: ?Timeout = null,
+    /// Explicit channel readiness policy. Null permits a service config to
+    /// supply its method policy; direct connected clients do not need to wait.
+    wait_for_ready: ?bool = null,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,
@@ -403,10 +406,34 @@ pub fn unaryCall(connection: *http2.runtime.Connection, allocator: std.mem.Alloc
     return retry.run(connection, allocator, options, null, unaryCallAttempt);
 }
 
+/// Unary call whose absolute deadline was captured by an owning channel before
+/// connection readiness. This prevents connection wait from renewing the RPC.
+pub fn unaryCallUnderDeadline(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp) Error!UnaryResponse {
+    return retry.runWithDeadline(
+        connection,
+        allocator,
+        options,
+        null,
+        deadline,
+        unaryCallAttempt,
+    );
+}
+
 /// Add explicit replay-safe retries to the transparent transport recovery.
 /// Logical attempts, pushback, throttling, and backoff share one RPC deadline.
 pub fn unaryCallWithRetry(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, policy: RetryPolicy) Error!UnaryResponse {
     return retry.run(connection, allocator, options, policy, unaryCallAttempt);
+}
+
+pub fn unaryCallWithRetryUnderDeadline(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, policy: RetryPolicy, deadline: ?std.Io.Clock.Timestamp) Error!UnaryResponse {
+    return retry.runWithDeadline(
+        connection,
+        allocator,
+        options,
+        policy,
+        deadline,
+        unaryCallAttempt,
+    );
 }
 
 /// Execute one unary attempt under a caller-owned absolute deadline.

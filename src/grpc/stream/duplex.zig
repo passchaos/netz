@@ -689,6 +689,33 @@ pub fn startDuplex(
     };
 }
 
+pub fn startDuplexUnderDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ClientDuplex {
+    const started = try sequential.startClientDuplexTransportUnderDeadline(
+        connection,
+        allocator,
+        options,
+        deadline,
+    );
+    return .{
+        .allocator = allocator,
+        .transport = started.transport,
+        .encoder = .{
+            .allocator = allocator,
+            .algorithm = options.compression,
+            .compression_level = options.compression_level,
+            .max_message_size = options.requestMessageLimit(),
+        },
+        .accepted_encodings = options.accepted_encodings,
+        .max_message_size = options.responseMessageLimit(),
+        .deadline = started.deadline,
+    };
+}
+
 pub const RequestTerminal = struct {
     allocator: std.mem.Allocator,
     trailers: ?[]http2.Hpack.HeaderField = null,

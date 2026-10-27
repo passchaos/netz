@@ -12,12 +12,18 @@ const web = @import("web.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
 const service_config = @import("service_config.zig");
+const channel = @import("channel.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 
 const net = std.Io.net;
 
 pub const Error = web.Error;
+pub const Channel = channel.Channel;
+pub const ChannelTarget = channel.Target;
+pub const ChannelOptions = channel.Options;
+pub const ChannelBackoffPolicy = channel.BackoffPolicy;
+pub const ChannelCustomConnector = channel.CustomConnector;
 
 pub const ClientOptions = struct {
     limits: http2.runtime.Limits = .{},
@@ -125,35 +131,11 @@ pub const Client = struct {
         options: call.UnaryCallOptions,
         config: *service_config.ServiceConfig,
     ) Error!call.UnaryResponse {
-        const policy = config.methodPolicy(options.path) orelse
-            return self.unary(options);
-        var resolved = options;
-        if (policy.timeout) |configured| {
-            if (configured.nanoseconds <= 0) return error.Timeout;
-            const duration = if (options.timeout) |explicit|
-                minDuration(explicit.duration(), configured)
-            else
-                configured;
-            resolved.timeout = try @import("wire.zig").Timeout.fromDuration(
-                duration,
-            );
+        const resolved = try config.resolveUnary(options);
+        if (resolved.retry_policy) |retry| {
+            return self.unaryWithRetry(resolved.options, retry);
         }
-        if (policy.max_request_message_bytes) |configured| {
-            resolved.max_request_message_size = @min(
-                resolved.requestMessageLimit(),
-                @as(usize, configured),
-            );
-        }
-        if (policy.max_response_message_bytes) |configured| {
-            resolved.max_response_message_size = @min(
-                resolved.responseMessageLimit(),
-                @as(usize, configured),
-            );
-        }
-        if (policy.retry_policy) |retry| {
-            return self.unaryWithRetry(resolved, retry);
-        }
-        return self.unary(resolved);
+        return self.unary(resolved.options);
     }
 
     pub fn healthCheck(
@@ -212,10 +194,9 @@ pub const Client = struct {
         options: streaming.RequestOptions,
         config: *service_config.ServiceConfig,
     ) streaming.Error!streaming.ClientWriter {
-        return self.startStreaming(try resolveStreamingOptions(
-            options,
-            config,
-        ));
+        return self.startStreaming(
+            (try config.resolveStreaming(options)).options,
+        );
     }
 
     /// Start a bidirectional message stream and transfer exclusive connection
@@ -240,10 +221,9 @@ pub const Client = struct {
         options: streaming.RequestOptions,
         config: *service_config.ServiceConfig,
     ) duplex.Error!duplex.ClientDuplex {
-        return self.startDuplex(try resolveStreamingOptions(
-            options,
-            config,
-        ));
+        return self.startDuplex(
+            (try config.resolveStreaming(options)).options,
+        );
     }
 
     pub fn negotiatedAlpn(self: *const Client) ?[]const u8 {
@@ -254,41 +234,6 @@ pub const Client = struct {
         return self.connection.peerCertificates();
     }
 };
-
-fn minDuration(a: std.Io.Duration, b: std.Io.Duration) std.Io.Duration {
-    return if (a.nanoseconds < b.nanoseconds) a else b;
-}
-
-fn resolveStreamingOptions(
-    options: streaming.RequestOptions,
-    config: *service_config.ServiceConfig,
-) streaming.Error!streaming.RequestOptions {
-    const policy = config.methodPolicy(options.path) orelse return options;
-    var resolved = options;
-    if (policy.timeout) |configured| {
-        if (configured.nanoseconds <= 0) return error.Timeout;
-        const duration = if (options.timeout) |explicit|
-            minDuration(explicit.duration(), configured)
-        else
-            configured;
-        resolved.timeout = try @import("wire.zig").Timeout.fromDuration(
-            duration,
-        );
-    }
-    if (policy.max_request_message_bytes) |configured| {
-        resolved.max_request_message_size = @min(
-            resolved.requestMessageLimit(),
-            @as(usize, configured),
-        );
-    }
-    if (policy.max_response_message_bytes) |configured| {
-        resolved.max_response_message_size = @min(
-            resolved.responseMessageLimit(),
-            @as(usize, configured),
-        );
-    }
-    return resolved;
-}
 
 pub const ServerOptions = struct {
     transport: http2.runtime.TlsListenOptions,

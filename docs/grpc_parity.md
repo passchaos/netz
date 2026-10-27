@@ -109,9 +109,9 @@ existing HTTP/2 runtime:
   `timeout`, `maxRequestMessageBytes`, and `maxResponseMessageBytes` are also
   applied to unary, sequential-streaming, and duplex calls, taking the stricter
   bound when the caller supplied its own timeout or directional message limit.
-  Streaming policies do not silently enable retry without a complete replay
-  buffer; recognized `waitForReady` is rejected until the channel owns a
-  reconnect policy,
+  `waitForReady` follows the same exact-method, service, then default selection,
+  while an explicitly set per-call value takes precedence. Streaming policies
+  do not silently enable retry without a complete replay buffer,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - sequential client-stream deadlines captured once before request setup and
@@ -862,3 +862,31 @@ and requires the raw Node peer to observe the exact connected address/port in
 the 63 native RPCs that use the constructor default, including correct `http`
 scheme and connection reuse. Nine further native calls supply equivalent Host
 and authority fields and must complete successfully on that same connection.
+
+## Wait-for-ready reconnecting channels
+
+`grpc.runtime.Channel` is a lazy, single-owner channel distinct from the
+already-connected `grpc.runtime.Client`. It accepts cleartext IP/hostname,
+TLS hostname/resolved-address, or custom connectors and retains one quiescent
+HTTP/2 connection across calls. Unary, sequential-streaming and duplex starts
+support explicit `wait_for_ready`; service-config `waitForReady` applies only
+when the call did not explicitly select fail-fast or waiting behavior.
+
+One awake-clock RPC deadline is captured before connection readiness and then
+reused by HTTP/2 request setup, every explicit retry attempt, stream writes and
+response reads. Connection waiting therefore cannot renew `grpc-timeout`.
+Unavailable targets use gRPC Core's connection-backoff defaults: one second
+initial delay, 1.6 multiplier, plus/minus 20 percent jitter, 120-second base cap and
+20-second minimum connect attempt, all configurable for tests and deployments.
+Scheduled backoff survives a shorter caller deadline, successful SETTINGS
+resets it, and `resetConnectionBackoff` permits an explicit immediate retry.
+`cancelWaits` interrupts backoff without racing the sole connection owner.
+
+Wait-for-ready is not an RPC replay policy. Once an RPC reaches a connection,
+transport failure returns to that caller; the broken channel connection is
+retired and a later call may reconnect. Existing transparent REFUSED_STREAM
+recovery and configured replay-safe unary retry remain the only automatic
+request replays. Real TCP tests cover two refused connection attempts followed
+by success, decreasing on-wire timeout, fail-fast override, deadline and
+cancellation, scheduled-backoff retention, and reconnecting only the later RPC
+after a committed request loses its transport.

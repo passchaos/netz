@@ -306,6 +306,32 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.health, "ClientWatch"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "startWatch"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
+    try std.testing.expect(@hasDecl(netz.grpc.runtime, "Channel"));
+    try std.testing.expect(@hasDecl(netz.grpc, "ChannelTarget"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "unaryWithServiceConfig",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "startStreamingWithServiceConfig",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "startDuplexWithServiceConfig",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "cancelWaits",
+    ));
+    try std.testing.expect(@hasField(
+        netz.grpc.UnaryCallOptions,
+        "wait_for_ready",
+    ));
+    try std.testing.expect(@hasField(
+        netz.grpc.StreamingRequestOptions,
+        "wait_for_ready",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Server"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Server, "accept"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "connectTlsHost"));

@@ -31,6 +31,8 @@ pub const RequestOptions = struct {
     accepted_encodings: compression.AlgorithmSet =
         compression.AlgorithmSet.supported,
     timeout: ?wire.Timeout = null,
+    /// Explicit channel readiness policy. Null permits service-config policy.
+    wait_for_ready: ?bool = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     /// Compatibility ceiling used for both directions unless a directional
@@ -250,6 +252,21 @@ pub fn startClient(
         })
     else
         null;
+    return startClientUnderDeadline(
+        connection,
+        allocator,
+        options,
+        deadline,
+    );
+}
+
+/// Start a stream under a deadline captured before channel readiness.
+pub fn startClientUnderDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ClientWriter {
     _ = try call.parseRequestMetadata(
         "POST",
         options.path,
@@ -362,13 +379,34 @@ pub fn startClientDuplexTransport(
     options: RequestOptions,
 ) Error!ClientDuplexTransport {
     var writer = try startClient(connection, allocator, options);
+    return beginClientDuplexTransport(&writer);
+}
+
+pub fn startClientDuplexTransportUnderDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ClientDuplexTransport {
+    var writer = try startClientUnderDeadline(
+        connection,
+        allocator,
+        options,
+        deadline,
+    );
+    return beginClientDuplexTransport(&writer);
+}
+
+fn beginClientDuplexTransport(
+    writer: *ClientWriter,
+) Error!ClientDuplexTransport {
     errdefer writer.deinit();
     const transport = try writer.transport.beginDuplex();
     const deadline = writer.deadline;
     // beginDuplex has transferred both HTTP/2 halves and made the writer
     // inert. Marking this local value undefined documents that it must not run
     // its cancellation deinitializer after the transfer.
-    writer = undefined;
+    writer.* = undefined;
     return .{ .transport = transport, .deadline = deadline };
 }
 

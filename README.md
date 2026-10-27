@@ -894,6 +894,10 @@ Current protocol coverage includes:
   a package-local focused encoder and Vort's bounded decompression, typed
   `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
   and gRPC Core-compatible fallback when compression does not shrink a message,
+  lazy reconnecting channels with explicit/service-config wait-for-ready,
+  one deadline spanning connection readiness and the RPC, upstream-compatible
+  jittered connection backoff, cancel/reset controls, and no implicit replay
+  after an RPC reaches a transport,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

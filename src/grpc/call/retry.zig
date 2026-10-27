@@ -8,11 +8,22 @@ const UnaryResponse = call.UnaryResponse;
 const RetryPolicy = call.RetryPolicy;
 
 pub fn run(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, comptime attempt: anytype) Error!UnaryResponse {
-    if (policy) |configured| try configured.validate();
     const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
         std.Io.Clock.Timestamp.fromNow(connection.io, .{ .raw = timeout.duration(), .clock = .awake })
     else
         null;
+    return runWithDeadline(
+        connection,
+        allocator,
+        options,
+        policy,
+        deadline,
+        attempt,
+    );
+}
+
+pub fn runWithDeadline(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) Error!UnaryResponse {
+    if (policy) |configured| try configured.validate();
     var attempts: u8 = 0;
     var transparent_used = false;
     var backoff = if (policy) |configured| cappedBackoff(configured.initial_backoff, configured.max_backoff) else std.Io.Duration.zero;

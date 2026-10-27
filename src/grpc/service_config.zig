@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const call = @import("call.zig");
+const streaming = @import("stream/runtime.zig");
 const wire = @import("wire.zig");
 
 pub const Error = std.mem.Allocator.Error || error{InvalidServiceConfig};
@@ -62,6 +63,7 @@ const OwnedRetryPolicy = struct {
 
 const OwnedMethodPolicy = struct {
     timeout: ?std.Io.Duration = null,
+    wait_for_ready: ?bool = null,
     max_request_message_bytes: ?u32 = null,
     max_response_message_bytes: ?u32 = null,
     retry_policy: ?OwnedRetryPolicy = null,
@@ -69,6 +71,7 @@ const OwnedMethodPolicy = struct {
 
 pub const MethodPolicy = struct {
     timeout: ?std.Io.Duration,
+    wait_for_ready: ?bool,
     max_request_message_bytes: ?u32,
     max_response_message_bytes: ?u32,
     retry_policy: ?call.RetryPolicy,
@@ -116,14 +119,12 @@ pub const ServiceConfig = struct {
         const methods = try owned.alloc(MethodConfig, method_count);
         var method_index: usize = 0;
         for (parsed.methodConfig) |config| {
-            if (config.waitForReady != null) {
-                return error.InvalidServiceConfig;
-            }
             const policy = OwnedMethodPolicy{
                 .timeout = if (config.timeout) |timeout|
                     try parseDuration(timeout, true)
                 else
                     null,
+                .wait_for_ready = config.waitForReady,
                 .max_request_message_bytes = try parseOptionalSize(
                     config.maxRequestMessageBytes,
                 ),
@@ -221,6 +222,86 @@ pub const ServiceConfig = struct {
         return null;
     }
 
+    pub fn resolveUnary(
+        self: *ServiceConfig,
+        options: call.UnaryCallOptions,
+    ) ResolveError!ResolvedUnary {
+        const policy = self.methodPolicy(options.path);
+        var resolved = options;
+        if (policy) |selected| {
+            if (selected.timeout) |configured| {
+                if (configured.nanoseconds <= 0) return error.Timeout;
+                const duration = if (options.timeout) |explicit|
+                    minDuration(explicit.duration(), configured)
+                else
+                    configured;
+                resolved.timeout = try wire.Timeout.fromDuration(duration);
+            }
+            if (selected.max_request_message_bytes) |configured| {
+                resolved.max_request_message_size = @min(
+                    resolved.requestMessageLimit(),
+                    @as(usize, configured),
+                );
+            }
+            if (selected.max_response_message_bytes) |configured| {
+                resolved.max_response_message_size = @min(
+                    resolved.responseMessageLimit(),
+                    @as(usize, configured),
+                );
+            }
+        }
+        return .{
+            .options = resolved,
+            .retry_policy = if (policy) |selected|
+                selected.retry_policy
+            else
+                null,
+            .wait_for_ready = options.wait_for_ready orelse
+                (if (policy) |selected|
+                    selected.wait_for_ready orelse false
+                else
+                    false),
+        };
+    }
+
+    pub fn resolveStreaming(
+        self: *ServiceConfig,
+        options: streaming.RequestOptions,
+    ) ResolveError!ResolvedStreaming {
+        const policy = self.methodPolicy(options.path);
+        var resolved = options;
+        if (policy) |selected| {
+            if (selected.timeout) |configured| {
+                if (configured.nanoseconds <= 0) return error.Timeout;
+                const duration = if (options.timeout) |explicit|
+                    minDuration(explicit.duration(), configured)
+                else
+                    configured;
+                resolved.timeout = try wire.Timeout.fromDuration(duration);
+            }
+            if (selected.max_request_message_bytes) |configured| {
+                resolved.max_request_message_size = @min(
+                    resolved.requestMessageLimit(),
+                    @as(usize, configured),
+                );
+            }
+            if (selected.max_response_message_bytes) |configured| {
+                resolved.max_response_message_size = @min(
+                    resolved.responseMessageLimit(),
+                    @as(usize, configured),
+                );
+            }
+        }
+        return .{
+            .options = resolved,
+            .wait_for_ready = options.wait_for_ready orelse
+                (if (policy) |selected|
+                    selected.wait_for_ready orelse false
+                else
+                    false),
+        };
+    }
+
     fn find(
         self: *ServiceConfig,
         service: ?[]const u8,
@@ -234,12 +315,30 @@ pub const ServiceConfig = struct {
     }
 };
 
+pub const ResolveError = wire.Error || error{Timeout};
+
+pub const ResolvedUnary = struct {
+    options: call.UnaryCallOptions,
+    retry_policy: ?call.RetryPolicy,
+    wait_for_ready: bool,
+};
+
+pub const ResolvedStreaming = struct {
+    options: streaming.RequestOptions,
+    wait_for_ready: bool,
+};
+
+fn minDuration(a: std.Io.Duration, b: std.Io.Duration) std.Io.Duration {
+    return if (a.nanoseconds < b.nanoseconds) a else b;
+}
+
 fn resolvedPolicy(
     config: *ServiceConfig,
     owned: OwnedMethodPolicy,
 ) MethodPolicy {
     return .{
         .timeout = owned.timeout,
+        .wait_for_ready = owned.wait_for_ready,
         .max_request_message_bytes = owned.max_request_message_bytes,
         .max_response_message_bytes = owned.max_response_message_bytes,
         .retry_policy = if (owned.retry_policy) |retry|
@@ -398,6 +497,7 @@ test "gRPC service config selects exact service and default retry policies" {
         \\      "retryableStatusCodes": ["UNAVAILABLE"]}},
         \\    {"name": [{"service": "demo.Echo"}],
         \\      "timeout": "9s",
+        \\      "waitForReady": true,
         \\      "maxRequestMessageBytes": "1024",
         \\      "maxResponseMessageBytes": 2048, "retryPolicy": {
         \\      "maxAttempts": 3, "initialBackoff": "0.125s",
@@ -441,6 +541,19 @@ test "gRPC service config selects exact service and default retry policies" {
     );
     try std.testing.expectEqual(@as(?u32, 1024), service_policy.max_request_message_bytes);
     try std.testing.expectEqual(@as(?u32, 2048), service_policy.max_response_message_bytes);
+    try std.testing.expectEqual(@as(?bool, true), service_policy.wait_for_ready);
+
+    const inherited = try config.resolveUnary(.{
+        .path = "/demo.Echo/Other",
+        .message = "request",
+    });
+    try std.testing.expect(inherited.wait_for_ready);
+    const explicit = try config.resolveUnary(.{
+        .path = "/demo.Echo/Other",
+        .message = "request",
+        .wait_for_ready = false,
+    });
+    try std.testing.expect(!explicit.wait_for_ready);
 
     const default = config.retryPolicy("/other.Service/Method").?;
     try std.testing.expectEqual(@as(u8, 2), default.max_attempts);
@@ -466,8 +579,6 @@ test "gRPC service config rejects malformed retry settings" {
         \\  "retryableStatusCodes": ["OK"]}}]}
         ,
         \\{"methodConfig": [{"name": [{}]}, {"name": [{"service": ""}]}]}
-        ,
-        \\{"methodConfig": [{"name": [{}], "waitForReady": true}]}
         ,
         \\{"methodConfig": [{"name": [{}], "maxRequestMessageBytes": -1}]}
         ,
