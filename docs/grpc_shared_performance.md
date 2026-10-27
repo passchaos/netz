@@ -11,9 +11,13 @@ stream admission and terminal cleanup are outside the measured interval. The
 calls mode creates a fresh bidirectional RPC for each roundtrip on one shared
 channel, including admission, one request/reply, request FIN, terminal status
 and owning-handle destruction in that interval. Connection establishment stays
-outside both intervals. All calls use identity compression and the default
-65,535-byte stream receive window; large messages exercise repeated credit
-return without enlarging the window.
+outside both intervals. All calls use identity compression. The default
+65,535-byte stream receive window makes large messages exercise repeated credit
+return. --stream-window and --connection-window independently set the initial
+receive windows on both endpoints; --adaptive-window enables BDP growth with
+--adaptive-window-max as its ceiling. Stream windows must be positive,
+connection windows must be at least 65535, and benchmark windows are capped at
+16 MiB. An adaptive ceiling must cover both initial windows.
 
 Payloads use the pre-encoded string field shape of upstream EchoRequest and
 EchoResponse. A zero-byte string uses the empty protobuf message. This measures
@@ -31,6 +35,12 @@ actual serialized size.
       --mode=calls --payload=262144 --warmup=100 --iterations=2000
     zig build bench-grpc-shared -Doptimize=ReleaseFast -- \
       --mode=persistent --payload=262144 --warmup=100 --iterations=2000 --stats
+    zig build bench-grpc-shared -Doptimize=ReleaseFast -- \
+      --mode=persistent --payload=262144 --stream-window=1048576 \
+      --connection-window=1048576 --warmup=100 --iterations=2000
+    zig build bench-grpc-shared -Doptimize=ReleaseFast -- \
+      --mode=persistent --payload=262144 --adaptive-window \
+      --adaptive-window-max=1048576 --warmup=100 --iterations=2000
     zig build test-grpc-benchmark-checker
 
 The result record reports average wall-clock roundtrip time, roundtrips per
@@ -39,6 +49,14 @@ tools/interop/grpc_benchmark_check.py verifier checks timing arithmetic, message
 counts, protobuf/logical byte counts, terminal-call counts and runtime identity.
 It requires exactly one result and one matching peer completion. Pass a saved
 benchmark log as its positional argument.
+
+Schema-two records include initial connection/stream windows, the adaptive
+policy and cap, and both final stream targets observed by the server after
+draining the connection. Result and peer-completion records must agree.
+Fixed windows cannot change; adaptive targets must stay between the initial
+stream window and its cap. Historical schema-one records retain their implicit
+fixed defaults. The official comparison runner requires native fixed defaults
+and rejects records from a changed window policy.
 
 Allocation telemetry is opt-in. Its measured delta includes explicit protocol
 allocations from both netz endpoints, including the shared ring consumer,

@@ -100,7 +100,7 @@ def main() -> None:
                     log = output / f"netz-{sample}-{mode}-{payload}.log"
                     command(["taskset", "-c", str(args.cpu), str(netz), f"--mode={mode}", f"--payload={payload}", f"--warmup={args.warmup}", f"--iterations={args.iterations}"], log, 60)
                     row = verify(log.read_text(encoding="utf-8"))
-                    if row["mode"] != mode or int(row["payload_bytes"]) != payload or int(row["warmup"]) != args.warmup or int(row["iterations"]) != args.iterations or row["stats_enabled"] != "false":
+                    if row["mode"] != mode or int(row["payload_bytes"]) != payload or int(row["warmup"]) != args.warmup or int(row["iterations"]) != args.iterations or row["stats_enabled"] != "false" or row.get("stream_window", "65535") != "65535" or row.get("connection_window", "65535") != "65535" or row.get("adaptive_window", "false") != "false":
                         raise ValueError(f"native workload mismatch: {log}")
                     native[mode, payload].append(int(row["ns_per_roundtrip"]))
             else:

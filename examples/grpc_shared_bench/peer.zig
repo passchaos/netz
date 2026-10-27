@@ -9,6 +9,8 @@ pub const Peer = struct {
     response: []const u8,
     messages: usize = 0,
     finished_calls: usize = 0,
+    final_client_stream_window: u32 = 0,
+    final_server_stream_window: u32 = 0,
 
     const Collector = struct {
         expected: []const u8,
@@ -23,6 +25,10 @@ pub const Peer = struct {
     pub fn run(self: *Peer) !void {
         var connection = try self.server.acceptWithTimeout(.fromSeconds(10));
         defer connection.deinit();
+        defer {
+            self.final_client_stream_window = @intCast(connection.connection.peer_initial_stream_window);
+            self.final_server_stream_window = connection.connection.recv_stream_window_target;
+        }
         for (0..self.options.calls()) |_| {
             var rpc = try connection.acceptDuplexWithTimeout(.fromSeconds(10));
             defer rpc.deinit();

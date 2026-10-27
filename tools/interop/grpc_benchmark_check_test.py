@@ -95,5 +95,27 @@ class ReferenceTests(unittest.TestCase):
                 self.check(change)
 
 
+def window_log(*, stream=65535, connection=65535, adaptive=False, maximum=1048576, final=None):
+    final = stream if final is None else final
+    tail = f" stream_window={stream} connection_window={connection} adaptive_window={str(adaptive).lower()} adaptive_window_max={maximum} final_client_stream_window={final} final_server_stream_window={final}"
+    return "\n".join(line.replace("record=result ", "record=result schema=2 ").replace("record=peer-completion ", "record=peer-completion schema=2 ") + tail for line in log().splitlines())
+
+
+class WindowTests(unittest.TestCase):
+    def test_fixed_and_adaptive_windows(self) -> None:
+        for value in (window_log(), window_log(stream=1), window_log(stream=1048576, connection=1048576), window_log(adaptive=True, final=1048576)):
+            self.assertEqual(verify(value)["schema"], "2")
+
+    def test_invalid_windows_and_growth(self) -> None:
+        for value in (window_log(stream=0), window_log(connection=65534), window_log(stream=16777217), window_log(adaptive=True, maximum=65534), window_log(final=1048576), window_log(adaptive=True, final=1048577)):
+            with self.assertRaises(ValueError):
+                verify(value)
+
+    def test_schema_and_peer_evidence(self) -> None:
+        for value in (window_log().replace("schema=2", "schema=3"), window_log().replace("record=peer-completion schema=2", "record=peer-completion"), window_log().replace("schema=2", "schema=1"), window_log().replace("final_client_stream_window=65535", "final_client_stream_window=65534", 1)):
+            with self.assertRaises(ValueError):
+                verify(value)
+
+
 if __name__ == "__main__":
     unittest.main()

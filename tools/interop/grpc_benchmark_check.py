@@ -30,6 +30,40 @@ def integer(row: dict[str, str], key: str, positive: bool = False) -> int:
     return value
 
 
+def verify_windows(result: dict[str, str], peer: dict[str, str]) -> None:
+    schema = result.get("schema", "1")
+    if peer.get("schema", "1") != schema:
+        raise ValueError("peer schema mismatch")
+    keys = ("stream_window", "connection_window", "adaptive_window", "adaptive_window_max", "final_client_stream_window", "final_server_stream_window")
+    if schema == "1":
+        # Historical version-one binaries only exercised the fixed defaults.
+        if any(key in row for row in (result, peer) for key in keys):
+            raise ValueError("legacy schema has explicit window fields")
+        return
+    if schema != "2":
+        raise ValueError("unsupported schema")
+    for key in keys:
+        if key not in result or peer.get(key) != result[key]:
+            raise ValueError(f"peer {key} mismatch")
+    stream = integer(result, "stream_window", True)
+    connection = integer(result, "connection_window", True)
+    maximum = integer(result, "adaptive_window_max")
+    if stream > 16 * 1024 * 1024 or connection < 65535 or connection > 16 * 1024 * 1024 or maximum > 16 * 1024 * 1024:
+        raise ValueError("invalid window limits")
+    adaptive = result["adaptive_window"]
+    if adaptive not in ("true", "false"):
+        raise ValueError("invalid adaptive_window")
+    if adaptive == "true" and maximum < max(stream, connection):
+        raise ValueError("adaptive window cap too small")
+    for key in ("final_client_stream_window", "final_server_stream_window"):
+        final = integer(result, key, True)
+        if adaptive == "true":
+            if not stream <= final <= maximum:
+                raise ValueError("adaptive window growth outside limits")
+        elif final != stream:
+            raise ValueError("unexpected fixed-window growth")
+
+
 def verify(text: str) -> dict[str, str]:
     rows = [fields(line) for line in text.splitlines() if line.startswith("record=")]
     results = [row for row in rows if row.get("record") == "result"]
@@ -37,6 +71,7 @@ def verify(text: str) -> dict[str, str]:
     if len(results) != 1 or len(completions) != 1:
         raise ValueError("expected one result and one peer completion")
     result, peer = results[0], completions[0]
+    verify_windows(result, peer)
     expected = {
         "implementation": "netz", "protocol": "grpc", "transport": "h2c",
         "client_api": "shared", "client_io": "zio-std-io", "server_io": "zio-std-io",
