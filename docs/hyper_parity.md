@@ -3652,3 +3652,19 @@ Upload Timeout now always selects the independent cleanup deadline, including
 transports that report timeout before the exact awake timestamp due to timer
 granularity. OOM still retains the earlier operation deadline. A deterministic
 submission-hook regression verifies both budgets without relying on poll timing.
+
+The same ownership policy now applies to `ResponseWriter`,
+`ServerDuplexStream`, and public peer-request abandonment. Default terminal
+output is bounded by `terminal_cleanup_timeout`; local request credit,
+priority state, response semantics, and send/receive windows are released on
+every terminal output failure. A duplex owner cannot abandon an incomplete
+consumed request trailer block while keeping HPACK reuse.
+
+Reader-scoped cancellation remains permitted at its own callback frame
+boundary. Parser discard uses an allocation-free terminal reset after reuse
+is retired, while failed output or retained TLS ciphertext stops subsequent
+cleanup. Pending-accept overflow captures one deadline for all queued resets,
+and already inactive materialized requests retire without touching transport
+or the I/O clock. Regression coverage includes TCP blocking, partial resets,
+zero cleanup budget, OOM, gRPC duplex wrappers, sibling completion, and real
+authenticated TLS 1.2/1.3 server records.

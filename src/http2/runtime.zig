@@ -31,6 +31,7 @@ test {
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
     _ = @import("runtime/stream/termination_tests.zig");
+    _ = @import("runtime/stream/peer_termination_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -500,7 +501,7 @@ pub const Limits = struct {
     /// can be advertised to peers and must stay within RFC 9113 bounds.
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
-    /// Best-effort control output after a discarded response, owned client
+    /// Best-effort control output after a discarded response, owned
     /// stream cancellation/destruction, or a terminal early response. The RPC
     /// keeps its original deadline; cleanup may add at most this separate
     /// shared transport budget to the return path. Zero skips writes.
@@ -12065,8 +12066,9 @@ pub const Connection = struct {
     fn cancelPendingAcceptOverflow(self: *Connection) void {
         self.aggregate_timeout_unusable = true;
         self.pending_accept_reset_overflowed = true;
+        const before = if (self.active_peer_index.count() != 0) response_cleanup.cleanupDeadline(self, null) else null;
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| {
-            self.cancelPeerRequest(pending.streamId());
+            self.abandonPeerRequestBefore(pending.streamId(), .cancel, before);
             pending.deinit(self.allocator);
         }
         self.pending_requests.items.len = 0;
@@ -14397,7 +14399,9 @@ pub const Connection = struct {
 
     const local_stream_termination_hooks = .{
         .active = outboundStreamIsActive,
+        .peerActive = peerStreamIsActive,
         .reset = writeResetStreamFrameUntil,
+        .terminalReset = writeTerminalResetStreamUntil,
         .emptyData = flow_output.writeEmpty,
         .transport = transportForIo,
         .releaseLocal = releaseLocalStream,
@@ -14405,8 +14409,12 @@ pub const Connection = struct {
         .forgetWindows = forgetStreamWindows,
     };
 
-    fn terminateLocalStream(self: *Connection, id: u31, code: http2.ErrorCode) Error!void {
+    fn terminateOwnedStream(self: *Connection, id: u31, code: http2.ErrorCode) Error!void {
         return stream_termination.reset(self, id, code, response_cleanup.cleanupDeadline(self, null), local_stream_termination_hooks);
+    }
+
+    fn peerStreamIsActive(self: Connection, id: u31) bool {
+        return self.active_peer_index.count() != 0 and self.active_peer_index.contains(id);
     }
 
     /// Best-effort cleanup for an admitted Extended CONNECT stream whose
@@ -14464,23 +14472,21 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) void {
-        self.abandonPeerRequestInternal(stream_id, error_code, false);
+        if (self.peerStreamIsActive(stream_id)) {
+            self.terminateOwnedStream(stream_id, error_code) catch {};
+        } else {
+            self.releasePeerStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+        }
     }
 
-    fn abandonPeerRequestInternal(
+    fn abandonPeerRequestBefore(
         self: *Connection,
         stream_id: u31,
         error_code: http2.ErrorCode,
-        allow_terminal_reset: bool,
+        before: ?std.Io.Clock.Timestamp,
     ) void {
-        if (self.active_peer_index.count() != 0 and
-            self.active_peer_index.contains(stream_id) and
-            (allow_terminal_reset or !self.aggregate_timeout_unusable))
-        {
-            self.writeResetStreamFrame(stream_id, error_code) catch {};
-        }
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+        stream_termination.resetFromReader(self, stream_id, error_code, before, local_stream_termination_hooks) catch {};
     }
 
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
@@ -15498,7 +15504,12 @@ pub const Connection = struct {
         // tests and upgrade paths can surface already-materialized requests
         // without an active stream, where emitting RST_STREAM would itself be
         // invalid and may not have a usable transport.
-        self.abandonPeerRequestInternal(stream_id, .cancel, true);
+        if (!self.peerStreamIsActive(stream_id)) {
+            self.releasePeerStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+            return;
+        }
+        self.abandonPeerRequestBefore(stream_id, .cancel, response_cleanup.cleanupDeadline(self, null));
     }
 
     fn failDiscardedRequest(self: *Connection, stream_id: u31) void {
@@ -19491,7 +19502,7 @@ pub const RequestWriter = struct {
             self.body_finished = true;
             self.completed = true;
         }
-        return self.connection.terminateLocalStream(self.stream_id, error_code);
+        return self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     fn ensureWritable(self: RequestWriter) Error!void {
@@ -19925,7 +19936,7 @@ pub const ClientDuplexStream = struct {
             // lose state needed to keep the shared decoder synchronized.
             if (!pending.decode_complete) self.connection.aggregate_timeout_unusable = true;
         }
-        return self.connection.terminateLocalStream(self.stream_id, error_code);
+        return self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     pub fn finishRequestData(
@@ -20470,18 +20481,14 @@ pub const ServerDuplexStream = struct {
     released: bool = false,
 
     pub fn deinit(self: *ServerDuplexStream) void {
-        self.pending_header.deinit(self.connection.allocator);
         if (!self.released) {
             if (self.request_finished and self.response_finished) {
                 self.release();
             } else {
-                self.connection.sendResetStream(self.stream_id, .cancel) catch {
-                    self.connection.releasePeerStream(self.stream_id);
-                    self.connection.forgetStreamWindows(self.stream_id);
-                };
-                self.released = true;
+                self.reset(.cancel) catch {};
             }
         }
+        self.pending_header.deinit(self.connection.allocator);
         self.connection.duplex_reader_active = false;
         freeHeaders(self.connection.allocator, self.headers);
         self.* = undefined;
@@ -20570,12 +20577,17 @@ pub const ServerDuplexStream = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         if (self.released) return error.ConnectionClosed;
-        try self.connection.sendResetStream(self.stream_id, error_code);
-        self.request_finished = true;
-        self.request_finished_reported = true;
-        self.response_finished = true;
-        self.released = true;
-        self.connection.duplex_reader_active = false;
+        defer {
+            self.request_finished = true;
+            self.request_finished_reported = true;
+            self.response_finished = true;
+            self.released = true;
+            self.connection.duplex_reader_active = false;
+        }
+        if (self.pending_header.getPtr()) |pending| {
+            if (!pending.decode_complete) self.connection.aggregate_timeout_unusable = true;
+        }
+        return self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     pub fn writeResponse(
@@ -21136,15 +21148,7 @@ pub const ResponseWriter = struct {
     /// `startResponse`. Successful finish/reset methods make this a no-op.
     pub fn deinit(self: *ResponseWriter) void {
         if (self.finished) return;
-        self.connection.sendResetStream(
-            self.stream_id,
-            .cancel,
-        ) catch {
-            // A transport failure may prevent emitting RST_STREAM, but local
-            // ownership must still be released so connection teardown does not
-            // retain stale response semantics.
-            self.connection.releasePeerStream(self.stream_id);
-        };
+        self.connection.terminateOwnedStream(self.stream_id, .cancel) catch {};
         self.finished = true;
     }
 
@@ -21311,11 +21315,8 @@ pub const ResponseWriter = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         try self.ensureWritable();
-        try self.connection.sendResetStream(
-            self.stream_id,
-            error_code,
-        );
-        self.finished = true;
+        defer self.finished = true;
+        return self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     fn ensureWritable(self: ResponseWriter) Error!void {
@@ -37625,6 +37626,7 @@ test "HTTP/2 failed protocol error reset write is terminal and uncounted" {
 }
 
 test "HTTP/2 abandoning peer request releases state after reset write failure" {
+    if (comptime builtin.os.tag != .linux) return;
     const allocator = std.testing.allocator;
     const FailingWriter = struct {
         fn write(
@@ -37640,29 +37642,18 @@ test "HTTP/2 abandoning peer request releases state after reset write failure" {
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
-    var vtable = threaded.io().vtable.*;
+    const io = threaded.io();
+    var fixture = try @import("runtime/testing/blocked_output.zig").BlockedOutput.init(io, .server);
+    defer fixture.deinit();
+    const connection = &fixture.connection;
+    var vtable = io.vtable.*;
     vtable.netWrite = FailingWriter.write;
-    var connection = Connection{
-        .io = .{ .userdata = null, .vtable = &vtable },
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .server,
-        .limits = .{
-            .max_concurrent_streams = 1,
-            .max_reset_stream_history = 0,
-        },
+    connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    defer connection.io = io;
+    connection.limits = .{
+        .max_concurrent_streams = 1,
+        .max_reset_stream_history = 0,
     };
-    defer {
-        connection.send_stream_windows.deinit(allocator);
-        connection.send_stream_window_index.deinit(allocator);
-        connection.recv_stream_windows.deinit(allocator);
-        connection.recv_stream_window_index.deinit(allocator);
-        connection.active_peer_streams.deinit(allocator);
-        connection.active_peer_index.deinit(allocator);
-        connection.priority_state.deinit(allocator);
-        connection.response_semantics.deinit(allocator);
-        connection.response_semantics_index.deinit(allocator);
-    }
 
     try connection.reservePeerStream(1);
     try connection.rememberResponseSemantics(1, "POST", null, .{});

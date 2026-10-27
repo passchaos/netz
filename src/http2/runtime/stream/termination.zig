@@ -1,4 +1,4 @@
-//! Bounded, final output for an owned client stream. Local ownership is always
+//! Bounded, final output for an owned stream. Local ownership is always
 //! retired; a failed write must never be retried by an adapter destructor.
 const std = @import("std");
 
@@ -7,6 +7,30 @@ pub fn reset(connection: anytype, id: u31, code: anytype, before: ?std.Io.Clock.
     try usableOutput(connection, before);
     if (!Hooks.active(connection.*, id)) return error.InvalidStreamId;
     Hooks.reset(connection, id, code, before) catch |err| {
+        failOutput(connection);
+        return err;
+    };
+}
+
+/// Request-reader cleanup owns the delivered frame boundary and may cancel
+/// inside its own callback. A discarded parser can also require an untracked
+/// terminal reset after reuse is retired; no allocation is needed in that case.
+pub fn resetFromReader(connection: anytype, id: u31, code: anytype, before: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) !void {
+    defer retire(connection, id, Hooks);
+    if (!Hooks.peerActive(connection.*, id)) return;
+    if (connection.terminal_write_failed or Hooks.transport(connection).hasPendingWrite()) {
+        failOutput(connection);
+        return error.ConnectionClosed;
+    }
+    if (before == null) {
+        failOutput(connection);
+        return error.Timeout;
+    }
+    const result = if (connection.aggregate_timeout_unusable)
+        Hooks.terminalReset(connection, id, code, before)
+    else
+        Hooks.reset(connection, id, code, before);
+    result catch |err| {
         failOutput(connection);
         return err;
     };

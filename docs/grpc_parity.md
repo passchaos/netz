@@ -542,6 +542,18 @@ The TLS probes hold the actual encrypted socket write after the verified
 handshake and check retained ciphertext plus task cancellation/join and no
 destructor resubmission, avoiding a TCP ACK race for tiny control frames.
 
+Server response writers and duplex streams now use the same finite terminal
+cleanup policy for explicit reset and destruction. This also bounds gRPC
+duplex failure cleanup and gRPC-Web abandoned-request conversion. Reset timeout,
+partial output, and reset-history OOM release request ownership, response
+semantics, priority state, and both stream windows even when the frame cannot
+be sent. A failed terminal write makes the channel unusable and suppresses
+destructor retries; successful cancellation preserves admitted siblings.
+The request reader retains its scoped callback cancellation behavior, and
+pending-request overflow cancellation shares one absolute cleanup deadline.
+Real certificate-pinned TLS 1.2/1.3 probes hold server ciphertext output and
+verify cancellation/join, retained records, and no later resubmission.
+
 ## gRPC-Web unary and server streaming support
 
 The production h2c/TLS gRPC server now speaks the gRPC-Web wire protocol
