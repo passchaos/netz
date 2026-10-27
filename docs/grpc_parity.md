@@ -911,3 +911,31 @@ first supported `pick_first` or `round_robin` entry, and supports
 config. Real two-server tests prove stable ordered pick-first selection,
 READY-only A/B/A/B round robin over persistent connections, and endpoint-local
 backoff that does not reattempt or block a healthy sibling.
+
+Hostname Channel targets now resolve every unique system A/AAAA address through
+a background polling worker; callers may inject the same allocator-owned,
+deadline-aware `AddressResolver` contract used by other netz transports. The
+first warm or RPC leaves `IDLE` and starts resolution. Subsequent connection
+failures request re-resolution, successful results observe gRPC Core's default
+30-second minimum refresh interval, and resolver failures retry with independent
+gRPC backoff. Result delivery is acknowledged before another query may publish,
+so a slow Channel owner cannot lose an intermediate error or leak replaced
+address storage.
+
+Address updates are applied transactionally at the single-owner Channel seam.
+Unchanged addresses retain their HTTP/2 connection and endpoint backoff;
+removed addresses close only after active operations are quiescent, and new
+addresses start independently. Resolver failure or an empty update does not
+discard an existing READY endpoint. Cleartext resolved addresses retain the
+original hostname authority just as TLS addresses retain SNI, verification
+identity, and authority. `requestNameResolution` and the bounded
+`refreshNameResolutionWithDeadline`/`refreshNameResolutionWithTimeout` APIs
+support control-plane refresh, while `connectivityState` exposes
+IDLE/CONNECTING/READY/TRANSIENT_FAILURE. Real TCP tests cover unchanged-address
+connection reuse, address replacement, authority preservation, resolver-error
+fallback, and wait-for-ready recovery after every old endpoint fails.
+
+The resolver worker is background control-plane work; connection creation and
+picker mutation remain serialized at the intentionally single-owner Channel
+boundary. A fully concurrent subchannel manager and connectivity watchers are
+still separate higher-level work rather than being implied by this API.

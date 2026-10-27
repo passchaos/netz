@@ -4090,6 +4090,22 @@ pub const Connection = struct {
         return client_authority.resolve(explicit, headers, self.default_authority);
     }
 
+    /// Replace a numeric resolved-address default with its logical authority.
+    /// The connection owns the copied value until close. This is primarily
+    /// used by resolvers that keep routing addresses separate from HTTP origin.
+    pub fn replaceDefaultAuthority(
+        self: *Connection,
+        authority: []const u8,
+    ) Error!void {
+        if (authority.len == 0) return error.InvalidHeader;
+        try client_authority.replace(
+            self.allocator,
+            &self.default_authority,
+            authority,
+        );
+        self.default_authority_is_ip = false;
+    }
+
     pub fn close(self: *Connection) void {
         if (self.default_authority) |authority| self.allocator.free(authority);
         self.send_stream_windows.deinit(self.allocator);

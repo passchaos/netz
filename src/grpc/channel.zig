@@ -7,12 +7,14 @@ const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 const wire = @import("wire.zig");
 const backoff = @import("channel/backoff.zig");
+const resolver = @import("channel/resolver.zig");
 
 const net = std.Io.net;
 
 pub const BackoffPolicy = backoff.Policy;
+pub const AddressResolver = resolver.AddressResolver;
 
-pub const Error = streaming.Error || error{
+pub const Error = streaming.Error || resolver.Error || error{
     InvalidChannelOptions,
     ChannelBusy,
     ConnectionUnavailable,
@@ -38,11 +40,21 @@ pub const SelectionPolicy = enum {
     round_robin,
 };
 
+pub const ConnectivityState = enum {
+    idle,
+    connecting,
+    ready,
+    transient_failure,
+    shutdown,
+};
+
 /// One pre-resolved backend. Every slice and custom context is borrowed for
 /// the Channel lifetime; the Channel owns only established HTTP/2 state.
 pub const Endpoint = union(enum) {
     cleartext_ip: struct {
         address: net.IpAddress,
+        /// Optional logical authority retained across address resolution.
+        authority: ?[]const u8 = null,
         limits: http2.runtime.Limits = .{},
     },
     cleartext_host: struct {
@@ -72,13 +84,20 @@ pub const Endpoint = union(enum) {
         deadline: std.Io.Clock.Timestamp,
     ) http2.runtime.Error!http2.runtime.Connection {
         return switch (self) {
-            .cleartext_ip => |target| http2.runtime.Client.connectWithDeadline(
-                allocator,
-                io,
-                target.address,
-                target.limits,
-                deadline,
-            ),
+            .cleartext_ip => |target| blk: {
+                var connection = try http2.runtime.Client.connectWithDeadline(
+                    allocator,
+                    io,
+                    target.address,
+                    target.limits,
+                    deadline,
+                );
+                errdefer connection.close();
+                if (target.authority) |authority| {
+                    try connection.replaceDefaultAuthority(authority);
+                }
+                break :blk connection;
+            },
             .cleartext_host => |target| http2.runtime.Client.connectHostWithDeadline(
                 allocator,
                 io,
@@ -188,6 +207,11 @@ pub const Options = struct {
     selection_policy: ?SelectionPolicy = null,
     /// Null keeps resolver order; a service config may request shuffling.
     shuffle_address_list: ?bool = null,
+    /// Optional asynchronous resolver for hostname targets. Its returned
+    /// address slice is owned by the allocator passed to the callback.
+    address_resolver: ?AddressResolver = null,
+    /// gRPC DNS re-resolution cooldown; failures independently use backoff.
+    resolver_min_refresh_interval: std.Io.Duration = .fromSeconds(30),
 };
 
 const Slot = struct {
@@ -214,6 +238,108 @@ const ReadyConnection = struct {
     connection: *http2.runtime.Connection,
 };
 
+const HostResolution = struct {
+    state: *resolver.State,
+    authority: []u8,
+    transport: union(enum) {
+        cleartext: struct {
+            limits: http2.runtime.Limits,
+        },
+        tls: struct {
+            host: []const u8,
+            limits: http2.runtime.Limits,
+            options: http2.runtime.TlsConnectOptions,
+        },
+    },
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        target: Target,
+        options: Options,
+    ) Error!?HostResolution {
+        const host: []const u8, const port: u16, const transport = switch (target) {
+            .cleartext_host => |value| .{
+                value.host,
+                value.port,
+                @FieldType(HostResolution, "transport"){
+                    .cleartext = .{ .limits = value.limits },
+                },
+            },
+            .tls_host => |value| .{
+                value.host,
+                value.port,
+                @FieldType(HostResolution, "transport"){ .tls = .{
+                    .host = value.host,
+                    .limits = value.limits,
+                    .options = value.tls,
+                } },
+            },
+            else => return null,
+        };
+        if (port == 0) return error.InvalidChannelOptions;
+        const authority = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ host, port },
+        );
+        errdefer allocator.free(authority);
+        const state = try resolver.State.create(
+            allocator,
+            io,
+            host,
+            port,
+            options.address_resolver,
+            options.resolver_min_refresh_interval,
+            options.backoff,
+        );
+        return .{
+            .state = state,
+            .authority = authority,
+            .transport = transport,
+        };
+    }
+
+    fn deinit(self: *HostResolution, allocator: std.mem.Allocator) void {
+        self.state.deinit();
+        allocator.free(self.authority);
+        self.* = undefined;
+    }
+
+    fn endpoint(self: *const HostResolution, address: net.IpAddress) Endpoint {
+        return switch (self.transport) {
+            .cleartext => |value| .{ .cleartext_ip = .{
+                .address = address,
+                .authority = self.authority,
+                .limits = value.limits,
+            } },
+            .tls => |value| .{ .tls_address = .{
+                .address = address,
+                .tls_host = value.host,
+                .authority = self.authority,
+                .limits = value.limits,
+                .tls = value.options,
+            } },
+        };
+    }
+
+    fn endpointAddress(
+        self: *const HostResolution,
+        candidate: Endpoint,
+    ) ?net.IpAddress {
+        return switch (self.transport) {
+            .cleartext => switch (candidate) {
+                .cleartext_ip => |value| value.address,
+                else => null,
+            },
+            .tls => switch (candidate) {
+                .tls_address => |value| value.address,
+                else => null,
+            },
+        };
+    }
+};
+
 /// A single-owner gRPC channel. It reconnects before a call begins but never
 /// replays an RPC merely because `wait_for_ready` was set. Explicit gRPC retry
 /// policy and transparent REFUSED_STREAM recovery remain separate call logic.
@@ -223,6 +349,9 @@ pub const Channel = struct {
     slots: []Slot,
     selection_policy: SelectionPolicy,
     backoff_policy: BackoffPolicy,
+    shuffle_address_list: bool,
+    host_resolution: ?HostResolution = null,
+    connectivity_state: ConnectivityState = .idle,
     selected_index: ?usize = null,
     next_pick_index: usize = 0,
     canceled: std.Io.Event = .unset,
@@ -234,11 +363,29 @@ pub const Channel = struct {
         options: Options,
     ) Error!Channel {
         try options.backoff.validate();
+        if (options.resolver_min_refresh_interval.nanoseconds < 0) {
+            return error.InvalidChannelOptions;
+        }
         try target.validate();
-        const slots = try allocator.alloc(Slot, target.count());
+        var host_resolution = try HostResolution.init(
+            allocator,
+            io,
+            target,
+            options,
+        );
+        errdefer if (host_resolution) |*value| value.deinit(allocator);
+        if (options.address_resolver != null and host_resolution == null) {
+            return error.InvalidChannelOptions;
+        }
+        const slots = try allocator.alloc(
+            Slot,
+            if (host_resolution == null) target.count() else 0,
+        );
         errdefer allocator.free(slots);
-        for (slots, 0..) |*slot, index| {
-            slot.* = .{ .endpoint = target.endpoint(index) };
+        if (host_resolution == null) {
+            for (slots, 0..) |*slot, index| {
+                slot.* = .{ .endpoint = target.endpoint(index) };
+            }
         }
         var result = Channel{
             .allocator = allocator,
@@ -247,8 +394,10 @@ pub const Channel = struct {
             .selection_policy = options.selection_policy orelse
                 target.policy(),
             .backoff_policy = options.backoff,
+            .shuffle_address_list = options.shuffle_address_list orelse false,
+            .host_resolution = host_resolution,
         };
-        if (options.shuffle_address_list orelse false) result.shuffleSlots();
+        if (result.shuffle_address_list) result.shuffleSlots();
         return result;
     }
 
@@ -274,6 +423,9 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
+        if (self.host_resolution) |*resolution| {
+            resolution.deinit(self.allocator);
+        }
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
         self.* = undefined;
@@ -292,6 +444,80 @@ pub const Channel = struct {
 
     pub fn resetConnectionBackoff(self: *Channel) void {
         for (self.slots) |*slot| slot.resetBackoff();
+        if (self.host_resolution) |*resolution| {
+            resolution.state.resetBackoff();
+        }
+        if (self.connectivity_state == .transient_failure) {
+            self.connectivity_state = .connecting;
+        }
+    }
+
+    pub fn connectivityState(self: *const Channel) ConnectivityState {
+        return self.connectivity_state;
+    }
+
+    /// Leave lazy IDLE state. Host targets begin resolution; connection
+    /// establishment remains owned by the next warm or RPC operation.
+    pub fn exitIdle(self: *Channel) void {
+        if (self.connectivity_state == .idle) {
+            self.connectivity_state = .connecting;
+        }
+        if (self.host_resolution) |*resolution| {
+            _ = resolution.state.start();
+        }
+    }
+
+    /// Ask a polling hostname resolver for a fresh result. Requests coalesce
+    /// and honor the configured minimum interval.
+    pub fn requestNameResolution(self: *Channel) Error!void {
+        const resolution = if (self.host_resolution) |*value|
+            value
+        else
+            return error.InvalidChannelOptions;
+        const was_idle = self.connectivity_state == .idle;
+        self.exitIdle();
+        if (!was_idle) resolution.state.requestRefresh();
+    }
+
+    pub fn refreshNameResolutionWithDeadline(
+        self: *Channel,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        if (self.canceled.isSet()) return error.Canceled;
+        if (deadlineExpired(self.io, deadline)) return error.Timeout;
+        try self.prepareSlots();
+        const resolution = if (self.host_resolution) |*value|
+            value
+        else
+            return error.InvalidChannelOptions;
+        const was_idle = self.connectivity_state == .idle;
+        var previous = resolution.state.currentGeneration();
+        self.exitIdle();
+        if (!was_idle) {
+            if (resolution.state.resultEvent().isSet()) {
+                _ = try self.applyPendingResolution(true);
+                return self.slots.len;
+            }
+            previous = resolution.state.currentGeneration();
+            resolution.state.requestRefresh();
+        }
+        while (resolution.state.currentGeneration() == previous) {
+            try self.waitForProgress(deadline);
+            if (self.canceled.isSet()) return error.Canceled;
+        }
+        _ = try self.applyPendingResolution(true);
+        return self.slots.len;
+    }
+
+    pub fn refreshNameResolutionWithTimeout(
+        self: *Channel,
+        timeout: std.Io.Duration,
+    ) Error!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.refreshNameResolutionWithDeadline(.fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
     }
 
     pub fn connected(self: *Channel) ?*http2.runtime.Connection {
@@ -322,7 +548,9 @@ pub const Channel = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
         if (self.canceled.isSet()) return error.Canceled;
+        self.exitIdle();
         try self.prepareSlots();
+        try self.ensureHostResolution(false, deadline);
         var ready_count: usize = 0;
         for (self.slots, 0..) |*slot, index| {
             if (slot.connection != null) {
@@ -332,7 +560,10 @@ pub const Channel = struct {
             }
             if (slot.disabled or !slotMayAttempt(slot, self.io)) continue;
             const attempt_deadline = self.connectDeadline(deadline) catch |err| {
-                if (ready_count != 0 and err == error.Timeout) return ready_count;
+                if (ready_count != 0 and err == error.Timeout) {
+                    self.connectivity_state = .ready;
+                    return ready_count;
+                }
                 return err;
             };
             slot.connection = slot.endpoint.connect(
@@ -347,7 +578,10 @@ pub const Channel = struct {
                     slot.disabled = true;
                 }
                 if (deadlineExpired(self.io, deadline)) {
-                    if (ready_count != 0) return ready_count;
+                    if (ready_count != 0) {
+                        self.connectivity_state = .ready;
+                        return ready_count;
+                    }
                     return error.Timeout;
                 }
                 continue;
@@ -356,7 +590,14 @@ pub const Channel = struct {
             self.noteWarmedConnection(index);
             ready_count += 1;
         }
-        if (ready_count == 0) return error.ConnectionUnavailable;
+        if (ready_count == 0) {
+            self.connectivity_state = .transient_failure;
+            if (self.host_resolution) |*resolution| {
+                resolution.state.requestRefresh();
+            }
+            return error.ConnectionUnavailable;
+        }
+        self.connectivity_state = .ready;
         return ready_count;
     }
 
@@ -516,7 +757,9 @@ pub const Channel = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
+        self.exitIdle();
         try self.prepareSlots();
+        try self.ensureHostResolution(wait_for_ready, deadline);
         if (self.selection_policy == .round_robin) {
             if (self.pickReadyRoundRobin()) |ready_connection| {
                 return ready_connection;
@@ -525,6 +768,7 @@ pub const Channel = struct {
 
         while (true) {
             if (self.canceled.isSet()) return error.Canceled;
+            _ = try self.applyPendingResolution(false);
             var retryable_failure = false;
             const start = self.pickStart();
             const pass_deadline = try self.connectDeadline(deadline);
@@ -549,22 +793,40 @@ pub const Channel = struct {
                         slot.disabled = true;
                         continue;
                     }
-                    if (!wait_for_ready and self.slots.len == 1) return err;
                     if (deadlineExpired(self.io, deadline)) {
                         return error.Timeout;
+                    }
+                    if (!wait_for_ready and self.slots.len == 1 and
+                        self.host_resolution == null)
+                    {
+                        self.connectivity_state = .transient_failure;
+                        return err;
                     }
                     retryable_failure = true;
                     slot.consecutive_failures +|= 1;
                     self.scheduleBackoff(slot);
+                    if (self.host_resolution) |*resolution| {
+                        resolution.state.requestRefresh();
+                    }
+                    if (!wait_for_ready and self.slots.len == 1) {
+                        self.connectivity_state = .transient_failure;
+                        return err;
+                    }
                     continue;
                 };
                 slot.resetBackoff();
                 return self.select(index, &slot.connection.?);
             }
+            if (self.host_resolution) |*resolution| {
+                resolution.state.requestRefresh();
+                retryable_failure = true;
+            }
             if (!wait_for_ready or !retryable_failure) {
+                self.connectivity_state = .transient_failure;
                 return error.ConnectionUnavailable;
             }
-            try self.waitScheduledAttempt(deadline);
+            self.connectivity_state = .transient_failure;
+            try self.waitForProgress(deadline);
         }
     }
 
@@ -582,6 +844,9 @@ pub const Channel = struct {
             if (slot.connection) |*connection| {
                 if (!connection.isReusable()) slot.closeConnection();
             }
+        }
+        if (!self.hasReadyConnection() and self.connectivity_state == .ready) {
+            self.connectivity_state = .transient_failure;
         }
     }
 
@@ -608,6 +873,7 @@ pub const Channel = struct {
         connection: *http2.runtime.Connection,
     ) ReadyConnection {
         self.selected_index = index;
+        self.connectivity_state = .ready;
         if (self.selection_policy == .round_robin) {
             self.next_pick_index = (index + 1) % self.slots.len;
         }
@@ -652,40 +918,208 @@ pub const Channel = struct {
             .addDuration(delay).nanoseconds;
     }
 
-    fn waitScheduledAttempt(
+    fn ensureHostResolution(
+        self: *Channel,
+        wait_for_ready: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        const resolution = if (self.host_resolution) |*value|
+            value
+        else
+            return;
+        _ = resolution.state.start();
+        while (self.slots.len == 0) {
+            if (self.canceled.isSet()) return error.Canceled;
+            const applied = self.applyPendingResolution(
+                !wait_for_ready,
+            ) catch |err| {
+                self.connectivity_state = .transient_failure;
+                return err;
+            };
+            if (applied and self.slots.len != 0) return;
+            if (!wait_for_ready and
+                self.connectivity_state == .transient_failure)
+            {
+                return error.ConnectionUnavailable;
+            }
+            self.connectivity_state = .connecting;
+            try self.waitForProgress(deadline);
+        }
+    }
+
+    fn applyPendingResolution(
+        self: *Channel,
+        propagate_failure: bool,
+    ) Error!bool {
+        const resolution = if (self.host_resolution) |*value|
+            value
+        else
+            return false;
+        const published = resolution.state.takePublished() orelse return false;
+        var accepted = false;
+        defer resolution.state.acknowledge(accepted);
+        switch (published.result) {
+            .addresses => |addresses| {
+                defer self.allocator.free(addresses);
+                if (addresses.len == 0) {
+                    self.connectivity_state = if (self.hasReadyConnection())
+                        .ready
+                    else
+                        .transient_failure;
+                    if (propagate_failure) return error.NoAddressReturned;
+                    return false;
+                }
+                try self.reconcileResolvedAddresses(addresses);
+                accepted = true;
+                self.connectivity_state = if (self.hasReadyConnection())
+                    .ready
+                else
+                    .connecting;
+                return true;
+            },
+            .failure => |err| {
+                accepted = true;
+                self.connectivity_state = if (self.hasReadyConnection())
+                    .ready
+                else
+                    .transient_failure;
+                if (propagate_failure) return err;
+                return false;
+            },
+        }
+    }
+
+    fn reconcileResolvedAddresses(
+        self: *Channel,
+        addresses: []net.IpAddress,
+    ) Error!void {
+        const resolution = if (self.host_resolution) |*value|
+            value
+        else
+            unreachable;
+        var unique_count: usize = 0;
+        for (addresses) |address| {
+            for (addresses[0..unique_count]) |*existing| {
+                if (existing.eql(&address)) break;
+            } else {
+                addresses[unique_count] = address;
+                unique_count += 1;
+            }
+        }
+        if (unique_count == 0) return error.NoAddressReturned;
+        const unique = addresses[0..unique_count];
+        if (self.shuffle_address_list) self.shuffleAddresses(unique);
+
+        const replacement = try self.allocator.alloc(Slot, unique.len);
+        errdefer self.allocator.free(replacement);
+        const old_slots = self.slots;
+        const old_selected = self.selected_index;
+        var selected: ?usize = null;
+        for (unique, 0..) |address, new_index| {
+            var matched: ?usize = null;
+            for (old_slots, 0..) |*slot, old_index| {
+                const existing = resolution.endpointAddress(slot.endpoint) orelse
+                    continue;
+                if (existing.eql(&address)) {
+                    matched = old_index;
+                    break;
+                }
+            }
+            if (matched) |old_index| {
+                replacement[new_index] = old_slots[old_index];
+                old_slots[old_index].connection = null;
+                if (old_selected == old_index) selected = new_index;
+            } else {
+                replacement[new_index] = .{
+                    .endpoint = resolution.endpoint(address),
+                };
+            }
+        }
+        for (old_slots) |*slot| slot.closeConnection();
+        self.allocator.free(old_slots);
+        self.slots = replacement;
+        self.selected_index = selected;
+        if (self.selected_index == null) {
+            for (self.slots, 0..) |slot, index| {
+                if (slot.connection != null) {
+                    self.selected_index = index;
+                    break;
+                }
+            }
+        }
+        self.next_pick_index = if (self.selected_index) |index|
+            (index + 1) % self.slots.len
+        else
+            0;
+    }
+
+    fn waitForProgress(
         self: *Channel,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        const target_ns = self.earliestAttempt() orelse
+        if (self.canceled.isSet()) return error.Canceled;
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        var timer_ns = self.earliestAttempt();
+        if (deadline) |absolute| {
+            if (absolute.clock != .awake or
+                absolute.durationFromNow(self.io).raw.nanoseconds <= 0)
+            {
+                return error.Timeout;
+            }
+            timer_ns = if (timer_ns) |current|
+                @min(current, absolute.raw.nanoseconds)
+            else
+                absolute.raw.nanoseconds;
+        }
+        if (timer_ns) |target| {
+            if (target <= now_ns) {
+                if (deadlineExpired(self.io, deadline)) return error.Timeout;
+                return;
+            }
+        } else if (self.host_resolution == null) {
             return error.ConnectionUnavailable;
-        while (true) {
-            if (self.canceled.isSet()) return error.Canceled;
-            const remaining_ns = target_ns -
-                std.Io.Clock.awake.now(self.io).nanoseconds;
-            if (remaining_ns <= 0) return;
-            const remaining_delay = std.Io.Duration.fromNanoseconds(
-                remaining_ns,
-            );
-            const remaining = if (deadline) |absolute| blk: {
-                const rpc = absolute.durationFromNow(self.io).raw;
-                if (rpc.nanoseconds <= 0) return error.Timeout;
-                break :blk std.Io.Duration.fromNanoseconds(@min(
-                    remaining_delay.nanoseconds,
-                    rpc.nanoseconds,
-                ));
-            } else remaining_delay;
-            self.canceled.waitTimeout(self.io, .{
-                .duration = .{ .raw = remaining, .clock = .awake },
-            }) catch |err| switch (err) {
-                error.Timeout => {
-                    if (deadlineExpired(self.io, deadline)) {
-                        return error.Timeout;
-                    }
-                    continue;
+        }
+
+        const Wake = union(enum) {
+            canceled: std.Io.Cancelable!void,
+            resolved: std.Io.Cancelable!void,
+            timer: std.Io.Cancelable!void,
+        };
+        var storage: [3]Wake = undefined;
+        var wait_set: std.Io.Select(Wake) = .init(self.io, &storage);
+        defer while (wait_set.cancel()) |wake| discardProgressWake(wake);
+        wait_set.async(.canceled, std.Io.Event.wait, .{
+            &self.canceled,
+            self.io,
+        });
+        if (self.host_resolution) |*resolution| {
+            wait_set.async(.resolved, std.Io.Event.wait, .{
+                resolution.state.resultEvent(),
+                self.io,
+            });
+        }
+        if (timer_ns) |target| {
+            wait_set.async(.timer, waitUntil, .{
+                self.io,
+                std.Io.Clock.Timestamp{
+                    .raw = .{ .nanoseconds = target },
+                    .clock = .awake,
                 },
-                error.Canceled => return error.Canceled,
-            };
-            return error.Canceled;
+            });
+        }
+        const wake = wait_set.await() catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
+        switch (wake) {
+            .canceled => |result| {
+                result catch return error.Canceled;
+                return error.Canceled;
+            },
+            .resolved => |result| result catch return error.Canceled,
+            .timer => |result| {
+                result catch return error.Canceled;
+                if (deadlineExpired(self.io, deadline)) return error.Timeout;
+            },
         }
     }
 
@@ -706,6 +1140,27 @@ pub const Channel = struct {
         var bytes: [8]u8 = undefined;
         self.io.random(&bytes);
         return std.mem.readInt(u64, &bytes, .little);
+    }
+
+    fn shuffleAddresses(
+        self: *Channel,
+        addresses: []net.IpAddress,
+    ) void {
+        var remaining = addresses.len;
+        while (remaining > 1) {
+            var bytes: [8]u8 = undefined;
+            self.io.random(&bytes);
+            const sample = std.mem.readInt(u64, &bytes, .little);
+            const index: usize = @intCast(
+                (@as(u128, sample) * @as(u128, remaining)) >> 64,
+            );
+            remaining -= 1;
+            std.mem.swap(
+                net.IpAddress,
+                &addresses[index],
+                &addresses[remaining],
+            );
+        }
     }
 
     fn shuffleSlots(self: *Channel) void {
@@ -733,8 +1188,36 @@ pub const Channel = struct {
                 slot.closeConnection();
             }
         }
+        if (!self.hasReadyConnection()) {
+            self.connectivity_state = .transient_failure;
+            if (self.host_resolution) |*resolution| {
+                resolution.state.requestRefresh();
+            }
+        }
+    }
+
+    fn hasReadyConnection(self: *const Channel) bool {
+        for (self.slots) |*slot| {
+            if (slot.connection) |*connection| {
+                if (connection.isReusable()) return true;
+            }
+        }
+        return false;
     }
 };
+
+fn discardProgressWake(wake: anytype) void {
+    switch (wake) {
+        inline else => |result| result catch {},
+    }
+}
+
+fn waitUntil(
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+) std.Io.Cancelable!void {
+    try deadline.wait(io);
+}
 
 fn slotMayAttempt(slot: *Slot, io: std.Io) bool {
     const target = slot.next_attempt_at_ns orelse return true;

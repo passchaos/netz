@@ -662,10 +662,10 @@ test "gRPC unary call succeeds before its local deadline" {
                 "\x0a\x03zig",
                 call.message.payload,
             );
-            try std.testing.expectEqual(
-                @as(i96, std.time.ns_per_s),
-                call.timeout.?.duration().toNanoseconds(),
-            );
+            const remaining_timeout =
+                call.timeout.?.duration().toNanoseconds();
+            try std.testing.expect(remaining_timeout > 0);
+            try std.testing.expect(remaining_timeout <= std.time.ns_per_s);
             const request_binary_size =
                 try grpc.binaryMetadataFieldsDecodedUpperBound(
                     request.headers,

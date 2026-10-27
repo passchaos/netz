@@ -900,7 +900,10 @@ Current protocol coverage includes:
   after an RPC reaches a transport,
   pre-resolved multi-endpoint pick-first and READY-only round-robin selection
   with per-endpoint backoff, bounded warming, optional pick-first shuffling,
-  and standard service-config load-balancing selection,
+  and standard service-config load-balancing selection; hostname Channels use
+  an asynchronous system or injected resolver, preserve unchanged ready
+  subchannels across address updates, retain healthy addresses across resolver
+  failures, and expose explicit refresh plus connectivity state,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

@@ -314,6 +314,14 @@ test "public modules are reachable" {
         "ChannelSelectionPolicy",
     ));
     try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelConnectivityState",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelAddressResolver",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "unaryWithServiceConfig",
     ));
@@ -360,6 +368,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "connectivityState",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "exitIdle",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "requestNameResolution",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "refreshNameResolutionWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "refreshNameResolutionWithTimeout",
     ));
     try std.testing.expect(@hasField(
         netz.grpc.UnaryCallOptions,
@@ -2327,6 +2355,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "resolveRequestAuthority",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "replaceDefaultAuthority",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime,
