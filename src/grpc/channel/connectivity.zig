@@ -66,7 +66,7 @@ pub const Tracker = struct {
 
     pub fn setState(self: *Tracker, state: State) void {
         self.mutex.lockUncancelable(self.io);
-        if (self.state == state) {
+        if (self.state == .shutdown or self.state == state) {
             self.mutex.unlock(self.io);
             return;
         }
@@ -192,3 +192,34 @@ pub const Watch = struct {
         }));
     }
 };
+
+test "gRPC connectivity shutdown remains terminal for retained watches" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const tracker = try Tracker.create(allocator, threaded.io());
+    var watch = Watch.init(tracker);
+    defer watch.deinit();
+
+    tracker.setState(.connecting);
+    tracker.setState(.shutdown);
+    const terminal = tracker.snapshot();
+    for ([_]State{ .idle, .connecting, .ready, .transient_failure, .shutdown }) |state| {
+        tracker.setState(state);
+        try std.testing.expectEqualDeep(terminal, tracker.snapshot());
+    }
+    tracker.release();
+
+    try std.testing.expectEqualDeep(
+        terminal,
+        try watch.nextWithTimeout(.zero),
+    );
+    try std.testing.expectEqualDeep(
+        terminal,
+        try watch.nextWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.ChannelShutdown,
+        watch.waitForReadyWithTimeout(.zero),
+    );
+}
