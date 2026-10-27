@@ -88,12 +88,14 @@ test "gRPC bounded message poll retains one DATA suffix while a sibling finishes
     var connection = try http2.runtime.Client.connectWithTimeout(allocator, io, server.address(), .{}, .fromSeconds(5));
     defer connection.close();
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
-    var a = try duplex.startDuplexWithIoDeadline(&connection, allocator, .{ .path = "/demo.Echo/A" }, deadline);
+    var a = try duplex.startDuplexWithDeadlines(&connection, allocator, .{ .path = "/demo.Echo/A" }, deadline, deadline);
     defer a.deinit();
     var b = try duplex.startDuplexWithIoDeadline(&connection, allocator, .{ .path = "/demo.Echo/B" }, deadline);
     defer b.deinit();
     const written = a.transport.requestCommittedBytes();
     try a.stageMessage("a", .{});
+    try std.testing.expectEqual(written, a.transport.requestCommittedBytes());
+    try std.testing.expectError(error.Timeout, a.pollResumeMessageWithDeadline(.{ .raw = .zero, .clock = .real }, 2));
     try std.testing.expectEqual(written, a.transport.requestCommittedBytes());
     while (try a.pollResumeMessageWithDeadline(deadline, 2) != .complete) {}
     try std.testing.expectEqual(duplex.WriteResult.complete, try a.finishRequestWithDeadline(deadline));

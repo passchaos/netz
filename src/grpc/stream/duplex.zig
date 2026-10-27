@@ -278,6 +278,7 @@ pub const ClientDuplex = struct {
     pub fn pollResumeMessageWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp, max_bytes: usize) Error!PollWriteResult {
         try self.ensureWritable();
         if (max_bytes == 0) return error.InvalidStreamState;
+        if (deadline.clock != .awake) return error.Timeout;
         const effective = earlierDeadline(self.deadline, deadline);
         if (effective.clock != .awake or effective.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) {
             if (self.deadline) |rpc| if (rpc.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) self.fail(.cancel);
