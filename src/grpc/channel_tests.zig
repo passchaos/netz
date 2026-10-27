@@ -80,6 +80,9 @@ const AlwaysUnavailable = struct {
 const UnaryPeer = struct {
     server: *http2.runtime.Server,
     close_first: bool = false,
+    response_count: usize = 1,
+    reply: []const u8 = "reply",
+    requests: usize = 0,
     observed_timeout_ns: i96 = 0,
     err: ?anyerror = null,
 
@@ -90,34 +93,47 @@ const UnaryPeer = struct {
     }
 
     fn serve(self: *@This()) !void {
-        const count: usize = if (self.close_first) 2 else 1;
-        for (0..count) |index| {
-            var connection = try self.server.acceptWithTimeout(
-                .fromSeconds(2),
-            );
-            defer connection.close();
-            var request = try connection.readRequestWithTimeout(
-                .fromSeconds(2),
-            );
-            defer request.deinit(self.server.allocator);
-            var parsed = try grpc.parseUnaryRequest(
-                self.server.allocator,
-                &request,
-                1024,
-            );
-            defer parsed.deinit();
-            if (grpc.call.headerValue(request.headers, "grpc-timeout")) |raw| {
-                self.observed_timeout_ns =
-                    (try grpc.Timeout.parse(raw)).duration().nanoseconds;
-            }
-            if (self.close_first and index == 0) continue;
-            try grpc.writeUnaryResponse(
-                &connection,
-                self.server.allocator,
-                request.stream_id,
-                .{ .message = "reply" },
-            );
+        if (self.close_first) {
+            var first = try self.server.acceptWithTimeout(.fromSeconds(2));
+            try self.serveRequest(&first, false);
+            first.close();
+            var second = try self.server.acceptWithTimeout(.fromSeconds(2));
+            defer second.close();
+            try self.serveRequest(&second, true);
+            return;
         }
+        var connection = try self.server.acceptWithTimeout(.fromSeconds(2));
+        defer connection.close();
+        for (0..self.response_count) |_| {
+            try self.serveRequest(&connection, true);
+        }
+    }
+
+    fn serveRequest(
+        self: *@This(),
+        connection: *http2.runtime.Connection,
+        respond: bool,
+    ) !void {
+        var request = try connection.readRequestWithTimeout(.fromSeconds(2));
+        defer request.deinit(self.server.allocator);
+        var parsed = try grpc.parseUnaryRequest(
+            self.server.allocator,
+            &request,
+            1024,
+        );
+        defer parsed.deinit();
+        self.requests += 1;
+        if (grpc.call.headerValue(request.headers, "grpc-timeout")) |raw| {
+            self.observed_timeout_ns =
+                (try grpc.Timeout.parse(raw)).duration().nanoseconds;
+        }
+        if (!respond) return;
+        try grpc.writeUnaryResponse(
+            connection,
+            self.server.allocator,
+            request.stream_id,
+            .{ .message = self.reply },
+        );
     }
 };
 
@@ -247,6 +263,15 @@ test "gRPC wait-for-ready channel connects through TLS ALPN" {
         .{ .backoff = testBackoff() },
     );
     defer client.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try client.warmWithTimeout(.fromSeconds(1)),
+    );
+    try std.testing.expectEqualStrings("h2", client.negotiatedAlpn().?);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.peerCertificates().?.len,
+    );
     var response = try client.unary(.{
         .path = "/fixture.Ready/Unary",
         .message = "request",
@@ -255,10 +280,6 @@ test "gRPC wait-for-ready channel connects through TLS ALPN" {
     });
     defer response.deinit();
     try std.testing.expectEqualStrings("secure", response.message.?.payload);
-    try std.testing.expectEqualStrings(
-        "h2",
-        client.connected().?.negotiatedAlpn().?,
-    );
     if (peer.err) |err| return err;
 }
 
@@ -427,6 +448,57 @@ test "gRPC channel rejects HTTP2 push and invalid backoff policy" {
         unavailable.target(),
         .{ .backoff = .{ .initial_backoff = .zero } },
     ));
+
+    var defaults = try grpc.ServiceConfig.parse(allocator, "{}");
+    defer defaults.deinit();
+    const endpoints = [_]channel.Endpoint{.{ .custom = .{
+        .context = &unavailable,
+        .connect_fn = AlwaysUnavailable.connect,
+        .retryable_fn = AlwaysUnavailable.retryable,
+    } }};
+    var selected = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{
+            .endpoints = &endpoints,
+            .policy = .round_robin,
+        } },
+        .{},
+        &defaults,
+    );
+    defer selected.deinit();
+    try std.testing.expectEqual(
+        channel.SelectionPolicy.round_robin,
+        selected.selectionPolicy(),
+    );
+}
+
+test "gRPC resolved channel initialization is allocation transactional" {
+    const Harness = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var unavailable: AlwaysUnavailable = .{};
+            const endpoints = [_]channel.Endpoint{
+                .{ .custom = .{
+                    .context = &unavailable,
+                    .connect_fn = AlwaysUnavailable.connect,
+                    .retryable_fn = AlwaysUnavailable.retryable,
+                } },
+                .{ .custom = .{
+                    .context = &unavailable,
+                    .connect_fn = AlwaysUnavailable.connect,
+                    .retryable_fn = AlwaysUnavailable.retryable,
+                } },
+            };
+            var client = try channel.Channel.init(
+                alloc,
+                undefined,
+                .{ .resolved = .{ .endpoints = &endpoints } },
+                .{},
+            );
+            client.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Harness.run, .{});
 }
 
 test "gRPC wait-for-ready does not replay an RPC after transport commitment" {
@@ -474,5 +546,177 @@ test "gRPC wait-for-ready does not replay an RPC after transport commitment" {
     defer second.deinit();
     try std.testing.expectEqualStrings("reply", second.message.?.payload);
     try std.testing.expectEqual(@as(usize, 2), connector.attempts);
+    if (peer.err) |err| return err;
+}
+
+test "gRPC resolved channel round robins ready endpoint connections" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_a = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server_a.deinit();
+    var server_b = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server_b.deinit();
+    var peer_a = UnaryPeer{
+        .server = &server_a,
+        .response_count = 2,
+        .reply = "a",
+    };
+    var peer_b = UnaryPeer{
+        .server = &server_b,
+        .response_count = 2,
+        .reply = "b",
+    };
+    const thread_a = try std.Thread.spawn(.{}, UnaryPeer.run, .{&peer_a});
+    defer thread_a.join();
+    const thread_b = try std.Thread.spawn(.{}, UnaryPeer.run, .{&peer_b});
+    defer thread_b.join();
+    const endpoints = [_]channel.Endpoint{
+        .{ .cleartext_ip = .{ .address = server_a.address() } },
+        .{ .cleartext_ip = .{ .address = server_b.address() } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"round_robin":{}}]}
+    );
+    defer config.deinit();
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .backoff = testBackoff() },
+        &config,
+    );
+    defer client.deinit();
+    try std.testing.expectEqual(
+        channel.SelectionPolicy.round_robin,
+        client.selectionPolicy(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.warmWithTimeout(.fromSeconds(1)),
+    );
+    for ([_][]const u8{ "a", "b", "a", "b" }) |expected| {
+        var response = try client.unary(.{
+            .path = "/fixture.Balance/Unary",
+            .message = "request",
+            .timeout = .{ .value = 1, .unit = .second },
+            .wait_for_ready = true,
+        });
+        defer response.deinit();
+        try std.testing.expectEqualStrings(expected, response.message.?.payload);
+    }
+    if (peer_a.err) |err| return err;
+    if (peer_b.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), peer_a.requests);
+    try std.testing.expectEqual(@as(usize, 2), peer_b.requests);
+}
+
+test "gRPC resolved pick-first sticks to the first reachable endpoint" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var reservation = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) })
+        .listen(io, .{ .reuse_address = true });
+    const unavailable = reservation.socket.address;
+    reservation.deinit(io);
+    var peer = UnaryPeer{
+        .server = &server,
+        .response_count = 2,
+        .reply = "selected",
+    };
+    const thread = try std.Thread.spawn(.{}, UnaryPeer.run, .{&peer});
+    defer thread.join();
+    const endpoints = [_]channel.Endpoint{
+        .{ .cleartext_ip = .{ .address = unavailable } },
+        .{ .cleartext_ip = .{ .address = server.address() } },
+    };
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .backoff = testBackoff() },
+    );
+    defer client.deinit();
+    for (0..2) |_| {
+        var response = try client.unary(.{
+            .path = "/fixture.Balance/Unary",
+            .message = "request",
+            .timeout = .{ .value = 1, .unit = .second },
+        });
+        defer response.deinit();
+        try std.testing.expectEqualStrings(
+            "selected",
+            response.message.?.payload,
+        );
+    }
+    if (peer.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), peer.requests);
+}
+
+test "gRPC resolved endpoint backoff does not block a healthy sibling" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var peer = UnaryPeer{ .server = &server, .response_count = 2 };
+    const thread = try std.Thread.spawn(.{}, UnaryPeer.run, .{&peer});
+    defer thread.join();
+    var unavailable: AlwaysUnavailable = .{};
+    const endpoints = [_]channel.Endpoint{
+        .{ .custom = .{
+            .context = &unavailable,
+            .connect_fn = AlwaysUnavailable.connect,
+            .retryable_fn = AlwaysUnavailable.retryable,
+        } },
+        .{ .cleartext_ip = .{ .address = server.address() } },
+    };
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        .{ .resolved = .{
+            .endpoints = &endpoints,
+            .policy = .round_robin,
+        } },
+        .{ .backoff = .{
+            .initial_backoff = .fromSeconds(1),
+            .multiplier = 1,
+            .jitter = 0,
+            .max_backoff = .fromSeconds(1),
+            .min_connect_timeout = .fromMilliseconds(10),
+        } },
+    );
+    defer client.deinit();
+    for (0..2) |_| {
+        var response = try client.unary(.{
+            .path = "/fixture.Balance/Unary",
+            .message = "request",
+            .timeout = .{ .value = 1, .unit = .second },
+        });
+        defer response.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 1), unavailable.attempts);
     if (peer.err) |err| return err;
 }

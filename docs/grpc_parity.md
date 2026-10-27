@@ -867,17 +867,19 @@ and authority fields and must complete successfully on that same connection.
 
 `grpc.runtime.Channel` is a lazy, single-owner channel distinct from the
 already-connected `grpc.runtime.Client`. It accepts cleartext IP/hostname,
-TLS hostname/resolved-address, or custom connectors and retains one quiescent
-HTTP/2 connection across calls. Unary, sequential-streaming and duplex starts
-support explicit `wait_for_ready`; service-config `waitForReady` applies only
+TLS hostname/resolved-address, or custom connectors and retains a quiescent
+HTTP/2 connection per ready endpoint across calls. Unary, sequential-streaming
+and duplex starts support explicit `wait_for_ready`; service-config
+`waitForReady` applies only
 when the call did not explicitly select fail-fast or waiting behavior.
 
 One awake-clock RPC deadline is captured before connection readiness and then
 reused by HTTP/2 request setup, every explicit retry attempt, stream writes and
 response reads. Connection waiting therefore cannot renew `grpc-timeout`.
 Unavailable targets use gRPC Core's connection-backoff defaults: one second
-initial delay, 1.6 multiplier, plus/minus 20 percent jitter, 120-second base cap and
-20-second minimum connect attempt, all configurable for tests and deployments.
+initial delay, 1.6 multiplier, plus/minus 20 percent jitter, 120-second base
+cap and 20-second minimum connect attempt, all configurable for tests and
+deployments.
 Scheduled backoff survives a shorter caller deadline, successful SETTINGS
 resets it, and `resetConnectionBackoff` permits an explicit immediate retry.
 `cancelWaits` interrupts backoff without racing the sole connection owner.
@@ -890,3 +892,22 @@ request replays. Real TCP tests cover two refused connection attempts followed
 by success, decreasing on-wire timeout, fail-fast override, deadline and
 cancellation, scheduled-backoff retention, and reconnecting only the later RPC
 after a committed request loses its transport.
+
+Pre-resolved endpoint sets add `pick_first` and `round_robin` selection without
+changing single-target construction. Each endpoint owns independent HTTP/2
+state, consecutive-failure count and scheduled backoff. `pick_first` walks the
+ordered list until one endpoint becomes ready, then stays on that endpoint
+until it becomes unusable. `round_robin` rotates only across READY connections;
+`warmWithDeadline`/`warmWithTimeout` explicitly and sequentially establish the
+set so an unconnected or backed-off sibling never delays a call while another
+endpoint is ready. A failed endpoint is skipped without advancing or resetting
+healthy siblings, and a non-retryable endpoint remains disabled until
+`resetConnectionBackoff`.
+
+Top-level service config now accepts the standard ordered
+`loadBalancingConfig` list plus deprecated `loadBalancingPolicy`, chooses the
+first supported `pick_first` or `round_robin` entry, and supports
+`pick_first.shuffleAddressList`. Explicit Channel options override service
+config. Real two-server tests prove stable ordered pick-first selection,
+READY-only A/B/A/B round robin over persistent connections, and endpoint-local
+backoff that does not reattempt or block a healthy sibling.

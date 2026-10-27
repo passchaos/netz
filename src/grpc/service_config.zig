@@ -37,6 +37,19 @@ const JsonMethodConfig = struct {
 const JsonServiceConfig = struct {
     retryThrottling: ?JsonThrottle = null,
     methodConfig: []const JsonMethodConfig = &.{},
+    loadBalancingConfig: ?[]const std.json.Value = null,
+    loadBalancingPolicy: ?[]const u8 = null,
+};
+
+pub const LoadBalancingPolicy = enum {
+    pick_first,
+    round_robin,
+};
+
+pub const LoadBalancingConfig = struct {
+    policy: LoadBalancingPolicy = .pick_first,
+    shuffle_address_list: bool = false,
+    configured: bool = false,
 };
 
 const OwnedRetryPolicy = struct {
@@ -87,6 +100,7 @@ pub const ServiceConfig = struct {
     arena: std.heap.ArenaAllocator,
     methods: []const MethodConfig,
     retry_throttler: ?*call.RetryThrottler,
+    load_balancing: LoadBalancingConfig,
 
     pub fn parse(
         allocator: std.mem.Allocator,
@@ -184,10 +198,12 @@ pub const ServiceConfig = struct {
             result.* = value;
             break :blk result;
         } else null;
+        const load_balancing = try parseLoadBalancing(parsed);
         return .{
             .arena = arena,
             .methods = methods,
             .retry_throttler = throttler,
+            .load_balancing = load_balancing,
         };
     }
 
@@ -203,6 +219,10 @@ pub const ServiceConfig = struct {
     ) ?call.RetryPolicy {
         const policy = self.methodPolicy(path) orelse return null;
         return policy.retry_policy;
+    }
+
+    pub fn loadBalancingConfig(self: *const ServiceConfig) LoadBalancingConfig {
+        return self.load_balancing;
     }
 
     pub fn methodPolicy(
@@ -350,6 +370,67 @@ fn resolvedPolicy(
 
 fn throttlerPointer(config: *ServiceConfig) ?*call.RetryThrottler {
     return config.retry_throttler;
+}
+
+fn parseLoadBalancing(
+    config: JsonServiceConfig,
+) Error!LoadBalancingConfig {
+    if (config.loadBalancingConfig) |entries| {
+        if (entries.len == 0) return error.InvalidServiceConfig;
+        for (entries) |entry| {
+            const object = switch (entry) {
+                .object => |value| value,
+                else => return error.InvalidServiceConfig,
+            };
+            if (object.count() != 1) return error.InvalidServiceConfig;
+            var iterator = object.iterator();
+            const item = iterator.next().?;
+            if (std.mem.eql(u8, item.key_ptr.*, "round_robin")) {
+                const options = switch (item.value_ptr.*) {
+                    .object => |value| value,
+                    else => return error.InvalidServiceConfig,
+                };
+                if (options.count() != 0) return error.InvalidServiceConfig;
+                return .{ .policy = .round_robin, .configured = true };
+            }
+            if (std.mem.eql(u8, item.key_ptr.*, "pick_first")) {
+                const options = switch (item.value_ptr.*) {
+                    .object => |value| value,
+                    else => return error.InvalidServiceConfig,
+                };
+                var shuffle = false;
+                var fields = options.iterator();
+                while (fields.next()) |field| {
+                    if (!std.mem.eql(
+                        u8,
+                        field.key_ptr.*,
+                        "shuffleAddressList",
+                    )) return error.InvalidServiceConfig;
+                    shuffle = switch (field.value_ptr.*) {
+                        .bool => |value| value,
+                        else => return error.InvalidServiceConfig,
+                    };
+                }
+                return .{
+                    .policy = .pick_first,
+                    .shuffle_address_list = shuffle,
+                    .configured = true,
+                };
+            }
+            // gRPC selects the first policy implemented by the client.
+        }
+        return error.InvalidServiceConfig;
+    }
+    if (config.loadBalancingPolicy) |name| {
+        if (std.ascii.eqlIgnoreCase(name, "pick_first")) {
+            return .{ .configured = true };
+        }
+        if (std.ascii.eqlIgnoreCase(name, "round_robin")) {
+            return .{ .policy = .round_robin, .configured = true };
+        }
+        return error.InvalidServiceConfig;
+    }
+    return .{};
 }
 
 fn parseOptionalSize(value: ?std.json.Value) Error!?u32 {
@@ -508,8 +589,7 @@ test "gRPC service config selects exact service and default retry policies" {
         \\      "maxBackoff": "3s", "backoffMultiplier": 1,
         \\      "retryableStatusCodes": ["RESOURCE_EXHAUSTED"]}},
         \\    {"name": [{"service": "demo.Echo", "method": "Disabled"}]}
-        \\  ],
-        \\  "loadBalancingConfig": []
+        \\  ]
         \\}
     ;
     var config = try ServiceConfig.parse(std.testing.allocator, json);
@@ -602,6 +682,62 @@ test "gRPC service config accepts an immediate method timeout" {
         @as(i96, 0),
         config.methodPolicy("/demo.Service/Call").?.timeout.?.nanoseconds,
     );
+}
+
+test "gRPC service config selects the first supported balancing policy" {
+    var defaults = try ServiceConfig.parse(std.testing.allocator, "{}");
+    defer defaults.deinit();
+    try std.testing.expect(!defaults.loadBalancingConfig().configured);
+
+    var round_robin = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[
+        \\  {"unknown_policy":{}},{"round_robin":{}}]}
+    );
+    defer round_robin.deinit();
+    try std.testing.expectEqual(
+        LoadBalancingPolicy.round_robin,
+        round_robin.loadBalancingConfig().policy,
+    );
+    try std.testing.expect(round_robin.loadBalancingConfig().configured);
+
+    var pick_first = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[
+        \\  {"pick_first":{"shuffleAddressList":true}}],
+        \\ "loadBalancingPolicy":"round_robin"}
+    );
+    defer pick_first.deinit();
+    try std.testing.expectEqual(
+        LoadBalancingPolicy.pick_first,
+        pick_first.loadBalancingConfig().policy,
+    );
+    try std.testing.expect(
+        pick_first.loadBalancingConfig().shuffle_address_list,
+    );
+
+    var deprecated = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingPolicy":"ROUND_ROBIN"}
+    );
+    defer deprecated.deinit();
+    try std.testing.expectEqual(
+        LoadBalancingPolicy.round_robin,
+        deprecated.loadBalancingConfig().policy,
+    );
+
+    for ([_][]const u8{
+        \\{"loadBalancingConfig":[]}
+        ,
+        \\{"loadBalancingConfig":[{"unknown":{}}]}
+        ,
+        \\{"loadBalancingConfig":[{"pick_first":{"unknown":true}}]}
+        ,
+        \\{"loadBalancingPolicy":"unknown"}
+        ,
+    }) |json| {
+        try std.testing.expectError(
+            error.InvalidServiceConfig,
+            ServiceConfig.parse(std.testing.allocator, json),
+        );
+    }
 }
 
 test "gRPC service config owns parsed selectors" {

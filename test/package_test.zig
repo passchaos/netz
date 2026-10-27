@@ -308,9 +308,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Channel"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelTarget"));
+    try std.testing.expect(@hasDecl(netz.grpc, "ChannelEndpoint"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelSelectionPolicy",
+    ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "unaryWithServiceConfig",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "initWithServiceConfig",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "LoadBalancingPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "LoadBalancingConfig",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
@@ -323,6 +340,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "cancelWaits",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "warmWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "warmWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "selectionPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "peerCertificates",
     ));
     try std.testing.expect(@hasField(
         netz.grpc.UnaryCallOptions,

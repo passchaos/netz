@@ -898,6 +898,9 @@ Current protocol coverage includes:
   one deadline spanning connection readiness and the RPC, upstream-compatible
   jittered connection backoff, cancel/reset controls, and no implicit replay
   after an RPC reaches a transport,
+  pre-resolved multi-endpoint pick-first and READY-only round-robin selection
+  with per-endpoint backoff, bounded warming, optional pick-first shuffling,
+  and standard service-config load-balancing selection,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

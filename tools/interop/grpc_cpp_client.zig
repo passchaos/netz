@@ -13,6 +13,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
+const InteropClient = netz.grpc.runtime.Channel;
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
 const half_duplex_service_path =
@@ -94,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
     );
     var client_live = true;
     defer if (client_live) client.deinit();
+    _ = try client.warmWithTimeout(.fromSeconds(5));
     if (tls_enabled and
         !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
     {
@@ -153,28 +155,32 @@ fn connectClient(
     ca_bundle: *std.crypto.Certificate.Bundle,
     ca_lock: *std.Io.RwLock,
     limits: netz.http2.runtime.Limits,
-) !netz.grpc.runtime.Client {
+) !InteropClient {
     return if (tls_enabled)
-        try netz.grpc.runtime.Client.connectTlsAddress(
+        try InteropClient.init(
             allocator,
             io,
-            .{ .ip4 = .loopback(port) },
-            "foo.test.google.fr",
-            authority,
-            .{
+            .{ .tls_address = .{
+                .address = .{ .ip4 = .loopback(port) },
+                .tls_host = "foo.test.google.fr",
+                .authority = authority,
                 .limits = limits,
                 .tls = .{ .ca_bundle = .{
                     .bundle = ca_bundle,
                     .lock = ca_lock,
                 } },
-            },
+            } },
+            .{},
         )
     else
-        try netz.grpc.runtime.Client.connect(
+        try InteropClient.init(
             allocator,
             io,
-            .{ .ip4 = .loopback(port) },
-            limits,
+            .{ .cleartext_ip = .{
+                .address = .{ .ip4 = .loopback(port) },
+                .limits = limits,
+            } },
+            .{},
         );
 }
 
@@ -204,6 +210,7 @@ fn runChannelSoak(
             limits,
         );
         defer client.deinit();
+        _ = try client.warmWithTimeout(.fromSeconds(5));
         if (tls_enabled and
             !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
         {
@@ -230,7 +237,7 @@ fn runChannelSoak(
 
 fn runRpcSoak(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     const request = try messages.encodeSimpleRequestAlloc(allocator, .{
@@ -276,7 +283,7 @@ const SlowConsumer = struct {
 fn runSlowConsumer(
     allocator: std.mem.Allocator,
     io: std.Io,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     const parameters = try allocator.alloc(
@@ -307,7 +314,7 @@ fn runSlowConsumer(
 
 fn runHalfDuplex(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     var stream = try client.startDuplex(.{
@@ -338,7 +345,7 @@ fn runHalfDuplex(
 }
 
 fn runCancelAfterBegin(
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     var stream = try client.startStreaming(.{
@@ -352,7 +359,7 @@ fn runCancelAfterBegin(
 
 fn runUnaryBasics(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     {
@@ -396,7 +403,7 @@ fn runUnaryBasics(
 }
 
 fn runUnimplementedRoutes(
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     for ([_][]const u8{
@@ -418,7 +425,7 @@ fn runUnimplementedRoutes(
 
 fn runStatusInterop(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     try runUnaryStatus(
@@ -463,7 +470,7 @@ fn runStatusInterop(
 
 fn runUnaryStatus(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
     expected_message: []const u8,
 ) !void {
@@ -488,7 +495,7 @@ fn runUnaryStatus(
 
 fn runStreamingCompression(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     try runClientStreamingCompression(allocator, client, message_limit);
@@ -512,7 +519,7 @@ const AggregateObserver = struct {
 
 fn runClientStreamingCompression(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     {
@@ -572,7 +579,7 @@ fn runClientStreamingCompression(
 
 fn runServerStreamingCompression(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     const expected_sizes = [_]usize{ 31_415, 92_653 };
@@ -613,7 +620,7 @@ fn runServerStreamingCompression(
 
 fn runUnaryCompression(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     for ([_]bool{ true, false }) |compress| {
@@ -679,7 +686,7 @@ fn validateUnaryCompressionResponse(
 
 fn runPingPong(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     var stream = try client.startDuplex(.{
@@ -713,7 +720,7 @@ fn runPingPong(
 
 fn runCustomMetadata(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     var stream = try client.startDuplex(.{
@@ -757,7 +764,7 @@ fn runCustomMetadata(
 
 fn runCancellationAndReuse(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     var stream = try client.startDuplex(.{
@@ -801,7 +808,7 @@ fn runCancellationAndReuse(
 
 fn runSleepingDeadline(
     allocator: std.mem.Allocator,
-    client: *netz.grpc.runtime.Client,
+    client: *InteropClient,
     message_limit: usize,
 ) !void {
     // Upstream's canonical case uses 1 ms.  Fifty milliseconds preserves the
