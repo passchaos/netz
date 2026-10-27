@@ -39,9 +39,9 @@ pub const WatchError = Error || duplex.Error || error{
     NotHealthWatchRequest,
 };
 
-/// One active server-streaming Health `Watch`. The value exclusively owns the
-/// underlying HTTP/2 connection reader until cancellation, terminal status,
-/// or deinitialization.
+/// One active server-streaming Health `Watch`. A single connection owner may
+/// alternate its reads with sibling client duplex streams. Each value retains
+/// independent message and terminal state until it is deinitialized.
 pub const ClientWatch = struct {
     allocator: std.mem.Allocator,
     stream: duplex.ClientDuplex,
@@ -56,8 +56,7 @@ pub const ClientWatch = struct {
         self.* = undefined;
     }
 
-    /// Send RST_STREAM(CANCEL). The owning HTTP/2 connection is reusable once
-    /// this succeeds and the watch is deinitialized.
+    /// Send RST_STREAM(CANCEL) for this Watch while preserving sibling streams.
     pub fn cancel(self: *ClientWatch) WatchError!void {
         if (self.terminal_seen) return error.ConnectionClosed;
         try self.stream.reset(.cancel);

@@ -78,6 +78,7 @@ pub const ReconnectingWatchEvent = reconnecting.Event;
 test {
     _ = client;
     _ = reconnecting;
+    _ = @import("health/multiplex_tests.zig");
 }
 
 pub fn encodeRequestAlloc(

@@ -3715,3 +3715,31 @@ Real-socket regressions block exactly the first cleartext preface/SETTINGS,
 the h2c Upgrade request/101 response, and the first TLS application record for
 both TLS 1.2 and 1.3. Every path returns Timeout before a 500 ms rescue, proves
 the in-flight write was cancelled, and covers client and server ownership.
+
+
+## Multiple client duplex streams under one owner
+
+`RequestWriter.beginDuplex` now permits several client duplex handles on one
+HTTP/2 connection. One caller serially drives all of them; ordinary aggregate
+and callback response readers stay excluded until the duplex handles retire.
+Each handle releases its registration once, so moving or deinitializing a
+completed handle cannot release a sibling's ownership. `activeClientDuplexCount` reports the
+remaining live handles.
+
+A shared ingress path decodes every response HEADERS block in wire order and
+retains its decoded fields for the addressed stream. Stream reads first take
+that stream's queued frames, preserving independent HEADERS, DATA and trailers
+without replaying HPACK updates. Partial HEADERS remain in connection-owned
+state across timeout and reads of another handle. CONTINUATION payloads join
+the bounded header block without occupying one deferred-frame slot each.
+Canceling an unrelated stream preserves that assembly; canceling the stream
+whose incomplete block is being assembled retires connection reuse. Complete
+HPACK blocks rejected only for decoded output limits remain stream scoped.
+Flow-control waits retain sibling sections through the same deferred decoder.
+
+The tests cover cross-stream dynamic references, alternating DATA, terminal
+and destructor isolation, queued canceled-stream compression state, timeout
+and continuation resumption, allocation-free registration, output-limit isolation, and
+flow-control stalls. A real gRPC h2c gate additionally interleaves a gzip Health
+Watch and a deflate business RPC on one connection, completes the business RPC,
+then receives another health update and cancels just Watch.

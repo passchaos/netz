@@ -231,10 +231,9 @@ pub const Client = struct {
         );
     }
 
-    /// Start a bidirectional message stream and transfer exclusive connection
-    /// read ownership to it.  Do not start another RPC or call a connection
-    /// reader until the returned value reaches both terminal halves or is
-    /// deinitialized.
+    /// Start a bidirectional stream. One owner may serially drive several
+    /// duplex streams and Health Watches on this connection. Aggregate and
+    /// sequential response readers require all duplex handles to retire first.
     pub fn startDuplex(
         self: *Client,
         options: streaming.RequestOptions,

@@ -1007,3 +1007,38 @@ cancellation, and zero peer-window request-output timeout. Certificate-pinned
 TLS tests check reconnects, logical authority, `h2` ALPN, and retained peer
 certificates; the pre-existing ordinary streaming deadline gates verify the
 shared request builder still advertises and enforces actual RPC lifetimes.
+
+
+## Health Watch and business duplex streams on one connection
+
+The owning `runtime.Client` can now start a Health Watch and business duplex
+RPCs together. Its single caller alternates event reads; HTTP/2 routes sibling
+frames and decodes shared HPACK state in wire order, while each gRPC stream
+keeps independent compression, incremental framing, metadata and final status.
+Completing or canceling one stream leaves its siblings active. The real h2c
+gate sends business response bytes before the first health update, retains
+that response while Watch is read, finishes the business RPC, and then
+observes a subsequent NOT_SERVING update on the same connection. Health gzip
+and business deflate negotiation exercise independent decoder state.
+
+This establishes the shared-connection stream primitive needed by a background
+subchannel owner. The existing Channel still waits for quiescent stream state
+before connection selection, and `ReconnectingWatch` still owns its dedicated
+Channel. Background dispatch, per-backend health-gated selection and standard
+`healthCheckConfig` parsing/application remain the next integration work.
+
+
+The pinned grpc-cpp forward gate independently verifies two concurrent
+FullDuplexCall streams on the same connection over h2c and certificate-verified
+TLS. It reads their differently sized responses in reverse stream order,
+checks initial metadata on both, cancels the first stream, then sends and
+receives another message on the surviving stream before its final OK. The
+strict result marker includes `multiplexed_duplex=2+cancel-isolated`.
+
+The local 2026-10-27 verification passed 1039/1039 combined HTTP/2 and gRPC
+tests, 20/20 package checks, and the ReleaseFast compact-state gate. Connection
+and client-stream sizes retain their existing assertions in both checked and
+optimized modes. Hyper h2c/TLS interop also passed. On this host the grpc-cpp
+reference was rebuilt with `CC=/usr/bin/gcc CXX=/usr/bin/g++` because the
+PATH-selected Clang could not locate the C++ standard headers; compiler
+selection remains an ordinary caller-provided environment.

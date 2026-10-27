@@ -1,10 +1,10 @@
 //! Step-driven, single-owner gRPC streams over HTTP/2.
 //!
-//! A duplex value is the only code allowed to read frames from its HTTP/2
-//! connection while it is alive.  Message callbacks therefore run inline with
-//! `read*Event`; their payload is borrowed only for that callback.  This avoids
-//! a background reader, cross-thread queues, and accidental use of DATA storage
-//! after the owning HTTP/2 event has been released.
+//! One connection owner serially drives its duplex values. Client streams can
+//! coexist on one HTTP/2 connection; their response events and compression
+//! state remain independent. Message callbacks run inline with `read*Event`
+//! and borrow payload only for that callback. Server duplex acceptance still
+//! gives one stream exclusive request-reader ownership.
 
 const std = @import("std");
 const response_metadata = @import("../response_metadata.zig");
