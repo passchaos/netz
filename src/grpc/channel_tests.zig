@@ -1207,3 +1207,169 @@ test "gRPC wait-for-ready re-resolves after every endpoint fails" {
     try std.testing.expect(scripted.calls >= 2);
     if (peer.err) |err| return err;
 }
+
+test "gRPC connectivity watch observes generations without ABA loss" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var unavailable: AlwaysUnavailable = .{};
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        unavailable.target(),
+        .{ .backoff = testBackoff() },
+    );
+    defer client.deinit();
+    client.exitIdle();
+    var watch = client.watchConnectivity();
+    defer watch.deinit();
+    const observed = watch.snapshot();
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        observed.state,
+    );
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        client.warmWithTimeout(.fromSeconds(1)),
+    );
+    client.resetConnectionBackoff();
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        client.connectivityState(),
+    );
+    const changed = try watch.nextWithTimeout(.fromSeconds(1));
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        changed.state,
+    );
+    try std.testing.expect(changed.generation > observed.generation);
+}
+
+test "gRPC connectivity watches support timeout cancellation and reuse" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+        .{},
+    );
+    defer client.deinit();
+    var watch = client.watchConnectivity();
+    defer watch.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        watch.nextWithTimeout(.fromMilliseconds(1)),
+    );
+
+    const Await = struct {
+        fn run(
+            cursor: *channel.ConnectivityWatch,
+        ) !channel.ConnectivitySnapshot {
+            return cursor.nextWithTimeout(.fromSeconds(5));
+        }
+    };
+    var pending = io.async(Await.run, .{&watch});
+    try std.testing.expectError(error.Canceled, pending.cancel(io));
+
+    client.exitIdle();
+    const changed = try watch.nextWithTimeout(.fromSeconds(1));
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        changed.state,
+    );
+}
+
+test "gRPC connectivity watches broadcast and survive channel shutdown" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+        .{},
+    );
+    var watch_a = client.watchConnectivity();
+    defer watch_a.deinit();
+    var watch_b = client.watchConnectivity();
+    defer watch_b.deinit();
+    const Await = struct {
+        fn run(
+            cursor: *channel.ConnectivityWatch,
+        ) !channel.ConnectivitySnapshot {
+            return cursor.nextWithTimeout(.fromSeconds(2));
+        }
+    };
+    var future_a = io.async(Await.run, .{&watch_a});
+    var future_b = io.async(Await.run, .{&watch_b});
+    client.exitIdle();
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        (try future_a.await(io)).state,
+    );
+    try std.testing.expectEqual(
+        channel.ConnectivityState.connecting,
+        (try future_b.await(io)).state,
+    );
+
+    var shutdown_watch = client.watchConnectivity();
+    defer shutdown_watch.deinit();
+    var shutdown_future = io.async(Await.run, .{&shutdown_watch});
+    client.deinit();
+    const shutdown = try shutdown_future.await(io);
+    try std.testing.expectEqual(
+        channel.ConnectivityState.shutdown,
+        shutdown.state,
+    );
+    try std.testing.expectError(
+        error.ChannelShutdown,
+        shutdown_watch.waitForReadyWithTimeout(.fromSeconds(1)),
+    );
+}
+
+test "gRPC connectivity watch waits for a real READY transition" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var peer = UnaryPeer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, UnaryPeer.run, .{&peer});
+    defer thread.join();
+    var client = try channel.Channel.init(
+        allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = server.address() } },
+        .{},
+    );
+    defer client.deinit();
+    var watch = client.watchConnectivity();
+    defer watch.deinit();
+    const Await = struct {
+        fn run(
+            cursor: *channel.ConnectivityWatch,
+        ) !void {
+            return cursor.waitForReadyWithTimeout(.fromSeconds(2));
+        }
+    };
+    var ready = io.async(Await.run, .{&watch});
+    var response = try client.unary(.{
+        .path = "/fixture.Watch/Unary",
+        .message = "request",
+        .timeout = .{ .value = 1, .unit = .second },
+    });
+    defer response.deinit();
+    try ready.await(io);
+    try std.testing.expectEqual(
+        channel.ConnectivityState.ready,
+        watch.snapshot().state,
+    );
+    if (peer.err) |err| return err;
+}

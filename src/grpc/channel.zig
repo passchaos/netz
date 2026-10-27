@@ -7,6 +7,7 @@ const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 const wire = @import("wire.zig");
 const backoff = @import("channel/backoff.zig");
+const connectivity = @import("channel/connectivity.zig");
 const resolver = @import("channel/resolver.zig");
 
 const net = std.Io.net;
@@ -40,13 +41,9 @@ pub const SelectionPolicy = enum {
     round_robin,
 };
 
-pub const ConnectivityState = enum {
-    idle,
-    connecting,
-    ready,
-    transient_failure,
-    shutdown,
-};
+pub const ConnectivityState = connectivity.State;
+pub const ConnectivitySnapshot = connectivity.Snapshot;
+pub const ConnectivityWatch = connectivity.Watch;
 
 /// One pre-resolved backend. Every slice and custom context is borrowed for
 /// the Channel lifetime; the Channel owns only established HTTP/2 state.
@@ -351,7 +348,7 @@ pub const Channel = struct {
     backoff_policy: BackoffPolicy,
     shuffle_address_list: bool,
     host_resolution: ?HostResolution = null,
-    connectivity_state: ConnectivityState = .idle,
+    connectivity_tracker: *connectivity.Tracker,
     selected_index: ?usize = null,
     next_pick_index: usize = 0,
     canceled: std.Io.Event = .unset,
@@ -382,6 +379,11 @@ pub const Channel = struct {
             if (host_resolution == null) target.count() else 0,
         );
         errdefer allocator.free(slots);
+        const connectivity_tracker = try connectivity.Tracker.create(
+            allocator,
+            io,
+        );
+        errdefer connectivity_tracker.release();
         if (host_resolution == null) {
             for (slots, 0..) |*slot, index| {
                 slot.* = .{ .endpoint = target.endpoint(index) };
@@ -396,6 +398,7 @@ pub const Channel = struct {
             .backoff_policy = options.backoff,
             .shuffle_address_list = options.shuffle_address_list orelse false,
             .host_resolution = host_resolution,
+            .connectivity_tracker = connectivity_tracker,
         };
         if (result.shuffle_address_list) result.shuffleSlots();
         return result;
@@ -423,11 +426,13 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
+        self.connectivity_tracker.setState(.shutdown);
         if (self.host_resolution) |*resolution| {
             resolution.deinit(self.allocator);
         }
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
+        self.connectivity_tracker.release();
         self.* = undefined;
     }
 
@@ -447,20 +452,30 @@ pub const Channel = struct {
         if (self.host_resolution) |*resolution| {
             resolution.state.resetBackoff();
         }
-        if (self.connectivity_state == .transient_failure) {
-            self.connectivity_state = .connecting;
+        if (self.connectivityState() == .transient_failure) {
+            self.setConnectivityState(.connecting);
         }
     }
 
     pub fn connectivityState(self: *const Channel) ConnectivityState {
-        return self.connectivity_state;
+        return self.connectivity_tracker.snapshot().state;
+    }
+
+    pub fn connectivitySnapshot(self: *const Channel) ConnectivitySnapshot {
+        return self.connectivity_tracker.snapshot();
+    }
+
+    /// Return an independent cursor that may wait concurrently and remains
+    /// valid through Channel deinitialization until the watch is released.
+    pub fn watchConnectivity(self: *const Channel) ConnectivityWatch {
+        return .init(self.connectivity_tracker);
     }
 
     /// Leave lazy IDLE state. Host targets begin resolution; connection
     /// establishment remains owned by the next warm or RPC operation.
     pub fn exitIdle(self: *Channel) void {
-        if (self.connectivity_state == .idle) {
-            self.connectivity_state = .connecting;
+        if (self.connectivityState() == .idle) {
+            self.setConnectivityState(.connecting);
         }
         if (self.host_resolution) |*resolution| {
             _ = resolution.state.start();
@@ -474,7 +489,7 @@ pub const Channel = struct {
             value
         else
             return error.InvalidChannelOptions;
-        const was_idle = self.connectivity_state == .idle;
+        const was_idle = self.connectivityState() == .idle;
         self.exitIdle();
         if (!was_idle) resolution.state.requestRefresh();
     }
@@ -490,7 +505,7 @@ pub const Channel = struct {
             value
         else
             return error.InvalidChannelOptions;
-        const was_idle = self.connectivity_state == .idle;
+        const was_idle = self.connectivityState() == .idle;
         var previous = resolution.state.currentGeneration();
         self.exitIdle();
         if (!was_idle) {
@@ -561,7 +576,7 @@ pub const Channel = struct {
             if (slot.disabled or !slotMayAttempt(slot, self.io)) continue;
             const attempt_deadline = self.connectDeadline(deadline) catch |err| {
                 if (ready_count != 0 and err == error.Timeout) {
-                    self.connectivity_state = .ready;
+                    self.setConnectivityState(.ready);
                     return ready_count;
                 }
                 return err;
@@ -579,7 +594,7 @@ pub const Channel = struct {
                 }
                 if (deadlineExpired(self.io, deadline)) {
                     if (ready_count != 0) {
-                        self.connectivity_state = .ready;
+                        self.setConnectivityState(.ready);
                         return ready_count;
                     }
                     return error.Timeout;
@@ -591,13 +606,13 @@ pub const Channel = struct {
             ready_count += 1;
         }
         if (ready_count == 0) {
-            self.connectivity_state = .transient_failure;
+            self.setConnectivityState(.transient_failure);
             if (self.host_resolution) |*resolution| {
                 resolution.state.requestRefresh();
             }
             return error.ConnectionUnavailable;
         }
-        self.connectivity_state = .ready;
+        self.setConnectivityState(.ready);
         return ready_count;
     }
 
@@ -799,7 +814,7 @@ pub const Channel = struct {
                     if (!wait_for_ready and self.slots.len == 1 and
                         self.host_resolution == null)
                     {
-                        self.connectivity_state = .transient_failure;
+                        self.setConnectivityState(.transient_failure);
                         return err;
                     }
                     retryable_failure = true;
@@ -809,7 +824,7 @@ pub const Channel = struct {
                         resolution.state.requestRefresh();
                     }
                     if (!wait_for_ready and self.slots.len == 1) {
-                        self.connectivity_state = .transient_failure;
+                        self.setConnectivityState(.transient_failure);
                         return err;
                     }
                     continue;
@@ -822,10 +837,10 @@ pub const Channel = struct {
                 retryable_failure = true;
             }
             if (!wait_for_ready or !retryable_failure) {
-                self.connectivity_state = .transient_failure;
+                self.setConnectivityState(.transient_failure);
                 return error.ConnectionUnavailable;
             }
-            self.connectivity_state = .transient_failure;
+            self.setConnectivityState(.transient_failure);
             try self.waitForProgress(deadline);
         }
     }
@@ -845,8 +860,8 @@ pub const Channel = struct {
                 if (!connection.isReusable()) slot.closeConnection();
             }
         }
-        if (!self.hasReadyConnection() and self.connectivity_state == .ready) {
-            self.connectivity_state = .transient_failure;
+        if (!self.hasReadyConnection() and self.connectivityState() == .ready) {
+            self.setConnectivityState(.transient_failure);
         }
     }
 
@@ -873,7 +888,7 @@ pub const Channel = struct {
         connection: *http2.runtime.Connection,
     ) ReadyConnection {
         self.selected_index = index;
-        self.connectivity_state = .ready;
+        self.setConnectivityState(.ready);
         if (self.selection_policy == .round_robin) {
             self.next_pick_index = (index + 1) % self.slots.len;
         }
@@ -933,16 +948,16 @@ pub const Channel = struct {
             const applied = self.applyPendingResolution(
                 !wait_for_ready,
             ) catch |err| {
-                self.connectivity_state = .transient_failure;
+                self.setConnectivityState(.transient_failure);
                 return err;
             };
             if (applied and self.slots.len != 0) return;
             if (!wait_for_ready and
-                self.connectivity_state == .transient_failure)
+                self.connectivityState() == .transient_failure)
             {
                 return error.ConnectionUnavailable;
             }
-            self.connectivity_state = .connecting;
+            self.setConnectivityState(.connecting);
             try self.waitForProgress(deadline);
         }
     }
@@ -962,27 +977,27 @@ pub const Channel = struct {
             .addresses => |addresses| {
                 defer self.allocator.free(addresses);
                 if (addresses.len == 0) {
-                    self.connectivity_state = if (self.hasReadyConnection())
+                    self.setConnectivityState(if (self.hasReadyConnection())
                         .ready
                     else
-                        .transient_failure;
+                        .transient_failure);
                     if (propagate_failure) return error.NoAddressReturned;
                     return false;
                 }
                 try self.reconcileResolvedAddresses(addresses);
                 accepted = true;
-                self.connectivity_state = if (self.hasReadyConnection())
+                self.setConnectivityState(if (self.hasReadyConnection())
                     .ready
                 else
-                    .connecting;
+                    .connecting);
                 return true;
             },
             .failure => |err| {
                 accepted = true;
-                self.connectivity_state = if (self.hasReadyConnection())
+                self.setConnectivityState(if (self.hasReadyConnection())
                     .ready
                 else
-                    .transient_failure;
+                    .transient_failure);
                 if (propagate_failure) return err;
                 return false;
             },
@@ -1189,7 +1204,7 @@ pub const Channel = struct {
             }
         }
         if (!self.hasReadyConnection()) {
-            self.connectivity_state = .transient_failure;
+            self.setConnectivityState(.transient_failure);
             if (self.host_resolution) |*resolution| {
                 resolution.state.requestRefresh();
             }
@@ -1203,6 +1218,13 @@ pub const Channel = struct {
             }
         }
         return false;
+    }
+
+    fn setConnectivityState(
+        self: *Channel,
+        state: ConnectivityState,
+    ) void {
+        self.connectivity_tracker.setState(state);
     }
 };
 

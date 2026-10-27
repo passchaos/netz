@@ -319,6 +319,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
+        "ChannelConnectivitySnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelConnectivityWatch",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
         "ChannelAddressResolver",
     ));
     try std.testing.expect(@hasDecl(
@@ -372,6 +380,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "connectivityState",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "connectivitySnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Channel,
+        "watchConnectivity",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.ChannelConnectivityWatch,
+        "nextWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.ChannelConnectivityWatch,
+        "waitForReadyWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,

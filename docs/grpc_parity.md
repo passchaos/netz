@@ -935,7 +935,21 @@ IDLE/CONNECTING/READY/TRANSIENT_FAILURE. Real TCP tests cover unchanged-address
 connection reuse, address replacement, authority preservation, resolver-error
 fallback, and wait-for-ready recovery after every old endpoint fails.
 
-The resolver worker is background control-plane work; connection creation and
-picker mutation remain serialized at the intentionally single-owner Channel
-boundary. A fully concurrent subchannel manager and connectivity watchers are
-still separate higher-level work rather than being implied by this API.
+Connectivity observation now follows grpc-core's last-observed-state contract
+without borrowing the movable Channel value. `watchConnectivity` returns an
+independently reference-counted cursor with generation-stamped snapshots, so a
+READY-to-TRANSIENT_FAILURE-to-READY ABA sequence is still observable even when
+the final enum equals the cursor's prior state. Bounded next-change and
+wait-for-READY operations support concurrent independent watchers, cancellation
+and timeout; Channel destruction broadcasts SHUTDOWN and the cursor remains
+valid until explicitly released. Tests cover immediate stale-generation
+completion, timeout then reuse, task cancellation, multi-watcher broadcast,
+real READY notification and shutdown after the Channel storage is gone.
+
+The resolver worker and connectivity tracker are background control-plane
+work. Connection creation, HTTP/2 ownership and picker mutation remain
+serialized at the intentionally single-owner Channel boundary. A fully
+concurrent subchannel manager must therefore own stable heap subchannels and
+publish quiescent connections into that boundary; running `Connection` methods
+from watcher tasks would violate the current ownership contract and is not
+implied by these observation APIs.

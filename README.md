@@ -903,7 +903,8 @@ Current protocol coverage includes:
   and standard service-config load-balancing selection; hostname Channels use
   an asynchronous system or injected resolver, preserve unchanged ready
   subchannels across address updates, retain healthy addresses across resolver
-  failures, and expose explicit refresh plus connectivity state,
+  failures, expose explicit refresh plus connectivity state, and provide
+  generation-stamped concurrent watches that survive Channel shutdown,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server
