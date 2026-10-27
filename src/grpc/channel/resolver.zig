@@ -41,6 +41,7 @@ pub const State = struct {
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Event = .unset,
     result_ready: std.Io.Event = .unset,
+    publication_wake: ?*std.Io.Event = null,
     pending: ?Published = null,
     acknowledgement: ?bool = null,
     generation: u64 = 0,
@@ -103,6 +104,17 @@ pub const State = struct {
         return true;
     }
 
+    /// Background managers must not execute this long-lived resolver inline
+    /// when an async budget is exhausted: publication waits for their ACK.
+    pub fn startConcurrent(self: *State) std.Io.ConcurrentError!bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.started or self.closed) return false;
+        self.future = try self.io.concurrent(run, .{self});
+        self.started = true;
+        return true;
+    }
+
     pub fn requestRefresh(self: *State) void {
         if (self.start()) return;
         self.mutex.lockUncancelable(self.io);
@@ -146,6 +158,13 @@ pub const State = struct {
 
     pub fn resultEvent(self: *State) *std.Io.Event {
         return &self.result_ready;
+    }
+
+    /// Install before starting. A shared owner combines publication and
+    /// command wakeups without reserving additional concurrent waiter tasks.
+    pub fn notifyPublication(self: *State, event: *std.Io.Event) void {
+        std.debug.assert(!self.started);
+        self.publication_wake = event;
     }
 
     fn run(self: *State) void {
@@ -235,6 +254,8 @@ pub const State = struct {
         self.mutex.unlock(self.io);
         if (previous) |published| published.result.deinit(self.allocator);
         self.result_ready.set(self.io);
+        if (self.publication_wake) |event| event.set(self.io);
+        if (self.publication_wake) |event| event.set(self.io);
     }
 
     fn waitForRequest(self: *State) bool {

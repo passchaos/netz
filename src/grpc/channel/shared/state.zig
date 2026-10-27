@@ -16,7 +16,10 @@ pub const State = struct {
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     group: std.Io.Group = .init,
-    workers: []Worker,
+    workers: std.ArrayList(*Worker) = .empty,
+    sources: []Source = &.{},
+    shuffle_addresses: bool = false,
+    resolution_changed: std.Io.Event = .unset,
     config: ?service_config.ServiceConfig = null,
     health_service: ?[]u8 = null,
     tracker: *connectivity.Tracker,
@@ -26,10 +29,14 @@ pub const State = struct {
     queued: usize = 0,
     demand: bool = false,
     closed: bool = false,
-    selected: ?usize = null,
+    selected: ?*Worker = null,
     next_pick: usize = 0,
 
     pub const Worker = @import("worker.zig").Worker(State);
+    pub const Source = @import("source.zig").Source(Worker);
+    pub const Membership = @import("membership.zig").Membership(State);
+    pub const Resolution = @import("resolution.zig").Resolution(State);
+    pub const Failure = @import("state.zig").Error;
 
     pub fn retain(self: *State) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -38,11 +45,10 @@ pub const State = struct {
     pub fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         std.debug.assert(self.closed and self.head == null);
-        for (self.workers) |*worker| {
-            worker.owner.deinit();
-            worker.tracker.release();
-        }
-        self.allocator.free(self.workers);
+        std.debug.assert(self.workers.items.len == 0);
+        self.workers.deinit(self.allocator);
+        for (self.sources) |*source| source.deinit(self.allocator);
+        self.allocator.free(self.sources);
         if (self.config) |*config| config.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         self.tracker.release();
@@ -55,8 +61,38 @@ pub const State = struct {
     pub fn unlock(self: *State) void {
         self.mutex.unlock(self.io);
     }
+    pub fn endpointCountLocked(self: *State) usize {
+        if (self.closed) return 0;
+        var count: usize = 0;
+        for (self.sources) |*source| count += source.latest().len;
+        return count;
+    }
+    pub fn endpointCount(self: *State) usize {
+        self.lock();
+        defer self.unlock();
+        return self.endpointCountLocked();
+    }
+    pub fn watchEndpoint(self: *State, index: usize) ?connectivity.Watch {
+        self.lock();
+        defer self.unlock();
+        if (self.closed) return null;
+        var ordinal = index;
+        for (self.sources) |*source| {
+            const members = source.latest();
+            if (ordinal < members.len) return .init(members[ordinal].tracker);
+            ordinal -= members.len;
+        }
+        return null;
+    }
+    pub fn requestNameResolution(self: *State) Error!void {
+        return Resolution.request(self);
+    }
+    pub fn refreshNameResolution(self: *State, deadline: std.Io.Clock.Timestamp) Error!usize {
+        return Resolution.refresh(self, deadline);
+    }
     pub fn wakeAllLocked(self: *State) void {
-        for (self.workers) |*worker| worker.wake.set(self.io);
+        for (self.workers.items) |worker| worker.wake.set(self.io);
+        for (self.sources) |*source| source.wake.set(self.io);
     }
     pub fn isClosed(self: *State) bool {
         self.lock();
@@ -72,8 +108,21 @@ pub const State = struct {
             self.finishLocked(job, null, error.SharedChannelClosed);
         }
         self.tracker.setState(.shutdown);
-        for (self.workers) |*worker| worker.tracker.setState(.shutdown);
+        for (self.workers.items) |worker| worker.tracker.setState(.shutdown);
+        self.resolution_changed.set(self.io);
         self.wakeAllLocked();
+    }
+    /// Resolver callbacks borrow target/custom context only until the owning
+    /// channel is destroyed, even when Sender references retain this state.
+    /// Call after the endpoint/manager group has been joined.
+    pub fn stopResolution(self: *State) void {
+        for (self.sources) |*source| {
+            self.lock();
+            const resolver = source.resolver;
+            source.resolver = null;
+            self.unlock();
+            if (resolver) |value| value.deinit();
+        }
     }
     fn finishLocked(self: *State, job: *Job, result: ?call.UnaryResponse, err: ?anyerror) void {
         job.result = result;
@@ -105,10 +154,14 @@ pub const State = struct {
         if (self.closed) return .shutdown;
         if (!self.demand) return .idle;
         var connecting = false;
-        for (self.workers) |worker| {
-            if (worker.published == .ready) return .ready;
+        for (self.workers.items) |worker| {
+            if (worker.retired) continue;
+            if (worker.eligible and worker.published == .ready) return .ready;
             if (worker.published == .connecting or worker.published == .idle) connecting = true;
         }
+        for (self.sources) |source| if (source.resolver != null and source.generation == 0) {
+            connecting = true;
+        };
         return if (connecting) .connecting else .transient_failure;
     }
     pub fn publish(self: *State, worker: *Worker, state: connectivity.State, capacity: usize) void {
@@ -117,7 +170,12 @@ pub const State = struct {
         const changed = worker.published != state or worker.capacity != capacity;
         worker.published = state;
         worker.capacity = capacity;
-        worker.tracker.setState(state);
+        worker.tracker.setState(if (self.closed or worker.retired) .shutdown else state);
+        Membership.promoteLocked(self, worker.source_index);
+        self.recomputeLocked();
+        if (changed) self.wakeAllLocked();
+    }
+    pub fn recomputeLocked(self: *State) void {
         const aggregate = self.aggregateLocked();
         self.tracker.setState(aggregate);
         if (aggregate == .transient_failure) {
@@ -131,13 +189,42 @@ pub const State = struct {
                 cursor = next;
             }
         }
-        if (changed) self.wakeAllLocked();
     }
     pub fn needsConnection(self: *State, worker: *Worker) bool {
         self.lock();
         defer self.unlock();
         worker.wake.reset();
-        return self.demand;
+        return self.demand and !worker.retired;
+    }
+    pub fn shouldStop(self: *State, worker: *Worker, drained: bool) bool {
+        self.lock();
+        defer self.unlock();
+        return self.closed or (worker.retired and drained);
+    }
+    pub fn isRetired(self: *State, worker: *Worker) bool {
+        self.lock();
+        defer self.unlock();
+        return worker.retired;
+    }
+    pub fn connectionFailed(self: *State, worker: *Worker) void {
+        self.lock();
+        defer self.unlock();
+        if (self.closed or worker.retired) return;
+        const source = &self.sources[worker.source_index];
+        if (source.resolver != null) {
+            source.refresh_requested = true;
+            source.wake.set(self.io);
+        }
+    }
+    pub fn workerStopped(self: *State, worker: *Worker) void {
+        self.lock();
+        defer self.unlock();
+        for (self.workers.items, 0..) |member, index| if (member == worker) {
+            _ = self.workers.swapRemove(index);
+            break;
+        };
+        worker.tracker.setState(.shutdown);
+        self.recomputeLocked();
     }
     pub fn canceled(self: *State, job: *Job) bool {
         self.lock();
@@ -169,15 +256,27 @@ pub const State = struct {
             cursor = next;
         }
     }
-    fn pickLocked(self: *State) ?usize {
+    fn pickLocked(self: *State) ?*Worker {
         if (self.policy == .pick_first) {
-            if (self.selected) |id| if (self.workers[id].published == .ready) {
-                return if (self.workers[id].capacity != 0) id else null;
+            if (self.selected) |worker| if (worker.eligible and worker.published == .ready) {
+                return if (worker.capacity != 0) worker else null;
             };
         }
-        for (0..self.workers.len) |offset| {
-            const id = if (self.policy == .round_robin) (self.next_pick + offset) % self.workers.len else offset;
-            if (self.workers[id].published == .ready and self.workers[id].capacity != 0) return id;
+        var count: usize = 0;
+        for (self.sources) |source| count += source.current.len;
+        for (0..count) |offset| {
+            var ordinal = if (self.policy == .round_robin) (self.next_pick + offset) % count else offset;
+            for (self.sources) |source| {
+                if (ordinal >= source.current.len) {
+                    ordinal -= source.current.len;
+                    continue;
+                }
+                const worker = source.current[ordinal];
+                if (worker.published == .ready and worker.capacity != 0) {
+                    return worker;
+                }
+                break;
+            }
         }
         return null;
     }
@@ -186,13 +285,21 @@ pub const State = struct {
         defer self.unlock();
         if (self.closed or self.head == null) return null;
         const picked = self.pickLocked() orelse return null;
-        if (picked != worker.id) return null;
+        if (picked != worker) return null;
         const job = self.head.?;
         self.removeQueuedLocked(job);
         job.phase = .assigned;
         worker.capacity -= 1;
         self.selected = picked;
-        self.next_pick = (picked + 1) % self.workers.len;
+        var count: usize = 0;
+        var next: usize = 0;
+        for (self.sources) |source| {
+            for (source.current, count..) |member, ordinal| if (member == picked) {
+                next = ordinal + 1;
+            };
+            count += source.current.len;
+        }
+        self.next_pick = next % count;
         self.wakeAllLocked();
         return job;
     }

@@ -1141,8 +1141,9 @@ return path and prevents an unbounded refund from hiding inside a poll.
 ## Background shared unary channels and health-aware endpoint selection
 
 `grpc.SharedChannel` owns a stable heap state and one background `std.Io`
-worker per configured endpoint. Each worker exclusively owns its ordinary
-Channel, HTTP/2 connection, Health Watch and application duplex streams.
+worker per static endpoint or unique resolved hostname address. Each worker
+exclusively owns its ordinary Channel, HTTP/2 connection, Health Watch and
+application duplex streams.
 `channel.sender()` and `sender.clone()` return reference-counted handles that
 may issue concurrent unary calls. Callers enqueue stack-owned commands under
 the shared mutex and wait on per-call events. Deadline or task cancellation
@@ -1156,9 +1157,36 @@ workers connect in parallel and expose independent health-derived connectivity
 through `watchEndpointConnectivity`. `pick_first` stays with a ready selected
 endpoint, while `round_robin` advances across ready endpoints with available
 concurrency credit. Connection and health retries use the existing gRPC
-backoff defaults. Host endpoints use the ordinary Channel resolver and preserve
-its authority/SNI policies. Dynamic reconciliation of a hostname's full address
-set into separate shared workers remains future manager work.
+backoff defaults. Each hostname source has an independent background resolver,
+including hostname entries mixed with static endpoints in a resolved target.
+Every physical address preserves the original logical authority, TLS server
+name, certificate-verification policy and transport limits.
+
+Resolution starts on the first call, explicit `connect()`, or name-resolution
+request. `requestNameResolution()` coalesces refresh requests and retains the
+ordinary resolver's minimum interval and failure backoff; endpoint connection
+failure also requests a refresh. Successful
+`refreshNameResolutionWithDeadline/Timeout` calls await a new published result
+from every hostname source; any failure is reported as soon as it is observed.
+Its deadline or caller cancellation ends only that wait; the channel still
+owns discovery.
+`endpointCount()` and `watchEndpointConnectivity(index)` describe the latest
+candidate address list. A retained cursor remains attached to its original
+endpoint when a later list changes its ordinal.
+
+An address update reuses unchanged workers, connections and Health Watches.
+A candidate list replaces its current source once the current source has no
+READY worker, a candidate is READY after all initial state notifications, or
+every candidate has failed. Until then, the old READY source still serves new
+calls while candidates independently connect and pass their health gates.
+Resolver errors preserve the last valid membership. A valid empty list retires
+the source immediately and reports NoAddressReturned. Removed workers stop
+admitting calls, cancel their Health Watch, drain active RPCs under their
+original deadlines, then close the transport and reclaim their own state.
+Constructor and candidate allocation/admission failures clean up provisional
+workers without replacing an existing valid list. Channel destruction joins
+resolver callbacks before returning, including when retained Sender handles
+keep the already-closed shared state alive.
 
 `SharedChannelOptions.service_config_json` is parsed into owned state. Its
 method timeout, directional message limits, waitForReady and retry policies
@@ -1212,13 +1240,24 @@ connection, same-connection health admission and endpoint switch, active-RPC
 survival after NOT_SERVING, timeout and caller cancellation, reference-counted
 shutdown, transparent refusal recovery, configured retry metadata, exact staged
 upload suffixes, and allocator/concurrency-admission cleanup. Shared streaming
-and duplex send handles, dynamic shared-worker address updates, and broader
+and duplex send handles and broader
 production scheduling evidence remain beyond this unary manager surface.
 
 
-The final shared-unary verification passed 1071/1071 combined HTTP/2 and gRPC
+The initial shared-unary verification passed 1071/1071 combined HTTP/2 and gRPC
 tests and 20/20 package tests. The pinned grpc-cpp forward gate creates the
 background SharedChannel with healthCheckConfig, submits two concurrent unary
 calls through reference-counted send handles, validates their differently
 sized protobuf responses, and reports `shared_unary=2+health-gated` over h2c and
 certificate-verified TLS on the zio backend.
+
+The hostname manager's targeted verification passed 140/140 shared-channel
+tests and 20/20 public package tests. Real TCP cases cover duplicate/reordered
+addresses, mixed hostname/static sources and logical authorities, DNS errors
+with a retained healthy connection, empty-list retirement, health-gated
+candidate switching while an old RPC drains, blocked-lookup cancellation with
+retained senders and a zero async budget, resolver concurrency admission,
+replacement allocation failure, and connector-cancellation recovery. The
+grpc-cpp shared gate now uses hostname targets and an allocator-owned duplicate
+address result over h2c and verified TLS, then refreshes the unchanged address
+after its concurrent unary calls; both publications produce one endpoint.

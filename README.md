@@ -915,6 +915,8 @@ Current protocol coverage includes:
   for owners that schedule multiple active streams,
   background shared unary channels with cloneable send handles, per-endpoint
   workers, same-connection Health Watch admission, ready endpoint selection,
+  dynamic DNS address membership with connection/health retention and draining
+  retirement, including independent hostname sources in resolved targets,
   owned service config and cancellation/join before caller return,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,

@@ -2,8 +2,6 @@
 const std = @import("std");
 const channel = @import("../channel.zig");
 const call = @import("../call.zig");
-const health = @import("../health.zig");
-const service_config = @import("../service_config.zig");
 const connectivity = @import("connectivity.zig");
 const state_module = @import("shared/state.zig");
 const State = state_module.State;
@@ -39,82 +37,7 @@ pub const Sender = struct {
 pub const SharedChannel = struct {
     state: *State,
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!SharedChannel {
-        if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
-        var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parse(allocator, json) else null;
-        errdefer if (config) |*value| value.deinit();
-        const name: ?[]const u8 = if (options.disable_health_check) null else options.health_service orelse (if (options.health_metadata.service.len != 0) options.health_metadata.service else if (config) |*value| value.healthCheckServiceName() else null);
-        if (name) |service| {
-            const encoded = try health.encodeRequestAlloc(allocator, .{ .service = service });
-            allocator.free(encoded);
-        }
-        const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
-        errdefer if (owned_name) |service| allocator.free(service);
-        const tracker = try connectivity.Tracker.create(allocator, io);
-        errdefer tracker.release();
-        const state = try allocator.create(State);
-        errdefer allocator.destroy(state);
-        const count = switch (target) {
-            .resolved => |set| set.endpoints.len,
-            else => 1,
-        };
-        if (count == 0) return error.InvalidSharedOptions;
-        const workers = try allocator.alloc(State.Worker, count);
-        errdefer allocator.free(workers);
-        var initialized: usize = 0;
-        errdefer for (workers[0..initialized]) |*worker| {
-            worker.owner.deinit();
-            worker.tracker.release();
-        };
-        for (workers, 0..) |*worker, id| {
-            const local_target: channel.Target = if (target == .resolved) switch (target.resolved.endpoints[id]) {
-                .cleartext_ip => |v| .{ .cleartext_ip = v },
-                .cleartext_host => |v| .{ .cleartext_host = v },
-                .tls_host => |v| .{ .tls_host = v },
-                .tls_address => |v| .{ .tls_address = v },
-                .custom => |v| .{ .custom = v },
-            } else target;
-            var owner = if (config) |*value| try channel.Channel.initWithServiceConfig(allocator, io, local_target, options.channel, value) else try channel.Channel.init(allocator, io, local_target, options.channel);
-            const endpoint_tracker = connectivity.Tracker.create(allocator, io) catch |err| {
-                owner.deinit();
-                return err;
-            };
-            worker.* = .{ .parent = state, .id = id, .owner = owner, .tracker = endpoint_tracker };
-            initialized += 1;
-        }
-        const balancing = if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{};
-        var retained = options;
-        retained.service_config_json = null;
-        retained.health_service = owned_name;
-        retained.health_metadata.service = owned_name orelse "";
-        state.* = .{
-            .allocator = allocator,
-            .io = io,
-            .options = retained,
-            .workers = workers,
-            .config = config,
-            .health_service = owned_name,
-            .tracker = tracker,
-            .policy = options.channel.selection_policy orelse (if (balancing.configured) switch (balancing.policy) {
-                .pick_first => channel.SelectionPolicy.pick_first,
-                .round_robin => channel.SelectionPolicy.round_robin,
-            } else if (target == .resolved) target.resolved.policy else .pick_first),
-        };
-        if (options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list)) {
-            var remaining = workers.len;
-            while (remaining > 1) {
-                remaining -= 1;
-                var random: usize = undefined;
-                io.random(std.mem.asBytes(&random));
-                std.mem.swap(State.Worker, &workers[remaining], &workers[random % (remaining + 1)]);
-            }
-            for (workers, 0..) |*worker, id| worker.id = id;
-        }
-        errdefer {
-            state.close();
-            state.group.cancel(io);
-        }
-        for (workers) |*worker| try state.group.concurrent(io, State.Worker.run, .{worker});
-        return .{ .state = state };
+        return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
     }
     pub fn sender(self: SharedChannel) Sender {
         self.state.retain();
@@ -134,15 +57,28 @@ pub const SharedChannel = struct {
     pub fn connectivityState(self: SharedChannel) connectivity.State {
         return self.state.tracker.snapshot().state;
     }
+    /// Latest resolver membership; retained cursors still identify their
+    /// original endpoint when a later update changes this ordinal.
     pub fn watchEndpointConnectivity(self: SharedChannel, index: usize) ?connectivity.Watch {
-        self.state.lock();
-        defer self.state.unlock();
-        if (index >= self.state.workers.len) return null;
-        return .init(self.state.workers[index].tracker);
+        return self.state.watchEndpoint(index);
+    }
+    pub fn endpointCount(self: SharedChannel) usize {
+        return self.state.endpointCount();
+    }
+    pub fn requestNameResolution(self: SharedChannel) Error!void {
+        return self.state.requestNameResolution();
+    }
+    pub fn refreshNameResolutionWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
+        return self.state.refreshNameResolution(deadline);
+    }
+    pub fn refreshNameResolutionWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.refreshNameResolutionWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
     }
     pub fn deinit(self: *SharedChannel) void {
         self.state.close();
         self.state.group.cancel(self.state.io);
+        self.state.stopResolution();
         self.state.release();
         self.* = undefined;
     }
@@ -150,4 +86,5 @@ pub const SharedChannel = struct {
 
 test {
     _ = @import("shared/tests.zig");
+    _ = @import("shared/resolution/tests.zig");
 }

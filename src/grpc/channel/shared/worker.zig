@@ -11,7 +11,10 @@ const Active = @import("active.zig").Active;
 pub fn Worker(comptime State: type) type {
     return struct {
         parent: *State,
-        id: usize,
+        source_index: usize,
+        address: ?std.Io.net.IpAddress = null,
+        eligible: bool = false,
+        retired: bool = false,
         owner: channel.Channel,
         tracker: *connectivity.Tracker,
         wake: std.Io.Event = .unset,
@@ -30,14 +33,19 @@ pub fn Worker(comptime State: type) type {
 
         const Self = @This();
         pub fn run(self: *Self) std.Io.Cancelable!void {
+            const parent = self.parent;
             defer {
                 self.disconnect(error.SharedChannelClosed);
                 self.active.deinit(self.parent.allocator);
                 self.parent.publish(self, .shutdown, 0);
+                self.owner.deinit();
+                parent.workerStopped(self);
+                self.tracker.release();
+                parent.allocator.destroy(self);
             }
-            while (!self.parent.isClosed()) {
+            while (!self.parent.shouldStop(self, self.active.items.len == 0)) {
                 self.tick() catch |err| {
-                    if (err == error.Canceled) return error.Canceled;
+                    if (err == error.Canceled and (self.parent.isClosed() or self.parent.isRetired(self))) return error.Canceled;
                     self.disconnect(err);
                     self.scheduleConnect();
                 };
@@ -83,6 +91,7 @@ pub fn Worker(comptime State: type) type {
             self.health_seen = false;
             self.local_state = .transient_failure;
             self.parent.publish(self, .transient_failure, 0);
+            self.parent.connectionFailed(self);
         }
         fn failActive(self: *Self, index: usize, err: anyerror) void {
             const job = self.active.items[index].job;
@@ -103,9 +112,12 @@ pub fn Worker(comptime State: type) type {
 
         fn tick(self: *Self) !void {
             const demand = self.parent.needsConnection(self);
+            const retiring = self.parent.isRetired(self);
+            if (retiring) self.dropWatch();
             self.parent.expireQueued();
-            if (!demand) return self.sleepUntilWake(null);
+            if (!demand and self.active.items.len == 0) return self.sleepUntilWake(null);
             if (self.connection == null) {
+                if (retiring) return;
                 if (self.connect_at != null and !self.expired(self.connect_at)) return self.sleepUntilWake(minimum(self.connect_at, self.parent.nextQueuedDeadline()));
                 self.local_state = .connecting;
                 self.publish();
@@ -126,7 +138,7 @@ pub fn Worker(comptime State: type) type {
                     self.connect_at = null;
                     return;
                 }
-            } else if (self.parent.health_service != null and !self.health_disabled and self.watch == null and (self.health_at == null or self.expired(self.health_at))) {
+            } else if (!retiring and self.parent.health_service != null and !self.health_disabled and self.watch == null and (self.health_at == null or self.expired(self.health_at))) {
                 var options = self.parent.options.health_metadata;
                 options.service = self.parent.health_service.?;
                 self.watch = try health.startWatchWithDeadline(connection, self.parent.allocator, options, self.outputDeadline());
