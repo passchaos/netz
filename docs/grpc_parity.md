@@ -229,6 +229,13 @@ one-shot netz server for each scenario:
 zig build interop-grpc-cpp-client -Doptimize=ReleaseFast
 ```
 
+The upstream gates require the exact `.bazelversion` release from the pinned
+gRPC checkout. They accept that version's ordinary label and the official
+`- (@non-git)` package label. `GRPC_BAZEL_OUTPUT_USER_ROOT` can relocate
+Bazel's regenerable output tree to a filesystem with sufficient space; custom
+Bazel runtime-library or compiler environments remain ordinary shell
+configuration (`LD_LIBRARY_PATH`, `CC`, and `CXX`).
+
 Run the independent Server Reflection gate, with upstream's official
 `grpc_cli` querying a one-shot zio-backed netz h2c server:
 

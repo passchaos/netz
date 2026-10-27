@@ -145,11 +145,11 @@ pub fn main(init: std.process.Init) !void {
     var connection = if (tls_enabled)
         tls_server.accept() catch |err| {
             if (scenario == .timeout_on_sleeping_server and
-                err == error.UnexpectedEof)
+                deadlinePeerClosed(err))
             {
                 std.debug.print(
                     "netz grpc server completed: scenario={s} transport=tls " ++
-                        "outcome=local-deadline-before-tls-accept " ++
+                        "outcome=local-deadline-before-rpc-accept " ++
                         "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
                     .{@tagName(scenario)},
                 );
@@ -158,7 +158,20 @@ pub fn main(init: std.process.Init) !void {
             return err;
         }
     else
-        try clear_server.accept();
+        clear_server.accept() catch |err| {
+            if (scenario == .timeout_on_sleeping_server and
+                deadlinePeerClosed(err))
+            {
+                std.debug.print(
+                    "netz grpc server completed: scenario={s} transport=h2c " ++
+                        "outcome=local-deadline-before-rpc-accept " ++
+                        "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+                    .{@tagName(scenario)},
+                );
+                return;
+            }
+            return err;
+        };
     defer connection.deinit();
     std.debug.print(
         "netz grpc server accepted: scenario={s} transport={s}\n",
@@ -1198,6 +1211,11 @@ fn serveSleepingDeadline(
                     },
                 }
             },
+            error.ConnectionClosed,
+            error.ConnectionResetByPeer,
+            error.SocketUnconnected,
+            error.UnexpectedEof,
+            => return,
             else => return err,
         };
         defer event.deinit();
@@ -1219,6 +1237,17 @@ fn serveSleepingDeadline(
             },
         }
     }
+}
+
+fn deadlinePeerClosed(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.SocketUnconnected,
+        error.UnexpectedEof,
+        => true,
+        else => false,
+    };
 }
 
 fn nextRequest(

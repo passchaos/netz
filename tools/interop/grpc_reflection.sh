@@ -5,6 +5,10 @@ server=${1:?netz reflection server executable path}
 grpc_root=${GRPC_ROOT:-"$HOME/Work/grpc"}
 expected_grpc_commit=03d65cc67c450ccbb58a8a45627c4da83a886ccd
 bazel_bin=${BAZEL:-}
+bazel_startup_args=()
+if [[ -n "${GRPC_BAZEL_OUTPUT_USER_ROOT:-}" ]]; then
+  bazel_startup_args+=("--output_user_root=$GRPC_BAZEL_OUTPUT_USER_ROOT")
+fi
 grpc_cli=${GRPC_CLI:-}
 build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
 case_timeout=${GRPC_CPP_CASE_TIMEOUT:-30s}
@@ -65,19 +69,26 @@ if [[ -z "$grpc_cli" ]]; then
     fi
   fi
   required_bazel_version=$(tr -d '[:space:]' <"$grpc_root/.bazelversion")
-  actual_bazel_version="$(
+  actual_bazel_label="$(
     cd "$grpc_root"
-    timeout 60s "$bazel_bin" --batch version 2>/dev/null |
+    timeout 60s "$bazel_bin" "${bazel_startup_args[@]}" --batch version 2>/dev/null |
       sed -n 's/^Build label: //p' | head -n 1
   )" || {
     echo "failed to query $bazel_bin within 60 seconds" >&2
     exit 1
   }
+  # Pixi's official Bazel package identifies an otherwise exact release as
+  # `8.7.0- (@non-git)`. Accept only that packaging suffix; keep prerelease or
+  # unrelated labels mismatched against the upstream pin.
+  actual_bazel_version="$(
+    printf '%s\n' "$actual_bazel_label" |
+      sed -n -E 's/^([0-9]+\.[0-9]+\.[0-9]+)(- \(@non-git\))?$/\1/p'
+  )"
   if [[ "$actual_bazel_version" != "$required_bazel_version" ]]; then
-    echo "gRPC requires Bazel $required_bazel_version (found ${actual_bazel_version:-unknown})" >&2
+    echo "gRPC requires Bazel $required_bazel_version (found ${actual_bazel_label:-unknown})" >&2
     exit 1
   fi
-  (cd "$grpc_root" && timeout "$build_timeout" "$bazel_bin" build \
+  (cd "$grpc_root" && timeout "$build_timeout" "$bazel_bin" "${bazel_startup_args[@]}" build \
     --compilation_mode=opt //test/cpp/util:grpc_cli)
   grpc_cli="$grpc_root/bazel-bin/test/cpp/util/grpc_cli"
 fi
