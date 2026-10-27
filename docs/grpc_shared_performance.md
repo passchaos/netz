@@ -149,3 +149,79 @@ tick at 3.48% self. zio task spawning, yielding, cleanup and scheduling are also
 visible. These fractions describe sampled user work, not wall-clock waiting
 or a directly comparable grpc-cpp profile. They make deadline/output-task and
 window-update orchestration part of the next investigation alongside copying.
+
+## Window isolation and credit batching
+
+A fixed executable at clean 459d9e1f compared five window policies on CPU 0,
+using 100 warmup and 1000 measured 256 KiB roundtrips in each of five samples.
+Policy order reversed on alternating samples. Initial and observed final
+windows, all result/completion records and binary fingerprints are retained in
+[the window experiment](evidence/grpc_shared/2026-10-28-windows.json).
+
+| Policy | Persistent us/roundtrip | Per-call us/roundtrip |
+| --- | ---: | ---: |
+| Fixed 65535-byte defaults | 1009.52 | 1124.61 |
+| Stream 1 MiB, connection default | 996.80 | 1140.86 |
+| Connection 1 MiB, stream default | 996.23 | 1080.60 |
+| Both initial windows 1 MiB | 981.38 | 1122.81 |
+| Adaptive from defaults, capped at 1 MiB | 969.44 | 1125.98 |
+
+Adaptive targets grew on both endpoints and stayed within the cap. Larger
+fixed windows and adaptive growth did not remove the large-message gap: the
+observed changes stayed near 0-4%, while every shape still took about 1 ms.
+Increasing default buffering is therefore not supported as the main remedy by
+this experiment.
+
+The production shared owner now uses low-watermark connection refills and
+batches consumer-acknowledged stream credit. Stream updates cover only dequeued
+encoded bytes; an exhausted window flushes available acknowledged bytes even
+below the batching threshold. Padding returns immediately. Legacy immediate
+credit entry points retain their behavior. Wire tests verify combined update
+counts, tiny-window progress, exact credit accounting and uncertain-prefix
+fail-closed behavior. The HTTP/2 ClientDuplexStream remains 120 bytes.
+
+An isolated clean cc134032 candidate was compared with clean 491a6c02 using the
+same 65535-byte windows, 100 warmup and 2000 measured roundtrips. Five samples
+alternated the executable order; byte validation stayed enabled and allocation
+telemetry stayed disabled. Both executables include the preceding HTTP fallback
+body-credit fix, so the changed code is the response-credit batching. Full
+records and fingerprints are retained in
+[the batching A/B](evidence/grpc_shared/2026-10-28-credit-batching.json).
+
+| Mode | String bytes | Before us/roundtrip | Batched us/roundtrip | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 29.82 | 18.44 | 1.617x |
+| Persistent RPC | 512 | 30.04 | 18.83 | 1.595x |
+| Persistent RPC | 4096 | 33.34 | 23.70 | 1.407x |
+| Persistent RPC | 262144 | 1014.35 | 944.92 | 1.073x |
+| RPC per roundtrip | 0 | 77.15 | 65.80 | 1.173x |
+| RPC per roundtrip | 512 | 78.07 | 66.71 | 1.170x |
+| RPC per roundtrip | 4096 | 82.64 | 72.84 | 1.135x |
+| RPC per roundtrip | 262144 | 1137.24 | 1083.65 | 1.049x |
+
+The retained optimization reduces window-update work and materially improves
+small-message persistent streams. Large-message improvements remain 5-7% in
+these samples; the earlier grpc-cpp large-message gap still requires further
+deadline/output-task and data-copying analysis. These A/B figures compare two
+native implementations. The external fixture was also rerun below.
+
+The clean cc134032 public bench-grpc-cpp step then repeated five alternating
+samples against the pinned official TCP kernels. It used the same CPU, native
+warmup/iteration counts and pre-encoded/full-byte-validation boundaries as the
+original comparison. Full native/completion and reference records are retained
+in [the refreshed comparison](evidence/grpc_shared/2026-10-28-credit-grpc-cpp.json).
+
+| Mode | String bytes | Native us/roundtrip | grpc-cpp us/roundtrip | Native / grpc-cpp |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 18.29 | 43.82 | 0.417 |
+| Persistent RPC | 512 | 18.87 | 45.02 | 0.419 |
+| Persistent RPC | 4096 | 23.64 | 49.79 | 0.475 |
+| Persistent RPC | 262144 | 944.58 | 392.77 | 2.405 |
+| RPC per roundtrip | 0 | 64.54 | 124.31 | 0.519 |
+| RPC per roundtrip | 512 | 65.46 | 125.26 | 0.523 |
+| RPC per roundtrip | 4096 | 71.36 | 131.46 | 0.543 |
+| RPC per roundtrip | 262144 | 1087.56 | 501.34 | 2.169 |
+
+The fresh results preserve the small-message advantage in these independent
+workloads. Large persistent and per-call messages still take 2.41x and 2.17x
+the reference wall time; broad gRPC performance superiority remains unproven.

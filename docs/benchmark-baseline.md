@@ -8750,10 +8750,13 @@ would not meet the repository's end-to-end evidence threshold.
 
 The shared gRPC TCP baseline is recorded separately in
 [grpc_shared_performance.md](grpc_shared_performance.md), with complete sample
-records and the official grpc-cpp fixture boundaries. Its 256 KiB persistent
-and per-call workloads remain 2.61x and 2.28x the reference wall time; that gap
-requires window and allocation/copying analysis before a gRPC performance
-completion claim.
+records and the official grpc-cpp fixture boundaries. Its initial 256 KiB
+persistent and per-call workloads took 2.61x and 2.28x the reference wall time.
+Later fixed-window A/B samples show response-credit batching improving native
+large-message time by 7% and 5%, with larger small-message improvements. The
+refreshed clean cc134032 external comparison still records 2.41x and 2.17x
+reference wall time for large messages. Further deadline/output-task and
+copying analysis is required before a gRPC performance completion claim.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP
