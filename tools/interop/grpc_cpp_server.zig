@@ -227,7 +227,23 @@ pub fn main(init: std.process.Init) !void {
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
-            var stream = try connection.acceptDuplex();
+            var stream = connection.acceptDuplex() catch |err| {
+                if (scenario == .timeout_on_sleeping_server and
+                    deadlinePeerClosed(err))
+                {
+                    std.debug.print(
+                        "netz grpc server completed: scenario={s} transport={s} " ++
+                            "outcome=local-deadline-before-rpc-accept " ++
+                            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+                        .{
+                            @tagName(scenario),
+                            if (tls_enabled) "tls" else "h2c",
+                        },
+                    );
+                    return;
+                }
+                return err;
+            };
             defer stream.deinit();
             if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
                 try stream.finish(.unimplemented, null, &.{}, &.{});
@@ -1184,12 +1200,15 @@ fn serveSleepingDeadline(
     while (true) {
         var event = readEvent(stream, queue, watchdog) catch |err| switch (err) {
             error.Timeout => {
-                try stream.finish(
+                stream.finish(
                     .deadline_exceeded,
                     "deadline exceeded",
                     &.{},
                     &.{},
-                );
+                ) catch |finish_err| {
+                    if (deadlinePeerClosed(finish_err)) return;
+                    return finish_err;
+                };
                 const cleanup_deadline = std.Io.Clock.Timestamp.fromNow(
                     io,
                     .{
@@ -1197,8 +1216,11 @@ fn serveSleepingDeadline(
                         .clock = .awake,
                     },
                 );
-                const drained = try stream
-                    .drainRequestAfterResponseWithDeadline(cleanup_deadline);
+                const drained = stream
+                    .drainRequestAfterResponseWithDeadline(cleanup_deadline) catch |drain_err| {
+                    if (deadlinePeerClosed(drain_err)) return;
+                    return drain_err;
+                };
                 switch (drained) {
                     .finished => return,
                     .reset => |reset| {
