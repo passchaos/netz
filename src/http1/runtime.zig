@@ -8492,39 +8492,49 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
     try writeRequestToTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, options);
 }
 
-fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
+/// Validate and write one complete request under the caller's absolute
+/// awake-clock deadline. Any error after output begins is terminal for this
+/// byte stream; callers retain ownership and decide how to close it.
+pub fn writeRequestToStreamWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: RequestOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    _ = try deadline_policy.usableAwake(io, deadline);
     var scratch: WriteScratch = .{};
     defer scratch.deinit(allocator);
-    try writeRequestToTransportScratch(
+    try writeRequestToTransportScratchMaybeBefore(
         allocator,
-        transport,
+        .{ .tcp = .{ .io = io, .stream = stream } },
         options,
+        deadline,
         &scratch,
     );
 }
 
-fn writeRequestToTransportScratch(
+pub fn writeRequestToStreamWithTimeout(
     allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
+    io: std.Io,
+    stream: net.Stream,
     options: RequestOptions,
-    scratch: *WriteScratch,
+    timeout: std.Io.Duration,
 ) Error!void {
-    const parts = try runtime_write.prepareRequest(
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return writeRequestToStreamWithDeadline(
         allocator,
+        io,
+        stream,
         options,
-        scratch,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
     );
-    try transport.writeAllParts(parts.header, parts.body);
 }
 
-pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
-    try writeResponseToTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, options);
-}
-
-fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: ResponseOptions) Error!void {
+fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
     var scratch: WriteScratch = .{};
     defer scratch.deinit(allocator);
-    try writeResponseToTransportScratch(
+    try writeRequestToTransportScratchMaybeBefore(
         allocator,
         transport,
         options,
@@ -8533,11 +8543,93 @@ fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTran
     );
 }
 
-fn writeResponseToTransportScratch(
+fn writeRequestToTransportScratchMaybeBefore(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    options: RequestOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+    scratch: *WriteScratch,
+) Error!void {
+    const parts = try runtime_write.prepareRequest(
+        allocator,
+        options,
+        scratch,
+    );
+    if (deadline) |absolute| {
+        var committed: usize = 0;
+        try transport.writeAllPartsWithDeadline(
+            parts.header,
+            parts.body,
+            &committed,
+            absolute,
+        );
+    } else {
+        try transport.writeAllParts(parts.header, parts.body);
+    }
+}
+
+pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
+    try writeResponseToTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, options);
+}
+
+/// Validate and write one complete response under the caller's absolute
+/// awake-clock deadline. The operation never renews the supplied budget.
+pub fn writeResponseToStreamWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: ResponseOptions,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    _ = try deadline_policy.usableAwake(io, deadline);
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    try writeResponseToTransportScratchMaybeBefore(
+        allocator,
+        .{ .tcp = .{ .io = io, .stream = stream } },
+        options,
+        null,
+        deadline,
+        &scratch,
+    );
+}
+
+pub fn writeResponseToStreamWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    options: ResponseOptions,
+    timeout: std.Io.Duration,
+) Error!void {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return writeResponseToStreamWithDeadline(
+        allocator,
+        io,
+        stream,
+        options,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
+fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: ResponseOptions) Error!void {
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    try writeResponseToTransportScratchMaybeBefore(
+        allocator,
+        transport,
+        options,
+        null,
+        null,
+        &scratch,
+    );
+}
+
+fn writeResponseToTransportScratchMaybeBefore(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     options: ResponseOptions,
     default_date: ?[]const u8,
+    deadline: ?std.Io.Clock.Timestamp,
     scratch: *WriteScratch,
 ) Error!void {
     const parts = try runtime_write.prepareServerResponse(
@@ -8546,7 +8638,17 @@ fn writeResponseToTransportScratch(
         default_date,
         scratch,
     );
-    try transport.writeAllParts(parts.header, parts.body);
+    if (deadline) |absolute| {
+        var committed: usize = 0;
+        try transport.writeAllPartsWithDeadline(
+            parts.header,
+            parts.body,
+            &committed,
+            absolute,
+        );
+    } else {
+        try transport.writeAllParts(parts.header, parts.body);
+    }
 }
 
 fn writeResponsesToTransportScratch(

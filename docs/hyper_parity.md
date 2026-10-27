@@ -3690,3 +3690,28 @@ abandonment, tunnel reset and abort follow the same finite default policy, and
 an explicit absolute abort deadline remains expired instead of being renewed.
 TCP regressions cover stalled cancellation, zero-output cleanup, exact local
 credit, partial refund/reset handling and both endpoint roles.
+
+## HTTP/2 bootstrap output deadlines
+
+HTTP/2 connection establishment now applies the same absolute handshake
+budget to output as to input. Cleartext and TLS clients write the connection
+preface, SETTINGS and initial connection WINDOW_UPDATE under that budget;
+servers write their initial SETTINGS, optional WINDOW_UPDATE and SETTINGS ACK
+under it as well. The final client SETTINGS ACK retains the original deadline
+instead of beginning another output interval. A peer that completes the read
+side of TLS or HTTP/2 setup and then stops reading therefore cannot strand
+`connect` or `accept` beyond the configured or caller-owned deadline.
+
+h2c Upgrade carries the same rule across both protocols. Its HTTP/1.1 request
+or 101 response uses one absolute HTTP/1 phase budget, then legacy calls begin
+a fresh configured budget for binary preface/SETTINGS exchange. Explicit
+deadline calls retain and cap the original timestamp across TCP acceptance,
+HTTP/1 input and output, and the complete HTTP/2 bootstrap without renewal.
+The low-level HTTP/1 stream helpers expose matching request/response
+`WithDeadline` and `WithTimeout` forms so adapters do not need an unbounded
+write between bounded reads.
+
+Real-socket regressions block exactly the first cleartext preface/SETTINGS,
+the h2c Upgrade request/101 response, and the first TLS application record for
+both TLS 1.2 and 1.3. Every path returns Timeout before a 500 ms rescue, proves
+the in-flight write was cancelled, and covers client and server ownership.

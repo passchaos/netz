@@ -87,7 +87,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
         .disabled => 0,
         .blocked => 1,
         .healthy, .partial, .close_blocked => 2,
-        .alert_blocked => unreachable,
+        .post_handshake_blocked => unreachable,
     }), writer.calls.load(.acquire));
     if (mode == .blocked or mode == .close_blocked) try std.testing.expect(writer.canceled.load(.acquire));
     if (mode == .healthy) {

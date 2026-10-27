@@ -1,4 +1,4 @@
-//! Per-socket netWrite interceptor for bounded TLS terminal-output tests.
+//! netWrite interceptor for bounded cleartext and TLS output tests.
 //! One interceptor is active per process; tests run sequentially.
 const std = @import("std");
 
@@ -13,10 +13,10 @@ pub const Mode = enum {
     partial,
     /// Let one write through, then block the next.
     close_blocked,
-    /// Block the armed TLS close_notify on any socket: plaintext 0x15 alerts
-    /// (TLS 1.2) block immediately, while in TLS 1.3 the first encrypted
-    /// 0x17 record (the Finished flight) passes and the next one blocks.
-    alert_blocked,
+    /// Block selected post-handshake TLS output on any socket. Plaintext 0x15
+    /// alerts block immediately; encrypted 0x17 records use the configurable
+    /// `post_hello_writes_to_pass` threshold below.
+    post_handshake_blocked,
 };
 
 pub const BlockedTlsWrite = struct {
@@ -24,12 +24,15 @@ pub const BlockedTlsWrite = struct {
 
     io: std.Io,
     mode: Mode,
-    socket: std.Io.net.Socket.Handle,
+    /// Null targets every socket used through the installed I/O vtable.
+    socket: ?std.Io.net.Socket.Handle,
     armed: std.atomic.Value(bool) = .init(false),
     calls: std.atomic.Value(usize) = .init(0),
     canceled: std.atomic.Value(bool) = .init(false),
-    // Counts encrypted (0x17) client writes so alert_blocked lets the
-    // post-ServerHello Finished flight pass before the TLS 1.3 close_notify.
+    /// Number of encrypted 0x17 records to pass before blocking. TLS 1.3 needs
+    /// one for its post-ServerHello Finished flight; TLS 1.2 application-output
+    /// tests use zero, while close_notify tests still match plaintext 0x15.
+    post_hello_writes_to_pass: usize = 1,
     post_hello_writes: std.atomic.Value(usize) = .init(0),
     wait: std.Io.Event = .unset,
 
@@ -57,15 +60,17 @@ pub const BlockedTlsWrite = struct {
         splat: usize,
     ) std.Io.net.Stream.Writer.Error!usize {
         const self = active.load(.acquire).?;
-        if (self.armed.load(.acquire) and self.mode == .alert_blocked and
-            header.len >= 1 and shouldBlockAlert(header[0], &self.post_hello_writes))
+        if (self.armed.load(.acquire) and self.mode == .post_handshake_blocked and
+            header.len >= 1 and self.shouldBlockPostHandshake(header[0]))
         {
             self.wait.wait(self.io) catch |err| {
                 self.canceled.store(true, .release);
                 return err;
             };
         }
-        if (socket != self.socket or !self.armed.load(.acquire)) {
+        if ((self.socket != null and socket != self.socket.?) or
+            !self.armed.load(.acquire))
+        {
             return self.io.vtable.netWrite(
                 self.io.userdata,
                 socket,
@@ -86,7 +91,7 @@ pub const BlockedTlsWrite = struct {
                     };
                 }
             },
-            .healthy, .alert_blocked => {},
+            .healthy, .post_handshake_blocked => {},
         }
         return self.io.vtable.netWrite(
             self.io.userdata,
@@ -102,18 +107,16 @@ pub const BlockedTlsWrite = struct {
         std.Io.sleep(self.io, .fromMilliseconds(500), .awake) catch {};
         self.wait.set(self.io);
     }
-};
 
-/// TLS 1.2 sends alerts as plaintext content type 0x15. In TLS 1.3 every
-/// post-ServerHello record uses 0x17, so let the single encrypted Finished
-/// flight through and treat the next 0x17 write as the close_notify.
-fn shouldBlockAlert(
-    content_type: u8,
-    post_hello_writes: *std.atomic.Value(usize),
-) bool {
-    return switch (content_type) {
-        0x15 => true,
-        0x17 => post_hello_writes.fetchAdd(1, .monotonic) != 0,
-        else => false,
-    };
-}
+    /// TLS 1.2 exposes alerts as content type 0x15 and application data as
+    /// 0x17. TLS 1.3 uses 0x17 for both its encrypted Finished flight and all
+    /// later output, so the per-fixture threshold selects the target record.
+    fn shouldBlockPostHandshake(self: *@This(), content_type: u8) bool {
+        return switch (content_type) {
+            0x15 => true,
+            0x17 => self.post_hello_writes.fetchAdd(1, .monotonic) >=
+                self.post_hello_writes_to_pass,
+            else => false,
+        };
+    }
+};

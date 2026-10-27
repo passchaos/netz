@@ -100,7 +100,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
         .disabled => 0,
         .partial => 2,
         .healthy, .blocked => 1,
-        .close_blocked, .alert_blocked => unreachable,
+        .close_blocked, .post_handshake_blocked => unreachable,
     }), writer.calls.load(.acquire));
     if (mode == .blocked) {
         try std.testing.expect(writer.canceled.load(.acquire));
@@ -123,7 +123,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
 
 test "HTTP/2 TLS connect without h2 ALPN bounds rejected close notify" {
     if (comptime builtin.os.tag != .linux) return;
-    const modes = [_]Mode{ .healthy, .alert_blocked, .disabled };
+    const modes = [_]Mode{ .healthy, .post_handshake_blocked, .disabled };
     for ([_]bool{ false, true }) |tls12| {
         for (modes) |mode| try exerciseAlpnRejection(tls12, mode);
     }
@@ -223,7 +223,7 @@ fn exerciseAlpnRejection(tls12: bool, mode: Mode) !void {
     );
     try std.testing.expectError(error.InvalidAlpn, result);
     try std.testing.expect(started.untilNow(io, .awake).nanoseconds < 400 * std.time.ns_per_ms);
-    if (mode == .alert_blocked) {
+    if (mode == .post_handshake_blocked) {
         try std.testing.expect(writer.canceled.load(.acquire));
     }
     try peer.done.wait(io);

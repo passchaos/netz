@@ -18,6 +18,7 @@ test {
     _ = @import("runtime/headers/authority_reuse_tests.zig");
     _ = client_authority;
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/connect/output_deadline_tests.zig");
     _ = @import("runtime/connect/protocol_error_tests.zig");
     _ = @import("runtime/connect/tls_protocol_error_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");
@@ -83,6 +84,7 @@ const stream_termination = @import("runtime/stream/termination.zig");
 const protocol_error_output = @import("runtime/control/protocol_error.zig");
 const handshake_protocol_error = @import("runtime/connect/protocol_error.zig");
 const terminal_tls_output = @import("runtime/control/tls_close.zig");
+const bootstrap_output = @import("runtime/connect/bootstrap_output.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
@@ -840,7 +842,20 @@ pub const Server = struct {
             try socket_options.setTcpNoDelay(stream);
         }
 
-        var request = if (deadline) |absolute|
+        const transport = tcpTransport(self.io, stream);
+        const http1_deadline = if (deadline) |absolute|
+            try connectionHandshakeDeadlineBefore(
+                transport,
+                absolute,
+                self.limits.handshake_timeout,
+            )
+        else
+            try connectionHandshakeDeadline(
+                transport,
+                self.limits.handshake_timeout,
+            );
+
+        var request = if (http1_deadline) |absolute|
             try http1_runtime.readRequestFromStreamWithDeadline(
                 self.allocator,
                 self.io,
@@ -864,7 +879,7 @@ pub const Server = struct {
         const advertised_settings = try decodeHttp2SettingsHeader(self.allocator, settings_header);
         defer self.allocator.free(advertised_settings);
 
-        try http1_runtime.writeResponseToStream(self.allocator, self.io, stream, .{
+        const switching_response: http1_runtime.ResponseOptions = .{
             .status = 101,
             .reason = "Switching Protocols",
             .headers = &.{
@@ -872,9 +887,24 @@ pub const Server = struct {
                 .{ .name = "Upgrade", .value = "h2c" },
             },
             .request_method = request.request.method,
-        });
+        };
+        if (http1_deadline) |absolute| {
+            try http1_runtime.writeResponseToStreamWithDeadline(
+                self.allocator,
+                self.io,
+                stream,
+                switching_response,
+                absolute,
+            );
+        } else {
+            try http1_runtime.writeResponseToStream(
+                self.allocator,
+                self.io,
+                stream,
+                switching_response,
+            );
+        }
 
-        const transport = tcpTransport(self.io, stream);
         // Parsing the HTTP/1 request has its own bounded head phase. Once the
         // protocol switch is committed, one new deadline spans every byte of
         // the client preface, its repeated SETTINGS, and its server-SETTINGS
@@ -921,24 +951,27 @@ pub const Server = struct {
         );
         defer self.allocator.free(peer_settings);
 
-        try writeInitialSettingsTransport(
+        try writeInitialSettingsTransportMaybeBefore(
             self.allocator,
             transport,
             self.limits,
             .server,
+            handshake_deadline,
         );
-        try writeInitialConnectionWindowTransport(
+        try writeInitialConnectionWindowTransportMaybeBefore(
             self.allocator,
             transport,
             self.limits,
+            handshake_deadline,
         );
-        try writeFrameTransport(
+        try bootstrap_output.writeFrame(
             self.allocator,
             transport,
             .settings,
             flag_ack,
             0,
             &.{},
+            handshake_deadline,
         );
 
         // The HTTP/1 Upgrade request already occupies stream 1, so the next
@@ -1272,15 +1305,16 @@ fn acceptConnectionTransportMaybeBefore(
     );
     defer allocator.free(peer_settings);
 
-    try writeInitialSettingsTransport(allocator, transport, limits, .server);
-    try writeInitialConnectionWindowTransport(allocator, transport, limits);
-    try writeFrameTransport(
+    try writeInitialSettingsTransportMaybeBefore(allocator, transport, limits, .server, deadline);
+    try writeInitialConnectionWindowTransportMaybeBefore(allocator, transport, limits, deadline);
+    try bootstrap_output.writeFrame(
         allocator,
         transport,
         .settings,
         flag_ack,
         0,
         &.{},
+        deadline,
     );
 
     var connection = Connection{
@@ -2823,6 +2857,19 @@ pub const Client = struct {
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
         connection.applyLocalLimits();
 
+        const transport = connection.transportForIo();
+        const http1_deadline = if (deadline) |absolute|
+            try connectionHandshakeDeadlineBefore(
+                transport,
+                absolute,
+                limits.handshake_timeout,
+            )
+        else
+            try connectionHandshakeDeadline(
+                transport,
+                limits.handshake_timeout,
+            );
+
         const h2c_settings = try settingsForLimits(limits, .client);
         var settings_payload_buf: [max_settings_payload_len]u8 = undefined;
         const settings_payload = try encodeSettingsPayloadInto(
@@ -2884,14 +2931,30 @@ pub const Client = struct {
         // any entity body and trailers, to half-closed stream 1. CONNECT is not
         // an Upgrade-capable HTTP/1.1 request and retains its tunnel API.
         if (method == .CONNECT) return error.InvalidHeader;
-        try http1_runtime.writeRequestToStream(allocator, io, stream, .{
+        const upgrade_request: http1_runtime.RequestOptions = .{
             .method = method,
             .target = request_options.path,
             .headers = headers.items,
             .body = request_options.body,
             .trailers = trailers.items,
-        });
-        var upgrade = if (deadline) |absolute|
+        };
+        if (http1_deadline) |absolute| {
+            try http1_runtime.writeRequestToStreamWithDeadline(
+                allocator,
+                io,
+                stream,
+                upgrade_request,
+                absolute,
+            );
+        } else {
+            try http1_runtime.writeRequestToStream(
+                allocator,
+                io,
+                stream,
+                upgrade_request,
+            );
+        }
+        var upgrade = if (http1_deadline) |absolute|
             try http1_runtime.readResponseFromStreamForRequestWithDeadline(
                 allocator,
                 io,
@@ -2924,7 +2987,6 @@ pub const Client = struct {
             return error.InvalidResponse;
         }
 
-        const transport = connection.transportForIo();
         // Legacy calls deliberately start their SETTINGS phase budget after
         // validating 101. Deadline calls instead retain the original timestamp
         // and cap it with the possibly stricter phase limit.
@@ -2939,17 +3001,18 @@ pub const Client = struct {
                 transport,
                 limits.handshake_timeout,
             );
-        try transport.writeAll(http2.connection_preface);
-        try writeFrameTransport(
+        try bootstrap_output.writeClientPreface(transport, handshake_deadline);
+        try bootstrap_output.writeFrame(
             allocator,
             transport,
             .settings,
             0,
             0,
             settings_payload,
+            handshake_deadline,
         );
         try finishClientSettingsHandshake(&connection, handshake_deadline);
-        try writeInitialConnectionWindowTransport(allocator, transport, limits);
+        try writeInitialConnectionWindowTransportMaybeBefore(allocator, transport, limits, handshake_deadline);
         return .{ .connection = connection, .upgrade_response = upgrade };
     }
 
@@ -3098,9 +3161,9 @@ pub const Client = struct {
                 transport,
                 limits.handshake_timeout,
             );
-        try transport.writeAll(http2.connection_preface);
-        try writeInitialSettingsTransport(allocator, transport, limits, .client);
-        try writeInitialConnectionWindowTransport(allocator, transport, limits);
+        try bootstrap_output.writeClientPreface(transport, deadline);
+        try writeInitialSettingsTransportMaybeBefore(allocator, transport, limits, .client, deadline);
+        try writeInitialConnectionWindowTransportMaybeBefore(allocator, transport, limits, deadline);
 
         var connection = Connection{
             .io = io,
@@ -3149,13 +3212,14 @@ pub const Client = struct {
                     frame.frame.payload,
                     deadline,
                 );
-                try writeFrameTransport(
+                try bootstrap_output.writeFrame(
                     connection.allocator,
                     connection.transportForIo(),
                     .settings,
                     flag_ack,
                     0,
                     &.{},
+                    deadline,
                 );
             }
         }
@@ -22238,57 +22302,45 @@ fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
 }
 
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
-    return writeInitialSettingsTransport(
+    return writeInitialSettingsTransportMaybeBefore(
         allocator,
         tcpTransport(io, stream),
         limits,
         role,
+        null,
     );
 }
 
-fn writeInitialSettingsTransport(
+fn writeInitialSettingsTransportMaybeBefore(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     limits: Limits,
     role: Role,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
     const settings = try settingsForLimits(limits, role);
     var payload_buf: [max_settings_payload_len]u8 = undefined;
     const payload = try encodeSettingsPayloadInto(&payload_buf, settings.buf[0..settings.count]);
-    try writeFrameTransport(allocator, transport, .settings, 0, 0, payload);
-}
-
-fn writeInitialConnectionWindow(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
-    limits: Limits,
-) Error!void {
-    return writeInitialConnectionWindowTransport(
+    try bootstrap_output.writeSettings(
         allocator,
-        tcpTransport(io, stream),
-        limits,
+        transport,
+        payload,
+        deadline,
     );
 }
 
-fn writeInitialConnectionWindowTransport(
+fn writeInitialConnectionWindowTransportMaybeBefore(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
 ) Error!void {
-    if (limits.initial_connection_window_size == default_flow_window) return;
-    const increment: u31 = @intCast(
-        limits.initial_connection_window_size - default_flow_window,
-    );
-    var payload: [4]u8 = undefined;
-    std.mem.writeInt(u32, &payload, increment, .big);
-    try writeFrameTransport(
+    try bootstrap_output.writeConnectionWindow(
         allocator,
         transport,
-        .window_update,
-        0,
-        0,
-        &payload,
+        limits.initial_connection_window_size,
+        default_flow_window,
+        deadline,
     );
 }
 

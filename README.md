@@ -491,6 +491,12 @@ Current protocol coverage includes:
   pending, so neither GOAWAY nor alert output can outlive connection
   cleanup; queued request overflow shares this budget across resets
   and GOAWAY,
+  one absolute `handshake_timeout` or caller deadline also bounds every
+  outbound bootstrap byte: cleartext/TLS client preface, both endpoints'
+  initial SETTINGS/WINDOW_UPDATE/ACK frames, and h2c's HTTP/1.1 Upgrade
+  request and 101 response; the legacy h2c path uses one budget for the
+  HTTP/1.1 phase and a fresh phase budget after switching protocols, while
+  explicit deadlines are never renewed,
   exact dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
   peer table-size update emission plus h2/hyper-style non-indexing for volatile or oversized fields and automatic
   never-index encoding for sensitive fields, fixed-control-frame and preallocated control-frame write fast paths, PING with opaque ACK matching plus explicit absolute-deadline round trips whose budget covers probe/ACK writes as well as reads, and a reusable single-reader inactivity-aware keep-alive driver with active/idle policy, monotonic probe payloads, connection-control processing and a configurable bounded FIFO preserving interleaved application frames, GOAWAY/WINDOW_UPDATE connection
