@@ -3,7 +3,17 @@ const std = @import("std");
 const grpc = @import("../mod.zig");
 const http2 = @import("../../http2/mod.zig");
 
-pub const Step = enum { refused, canceled, head_refused, interim_refused, unavailable, ok, silent };
+pub const Step = enum {
+    refused,
+    canceled,
+    head_refused,
+    interim_refused,
+    unavailable,
+    pushback_stop,
+    pushback_delay,
+    ok,
+    silent,
+};
 pub const Peer = struct {
     server: *http2.runtime.Server,
     steps: []const Step,
@@ -62,6 +72,18 @@ pub const Peer = struct {
                     try connection.sendResetStream(request.stream_id, .refused_stream);
                 },
                 .unavailable => try grpc.writeUnaryResponse(&connection, allocator, request.stream_id, .{ .status = .unavailable, .retry_pushback_ms = 0, .trailers_only = true }),
+                .pushback_stop => try writeDuplicatePushback(
+                    &connection,
+                    request.stream_id,
+                    "0",
+                    "-1",
+                ),
+                .pushback_delay => try writeDuplicatePushback(
+                    &connection,
+                    request.stream_id,
+                    "-1",
+                    "0",
+                ),
                 .ok => try grpc.writeUnaryResponse(&connection, allocator, request.stream_id, .{ .message = "reply" }),
                 .silent => {
                     var reset = try connection.readResetStreamWithTimeout(.fromSeconds(2));
@@ -73,3 +95,17 @@ pub const Peer = struct {
         }
     }
 };
+
+fn writeDuplicatePushback(
+    connection: *http2.runtime.Connection,
+    stream_id: u31,
+    first: []const u8,
+    second: []const u8,
+) !void {
+    try connection.writeResponse(stream_id, .{ .headers = &.{
+        .{ .name = "content-type", .value = "application/grpc+proto" },
+        .{ .name = "grpc-status", .value = "14" },
+        .{ .name = "grpc-retry-pushback-ms", .value = first },
+        .{ .name = "grpc-retry-pushback-ms", .value = second },
+    } });
+}

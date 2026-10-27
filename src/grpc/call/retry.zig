@@ -81,13 +81,49 @@ fn retryableStatus(response: UnaryResponse, policy: RetryPolicy) bool {
 
 fn retryPushback(response: UnaryResponse) RetryPushback {
     const transport = response.transport orelse return .absent;
-    const raw = call.headerValue(
-        transport.headers,
-        "grpc-retry-pushback-ms",
-    ) orelse return .absent;
-    const milliseconds = std.fmt.parseInt(i64, raw, 10) catch return .stop;
+    return retryPushbackFields(transport.headers);
+}
+
+/// gRPC Core models pushback as known, non-repeatable metadata. Its metadata
+/// map applies fields in wire order, so the last value replaces any earlier
+/// value. Match that behavior instead of letting an intermediary-prepended
+/// value override the server's terminal retry decision.
+fn retryPushbackFields(
+    headers: []const http2.Hpack.HeaderField,
+) RetryPushback {
+    var raw: ?[]const u8 = null;
+    for (headers) |field| {
+        if (std.mem.eql(u8, field.name, "grpc-retry-pushback-ms")) {
+            raw = field.value;
+        }
+    }
+    const value = raw orelse return .absent;
+    const milliseconds = std.fmt.parseInt(i64, value, 10) catch return .stop;
     if (milliseconds < 0) return .stop;
     return .{ .delay = .fromMilliseconds(milliseconds) };
+}
+
+test "gRPC retry pushback uses the final non-repeatable metadata value" {
+    const stop = retryPushbackFields(&.{
+        .{ .name = "grpc-retry-pushback-ms", .value = "0" },
+        .{ .name = "grpc-retry-pushback-ms", .value = "-1" },
+    });
+    try std.testing.expect(stop == .stop);
+
+    const delay = retryPushbackFields(&.{
+        .{ .name = "grpc-retry-pushback-ms", .value = "-1" },
+        .{ .name = "grpc-retry-pushback-ms", .value = "7" },
+    });
+    try std.testing.expectEqual(
+        @as(i96, 7 * std.time.ns_per_ms),
+        delay.delay.nanoseconds,
+    );
+
+    try std.testing.expect(retryPushbackFields(&.{.{
+        .name = "grpc-retry-pushback-ms",
+        .value = "invalid",
+    }}) == .stop);
+    try std.testing.expect(retryPushbackFields(&.{}) == .absent);
 }
 
 fn cappedBackoff(

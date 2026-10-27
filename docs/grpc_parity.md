@@ -90,8 +90,12 @@ existing HTTP/2 runtime:
   configured retryable status codes, exponential jittered
   backoff, server `grpc-retry-pushback-ms`, and standard
   `grpc-previous-rpc-attempts` metadata. Retries occur only for trailers-only
-  responses or typed pre-response resets before the call is committed; one absolute `std.Io` awake-clock
-  deadline bounds every attempt and backoff while each retry advertises the
+  responses or typed pre-response resets before the call is committed. Pushback
+  follows gRPC Core's known non-repeatable metadata behavior: the final wire
+  value wins, and a malformed or negative final value disables retry instead
+  of allowing an earlier intermediary-prepended delay to override it. One
+  absolute `std.Io` awake-clock deadline bounds every attempt and backoff while
+  each retry advertises the
   remaining `grpc-timeout`. An optional thread-safe channel/service throttler
   applies gRPC's milli-token algorithm, debiting configured retryable failures
   before eligibility and replenishing successful RPCs without exceeding its

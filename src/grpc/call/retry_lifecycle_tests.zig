@@ -92,3 +92,18 @@ test "gRPC retry lifecycle uses explicit policy for uncommitted CANCEL" {
 test "gRPC retry lifecycle keeps one deadline across transparent refusal" {
     try exercise(.{ .steps = &.{ .refused, .silent }, .previous = &.{ "-", "-" }, .deadline = true });
 }
+
+test "gRPC retry lifecycle honors the final server pushback value" {
+    try exercise(.{
+        .steps = &.{ .pushback_stop, .ok },
+        .previous = &.{ "-", "-" },
+        .expected = .unavailable,
+        .configured = true,
+        .healthy = true,
+    });
+    try exercise(.{
+        .steps = &.{ .pushback_delay, .ok },
+        .previous = &.{ "-", "1" },
+        .configured = true,
+    });
+}
