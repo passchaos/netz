@@ -76,7 +76,6 @@ pub fn Owner(comptime State: type) type {
                 const canceled = state.closed or call.cancel_requested;
                 const write = call.write;
                 const credit = call.credit;
-                call.credit = 0;
                 state.unlock();
                 const expired = if (call.deadline) |until| until.durationFromNow(state.io).raw.nanoseconds <= 0 else false;
                 const write_expired = if (write) |value| if (value.deadline) |until| until.durationFromNow(state.io).raw.nanoseconds <= 0 else false else false;
@@ -87,14 +86,17 @@ pub fn Owner(comptime State: type) type {
                 }
                 const deadline = earlier(call.deadline, output);
                 if (credit != 0) {
-                    active.stream.transport.releaseResponseStreamCreditWithDeadline(credit, deadline) catch |err| {
+                    const granted = active.stream.transport.releaseResponseStreamCreditBatchedWithDeadline(credit, deadline) catch |err| {
                         fail(worker, index, err);
                         progress = true;
                         continue;
                     };
-                    progress = true;
+                    state.lock();
+                    call.credit -= granted;
+                    state.unlock();
+                    progress = granted != 0 or progress;
                 }
-                const ready = active.stream.pollRawResponseEventWithDeadline(deadline) catch |err| {
+                const ready = active.stream.pollRawResponseEventBatchedWithDeadline(deadline) catch |err| {
                     fail(worker, index, err);
                     progress = true;
                     continue;

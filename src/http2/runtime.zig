@@ -45,6 +45,7 @@ test {
     _ = @import("runtime/duplex/client_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
     _ = @import("runtime/duplex/response_capacity_tests.zig");
+    _ = @import("runtime/duplex/batched_credit_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -20163,11 +20164,14 @@ pub const DuplexResponseEvent = union(enum) {
 /// One client-owned HTTP/2 stream whose request and response halves progress
 /// independently while one connection owner alternates its client handles.
 pub const ClientDuplexStream = struct {
+    pub const ConnectionCreditPolicy = @import("runtime/duplex/response_capacity.zig").ConnectionCreditPolicy;
     const response_capacity = @import("runtime/duplex/response_capacity.zig").Capacity(.{
         .Error = Error,
         .automatic = Connection.releaseReceivedDataCapacityUntil,
         .update = Connection.sendWindowUpdatesUntil,
         .window = Connection.recvStreamWindow,
+        .connectionTarget = Connection.receiveConnectionWindowTarget,
+        .streamTarget = Connection.receiveStreamWindowTarget,
     });
     connection: *Connection,
     stream_id: u31,
@@ -20220,6 +20224,13 @@ pub const ClientDuplexStream = struct {
     pub fn releaseResponseStreamCreditWithDeadline(self: *ClientDuplexStream, amount: usize, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return response_capacity.release(self, amount, deadline);
+    }
+
+    /// Return the amount granted, or zero when the caller should retain its
+    /// consumed-byte acknowledgement until half a window accumulates.
+    pub fn releaseResponseStreamCreditBatchedWithDeadline(self: *ClientDuplexStream, amount: usize, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!usize {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return response_capacity.releaseBatched(self, amount, deadline);
     }
 
     pub fn write(
@@ -20596,6 +20607,15 @@ pub const ClientDuplexStream = struct {
         return self.readResponseEventUntil(deadline, true);
     }
 
+    pub fn pollResponseEventWithCreditPolicy(self: *ClientDuplexStream, policy: ConnectionCreditPolicy) Error!?DuplexResponseEvent {
+        return self.readResponseEventWithCreditUntil(null, true, policy);
+    }
+
+    pub fn pollResponseEventWithCreditPolicyAndDeadline(self: *ClientDuplexStream, policy: ConnectionCreditPolicy, deadline: std.Io.Clock.Timestamp) Error!?DuplexResponseEvent {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.readResponseEventWithCreditUntil(deadline, true, policy);
+    }
+
     fn nextResponseFrame(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp, buffered: bool) Error!?OwnedFrame {
         if (buffered) return self.connection.pollOwnedClientDuplexFrame(self.stream_id, deadline);
         return try self.connection.readOwnedClientDuplexFrameWithDeadline(self.stream_id, deadline);
@@ -20605,6 +20625,15 @@ pub const ClientDuplexStream = struct {
         self: *ClientDuplexStream,
         deadline: ?std.Io.Clock.Timestamp,
         buffered: bool,
+    ) Error!?DuplexResponseEvent {
+        return self.readResponseEventWithCreditUntil(deadline, buffered, .immediate);
+    }
+
+    fn readResponseEventWithCreditUntil(
+        self: *ClientDuplexStream,
+        deadline: ?std.Io.Clock.Timestamp,
+        buffered: bool,
+        policy: ConnectionCreditPolicy,
     ) Error!?DuplexResponseEvent {
         if (self.response_finished_reported) {
             return error.ConnectionClosed;
@@ -20725,11 +20754,12 @@ pub const ClientDuplexStream = struct {
                         self.maybeRelease();
                     }
                     if (payload.data.len == 0) {
-                        try response_capacity.receive(
+                        try response_capacity.receiveWithPolicy(
                             self,
                             payload,
                             end_stream,
                             deadline,
+                            policy,
                         );
                         if (end_stream) {
                             self.response_finished_reported = true;
@@ -20738,11 +20768,12 @@ pub const ClientDuplexStream = struct {
                         }
                         continue;
                     }
-                    try response_capacity.receive(
+                    try response_capacity.receiveWithPolicy(
                         self,
                         payload,
                         end_stream,
                         deadline,
+                        policy,
                     );
                     const data = payload.data;
                     frame_owned = false;

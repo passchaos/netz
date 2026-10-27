@@ -531,11 +531,21 @@ pub const ClientDuplex = struct {
     /// Route encoded DATA to a consumer-owned decoder. Use one receive mode
     /// for the entire RPC; raw and decoded event reads cannot be mixed.
     pub fn pollRawResponseEventWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
+        return self.pollRawResponseEventWithCredit(deadline, .immediate);
+    }
+
+    /// Keep connection credit available with low-watermark refills while the
+    /// application owns stream-credit acknowledgements.
+    pub fn pollRawResponseEventBatchedWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
+        return self.pollRawResponseEventWithCredit(deadline, .low_watermark);
+    }
+
+    fn pollRawResponseEventWithCredit(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy) Error!?RawClientEvent {
         try self.selectReceiveMode(.raw);
         if (deadline.clock != .awake) return error.Timeout;
         const effective = earlierDeadline(self.deadline, deadline);
         const rpc_limited = if (self.deadline) |rpc| !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc) else false;
-        return client_receive.poll(self, effective, rpc_limited, 1, {}, unusedMessage, raw_receive_hooks);
+        return client_receive.pollWithConnectionCredit(self, effective, rpc_limited, 1, {}, unusedMessage, raw_receive_hooks, policy);
     }
 
     fn unusedMessage(_: void, _: codec.DecodedMessage) Error!void {

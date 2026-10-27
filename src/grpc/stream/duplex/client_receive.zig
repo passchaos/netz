@@ -29,11 +29,15 @@ fn pending(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: 
 }
 
 pub fn poll(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype) !?Hooks.Event {
+    return pollWithConnectionCredit(self, deadline, cancel_on_timeout, max_messages, context, consume, Hooks, .immediate);
+}
+
+pub fn pollWithConnectionCredit(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy) !?Hooks.Event {
     if (try pending(self, deadline, cancel_on_timeout, max_messages, context, consume, Hooks)) |event| return event;
     const event = (if (deadline) |absolute|
-        self.transport.pollResponseEventWithDeadline(absolute)
+        self.transport.pollResponseEventWithCreditPolicyAndDeadline(policy, absolute)
     else
-        self.transport.pollResponseEvent()) catch |err| {
+        self.transport.pollResponseEventWithCreditPolicy(policy)) catch |err| {
         if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
         return err;
     };

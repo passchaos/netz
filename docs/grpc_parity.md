@@ -1322,9 +1322,11 @@ The endpoint copies encoded response DATA into a bounded per-RPC ring. Its
 capacity is the transport's maximum receive stream window (including configured
 adaptive growth), limited by SharedChannelOptions.max_buffered_stream_bytes
 (default 16 MiB). A receive window above this ceiling fails stream admission
-with InvalidSharedOptions. Connection WINDOW_UPDATE is returned as DATA is
-accepted, while stream credit is withheld until the reader dequeues encoded
-bytes. Padding credit returns immediately. This keeps a paused reader from
+with InvalidSharedOptions. Accepted DATA returns connection credit through
+low-watermark refills when at most half the connection window remains. The
+reader acknowledges encoded bytes as it dequeues them; the endpoint batches
+stream grants until half a window is acknowledged or the receive window is
+exhausted. Padding credit returns immediately. This keeps a paused reader from
 exhausting connection credit needed by siblings. A reader retains at most one
 dequeued chunk plus its bounded message decoder, so a message larger than the
 stream window can still complete without buffering an unbounded message list.
@@ -1348,6 +1350,14 @@ shared transport primitive. Health admission and DNS candidate selection apply
 before opening. A retired endpoint rejects later calls and drains its existing
 shared streams before transport teardown, under their original deadlines.
 Channel destruction joins all active shared streams before returning.
+
+The HTTP/2 duplex primitive also exposes pollResponseEventWithCreditPolicy and
+its AndDeadline form to select immediate or low-watermark connection credit.
+releaseResponseStreamCreditBatchedWithDeadline returns the acknowledged amount
+or zero when the caller must retain its consumed-byte acknowledgement. The
+existing immediate receive/release entry points preserve their wire behavior.
+ClientDuplex.pollRawResponseEventBatchedWithDeadline applies the same policy to
+encoded gRPC DATA without mixing raw and decoded receive modes.
 
     var rpc = try sender.startDuplex(.{
         .path = "/demo.Echo/Bidi", .wait_for_ready = true,
