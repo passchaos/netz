@@ -2127,6 +2127,12 @@ taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
 zig build bench-http1-hyper -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
+# Shared gRPC persistent ping-pong or per-roundtrip RPC creation on one channel.
+taskset -c 0 zig build bench-grpc-shared -Doptimize=ReleaseFast -- \
+  --mode=persistent --payload=4096 --warmup=100 --iterations=2000
+# Requires the pinned official grpc-cpp TCP benchmark binary; see
+# docs/grpc_shared_performance.md for its build and comparison boundaries.
+zig build bench-grpc-cpp -Doptimize=ReleaseFast -- --cpu=0 --samples=5
 # Isolate SharedSender queue/pool/observer overhead on one h2c connection.
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
   --scenario=http2_shared_consecutive_x1_empty
@@ -2343,6 +2349,10 @@ through `std.Io.async`. Historical Threaded measurements remain labeled as
 such in the benchmark baseline.
 The built-in HTTP/2 h2c, flow-control, and HPACK benchmarks follow the same
 model; h2c and flow-control schedule their local server with `std.Io.async`.
+The shared gRPC TCP benchmark uses the same backend and validates both endpoint
+message counts, complete payloads and terminal statuses. Persistent-stream and
+RPC-creation measurements, allocation telemetry and official grpc-cpp workload
+comparisons are described in `docs/grpc_shared_performance.md`.
 The built-in WebSocket frame and H1/H2/H3 echo benchmarks also use zio-provided
 `std.Io`; echo servers and concurrent H1 clients are scheduled with
 `std.Io.async`/`std.Io.Group`, and result records identify both endpoints as

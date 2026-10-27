@@ -1293,6 +1293,9 @@ grpc-cpp forward gate passed h2c and certificate-verified TLS.
 
 ## Shared streaming capabilities and bounded receive credit
 
+The reproducible shared TCP performance workloads and their official grpc-cpp
+comparison boundaries are documented in [grpc_shared_performance.md](grpc_shared_performance.md).
+
 SharedChannelSender.startDuplex accepts StreamingRequestOptions and returns an
 owning SharedClientDuplex. Its writer() and reader() methods create retained
 SharedStreamWriter and SharedStreamReader capabilities. A read may run

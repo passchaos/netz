@@ -1177,6 +1177,12 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/http2_cancel_benchmark_check_test.py",
     });
+    const grpc_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/grpc_benchmark_check_test.py",
+    });
+    const grpc_benchmark_checker_step = b.step("test-grpc-benchmark-checker", "Verify shared gRPC benchmark completion and timing records");
+    grpc_benchmark_checker_step.dependOn(&grpc_benchmark_checker_tests.step);
     const http1_hyper_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http1_hyper_benchmark_check_test.py",
@@ -1329,6 +1335,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_mostly_idle_benchmark_checker_tests.step);
     test_step.dependOn(&http2_cancel_benchmark_checker_tests.step);
+    test_step.dependOn(&grpc_benchmark_checker_tests.step);
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_config_tests.step);
@@ -3206,6 +3213,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/2 h2c persistent request/response round trips",
         },
         .{
+            .exe_name = "netz-bench-grpc-shared",
+            .path = "examples/bench_grpc_shared.zig",
+            .run_step = "bench-grpc-shared",
+            .description = "Benchmark shared gRPC persistent ping-pong and RPC creation",
+        },
+        .{
             .exe_name = "netz-bench-http2-flow",
             .path = "examples/bench_http2_flow.zig",
             .run_step = "bench-http2-flow",
@@ -3402,6 +3415,7 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run all native protocol benchmarks");
     var http1_pipeline_bench_exe: ?*std.Build.Step.Compile = null;
     var http1_body_bench_exe: ?*std.Build.Step.Compile = null;
+    var grpc_shared_bench_exe: ?*std.Build.Step.Compile = null;
     for (example_specs) |spec| {
         const exe = b.addExecutable(.{
             .name = spec.exe_name,
@@ -3416,6 +3430,8 @@ pub fn build(b: *std.Build) void {
             http1_pipeline_bench_exe = exe;
         } else if (std.mem.eql(u8, spec.run_step, "bench-http1-body")) {
             http1_body_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-grpc-shared")) {
+            grpc_shared_bench_exe = exe;
         }
         examples_step.dependOn(&exe.step);
 
@@ -3433,6 +3449,13 @@ pub fn build(b: *std.Build) void {
             bench_step.dependOn(&run.step);
         }
     }
+
+    const grpc_cpp_bench = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_benchmark.py" });
+    grpc_cpp_bench.addArtifactArg(grpc_shared_bench_exe.?);
+    grpc_cpp_bench.addArgs(&.{ "--netz-build-mode", @tagName(optimize) });
+    if (b.args) |args| grpc_cpp_bench.addArgs(args);
+    const grpc_cpp_bench_step = b.step("bench-grpc-cpp", "Compare shared gRPC with official grpc-cpp TCP ping-pong workloads");
+    grpc_cpp_bench_step.dependOn(&grpc_cpp_bench.step);
 
     const http1_hyper_bench = b.addSystemCommand(&.{
         "tools/interop/http1_hyper_benchmark.sh",
