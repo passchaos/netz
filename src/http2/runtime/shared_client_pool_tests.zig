@@ -918,7 +918,7 @@ test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var connection = try self.server.accept();
+            var connection = try self.server.acceptWithTimeout(.fromSeconds(8));
             defer connection.close();
             var requests: [4]runtime.StreamingRequest = undefined;
             const BodyContext = struct {
@@ -937,8 +937,9 @@ test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
                 }
             };
             var body_context: BodyContext = .{};
-            try connection.readRequestBatchStreamingInto(
+            try connection.readRequestBatchStreamingIntoWithTimeout(
                 &requests,
+                .fromSeconds(8),
                 &body_context,
                 BodyContext.consume,
             );
@@ -1194,8 +1195,17 @@ test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
         };
     }
     var producer_threads: [producers.len]std.Thread = undefined;
+    var started_producers: usize = 0;
+    defer {
+        dispatcher.close();
+        for (producer_threads[0..started_producers]) |thread| thread.join();
+        for (&producers) |*producer| {
+            if (producer.response) |*response| response.deinit(allocator);
+        }
+    }
     for (&producer_threads, &producers) |*thread, *producer| {
         thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        started_producers += 1;
     }
     try waitQueued(io, &dispatcher, producers.len);
     var driver = try std.Io.concurrent(
@@ -1203,7 +1213,12 @@ test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
         pool_mod.SharedDispatcher.run,
         .{&dispatcher},
     );
+    defer {
+        dispatcher.close();
+        driver.cancel(io) catch {};
+    }
     for (&producer_threads) |*thread| thread.join();
+    started_producers = 0;
 
     for (&producers, paths, 0..) |*producer, path, index| {
         if (index == 1) {
@@ -1230,8 +1245,7 @@ test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
             continue;
         }
         if (producer.err) |err| return err;
-        var response = producer.response.?;
-        defer response.deinit(allocator);
+        const response = producer.response.?;
         try std.testing.expectEqual(@as(u16, 200), response.status);
         try std.testing.expectEqual(response_bytes, response.body_bytes);
         try std.testing.expectEqual(response_bytes, producer.context.body_bytes);

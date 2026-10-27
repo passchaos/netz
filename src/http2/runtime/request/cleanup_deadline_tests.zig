@@ -141,11 +141,13 @@ test "HTTP/2 request cleanup budget never renews an expired or disabled deadline
 
 test "HTTP/2 request callback cleanup stops resets after a partial refund" {
     if (comptime builtin.os.tag != .linux) return;
+    const Failure = enum { network, expired };
     const Reject = struct {
         var active: ?*@This() = null;
         connection: *runtime.Connection,
         io: std.Io,
         vtable: std.Io.VTable,
+        failure: Failure,
         calls: std.atomic.Value(usize) = .init(0),
         first_type: u8 = 0,
 
@@ -155,6 +157,14 @@ test "HTTP/2 request callback cleanup stops resets after a partial refund" {
         }
         fn batch(self: *@This(), _: u31, bytes: []const u8) !void {
             return self.consume(bytes);
+        }
+        fn now(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            const self = active.?;
+            const current = self.io.vtable.now(self.io.userdata, clock);
+            if (clock == .awake and self.failure == .expired and self.calls.load(.acquire) != 0) {
+                return current.addDuration(.fromSeconds(2));
+            }
+            return current;
         }
         fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, bytes: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
             const self = active.?;
@@ -166,30 +176,37 @@ test "HTTP/2 request callback cleanup stops resets after a partial refund" {
         }
     };
     inline for (.{ false, true }) |batch| {
-        var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-        defer threaded.deinit();
-        const io = threaded.io();
-        var fixture = try BlockedOutput.init(io, .server);
-        defer fixture.deinit();
-        const connection = &fixture.connection;
-        try headers(connection, 1);
-        if (batch) try headers(connection, 3);
-        try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0, 1, "abc");
-        var reject: Reject = .{ .connection = connection, .io = io, .vtable = io.vtable.* };
-        reject.vtable.netWrite = Reject.write;
-        Reject.active = &reject;
-        defer Reject.active = null;
-        defer connection.io = io;
-        if (batch) {
-            var requests: [2]runtime.StreamingRequest = undefined;
-            try std.testing.expectError(error.ApplicationRejected, connection.readRequestBatchStreamingInto(&requests, &reject, Reject.batch));
-        } else {
-            try std.testing.expectError(error.ApplicationRejected, connection.readRequestStreaming(&reject, Reject.consume));
+        for (std.enums.values(Failure)) |failure| {
+            var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+            defer threaded.deinit();
+            const io = threaded.io();
+            var fixture = try BlockedOutput.init(io, .server);
+            defer fixture.deinit();
+            const connection = &fixture.connection;
+            // The injected network error must win over task scheduling latency.
+            // The expired case advances only this connection's clock after the
+            // committed prefix, proving cleanup does not renew its captured budget.
+            connection.limits.terminal_cleanup_timeout = .fromSeconds(1);
+            try headers(connection, 1);
+            if (batch) try headers(connection, 3);
+            try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 0, 1, "abc");
+            var reject: Reject = .{ .connection = connection, .io = io, .vtable = io.vtable.*, .failure = failure };
+            reject.vtable.netWrite = Reject.write;
+            reject.vtable.now = Reject.now;
+            Reject.active = &reject;
+            defer Reject.active = null;
+            defer connection.io = io;
+            if (batch) {
+                var requests: [2]runtime.StreamingRequest = undefined;
+                try std.testing.expectError(error.ApplicationRejected, connection.readRequestBatchStreamingInto(&requests, &reject, Reject.batch));
+            } else {
+                try std.testing.expectError(error.ApplicationRejected, connection.readRequestStreaming(&reject, Reject.consume));
+            }
+            try std.testing.expectEqual(@as(usize, if (failure == .network) 2 else 1), reject.calls.load(.acquire));
+            try std.testing.expectEqual(@as(u8, @intFromEnum(http2.FrameType.window_update)), reject.first_type);
+            try std.testing.expect(connection.aggregate_timeout_unusable and connection.terminal_write_failed);
+            try std.testing.expectEqual(@as(usize, 0), connection.activePeerStreamCount());
+            try std.testing.expectEqual(@as(i64, 65_535), connection.recv_connection_window.value);
         }
-        try std.testing.expectEqual(@as(usize, 2), reject.calls.load(.acquire));
-        try std.testing.expectEqual(@as(u8, @intFromEnum(http2.FrameType.window_update)), reject.first_type);
-        try std.testing.expect(connection.aggregate_timeout_unusable and connection.terminal_write_failed);
-        try std.testing.expectEqual(@as(usize, 0), connection.activePeerStreamCount());
-        try std.testing.expectEqual(@as(i64, 65_535), connection.recv_connection_window.value);
     }
 }
