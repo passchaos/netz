@@ -5,6 +5,7 @@ const net = std.Io.net;
 
 test {
     _ = @import("stream_io_deadline_tests.zig");
+    _ = @import("../runtime/timed_socket_tests.zig");
 }
 
 pub const TimedReadError = net.Stream.Reader.Error ||
@@ -71,6 +72,7 @@ pub fn writeSomeWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimedWriteError!usize {
     if (bytes.len == 0) return 0;
+    if (@import("../runtime/timed_socket.zig").tryWrite(io, stream, bytes, deadline)) |result| return result;
     _ = try @import("deadline.zig").usableAwake(io, deadline);
     const WriteResult = TimedWriteError!usize;
     const Task = struct {
