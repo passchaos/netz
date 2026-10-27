@@ -6,6 +6,7 @@ pub const duplex = @import("duplex.zig");
 
 pub const Error = runtime.Error;
 pub const DecodedMessage = codec.DecodedMessage;
+pub const FeedProgress = codec.FeedProgress;
 pub const MessageOptions = codec.MessageOptions;
 pub const Decoder = codec.Decoder;
 pub const Encoder = codec.Encoder;
@@ -35,6 +36,7 @@ pub const acceptDuplexWithTimeout = duplex.acceptDuplexWithTimeout;
 pub const acceptDuplexWithDeadline = duplex.acceptDuplexWithDeadline;
 
 test {
+    _ = @import("duplex/limited_receive_tests.zig");
     _ = @import("tests.zig");
     _ = @import("termination_tests.zig");
     _ = @import("termination_tls_tests.zig");

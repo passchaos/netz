@@ -20,6 +20,11 @@ pub const DecodedMessage = struct {
     was_compressed: bool,
 };
 
+pub const FeedProgress = struct {
+    consumed: usize,
+    messages: usize,
+};
+
 /// Controls encoding for one message without changing the stream's declared
 /// `grpc-encoding`. A disabled message uses the identity representation and a
 /// clear compressed flag; later messages continue using the stream default.
@@ -75,9 +80,24 @@ pub const Decoder = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
+        _ = try self.feedLimited(bytes, std.math.maxInt(usize), context, consume);
+    }
+
+    /// Stop immediately after at most `max_messages` complete messages.
+    /// The caller retains bytes after `consumed` and resumes with that exact
+    /// suffix. Partial prefixes/payloads remain owned by this decoder.
+    pub fn feedLimited(
+        self: *Decoder,
+        bytes: []const u8,
+        max_messages: usize,
+        context: anytype,
+        comptime consume: anytype,
+    ) !FeedProgress {
         if (self.finished) return error.InvalidStreamState;
+        if (max_messages == 0) return error.InvalidStreamState;
         var offset: usize = 0;
-        while (offset < bytes.len) {
+        var delivered: usize = 0;
+        while (offset < bytes.len and delivered < max_messages) {
             if (self.prefix_len < self.prefix.len) {
                 const count = @min(
                     self.prefix.len - self.prefix_len,
@@ -89,13 +109,14 @@ pub const Decoder = struct {
                 );
                 self.prefix_len += count;
                 offset += count;
-                if (self.prefix_len != self.prefix.len) return;
+                if (self.prefix_len != self.prefix.len) return .{ .consumed = offset, .messages = delivered };
                 try self.preparePayload();
             }
 
             if (self.payload_len == 0) {
                 try self.deliver(&.{}, context, consume);
                 self.resetMessage();
+                delivered += 1;
                 continue;
             }
 
@@ -106,6 +127,7 @@ pub const Decoder = struct {
                 offset += self.payload_len;
                 try self.deliver(payload, context, consume);
                 self.resetMessage();
+                delivered += 1;
                 continue;
             }
 
@@ -126,7 +148,7 @@ pub const Decoder = struct {
             );
             self.payload_written += count;
             offset += count;
-            if (self.payload_written != payload.len) return;
+            if (self.payload_written != payload.len) return .{ .consumed = offset, .messages = delivered };
 
             // Remove ownership from parser state before invoking application
             // code so callback failure cannot leave a completed message stuck.
@@ -137,7 +159,9 @@ pub const Decoder = struct {
             };
             self.allocator.free(payload);
             self.resetMessage();
+            delivered += 1;
         }
+        return .{ .consumed = offset, .messages = delivered };
     }
 
     /// Mark the HTTP body complete and reject a truncated prefix or payload.

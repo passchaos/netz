@@ -16,6 +16,7 @@ const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
 const codec = @import("codec.zig");
+const client_receive = @import("duplex/client_receive.zig");
 const sequential = @import("runtime.zig");
 
 pub const Error = sequential.Error;
@@ -166,6 +167,7 @@ pub const ClientDuplex = struct {
     response_encoding: ?[]const u8 = null,
     parse_response_body: bool = false,
     pending_message: ?PendingMessage = null,
+    pending_data: ?client_receive.PendingData = null,
     pending_terminal: ?Response = null,
     receive_state: ReceiveState = .active,
     deadline: ?std.Io.Clock.Timestamp = null,
@@ -174,6 +176,7 @@ pub const ClientDuplex = struct {
         if (self.decoder) |*decoder| decoder.deinit();
         if (self.response_head) |*head| head.deinit(self.allocator);
         if (self.pending_message) |*pending| pending.deinit(self.allocator);
+        if (self.pending_data) |*pending| pending.data.deinit(self.allocator);
         if (self.pending_terminal) |*response| response.deinit();
         self.transport.deinit();
         self.* = undefined;
@@ -201,16 +204,7 @@ pub const ClientDuplex = struct {
         payload: []const u8,
         options: codec.MessageOptions,
     ) Error!WriteResult {
-        try self.ensureWritable();
-        if (self.pending_message != null) return error.InvalidStreamState;
-        self.pending_message = .{
-            .bytes = try encodeMessageAlloc(
-                self.allocator,
-                self.encoder,
-                payload,
-                options,
-            ),
-        };
+        try self.stageMessage(payload, options);
         return self.resumeMessage();
     }
 
@@ -235,6 +229,15 @@ pub const ClientDuplex = struct {
 
     /// Retain a final message without writing or reading transport input.
     pub fn stageFinalMessage(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions) Error!void {
+        try self.stageMessageWithEndStream(payload, options, true);
+    }
+
+    /// Retain an ordinary message for a background owner without socket IO.
+    pub fn stageMessage(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions) Error!void {
+        try self.stageMessageWithEndStream(payload, options, false);
+    }
+
+    fn stageMessageWithEndStream(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions, end_stream: bool) Error!void {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         self.pending_message = .{
@@ -244,7 +247,7 @@ pub const ClientDuplex = struct {
                 payload,
                 options,
             ),
-            .end_stream = true,
+            .end_stream = end_stream,
         };
     }
 
@@ -326,10 +329,25 @@ pub const ClientDuplex = struct {
     }
 
     pub fn finishRequest(self: *ClientDuplex) Error!WriteResult {
+        return self.finishRequestUntil(self.deadline);
+    }
+
+    /// Bound a background owner's empty request FIN under its operation budget.
+    pub fn finishRequestWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!WriteResult {
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
+        if (effective.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) {
+            if (self.deadline) |rpc| if (rpc.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) self.fail(.cancel);
+            return error.Timeout;
+        }
+        return self.finishRequestUntil(effective);
+    }
+
+    fn finishRequestUntil(self: *ClientDuplex, deadline: ?std.Io.Clock.Timestamp) Error!WriteResult {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
-        const result = (if (self.deadline) |deadline|
-            self.transport.finishRequestWithDeadline(deadline)
+        const result = (if (deadline) |until|
+            self.transport.finishRequestWithDeadline(until)
         else
             self.transport.finishRequest()) catch |err| {
             self.fail(if (err == error.Timeout) .cancel else .internal_error);
@@ -432,209 +450,37 @@ pub const ClientDuplex = struct {
         return self.pollResponseEventUntil(effective, rpc_limited, context, consume);
     }
 
-    fn pollResponseEventUntil(
-        self: *ClientDuplex,
-        deadline: ?std.Io.Clock.Timestamp,
-        cancel_on_timeout: bool,
-        context: anytype,
-        comptime consume: anytype,
-    ) !?ClientEvent {
-        if (self.pending_terminal) |response| {
-            self.pending_terminal = null;
-            self.receive_state = .terminal_delivered;
-            return .{ .terminal = response };
-        }
-        if (self.receive_state != .active) return error.ConnectionClosed;
-        const event = (if (deadline) |absolute|
-            self.transport.pollResponseEventWithDeadline(absolute)
-        else
-            self.transport.pollResponseEvent()) catch |err| {
-            if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) {
-                self.fail(if (err == error.Timeout) .cancel else .internal_error);
-            }
-            return err;
-        };
-        return if (event) |ready|
-            try self.readResponseEventTransport(ready, deadline, context, consume)
-        else
-            null;
+    const receive_hooks = .{
+        .Event = ClientEvent,
+        .begin = beginResponse,
+        .finishDecoder = finishResponseDecoder,
+        .finished = consumeTransportFinished,
+        .terminal = takeTerminal,
+        .resetTerminal = takeResetTerminal,
+        .closeRequest = closeRequestAfterTerminal,
+        .discardPending = discardPendingMessage,
+        .fail = fail,
+        .readTransport = readClientTransportEvent,
+        .Counter = MessageCounter,
+    };
+
+    fn pollResponseEventUntil(self: *ClientDuplex, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, context: anytype, comptime consume: anytype) !?ClientEvent {
+        return client_receive.poll(self, deadline, cancel_on_timeout, std.math.maxInt(usize), context, consume, receive_hooks);
+    }
+    fn readResponseEventWithRpcDeadline(self: *ClientDuplex, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, context: anytype, comptime consume: anytype) !ClientEvent {
+        return client_receive.read(self, deadline, cancel_on_timeout, context, consume, receive_hooks);
     }
 
-    fn readResponseEventWithRpcDeadline(
-        self: *ClientDuplex,
-        deadline: ?std.Io.Clock.Timestamp,
-        cancel_on_timeout: bool,
-        context: anytype,
-        comptime consume: anytype,
-    ) !ClientEvent {
-        if (self.pending_terminal) |response| {
-            self.pending_terminal = null;
-            self.receive_state = .terminal_delivered;
-            return .{ .terminal = response };
-        }
-        if (self.receive_state != .active) return error.ConnectionClosed;
-        const event = readClientTransportEvent(
-            &self.transport,
-            deadline,
-        ) catch |err| {
-            if (err == error.Timeout) {
-                if (cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) self.fail(.cancel);
-            } else {
-                self.fail(.internal_error);
-            }
-            return err;
-        };
-        return self.readResponseEventTransport(
-            event,
-            deadline,
-            context,
-            consume,
-        );
+    /// Bound callback delivery without reading the socket. A partial DATA
+    /// frame stays owned until subsequent polls consume its exact suffix.
+    pub fn pollResponseEventLimited(self: *ClientDuplex, max_messages: usize, context: anytype, comptime consume: anytype) !?ClientEvent {
+        return client_receive.poll(self, self.deadline, self.deadline != null, max_messages, context, consume, receive_hooks);
     }
-
-    fn readResponseEventTransport(
-        self: *ClientDuplex,
-        transport_event: http2.runtime.DuplexResponseEvent,
-        deadline: ?std.Io.Clock.Timestamp,
-        context: anytype,
-        comptime consume: anytype,
-    ) !ClientEvent {
-        if (self.pending_terminal != null or self.receive_state != .active) {
-            var unused = transport_event;
-            unused.deinit(self.allocator);
-            return error.ConnectionClosed;
-        }
-        var event = transport_event;
-        switch (event) {
-            .informational => |head| {
-                event = undefined;
-                return .{ .informational = head };
-            },
-            .head => |head| {
-                event = undefined;
-                self.beginResponse(head) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                if (!self.transport.responseFinished()) {
-                    const stored = self.response_head.?;
-                    return .{ .initial_metadata = .{
-                        .status = stored.status,
-                        .headers = stored.headers,
-                        .encoding = self.response_encoding,
-                    } };
-                }
-                self.finishResponseDecoder() catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                self.consumeTransportFinished(deadline) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                const response = self.takeTerminal(null) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                self.closeRequestAfterTerminal() catch {};
-                self.receive_state = .terminal_delivered;
-                return .{ .terminal = response };
-            },
-            .data => |*data| {
-                var delivered: usize = 0;
-                const Counter = MessageCounter(@TypeOf(context), consume);
-                var counter = Counter{
-                    .context = context,
-                    .count = &delivered,
-                };
-                if (self.parse_response_body) {
-                    const decoder = if (self.decoder) |*value| value else {
-                        event.deinit(self.allocator);
-                        self.fail(.internal_error);
-                        return error.InvalidStreamState;
-                    };
-                    decoder.feed(data.data, &counter, Counter.deliver) catch |err| {
-                        event.deinit(self.allocator);
-                        self.fail(.internal_error);
-                        return err;
-                    };
-                }
-                event.deinit(self.allocator);
-                const ended = self.transport.responseFinished();
-                if (ended) {
-                    self.finishResponseDecoder() catch |err| {
-                        self.fail(.internal_error);
-                        return err;
-                    };
-                    self.consumeTransportFinished(deadline) catch |err| {
-                        self.fail(.internal_error);
-                        return err;
-                    };
-                    const response = self.takeTerminal(null) catch |err| {
-                        self.fail(.internal_error);
-                        return err;
-                    };
-                    self.closeRequestAfterTerminal() catch {};
-                    if (delivered == 0) {
-                        self.receive_state = .terminal_delivered;
-                        return .{ .terminal = response };
-                    }
-                    self.pending_terminal = response;
-                    self.receive_state = .terminal_pending;
-                }
-                return .{ .messages = .{
-                    .count = delivered,
-                    .end_stream = ended,
-                } };
-            },
-            .trailers => |trailers| {
-                event = undefined;
-                var trailers_owned = true;
-                errdefer if (trailers_owned) {
-                    http2.Hpack.freeOwnedFields(self.allocator, trailers);
-                };
-                self.finishResponseDecoder() catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                self.consumeTransportFinished(deadline) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                const response = self.takeTerminal(trailers) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                trailers_owned = false;
-                self.closeRequestAfterTerminal() catch {};
-                self.receive_state = .terminal_delivered;
-                return .{ .terminal = response };
-            },
-            .finished => {
-                event = undefined;
-                self.finishResponseDecoder() catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                const response = self.takeTerminal(null) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                self.closeRequestAfterTerminal() catch {};
-                self.receive_state = .terminal_delivered;
-                return .{ .terminal = response };
-            },
-            .reset => |reset_value| {
-                event = undefined;
-                self.discardPendingMessage();
-                const response = self.takeResetTerminal(reset_value) catch |err| {
-                    self.fail(.internal_error);
-                    return err;
-                };
-                self.receive_state = .terminal_delivered;
-                return .{ .terminal = response };
-            },
-        }
+    pub fn pollResponseEventLimitedWithDeadline(self: *ClientDuplex, max_messages: usize, deadline: std.Io.Clock.Timestamp, context: anytype, comptime consume: anytype) !?ClientEvent {
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
+        const rpc_limited = if (self.deadline) |rpc| !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc) else false;
+        return client_receive.poll(self, effective, rpc_limited, max_messages, context, consume, receive_hooks);
     }
 
     fn beginResponse(
@@ -746,6 +592,8 @@ pub const ClientDuplex = struct {
     }
 
     fn discardReceiveState(self: *ClientDuplex) void {
+        if (self.pending_data) |*pending| pending.data.deinit(self.allocator);
+        self.pending_data = null;
         self.discardPendingMessage();
         if (self.pending_terminal) |*response| response.deinit();
         self.pending_terminal = null;
@@ -1431,7 +1279,7 @@ fn MessageCounter(comptime Context: type, comptime consume: anytype) type {
         context: Context,
         count: *usize,
 
-        fn deliver(self: *@This(), message: codec.DecodedMessage) !void {
+        pub fn deliver(self: *@This(), message: codec.DecodedMessage) !void {
             try consume(self.context, message);
             self.count.* += 1;
         }

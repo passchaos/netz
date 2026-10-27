@@ -1261,3 +1261,33 @@ replacement allocation failure, and connector-cancellation recovery. The
 grpc-cpp shared gate now uses hostname targets and an allocator-owned duplicate
 address result over h2c and verified TLS, then refreshes the unchanged address
 after its concurrent unary calls; both publications produce one endpoint.
+
+## Bounded message delivery for background stream owners
+
+The incremental Decoder exposes feedLimited(bytes, max_messages, context,
+consume), returning exact consumed-byte and delivered-message counts. It stops
+at a complete message boundary and leaves the remaining input with the caller;
+partial prefixes and payloads retain the existing decoder ownership rules.
+Compression remains independent for each message, including empty messages.
+
+ClientDuplex.pollResponseEventLimited and its WithDeadline form bound callback
+delivery from already-routed DATA. A DATA frame containing several messages
+stays owned across polls until its exact remaining suffix is consumed.
+Informational/initial metadata and terminal status retain their existing
+lifetimes. A terminal event follows every message in the last DATA frame.
+Short operation deadlines preserve pending DATA while the original RPC
+deadline still governs cancellation; callback/protocol failure discards the
+held frame and retires the stream before a later stream can reuse the channel.
+The client receive state machine lives in stream/duplex/client_receive.zig.
+
+stageMessage retains a normal framed request message without socket input or
+output. A background owner advances it with pollResumeMessageWithDeadline and
+then sends an empty request FIN with finishRequestWithDeadline. This provides
+the bounded send/receive primitives required by shared streaming handles.
+
+Verification passed 140/140 targeted decoder/duplex tests, including every
+prefix/payload split, compressed and empty messages, a paused coalesced DATA
+frame while a sibling RPC completes, short-operation-timeout recovery, and
+callback rejection followed by connection reuse. The combined HTTP/2 and gRPC
+suite passed 1083/1083 tests, public package checks passed 20/20, and the pinned
+grpc-cpp forward gate passed h2c and certificate-verified TLS.
