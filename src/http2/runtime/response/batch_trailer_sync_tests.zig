@@ -82,7 +82,9 @@ fn exercise(mode: Mode, kind: Kind, fragmented: bool, ended: bool, from_socket: 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     const peer = try listener.accept(io);
     defer peer.close(io);
-    var connection = runtime.Connection{ .io = io, .allocator = allocator, .stream = stream, .role = .client };
+    // Give reset writes room to finish before checking HPACK synchronization,
+    // exact reset codes, and reuse across all aggregate/streaming batch modes.
+    var connection = runtime.Connection{ .io = io, .allocator = allocator, .stream = stream, .role = .client, .limits = .{ .terminal_cleanup_timeout = .fromSeconds(1) } };
     defer connection.close();
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
