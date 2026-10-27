@@ -478,10 +478,16 @@ Current protocol coverage includes:
   header lookup, Content-Length normalization, pseudo-header/URI/authority
   validation, trailer rules, and response-body semantics grouped under
   `http2/runtime/headers/`,
-  protocol-error GOAWAY output shares the finite
+  protocol-error GOAWAY output, including pre-Connection bootstrap rejection
+  of a bad client preface, malformed handshake frame envelope, or invalid
+  peer SETTINGS on direct, TLS, and h2c-upgrade accepts, shares the finite
   `Limits.terminal_cleanup_timeout` budget (10 ms by default, zero skips
-  output), preserves the original error, and stops after a failed terminal
-  write; queued request overflow shares this budget across resets and GOAWAY,
+  output), is stack-encoded without allocation, preserves the original
+  error, and stops after a failed terminal write; the terminal TLS
+  close_notify shares that same single remaining budget and is suppressed
+  after a failed write or with a partial TLS record pending, so neither
+  GOAWAY nor alert output can outlive handshake cleanup; queued request
+  overflow shares this budget across resets and GOAWAY,
   exact dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
   peer table-size update emission plus h2/hyper-style non-indexing for volatile or oversized fields and automatic
   never-index encoding for sensitive fields, fixed-control-frame and preallocated control-frame write fast paths, PING with opaque ACK matching plus explicit absolute-deadline round trips whose budget covers probe/ACK writes as well as reads, and a reusable single-reader inactivity-aware keep-alive driver with active/idle policy, monotonic probe payloads, connection-control processing and a configurable bounded FIFO preserving interleaved application frames, GOAWAY/WINDOW_UPDATE connection

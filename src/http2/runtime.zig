@@ -18,6 +18,8 @@ test {
     _ = @import("runtime/headers/authority_reuse_tests.zig");
     _ = client_authority;
     _ = @import("runtime/connect/deadline_tests.zig");
+    _ = @import("runtime/connect/protocol_error_tests.zig");
+    _ = @import("runtime/connect/tls_protocol_error_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");
     _ = @import("runtime/control/output_deadline_tests.zig");
     _ = @import("runtime/control/protocol_error_deadline_tests.zig");
@@ -78,6 +80,8 @@ const complete_upload = @import("runtime/request/upload.zig");
 const response_cleanup = @import("runtime/response/cleanup.zig");
 const stream_termination = @import("runtime/stream/termination.zig");
 const protocol_error_output = @import("runtime/control/protocol_error.zig");
+const handshake_protocol_error = @import("runtime/connect/protocol_error.zig");
+const terminal_tls_output = @import("runtime/control/tls_close.zig");
 const response_start = @import("runtime/response/start.zig");
 const request_early_response = @import("runtime/request/early_response.zig");
 const forbidden_response_body = @import("runtime/response/forbidden_body.zig");
@@ -874,9 +878,12 @@ pub const Server = struct {
             &preface_buf,
             handshake_deadline,
         );
-        try http2.validateClientPreface(&preface_buf);
+        http2.validateClientPreface(&preface_buf) catch |err| {
+            handshake_protocol_error.reject(transport, self.limits, .protocol_error, "invalid-preface", handshake_deadline);
+            return err;
+        };
 
-        var client_settings = try readHandshakeFrameTransportWithDeadline(
+        var client_settings = try handshake_protocol_error.readFrame(
             self.allocator,
             transport,
             self.limits,
@@ -887,9 +894,10 @@ pub const Server = struct {
             return error.UnexpectedFrame;
         }
         if (!std.mem.eql(u8, advertised_settings, client_settings.frame.payload)) return error.InvalidFrame;
-        const peer_settings = try parsePeerSettingsTransport(
+        const peer_settings = try handshake_protocol_error.parseSettings(
             self.allocator,
             transport,
+            self.limits,
             client_settings.frame.payload,
             handshake_deadline,
         );
@@ -921,7 +929,7 @@ pub const Server = struct {
         // applications can immediately answer the upgraded request without
         // leaving unread control bytes that would make a short-lived test/server
         // close look like a TCP reset to the client.
-        var client_ack = try readHandshakeFrameTransportWithDeadline(
+        var client_ack = try handshake_protocol_error.readFrame(
             self.allocator,
             transport,
             self.limits,
@@ -1199,7 +1207,10 @@ fn acceptConnectionTransportMaybeBefore(
     // Ownership enters with the transport so failures before Connection is
     // constructed (notably a preface timeout) still close TCP or TLS state.
     var transport_owned = true;
-    errdefer if (transport_owned) transport.close();
+    errdefer if (transport_owned) {
+        terminal_tls_output.retire(transport);
+        transport.close();
+    };
     const deadline = if (outer_deadline) |absolute|
         try connectionHandshakeDeadlineBefore(
             transport,
@@ -1218,16 +1229,11 @@ fn acceptConnectionTransportMaybeBefore(
         deadline,
     );
     http2.validateClientPreface(&preface_buf) catch |err| {
-        writeConnectionErrorGoAwayTransport(
-            allocator,
-            transport,
-            .protocol_error,
-            "invalid-preface",
-        ) catch {};
+        handshake_protocol_error.reject(transport, limits, .protocol_error, "invalid-preface", deadline);
         return err;
     };
 
-    var client_settings = try readHandshakeFrameTransportWithDeadline(
+    var client_settings = try handshake_protocol_error.readFrame(
         allocator,
         transport,
         limits,
@@ -1239,9 +1245,10 @@ fn acceptConnectionTransportMaybeBefore(
     {
         return error.UnexpectedFrame;
     }
-    const peer_settings = try parsePeerSettingsTransport(
+    const peer_settings = try handshake_protocol_error.parseSettings(
         allocator,
         transport,
+        limits,
         client_settings.frame.payload,
         deadline,
     );
@@ -1269,7 +1276,10 @@ fn acceptConnectionTransportMaybeBefore(
         .awaiting_settings_ack = true,
     };
     transport_owned = false;
-    errdefer connection.close();
+    errdefer {
+        terminal_tls_output.retire(transport);
+        connection.close();
+    }
     connection.applyLocalLimits();
     try connection.applySettings(peer_settings);
     return connection;
@@ -3046,7 +3056,10 @@ pub const Client = struct {
         outer_deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
         var transport_owned = true;
-        errdefer if (transport_owned) transport.close();
+        errdefer if (transport_owned) {
+            terminal_tls_output.retire(transport);
+            transport.close();
+        };
         const deadline = if (outer_deadline) |absolute|
             try connectionHandshakeDeadlineBefore(
                 transport,
@@ -3083,10 +3096,13 @@ pub const Client = struct {
         connection: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        // Bootstrap failures close the transport rather than renewing a TLS
+        // close_notify budget in the caller's Connection destructor.
+        errdefer terminal_tls_output.retire(connection.transportForIo());
         var saw_server_settings = false;
         var saw_settings_ack = false;
         while (!saw_server_settings or !saw_settings_ack) {
-            var frame = try readHandshakeFrameTransportWithDeadline(
+            var frame = try handshake_protocol_error.readFrame(
                 connection.allocator,
                 connection.transportForIo(),
                 connection.limits,
@@ -18195,7 +18211,7 @@ pub const Connection = struct {
         err: anyerror,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        const code = settingsFailureErrorCode(payload, err) orelse return;
+        const code = handshake_protocol_error.settingsFailureCode(payload, err) orelse return;
         self.sendProtocolGoAway(
             self.lastPeerProcessedStreamId(),
             code,
@@ -22131,143 +22147,6 @@ fn readFrameTransportWithDeadline(
         @min(limits.max_frame_payload, limits.max_frame_size),
         deadline,
     );
-}
-
-fn readHandshakeFrameTransportWithDeadline(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    limits: Limits,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!OwnedFrame {
-    var violation: ?frame_wire.EnvelopeViolation = null;
-    return frame_io.readOwnedTransportWithDeadlineClassified(
-        allocator,
-        transport,
-        @min(limits.max_frame_payload, limits.max_frame_size),
-        deadline,
-        &violation,
-    ) catch |err| {
-        if (violation) |value| {
-            writeConnectionErrorGoAwayTransportUntil(
-                allocator,
-                transport,
-                value.error_code,
-                "frame-envelope",
-                deadline,
-            ) catch {};
-        }
-        return err;
-    };
-}
-
-fn settingsFailureErrorCode(
-    payload: []const u8,
-    err: anyerror,
-) ?http2.ErrorCode {
-    if (err == error.FlowControlViolation) return .flow_control_error;
-    if (err != error.InvalidSetting) return null;
-    if (payload.len % 6 != 0) return .frame_size_error;
-
-    var offset: usize = 0;
-    while (offset < payload.len) : (offset += 6) {
-        const id: http2.SettingId = @enumFromInt(std.mem.readInt(
-            u16,
-            payload[offset..][0..2],
-            .big,
-        ));
-        const value = std.mem.readInt(
-            u32,
-            payload[offset + 2 ..][0..4],
-            .big,
-        );
-        http2.validateSetting(id, value) catch {
-            return if (id == .initial_window_size)
-                .flow_control_error
-            else
-                .protocol_error;
-        };
-    }
-    // Role constraints and irreversible extension settings are validated only
-    // while applying otherwise well-formed values.
-    return .protocol_error;
-}
-
-fn parsePeerSettingsTransport(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    payload: []const u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error![]http2.Setting {
-    return http2.parseSettings(allocator, payload) catch |err| {
-        if (settingsFailureErrorCode(payload, err)) |code| {
-            writeConnectionErrorGoAwayTransportUntil(
-                allocator,
-                transport,
-                code,
-                "settings-value",
-                deadline,
-            ) catch {};
-        }
-        return err;
-    };
-}
-
-fn writeConnectionErrorGoAway(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
-    error_code: http2.ErrorCode,
-    debug_data: []const u8,
-) Error!void {
-    return writeConnectionErrorGoAwayTransport(
-        allocator,
-        tcpTransport(io, stream),
-        error_code,
-        debug_data,
-    );
-}
-
-fn writeConnectionErrorGoAwayTransport(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    error_code: http2.ErrorCode,
-    debug_data: []const u8,
-) Error!void {
-    return writeConnectionErrorGoAwayTransportUntil(
-        allocator,
-        transport,
-        error_code,
-        debug_data,
-        null,
-    );
-}
-
-fn writeConnectionErrorGoAwayTransportUntil(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    error_code: http2.ErrorCode,
-    debug_data: []const u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try http2.GoAwayPayload.write(
-        &encoded,
-        allocator,
-        0,
-        error_code,
-        debug_data,
-    );
-    if (deadline) |absolute| {
-        var committed: usize = 0;
-        try transport.writeAllWithDeadline(
-            encoded.items,
-            &committed,
-            absolute,
-        );
-    } else {
-        try transport.writeAll(encoded.items);
-    }
 }
 
 fn writeFrame(
