@@ -8748,6 +8748,13 @@ would not meet the repository's end-to-end evidence threshold.
 
 ## Gaps before a completion audit can pass
 
+The shared gRPC TCP baseline is recorded separately in
+[grpc_shared_performance.md](grpc_shared_performance.md), with complete sample
+records and the official grpc-cpp fixture boundaries. Its 256 KiB persistent
+and per-call workloads remain 2.61x and 2.28x the reference wall time; that gap
+requires window and allocation/copying analysis before a gRPC performance
+completion claim.
+
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain

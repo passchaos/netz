@@ -82,3 +82,52 @@ consumption-driven stream credit. The comparison establishes local workload
 performance and exposes follow-up work; it does not establish equal packet,
 allocator, threading or protobuf costs across the two stacks. TLS, concurrent
 streams, compression and sustained churn require separate performance evidence.
+
+## 2026-10-28 baseline
+
+The clean 5726dc94 checkout passed the public bench-grpc-cpp build step with five
+alternating samples on aarch64 CPU 0, using Zig 0.16.0 ReleaseFast and the pinned
+grpc-cpp optimized build. Each native sample used 100 warmup and 2000 measured
+roundtrips. Executable fingerprints, all native result/completion records,
+reference wall/CPU times and allocation samples are retained in
+[the evidence JSON](evidence/grpc_shared/2026-10-28.json).
+
+| Native mode | String bytes | Native median us/roundtrip | grpc-cpp median us/roundtrip | Native / grpc-cpp |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 29.65 | 43.34 | 0.684 |
+| Persistent RPC | 512 | 29.98 | 44.75 | 0.670 |
+| Persistent RPC | 4096 | 33.30 | 49.36 | 0.675 |
+| Persistent RPC | 262144 | 1011.07 | 387.68 | 2.608 |
+| RPC per roundtrip | 0 | 76.65 | 123.87 | 0.619 |
+| RPC per roundtrip | 512 | 77.11 | 125.75 | 0.613 |
+| RPC per roundtrip | 4096 | 82.95 | 130.27 | 0.637 |
+| RPC per roundtrip | 262144 | 1133.37 | 496.31 | 2.284 |
+
+Three separate counted samples per shape used the same warmup/iteration counts.
+The medians below describe the explicit allocation delta of both native
+endpoints; their instrumented timings are excluded from the comparison above.
+
+| Native mode | String bytes | Allocations/roundtrip | Requested bytes/roundtrip |
+| --- | ---: | ---: | ---: |
+| Persistent RPC | 4096 | 8.25 | 29026 |
+| Persistent RPC | 262144 | 106.00 | 2360561 |
+| RPC per roundtrip | 4096 | 26.15 | 98260 |
+| RPC per roundtrip | 262144 | 122.53 | 2429783 |
+
+The current native fixture has shorter small-message roundtrip times in these
+workloads. At 256 KiB its persistent and per-call times are 2.61x and 2.28x the
+reference. Native default-window waits, input chunk allocation/copying and
+owned-message materialization need separate causal measurements before
+selecting a production optimization. The byte totals expose allocation
+pressure, but do not alone establish which cost dominates elapsed time.
+
+A separate 199 Hz DWARF perf run captured 2051 user-cycle samples with no lost
+samples over 10000 measured persistent 256 KiB roundtrips. It used the same
+native executable fingerprint and validated all 10100 warmup/measured message
+pairs. Profile metadata and self-symbol rows are included in the evidence JSON.
+User-cycle samples show __kernel_clock_gettime at 18.55%, the benchmark's full
+byte mem.eql validation at 12.73%, memcpy at 6.99% self, and the shared worker
+tick at 3.48% self. zio task spawning, yielding, cleanup and scheduling are also
+visible. These fractions describe sampled user work, not wall-clock waiting
+or a directly comparable grpc-cpp profile. They make deadline/output-task and
+window-update orchestration part of the next investigation alongside copying.
