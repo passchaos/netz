@@ -11592,6 +11592,26 @@ pub const Connection = struct {
         };
     }
 
+    /// Background owners may wait without a read timer when there is no RPC
+    /// deadline. Control output receives a fresh finite budget after input or
+    /// a command wake completes; this also services an idle client connection.
+    pub fn pumpClientUntilOrWake(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: *std.Io.Event) Error!ClientDuplexPumpEvent {
+        if (output_timeout.nanoseconds <= 0) return error.Timeout;
+        if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.role != .client or self.callback_reader_active) return error.UnexpectedFrame;
+        const result = duplex_wake.read(self, read_until, wake, OwnedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
+        return switch (result) {
+            .wake => .wake,
+            .frame => |frame| try client_duplex_owner.ingest(self, frame, .fromNow(self.io, .{ .raw = output_timeout, .clock = .awake }), client_duplex_hooks),
+        };
+    }
+
+    /// Already available credit only; no frame read or WINDOW_UPDATE wait.
+    pub fn availableClientSendCapacity(self: *const Connection, stream_id: u31) usize {
+        return @min(self.send_connection_window.available(), self.sendStreamWindowAvailable(stream_id));
+    }
+
     fn checkClientDuplexPump(self: *const Connection) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client or self.client_duplex_owners.count() == 0 or self.callback_reader_active) return error.UnexpectedFrame;

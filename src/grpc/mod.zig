@@ -90,6 +90,9 @@ pub const MethodPolicy = service_config.MethodPolicy;
 pub const LoadBalancingPolicy = service_config.LoadBalancingPolicy;
 pub const LoadBalancingConfig = service_config.LoadBalancingConfig;
 pub const Channel = runtime.Channel;
+pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
+pub const SharedChannelSender = @import("channel/shared.zig").Sender;
+pub const SharedChannelOptions = @import("channel/shared.zig").Options;
 pub const ChannelTarget = runtime.ChannelTarget;
 pub const ChannelEndpoint = runtime.ChannelEndpoint;
 pub const ChannelSelectionPolicy = runtime.ChannelSelectionPolicy;
@@ -118,6 +121,7 @@ pub const bearerAuthorizationValueLen = auth.bearerAuthorizationValueLen;
 pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
+    _ = @import("channel/shared.zig");
     _ = compression;
     _ = @import("compression/negotiation_runtime_tests.zig");
     _ = status_details;

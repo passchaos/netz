@@ -1,0 +1,15 @@
+const std = @import("std");
+const channel = @import("../../channel.zig");
+const health = @import("../../health.zig");
+
+pub const Options = struct {
+    channel: channel.Options = .{},
+    max_queued_calls: usize = 256,
+    max_active_calls_per_endpoint: usize = 32,
+    max_write_bytes_per_turn: usize = 64 * 1024,
+    operation_timeout: std.Io.Duration = .fromSeconds(20),
+    health_service: ?[]const u8 = null,
+    disable_health_check: bool = false,
+    health_metadata: health.WatchOptions = .{},
+    service_config_json: ?[]const u8 = null,
+};

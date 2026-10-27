@@ -320,6 +320,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.health.ReconnectingWatch, "waitForServingWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Channel"));
+    try std.testing.expect(@hasDecl(netz.grpc, "SharedChannel"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "sender"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannelSender, "unaryWithRetry"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelTarget"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelEndpoint"));
     try std.testing.expect(@hasDecl(

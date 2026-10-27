@@ -103,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try @import("grpc_cpp_multiplex.zig").run(allocator, client.connected().?, message_limit);
+    try @import("grpc_cpp_shared.zig").run(allocator, io, port, tls_enabled, &ca_bundle, &ca_lock, limits);
     try runPingPong(allocator, &client, message_limit);
     try runHalfDuplex(allocator, &client, message_limit);
     try runSlowConsumer(allocator, io, &client, message_limit);
@@ -132,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
-            "multiplexed_duplex=2+cancel-isolated ping_pong=4 half_duplex=4 " ++
+            "multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated ping_pong=4 half_duplex=4 " ++
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++

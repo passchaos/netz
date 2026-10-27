@@ -913,6 +913,9 @@ Current protocol coverage includes:
   one owner, with independent framing/compression and sibling cancellation,
   a shared HTTP/2 frame pump with command wakes and gRPC/Health event polling
   for owners that schedule multiple active streams,
+  background shared unary channels with cloneable send handles, per-endpoint
+  workers, same-connection Health Watch admission, ready endpoint selection,
+  owned service config and cancellation/join before caller return,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

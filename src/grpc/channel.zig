@@ -541,6 +541,19 @@ pub const Channel = struct {
         return null;
     }
 
+    /// Close established transports after all borrowed stream handles retire.
+    /// A background owner uses this seam before reconnecting its subchannel.
+    pub fn disconnect(self: *Channel) Error!void {
+        for (self.slots) |*slot| {
+            if (slot.connection) |*connection| {
+                if (connection.activeLocalStreamCount() != 0 or connection.activeClientDuplexCount() != 0 or connection.activePeerStreamCount() != 0) return error.ChannelBusy;
+            }
+        }
+        for (self.slots) |*slot| slot.closeConnection();
+        self.selected_index = null;
+        self.setConnectivityState(.transient_failure);
+    }
+
     /// Establish/select a quiescent connection without starting an RPC.
     /// The caller borrows it until stream teardown; other Channel operations
     /// must wait for that stream to release ownership. Connection failures

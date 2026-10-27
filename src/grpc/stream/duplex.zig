@@ -28,6 +28,7 @@ pub const ResponseOptions = sequential.ResponseOptions;
 /// must drive the peer event(s), then call `resumeMessage`; it must not submit
 /// the logical message again because a prefix of it may already be on the wire.
 pub const WriteResult = enum { complete, peer_event };
+pub const PollWriteResult = enum { complete, blocked };
 
 pub const MessageProgress = struct {
     count: usize,
@@ -228,6 +229,12 @@ pub const ClientDuplex = struct {
         payload: []const u8,
         options: codec.MessageOptions,
     ) Error!WriteResult {
+        try self.stageFinalMessage(payload, options);
+        return self.resumeMessage();
+    }
+
+    /// Retain a final message without writing or reading transport input.
+    pub fn stageFinalMessage(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions) Error!void {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         self.pending_message = .{
@@ -239,7 +246,37 @@ pub const ClientDuplex = struct {
             ),
             .end_stream = true,
         };
-        return self.resumeMessage();
+    }
+
+    /// Commit at most the currently available credit and caller's byte budget.
+    /// No socket input is read; a blocked suffix stays byte-exact for the owner.
+    pub fn pollResumeMessageWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp, max_bytes: usize) Error!PollWriteResult {
+        try self.ensureWritable();
+        if (max_bytes == 0) return error.InvalidStreamState;
+        const effective = earlierDeadline(self.deadline, deadline);
+        if (effective.clock != .awake or effective.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) {
+            if (self.deadline) |rpc| if (rpc.durationFromNow(self.transport.connection.io).raw.nanoseconds <= 0) self.fail(.cancel);
+            return error.Timeout;
+        }
+        const pending = if (self.pending_message) |*value| value else return .complete;
+        const remaining = pending.bytes.len - pending.offset;
+        const amount = @min(remaining, max_bytes, self.transport.connection.availableClientSendCapacity(self.streamId()));
+        if (amount == 0 and remaining != 0) return .blocked;
+        const final = pending.end_stream and amount == remaining;
+        const result = (if (final)
+            self.transport.finishRequestDataWithDeadline(pending.bytes[pending.offset..][0..amount], effective)
+        else
+            self.transport.writeWithDeadline(pending.bytes[pending.offset..][0..amount], effective)) catch |err| {
+            self.fail(if (err == error.Timeout) .cancel else .internal_error);
+            return err;
+        };
+        pending.offset += result.written;
+        if (pending.offset == pending.bytes.len) {
+            pending.deinit(self.allocator);
+            self.pending_message = null;
+            return .complete;
+        }
+        return .blocked;
     }
 
     /// Continue the exact unsent suffix after a response event interrupted a
@@ -757,6 +794,10 @@ pub fn startDuplexWithIoDeadline(
         options,
         deadline,
     ));
+}
+
+pub fn startDuplexWithDeadlines(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: RequestOptions, rpc_deadline: ?std.Io.Clock.Timestamp, output_deadline: std.Io.Clock.Timestamp) Error!ClientDuplex {
+    return clientFromTransport(allocator, options, try sequential.startClientDuplexTransportWithDeadlines(connection, allocator, options, rpc_deadline, output_deadline));
 }
 
 fn clientFromTransport(

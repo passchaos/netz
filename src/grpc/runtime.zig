@@ -20,6 +20,9 @@ const net = std.Io.net;
 
 pub const Error = web.Error;
 pub const Channel = channel.Channel;
+pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
+pub const SharedChannelSender = @import("channel/shared.zig").Sender;
+pub const SharedChannelOptions = @import("channel/shared.zig").Options;
 pub const ChannelTarget = channel.Target;
 pub const ChannelEndpoint = channel.Endpoint;
 pub const ChannelSelectionPolicy = channel.SelectionPolicy;

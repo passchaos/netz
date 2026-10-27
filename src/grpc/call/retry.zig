@@ -22,7 +22,7 @@ pub fn run(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, 
     );
 }
 
-pub fn runWithDeadline(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) Error!UnaryResponse {
+pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) @TypeOf(attempt(connection, allocator, options, deadline, @as(?Timeout, null), @as(?u8, null))) {
     if (policy) |configured| try configured.validate();
     var attempts: u8 = 0;
     var transparent_used = false;

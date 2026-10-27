@@ -1134,3 +1134,89 @@ also returns its consumed credit within the same operation deadline: a blocked
 refund preserves the original protocol error, restores local accounting and
 retires connection writes/reuse. A real saturated TCP regression bounds that
 return path and prevents an unbounded refund from hiding inside a poll.
+
+
+## Background shared unary channels and health-aware endpoint selection
+
+`grpc.SharedChannel` owns a stable heap state and one background `std.Io`
+worker per configured endpoint. Each worker exclusively owns its ordinary
+Channel, HTTP/2 connection, Health Watch and application duplex streams.
+`channel.sender()` and `sender.clone()` return reference-counted handles that
+may issue concurrent unary calls. Callers enqueue stack-owned commands under
+the shared mutex and wait on per-call events. Deadline or task cancellation
+removes a queued command immediately, or wakes its owner and joins stream
+retirement before returning. Sender handles and connectivity cursors may
+outlive SharedChannel destruction; subsequent sends then fail with
+SharedChannelClosed while retained watchers observe terminal SHUTDOWN.
+
+Connection attempts begin on the first call or explicit `connect()`. Endpoint
+workers connect in parallel and expose independent health-derived connectivity
+through `watchEndpointConnectivity`. `pick_first` stays with a ready selected
+endpoint, while `round_robin` advances across ready endpoints with available
+concurrency credit. Connection and health retries use the existing gRPC
+backoff defaults. Host endpoints use the ordinary Channel resolver and preserve
+its authority/SNI policies. Dynamic reconciliation of a hostname's full address
+set into separate shared workers remains future manager work.
+
+`SharedChannelOptions.service_config_json` is parsed into owned state. Its
+method timeout, directional message limits, waitForReady and retry policies
+apply to unary sends, and its load-balancing config and healthCheckConfig
+select endpoint policy and health service. Explicit options override those
+policies; `disable_health_check` suppresses Watch. Health is checked on the
+same connection that serves application RPCs. NOT_SERVING, UNKNOWN and
+SERVICE_UNKNOWN prevent later admission but leave active RPCs running.
+UNIMPLEMENTED disables checking for that connection and permits calls. A
+terminated Watch retries after backoff when it received no status, or
+immediately after a status response. Connection loss retires active RPCs and
+reconnects for later calls; it does not implicitly replay a committed call.
+
+Each RPC owns one absolute awake deadline captured before queuing. The common
+unary retry driver also provides transparent pre-response REFUSED_STREAM
+recovery, configured replay-safe attempts, pushback, throttling and previous
+attempt metadata. A spurious futex wake cannot turn into an early RPC Timeout.
+Uploads are staged once and consume only current flow-control credit in bounded
+byte turns; they never read the socket to obtain more credit. The owner's sole
+wakeable frame pump supplies WINDOW_UPDATE and peer-response progress for every
+active stream. Header/data output uses the configurable operation_timeout
+(default 20 s) capped by the RPC deadline. Idle input waits have no artificial
+poll interval; commands wake the reader, and only RPC/backoff timers bound input.
+
+Unary responses retain standard decoded messages, metadata, status text, rich
+status details and typed resets. The advanced `transport.body` view is
+normalized to an uncompressed gRPC frame, allowing the decoded payload to alias
+one owned response allocation. `was_compressed` still records the actual peer
+message flag. Destruction closes the queue, cancels/joins endpoint workers and
+releases transport state before the owner reference is dropped.
+
+```zig
+var channel = try netz.grpc.SharedChannel.init(allocator, io, target, .{
+    .service_config_json =
+        \\{"healthCheckConfig":{"serviceName":"demo.Service"},
+        \\"loadBalancingConfig":[{"round_robin":{}}]}
+    ,
+});
+defer channel.deinit();
+var sender = channel.sender();
+defer sender.deinit();
+var result = try sender.unary(.{
+    .path = "/demo.Service/Unary", .message = payload,
+    .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second },
+});
+defer result.deinit();
+```
+
+The local suite proves reversed completion of simultaneous unary calls on one
+connection, same-connection health admission and endpoint switch, active-RPC
+survival after NOT_SERVING, timeout and caller cancellation, reference-counted
+shutdown, transparent refusal recovery, configured retry metadata, exact staged
+upload suffixes, and allocator/concurrency-admission cleanup. Shared streaming
+and duplex send handles, dynamic shared-worker address updates, and broader
+production scheduling evidence remain beyond this unary manager surface.
+
+
+The final shared-unary verification passed 1071/1071 combined HTTP/2 and gRPC
+tests and 20/20 package tests. The pinned grpc-cpp forward gate creates the
+background SharedChannel with healthCheckConfig, submits two concurrent unary
+calls through reference-counted send handles, validates their differently
+sized protobuf responses, and reports `shared_unary=2+health-gated` over h2c and
+certificate-verified TLS on the zio backend.

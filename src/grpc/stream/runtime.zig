@@ -40,6 +40,9 @@ pub const RequestOptions = struct {
     max_message_size: usize = 16 * 1024 * 1024,
     max_request_message_size: ?usize = null,
     max_response_message_size: ?usize = null,
+    /// Internal retry-attempt annotation, emitted after reserved-metadata
+    /// validation. Zero is invalid; null omits grpc-previous-rpc-attempts.
+    previous_attempts: ?u8 = null,
 
     pub fn requestMessageLimit(self: RequestOptions) usize {
         return @min(
@@ -300,7 +303,7 @@ fn startClientWithDeadlines(
         std.math.add(
             usize,
             binary.fields.len,
-            5,
+            5 + @as(usize, @intFromBool(options.previous_attempts != null)),
         ) catch return error.MessageTooLarge,
     ) catch return error.MessageTooLarge;
     const buffer = if (header_count <= header_storage.len)
@@ -344,6 +347,14 @@ fn startClientWithDeadlines(
     });
     headers.appendSliceAssumeCapacity(options.metadata);
     headers.appendSliceAssumeCapacity(binary.fields);
+    var previous_buffer: [3]u8 = undefined;
+    if (options.previous_attempts) |previous| {
+        if (previous == 0) return error.InvalidMetadata;
+        headers.appendAssumeCapacity(.{
+            .name = "grpc-previous-rpc-attempts",
+            .value = std.fmt.bufPrint(&previous_buffer, "{d}", .{previous}) catch unreachable,
+        });
+    }
 
     return .{
         .allocator = allocator,
@@ -426,6 +437,17 @@ pub fn startClientDuplexTransportWithIoDeadline(
         null,
         deadline,
     );
+    return beginClientDuplexTransport(&writer);
+}
+
+pub fn startClientDuplexTransportWithDeadlines(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    rpc_deadline: ?std.Io.Clock.Timestamp,
+    output_deadline: std.Io.Clock.Timestamp,
+) Error!ClientDuplexTransport {
+    var writer = try startClientWithDeadlines(connection, allocator, options, rpc_deadline, output_deadline);
     return beginClientDuplexTransport(&writer);
 }
 
