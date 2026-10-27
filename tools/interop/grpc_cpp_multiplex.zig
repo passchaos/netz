@@ -20,7 +20,13 @@ const Observer = struct {
     }
 
     fn step(self: *@This(), stream: *netz.grpc.ClientDuplex, allocator: std.mem.Allocator) !void {
-        var event = try stream.readResponseEventWithTimeout(.fromSeconds(10), self, consume);
+        const connection = stream.transport.connection;
+        const deadline = std.Io.Clock.Timestamp.fromNow(connection.io, .{ .raw = .fromSeconds(10), .clock = .awake });
+        var commands_ready: std.Io.Event = .unset;
+        var event = while (true) {
+            if (try stream.pollResponseEventWithDeadline(deadline, self, consume)) |ready| break ready;
+            _ = try connection.pumpClientDuplexWithDeadlineOrWake(deadline, &commands_ready);
+        };
         defer event.deinit(allocator);
         switch (event) {
             .initial_metadata => |head| {

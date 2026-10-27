@@ -911,6 +911,8 @@ Current protocol coverage includes:
   and allocation-free disabled Watch construction,
   same-connection client Health Watch and business duplex streams driven by
   one owner, with independent framing/compression and sibling cancellation,
+  a shared HTTP/2 frame pump with command wakes and gRPC/Health event polling
+  for owners that schedule multiple active streams,
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server

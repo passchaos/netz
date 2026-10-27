@@ -85,6 +85,35 @@ pub const ClientWatch = struct {
         return self.nextUntil(deadline);
     }
 
+    /// Consume only routed response events; request resumption is driven
+    /// explicitly so this method never starts a flow-control socket read.
+    pub fn pollNextWithDeadline(
+        self: *ClientWatch,
+        deadline: std.Io.Clock.Timestamp,
+    ) WatchError!?WatchEvent {
+        if (deadline.clock != .awake) return error.Timeout;
+        if (self.takePending()) |response| return .{ .status = response };
+        if (self.terminal_seen) return error.ConnectionClosed;
+        while (true) {
+            var event = (try self.stream.pollResponseEventWithDeadline(deadline, self, collectResponse)) orelse return null;
+            switch (event) {
+                .terminal => |terminal| {
+                    self.terminal_seen = true;
+                    return .{ .terminal = terminal };
+                },
+                .informational, .initial_metadata, .messages => {
+                    event.deinit(self.allocator);
+                    if (self.takePending()) |response| return .{ .status = response };
+                },
+            }
+        }
+    }
+
+    pub fn resumeRequestWithDeadline(self: *ClientWatch, deadline: std.Io.Clock.Timestamp) WatchError!void {
+        if (deadline.clock != .awake) return error.Timeout;
+        try self.resumeRequestIfNeeded(deadline);
+    }
+
     fn nextUntil(
         self: *ClientWatch,
         deadline: ?std.Io.Clock.Timestamp,

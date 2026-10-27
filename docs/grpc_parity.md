@@ -1085,3 +1085,52 @@ and balancing precedence, transactional allocation failure, and real h2c
 named/overall Watch delivery and cancellation without grpc-timeout. This
 configures the existing consumption-driven Watch; applying those live health
 updates to a background per-subchannel application picker remains open.
+
+
+## Shared client event pump and polling
+
+Client duplex response handling now supports a pump-and-poll owner loop.
+`http2.runtime.Connection.pumpClientDuplexWith{Timeout,Deadline}` consumes one
+input frame, handles connection control, assembles/decompresses HEADERS in wire
+order and routes application input. Its result contains a stream-ID hint or
+reports partial/control progress. `pumpClientDuplexWithDeadlineOrWake` races
+that sole frame read against a caller-owned command event. Both tasks require
+concurrency admission; admission failure and cancellation join all tasks and
+retain any complete frame, while a simultaneous completed frame takes
+precedence over an ordinary command wake. Partial transport and HPACK input
+remain in their existing connection-owned buffers.
+
+`ClientDuplexStream.pollResponseEvent[WithDeadline]` consumes only routed events
+and synthetic stream completion; it never reads transport input.
+`grpc.ClientDuplex.pollResponseEvent[WithDeadline]` adds the existing gRPC
+metadata, framing, compression, terminal-status and RPC-deadline semantics.
+`health.ClientWatch.pollNextWithDeadline` exposes the same path for health
+status updates. Polling DATA can return receive credit, and terminal cleanup
+can write control frames, so callers should supply a finite output deadline.
+Watch request resumption is explicit through `resumeRequestWithDeadline` and
+is kept outside the poll path because it can need flow-control input.
+
+An owner drains active streams with poll operations, processes commands, then
+pumps one input frame under its earliest operation/timer deadline or command
+wake. Completed handles are removed from the active set. This keeps an idle
+Health Watch from blocking a ready sibling RPC and supports RPC expiry even
+when no frame arrives. GOAWAY is recorded once and reported by each affected
+stream's poll, rather than only by whichever stream happened to read it.
+
+The h2c gate sends business replies while withholding health DATA until the
+business RPC completes, then sends the health update on that same connection.
+Other gates cover HPACK order and partial sections, transport-prefix retention,
+concurrency admission failure, task cancellation/join, command/frame races,
+synthetic completion and GOAWAY. The pinned grpc-cpp dual-stream gate also
+uses this poll/pump path for h2c and verified TLS. A complete background
+subchannel manager and health-driven application picker remain integration
+work on top of this primitive.
+
+
+The final pump/poll verification passed 1060/1060 combined HTTP/2 and gRPC
+tests and 20/20 package tests. The pinned grpc-cpp dual-stream gate uses the
+wake-capable pump on the zio backend over h2c and verified TLS. Malformed DATA
+also returns its consumed credit within the same operation deadline: a blocked
+refund preserves the original protocol error, restores local accounting and
+retires connection writes/reuse. A real saturated TCP regression bounds that
+return path and prevents an unbounded refund from hiding inside a poll.

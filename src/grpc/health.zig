@@ -79,6 +79,7 @@ test {
     _ = client;
     _ = reconnecting;
     _ = @import("health/multiplex_tests.zig");
+    _ = @import("health/pump_tests.zig");
 }
 
 pub fn encodeRequestAlloc(

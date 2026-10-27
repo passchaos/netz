@@ -305,6 +305,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.health, "check"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "ClientWatch"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "activeClientDuplexCount"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "pumpClientDuplexWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "pumpClientDuplexWithDeadlineOrWake"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.ClientDuplexStream, "pollResponseEventWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "pollResponseEventWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.health.ClientWatch, "pollNextWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "startWatch"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "startWatchWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "startWatchWithDeadline"));

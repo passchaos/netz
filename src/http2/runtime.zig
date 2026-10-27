@@ -11,6 +11,8 @@ const flow_output = @import("runtime/flow/output.zig");
 const outbound_headers = @import("runtime/headers/connection.zig");
 const client_authority = @import("runtime/client/authority.zig");
 const client_duplex_owner = @import("runtime/duplex/client_owner.zig");
+const duplex_wake = @import("runtime/duplex/wake.zig");
+pub const ClientDuplexPumpEvent = client_duplex_owner.PumpEvent;
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/client/authority_tests.zig");
@@ -41,6 +43,7 @@ test {
     _ = @import("runtime/stream/peer_termination_tests.zig");
     _ = client_duplex_owner;
     _ = @import("runtime/duplex/client_tests.zig");
+    _ = @import("runtime/duplex/pump_tests.zig");
 }
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
@@ -11537,19 +11540,66 @@ pub const Connection = struct {
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
-        return client_duplex_owner.read(self, stream_id, deadline, .{
-            .Error = Error,
-            .Frame = OwnedFrame,
-            .peek = peekQueuedFrameForStream,
-            .pop = popQueuedFrameForStream,
-            .readWire = readClientDuplexWireFrame,
-            .sequence = validateClientDuplexHeaderSequence,
-            .header = queueClientDuplexHeader,
-            .decoded = deferredHeaderIsDecoded,
-            .connectionFrame = handleConnectionFrameUntil,
-            .sibling = queueDuplexSiblingFrameUntil,
-            .discardCanceled = discardQueuedResetFramesUntil,
-        });
+        return client_duplex_owner.read(self, stream_id, deadline, client_duplex_hooks);
+    }
+
+    const client_duplex_hooks = .{
+        .Error = Error,
+        .Frame = OwnedFrame,
+        .peek = peekQueuedFrameForStream,
+        .pop = popQueuedFrameForStream,
+        .readWire = readClientDuplexWireFrame,
+        .sequence = validateClientDuplexHeaderSequence,
+        .header = queueClientDuplexHeader,
+        .decoded = deferredHeaderIsDecoded,
+        .connectionFrame = handleConnectionFrameUntil,
+        .sibling = queueDuplexSiblingFrameUntil,
+        .discardCanceled = discardQueuedResetFramesUntil,
+        .goaway = recordClientDuplexGoAway,
+    };
+
+    fn recordClientDuplexGoAway(self: *Connection, frame: http2.Frame) Error!void {
+        try self.recordPeerGoAway(try http2.GoAwayPayload.parse(frame));
+    }
+
+    fn pollOwnedClientDuplexFrame(self: *Connection, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) Error!?OwnedFrame {
+        return client_duplex_owner.poll(self, stream_id, deadline, client_duplex_hooks);
+    }
+
+    /// Read and route one input frame. Application stream IDs are hints to
+    /// poll; connection control and partial HEADERS report progress. One owner
+    /// must serially drive this pump and all client duplex handles.
+    pub fn pumpClientDuplexWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!ClientDuplexPumpEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try self.checkClientDuplexPump();
+        return client_duplex_owner.ingest(self, try self.readClientDuplexWireFrame(deadline), deadline, client_duplex_hooks);
+    }
+
+    pub fn pumpClientDuplexWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!ClientDuplexPumpEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pumpClientDuplexWithDeadline(.fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    /// Wake for new commands without abandoning partial input. The canceled
+    /// read is joined before return; a simultaneously completed frame is routed.
+    pub fn pumpClientDuplexWithDeadlineOrWake(self: *Connection, deadline: std.Io.Clock.Timestamp, wake: *std.Io.Event) Error!ClientDuplexPumpEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try self.checkClientDuplexPump();
+        const result = duplex_wake.read(self, deadline, wake, OwnedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
+        return switch (result) {
+            .frame => |frame| try client_duplex_owner.ingest(self, frame, deadline, client_duplex_hooks),
+            .wake => .wake,
+        };
+    }
+
+    fn checkClientDuplexPump(self: *const Connection) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.role != .client or self.client_duplex_owners.count() == 0 or self.callback_reader_active) return error.UnexpectedFrame;
+    }
+
+    fn retainInterruptedClientDuplexFrame(self: *Connection, frame: OwnedFrame) void {
+        std.debug.assert(!self.duplex_pending_frame.hasValue());
+        self.duplex_pending_frame.put(frame);
     }
 
     fn readClientDuplexWireFrame(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!OwnedFrame {
@@ -20467,7 +20517,7 @@ pub const ClientDuplexStream = struct {
     pub fn readResponseEvent(
         self: *ClientDuplexStream,
     ) Error!DuplexResponseEvent {
-        return self.readResponseEventUntil(null);
+        return (try self.readResponseEventUntil(null, false)).?;
     }
 
     pub fn readResponseEventWithTimeout(
@@ -20475,10 +20525,10 @@ pub const ClientDuplexStream = struct {
         timeout: std.Io.Duration,
     ) Error!DuplexResponseEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseEventUntil(.fromNow(
+        return (try self.readResponseEventUntil(.fromNow(
             self.connection.io,
             .{ .raw = timeout, .clock = .awake },
-        ));
+        ), false)).?;
     }
 
     pub fn readResponseEventWithDeadline(
@@ -20486,13 +20536,30 @@ pub const ClientDuplexStream = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!DuplexResponseEvent {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
-        return self.readResponseEventUntil(deadline);
+        return (try self.readResponseEventUntil(deadline, false)).?;
+    }
+
+    /// Consume only routed events. This never reads the socket; DATA may
+    /// return receive credit through bounded output when a deadline is given.
+    pub fn pollResponseEvent(self: *ClientDuplexStream) Error!?DuplexResponseEvent {
+        return self.readResponseEventUntil(null, true);
+    }
+
+    pub fn pollResponseEventWithDeadline(self: *ClientDuplexStream, deadline: std.Io.Clock.Timestamp) Error!?DuplexResponseEvent {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.readResponseEventUntil(deadline, true);
+    }
+
+    fn nextResponseFrame(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp, buffered: bool) Error!?OwnedFrame {
+        if (buffered) return self.connection.pollOwnedClientDuplexFrame(self.stream_id, deadline);
+        return try self.connection.readOwnedClientDuplexFrameWithDeadline(self.stream_id, deadline);
     }
 
     fn readResponseEventUntil(
         self: *ClientDuplexStream,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!DuplexResponseEvent {
+        buffered: bool,
+    ) Error!?DuplexResponseEvent {
         if (self.response_finished_reported) {
             return error.ConnectionClosed;
         }
@@ -20503,16 +20570,24 @@ pub const ClientDuplexStream = struct {
         }
         if (self.connection.aggregate_timeout_unusable) return error.ConnectionClosed;
         while (true) {
+            if (self.connection.peer_goaway_last_stream_id) |last| {
+                if (self.stream_id > last) {
+                    self.connection.releaseLocalStream(self.stream_id);
+                    return error.ConnectionGoAway;
+                }
+            }
             if (self.pending_header.getPtr()) |pending| {
+                if (buffered and !pending.end_headers) return null;
                 const end_stream = pending.end_stream;
                 const headers = (try pending.resumeUntil(
                     self.connection,
                     deadline,
                 )).?;
                 self.pending_header.deinit(self.connection.allocator);
-                return self.applyResponseHeaders(headers, end_stream);
+                return try self.applyResponseHeaders(headers, end_stream);
             }
-            var frame = self.connection.readOwnedClientDuplexFrameWithDeadline(self.stream_id, deadline) catch |err| {
+            const next_frame = self.nextResponseFrame(deadline, buffered);
+            var frame = (next_frame catch |err| {
                 if (err != error.Timeout) {
                     if (self.connection.pending_duplex_sibling_header.getPtr()) |pending| {
                         if (pending.header.stream_id == self.stream_id) {
@@ -20526,7 +20601,7 @@ pub const ClientDuplexStream = struct {
                     }
                 }
                 return err;
-            };
+            }) orelse return null;
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) continue;
@@ -20555,7 +20630,7 @@ pub const ClientDuplexStream = struct {
                         return err;
                     };
                     if (deferred_fields) |fields| {
-                        return self.applyResponseHeaders(fields, (frame.frame.header.flags & flag_end_stream) != 0);
+                        return try self.applyResponseHeaders(fields, (frame.frame.header.flags & flag_end_stream) != 0);
                     }
                     self.pending_header.put(try DuplexHeaderBlock.init(
                         self.connection,
@@ -20568,7 +20643,7 @@ pub const ClientDuplexStream = struct {
                         deadline,
                     )).?;
                     self.pending_header.deinit(self.connection.allocator);
-                    return self.applyResponseHeaders(headers, end_stream);
+                    return try self.applyResponseHeaders(headers, end_stream);
                 },
                 .data => {
                     if (!self.response_head_seen) return error.UnexpectedFrame;
@@ -20587,9 +20662,16 @@ pub const ClientDuplexStream = struct {
                         !self.response_body_forbidden,
                         end_stream,
                     ) catch |err| {
-                        self.connection.releaseConnectionCapacity(
+                        self.connection.releaseConnectionCapacityUntil(
                             frame.frame.payload.len,
-                        ) catch {};
+                            deadline,
+                        ) catch {
+                            self.connection.aggregate_timeout_unusable = true;
+                            self.connection.terminal_write_failed = true;
+                            // The failed write rolled back its window grant.
+                            // Retire the consumed bytes locally during unwind.
+                            self.connection.recv_connection_window.update(@intCast(frame.frame.payload.len)) catch {};
+                        };
                         return @errorCast(err);
                     };
                     if (end_stream) {

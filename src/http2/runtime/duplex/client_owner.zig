@@ -3,6 +3,12 @@
 //! when the owning handle moves.
 const std = @import("std");
 
+pub const PumpEvent = union(enum) {
+    stream: u31,
+    progress,
+    wake,
+};
+
 pub const Owners = struct {
     value: usize = 0,
 
@@ -27,6 +33,50 @@ pub fn queuedIndex(frames: anytype, start: usize, stream_id: u31) ?usize {
     return null;
 }
 
+pub fn poll(connection: anytype, stream_id: u31, deadline: ?std.Io.Clock.Timestamp, comptime hooks: anytype) hooks.Error!?hooks.Frame {
+    if (connection.aggregate_timeout_unusable) return error.ConnectionClosed;
+    if (connection.callback_reader_active) return error.UnexpectedFrame;
+    try hooks.discardCanceled(connection, deadline);
+    if (hooks.peek(connection, stream_id)) |queued| {
+        if (queued.header.frame_type != .headers or hooks.decoded(connection, queued)) {
+            return hooks.pop(connection, stream_id);
+        }
+    }
+    return null;
+}
+
+/// Consume one already-owned input frame. The shared pump queues application
+/// events and advances HPACK in wire order; individual handles poll that queue.
+pub fn ingest(connection: anytype, input: anytype, deadline: ?std.Io.Clock.Timestamp, comptime hooks: anytype) hooks.Error!PumpEvent {
+    var frame = input;
+    var owned = true;
+    defer if (owned) frame.deinit(connection.allocator);
+    try hooks.sequence(connection, frame.frame, deadline);
+    switch (frame.frame.header.frame_type) {
+        .headers, .continuation => {
+            if (try hooks.header(connection, frame)) owned = false;
+            if (hooks.peek(connection, frame.frame.header.stream_id)) |queued| {
+                if (queued.header.frame_type != .headers or hooks.decoded(connection, queued)) {
+                    return .{ .stream = frame.frame.header.stream_id };
+                }
+            }
+            return .progress;
+        },
+        else => {},
+    }
+    if (try hooks.connectionFrame(connection, frame.frame, deadline)) return .progress;
+    if (frame.frame.header.frame_type == .goaway) {
+        try hooks.goaway(connection, frame.frame);
+        return .progress;
+    }
+    hooks.sibling(connection, frame) catch |err| {
+        connection.aggregate_timeout_unusable = true;
+        return err;
+    };
+    owned = false;
+    return .{ .stream = frame.frame.header.stream_id };
+}
+
 /// Decode every HEADERS section in wire order before exposing a stream's
 /// frames. Polling another handle after a partial section cannot advance HPACK
 /// past that section, and deferred fields are never decoded a second time.
@@ -39,12 +89,7 @@ pub fn read(
     if (connection.aggregate_timeout_unusable) return error.ConnectionClosed;
     if (connection.callback_reader_active) return error.UnexpectedFrame;
     while (true) {
-        try hooks.discardCanceled(connection, deadline);
-        if (hooks.peek(connection, stream_id)) |queued| {
-            if (queued.header.frame_type != .headers or hooks.decoded(connection, queued)) {
-                return hooks.pop(connection, stream_id).?;
-            }
-        }
+        if (try poll(connection, stream_id, deadline, hooks)) |queued| return queued;
         var frame = try hooks.readWire(connection, deadline);
         var owned = true;
         defer if (owned) frame.deinit(connection.allocator);

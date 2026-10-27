@@ -370,6 +370,59 @@ pub const ClientDuplex = struct {
         );
     }
 
+    /// Consume only events routed by the shared HTTP/2 pump. No socket input
+    /// is read. DATA credit and terminal cleanup retain their finite budgets.
+    pub fn pollResponseEvent(
+        self: *ClientDuplex,
+        context: anytype,
+        comptime consume: anytype,
+    ) !?ClientEvent {
+        return self.pollResponseEventUntil(self.deadline, self.deadline != null, context, consume);
+    }
+
+    pub fn pollResponseEventWithDeadline(
+        self: *ClientDuplex,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !?ClientEvent {
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
+        const rpc_limited = if (self.deadline) |rpc|
+            !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc)
+        else
+            false;
+        return self.pollResponseEventUntil(effective, rpc_limited, context, consume);
+    }
+
+    fn pollResponseEventUntil(
+        self: *ClientDuplex,
+        deadline: ?std.Io.Clock.Timestamp,
+        cancel_on_timeout: bool,
+        context: anytype,
+        comptime consume: anytype,
+    ) !?ClientEvent {
+        if (self.pending_terminal) |response| {
+            self.pending_terminal = null;
+            self.receive_state = .terminal_delivered;
+            return .{ .terminal = response };
+        }
+        if (self.receive_state != .active) return error.ConnectionClosed;
+        const event = (if (deadline) |absolute|
+            self.transport.pollResponseEventWithDeadline(absolute)
+        else
+            self.transport.pollResponseEvent()) catch |err| {
+            if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) {
+                self.fail(if (err == error.Timeout) .cancel else .internal_error);
+            }
+            return err;
+        };
+        return if (event) |ready|
+            try self.readResponseEventTransport(ready, deadline, context, consume)
+        else
+            null;
+    }
+
     fn readResponseEventWithRpcDeadline(
         self: *ClientDuplex,
         deadline: ?std.Io.Clock.Timestamp,
@@ -388,7 +441,7 @@ pub const ClientDuplex = struct {
             deadline,
         ) catch |err| {
             if (err == error.Timeout) {
-                if (cancel_on_timeout) self.fail(.cancel);
+                if (cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) self.fail(.cancel);
             } else {
                 self.fail(.internal_error);
             }
