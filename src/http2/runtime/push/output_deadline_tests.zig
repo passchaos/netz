@@ -158,6 +158,9 @@ test "HTTP/2 pushed response deadline retires a promise after committed HEADERS"
     var fixture = try BlockedOutput.init(threaded.io(), .server);
     defer fixture.deinit();
     const connection = &fixture.connection;
+    // DATA must retain its short RPC deadline; its terminal CANCEL has an
+    // independent budget and is expected to complete on this writable socket.
+    connection.limits.terminal_cleanup_timeout = .fromSeconds(1);
     try runtime.testing.addActivePeerStream(connection, 1);
     const fields = requestFields("/flow-blocked");
     const promised = try connection.promisePushWithTimeout(

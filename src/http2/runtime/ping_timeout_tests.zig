@@ -328,7 +328,7 @@ test "HTTP/2 aggregate request deadline cancels admitted stream and fails closed
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
+        .{ .terminal_cleanup_timeout = .fromSeconds(1) },
     );
     defer server.deinit();
 
@@ -606,7 +606,7 @@ test "HTTP/2 bounded streaming request callback errors cancel once" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
+        .{ .terminal_cleanup_timeout = .fromSeconds(1) },
     );
     defer server.deinit();
 
@@ -1059,7 +1059,7 @@ test "HTTP/2 streaming request batch deadline is not renewed by completion" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
+        .{ .terminal_cleanup_timeout = .fromSeconds(1) },
     );
     defer server.deinit();
 

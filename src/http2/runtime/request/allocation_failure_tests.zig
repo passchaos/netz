@@ -19,7 +19,9 @@ const Fixture = struct {
         const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
         const peer = try listener.accept(io);
-        return .{ .connection = .{ .io = io, .allocator = allocator, .stream = stream, .role = .server }, .peer = peer };
+        // These cases verify allocation ownership and completed cancellation;
+        // blocked-output deadline behavior has its own fixture and assertions.
+        return .{ .connection = .{ .io = io, .allocator = allocator, .stream = stream, .role = .server, .limits = .{ .terminal_cleanup_timeout = .fromSeconds(1) } }, .peer = peer };
     }
 
     fn deinit(self: *@This()) void {

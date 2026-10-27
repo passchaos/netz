@@ -26,7 +26,16 @@ fn exercise(tls12: bool, mode: Mode) !void {
     var server = try runtime.TlsServer.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .identity = .{ .certificate_chain = &.{&certificate}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } } },
         .protocol_policy = if (tls12) .tls12_only else .tls13_only,
-        .limits = .{ .terminal_cleanup_timeout = if (mode == .disabled) .zero else .fromMilliseconds(20) },
+        .limits = .{
+            .terminal_cleanup_timeout = switch (mode) {
+                .disabled => .zero,
+                // Healthy and injected-error cases must reach their output steps.
+                .healthy, .partial => .fromSeconds(1),
+                // Retain the 400 ms return bound with room for TLS/task scheduling.
+                .blocked, .close_blocked => .fromMilliseconds(100),
+                .post_handshake_blocked => unreachable,
+            },
+        },
     });
     defer server.deinit();
     const stream = try server.address().connect(io, .{ .mode = .stream });
