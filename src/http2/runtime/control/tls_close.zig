@@ -1,4 +1,5 @@
-//! Terminal TLS output shares the caller's GOAWAY budget and is never retried.
+//! Terminal TLS output is bounded and never retried. Bootstrap callers share
+//! the GOAWAY cleanup deadline; established teardown supplies its own budget.
 const std = @import("std");
 const deadline_policy = @import("../../../internal/deadline.zig");
 

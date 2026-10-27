@@ -4,44 +4,9 @@ const builtin = @import("builtin");
 const runtime = @import("../../runtime.zig");
 const http2 = @import("../../mod.zig");
 const tls = @import("../../../tls/mod.zig");
+const BlockedTlsWrite = @import("../testing/blocked_tls_write.zig").BlockedTlsWrite;
 const allocator = std.testing.allocator;
-const Mode = enum { healthy, disabled, blocked, partial, close_blocked };
-
-const Writer = struct {
-    var active: std.atomic.Value(?*@This()) = .init(null);
-    io: std.Io,
-    mode: Mode,
-    socket: std.Io.net.Socket.Handle,
-    armed: std.atomic.Value(bool) = .init(false),
-    calls: std.atomic.Value(usize) = .init(0),
-    canceled: std.atomic.Value(bool) = .init(false),
-    wait: std.Io.Event = .unset,
-
-    fn write(_: ?*anyopaque, socket: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-        const self = active.load(.acquire).?;
-        if (socket != self.socket or !self.armed.load(.acquire)) return self.io.vtable.netWrite(self.io.userdata, socket, header, parts, splat);
-        const call = self.calls.fetchAdd(1, .monotonic);
-        switch (self.mode) {
-            .disabled => return error.NetworkDown,
-            .partial => return if (call == 0) @min(header.len, 4) else error.NetworkDown,
-            .blocked, .close_blocked => {
-                if (self.mode == .blocked or call != 0) {
-                    self.wait.wait(self.io) catch |err| {
-                        self.canceled.store(true, .release);
-                        return err;
-                    };
-                }
-            },
-            .healthy => {},
-        }
-        return self.io.vtable.netWrite(self.io.userdata, socket, header, parts, splat);
-    }
-
-    fn rescue(self: *@This()) void {
-        std.Io.sleep(self.io, .fromMilliseconds(500), .awake) catch {};
-        self.wait.set(self.io);
-    }
-};
+const Mode = @import("../testing/blocked_tls_write.zig").Mode;
 
 test "HTTP/2 handshake protocol error bounds TLS12 and TLS13 GOAWAY and close notify" {
     if (comptime builtin.os.tag != .linux) return;
@@ -67,13 +32,13 @@ fn exercise(tls12: bool, mode: Mode) !void {
     var peer_owned = true;
     defer if (peer_owned) stream.close(io);
     const accepted = try server.listener.accept(io);
-    var writer = Writer{ .io = io, .mode = mode, .socket = accepted.socket.handle };
-    Writer.active.store(&writer, .release);
-    defer Writer.active.store(null, .release);
-    var vtable = io.vtable.*;
-    vtable.netWrite = Writer.write;
-    server.io = .{ .userdata = io.userdata, .vtable = &vtable };
-    defer server.io = io;
+    var writer = BlockedTlsWrite{ .io = io, .mode = mode, .socket = accepted.socket.handle };
+    var vtable: std.Io.VTable = undefined;
+    server.io = writer.install(&vtable, io);
+    defer {
+        server.io = io;
+        BlockedTlsWrite.clear();
+    }
     const Shared = struct {
         server: *runtime.TlsServer,
         stream: std.Io.net.Stream,
@@ -108,7 +73,7 @@ fn exercise(tls12: bool, mode: Mode) !void {
     defer peer.deinit();
     try std.testing.expectEqualStrings("h2", peer.selected_alpn.?);
     writer.armed.store(true, .release);
-    const rescue = try std.Thread.spawn(.{}, Writer.rescue, .{&writer});
+    const rescue = try std.Thread.spawn(.{}, BlockedTlsWrite.rescue, .{&writer});
     defer rescue.join();
     const started = std.Io.Clock.awake.now(io);
     try peer.writeAll("x" ** http2.connection_preface.len);

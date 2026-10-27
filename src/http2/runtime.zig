@@ -23,6 +23,7 @@ test {
     _ = @import("runtime/control/extension_deadline_tests.zig");
     _ = @import("runtime/control/output_deadline_tests.zig");
     _ = @import("runtime/control/protocol_error_deadline_tests.zig");
+    _ = @import("runtime/control/tls_close_tests.zig");
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/request/complete_deadline_tests.zig");
@@ -509,10 +510,12 @@ pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     /// Best-effort control output after a discarded response, owned
-    /// stream cancellation/destruction, terminal early response, or protocol
-    /// error. The RPC keeps its original deadline; cleanup may add at most
-    /// this separate shared transport budget to the return path. Zero skips
-    /// writes.
+    /// stream cancellation/destruction, terminal early response, protocol
+    /// error, or connection teardown. The RPC keeps its original deadline;
+    /// cleanup may add at most this separate shared transport budget to the
+    /// return path. It bounds both GOAWAY frames and the TLS close_notify
+    /// written while discarding a handshake or closing an established
+    /// connection. Zero skips writes.
     terminal_cleanup_timeout: std.Io.Duration = .fromMilliseconds(10),
     max_header_fields: usize = 256,
     /// Maximum interim response heads accepted before a final response. This
@@ -4041,7 +4044,15 @@ pub const Connection = struct {
         self.pending_duplex_request_head.deinit(self.allocator);
         self.duplex_pending_frame.deinit(self.allocator);
         self.frame_reader.deinit(self.allocator);
-        self.transportForIo().close();
+        const transport = self.transportForIo();
+        // The TLS destructor otherwise sends close_notify with no budget. Give
+        // terminal alert output the same finite cleanup bound as GOAWAY frames;
+        // a blocked peer cannot extend the connection lifetime past teardown.
+        terminal_tls_output.closeNotify(
+            transport,
+            response_cleanup.cleanupDeadline(self, null),
+        );
+        transport.close();
         self.* = undefined;
     }
 

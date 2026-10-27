@@ -484,10 +484,13 @@ Current protocol coverage includes:
   `Limits.terminal_cleanup_timeout` budget (10 ms by default, zero skips
   output), is stack-encoded without allocation, preserves the original
   error, and stops after a failed terminal write; the terminal TLS
-  close_notify shares that same single remaining budget and is suppressed
-  after a failed write or with a partial TLS record pending, so neither
-  GOAWAY nor alert output can outlive handshake cleanup; queued request
-  overflow shares this budget across resets and GOAWAY,
+  close_notify shares that same single remaining budget during bootstrap
+  and receives its own equal-sized budget on established-connection
+  teardown (replacing the TLS destructor's formerly unbounded alert write),
+  and is suppressed after a failed write or with a partial TLS record
+  pending, so neither GOAWAY nor alert output can outlive connection
+  cleanup; queued request overflow shares this budget across resets
+  and GOAWAY,
   exact dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
   peer table-size update emission plus h2/hyper-style non-indexing for volatile or oversized fields and automatic
   never-index encoding for sensitive fields, fixed-control-frame and preallocated control-frame write fast paths, PING with opaque ACK matching plus explicit absolute-deadline round trips whose budget covers probe/ACK writes as well as reads, and a reusable single-reader inactivity-aware keep-alive driver with active/idle policy, monotonic probe payloads, connection-control processing and a configurable bounded FIFO preserving interleaved application frames, GOAWAY/WINDOW_UPDATE connection
