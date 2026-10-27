@@ -272,9 +272,10 @@ test "HTTP/2 request allocation failure stops cancellation after a partial reset
 
 fn partialCleanupWrite(with_data: bool) !void {
     const Writer = struct {
+        var active: std.atomic.Value(?*@This()) = .init(null);
         calls: usize = 0,
-        fn write(context: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+        fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
+            const self = active.load(.acquire).?;
             self.calls += 1;
             if (self.calls == 1) return @min(header.len, 4);
             return error.NetworkDown;
@@ -297,8 +298,10 @@ fn partialCleanupWrite(with_data: bool) !void {
         try appendRequest(connection, 5, .empty);
         try wire.appendFrame(&connection.frame_reader.buffer, allocator, .data, 1, 1, "");
         var writer: Writer = .{};
+        Writer.active.store(&writer, .release);
+        defer Writer.active.store(null, .release);
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
-        connection.io = .{ .userdata = &writer, .vtable = &vtable };
+        connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
         connection.allocator = failing.allocator();
         const outcome = read(connection, .aggregate, false);
         connection.io = io;

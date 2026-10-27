@@ -554,6 +554,14 @@ pending-request overflow cancellation shares one absolute cleanup deadline.
 Real certificate-pinned TLS 1.2/1.3 probes hold server ciphertext output and
 verify cancellation/join, retained records, and no later resubmission.
 
+Discarded HTTP/2 request-reader state now uses one bounded terminal deadline
+across connection-credit refunds, current-stream CANCEL, and queued-sibling
+cancellation. This covers internal OOM and transport Timeout as well as
+application rejection, preserving the original error after cleanup failure.
+A partial WINDOW_UPDATE forbids subsequent control writes; local held credit
+is still restored when output fails or cleanup writes are disabled. CONNECT
+abandonment and tunnel reset/abort use the same finite cleanup policy.
+
 ## gRPC-Web unary and server streaming support
 
 The production h2c/TLS gRPC server now speaks the gRPC-Web wire protocol

@@ -23,6 +23,7 @@ test {
     _ = @import("runtime/push/output_deadline_tests.zig");
     _ = @import("runtime/request/output_deadline_tests.zig");
     _ = @import("runtime/request/complete_deadline_tests.zig");
+    _ = @import("runtime/request/cleanup_deadline_tests.zig");
     _ = @import("runtime/request/batch_output_deadline_tests.zig");
     _ = @import("runtime/request/batch_progress_tests.zig");
     _ = @import("runtime/request/batch_tls_deadline_tests.zig");
@@ -9896,6 +9897,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending| return pending;
         var active_stream_id: ?u31 = null;
+        var cleanup_budget: request_cleanup.Budget = .{};
         errdefer |err| if (self.serve_read_connection_error == null) {
             if (active_stream_id) |stream_id| {
                 if (serveRequestStreamErrorCode(err)) |code| {
@@ -9911,11 +9913,13 @@ pub const Connection = struct {
             // Once a stream has been admitted, a retry cannot reconstruct that
             // state, so cancel it and fail the connection closed.
             if (active_stream_id) |stream_id| {
-                self.failDiscardedRequest(stream_id);
+                self.failDiscardedRequestBefore(stream_id, cleanup_budget.get(self, deadline, err == error.Timeout));
             }
         };
         var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        errdefer |err| if (active_stream_id != null or receive_credit.unreleased_connection_bytes != 0) {
+            self.releaseDiscardedMessageCapacityBefore(receive_credit.unreleased_connection_bytes, cleanup_budget.get(self, deadline, err == error.Timeout));
+        };
         while (true) {
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
@@ -9985,6 +9989,7 @@ pub const Connection = struct {
                                 expected_request_len,
                                 deadline,
                                 &receive_credit,
+                                &cleanup_budget,
                             );
                             switch (incoming) {
                                 .direct_data => |end_stream| {
@@ -10017,6 +10022,7 @@ pub const Connection = struct {
                                         if (try self.queueCompletePeerRequestFrameUntil(
                                             owned.frame,
                                             deadline,
+                                            &cleanup_budget,
                                         )) continue;
                                         return error.UnexpectedFrame;
                                     }
@@ -10037,7 +10043,7 @@ pub const Connection = struct {
                                                 self.limits.max_body_bytes,
                                                 (owned.frame.header.flags & flag_end_stream) != 0,
                                             ) catch |err| {
-                                                self.releaseDiscardedMessageCapacity(owned.frame.payload.len);
+                                                self.releaseDiscardedMessageCapacityBefore(owned.frame.payload.len, cleanup_budget.get(self, deadline, false));
                                                 return @errorCast(err);
                                             };
                                             try body.appendSlice(
@@ -10443,6 +10449,7 @@ pub const Connection = struct {
         var active_stream_id: ?u31 = null;
         var read_timed_out = false;
         var callback_failed = false;
+        var cleanup_budget: request_cleanup.Budget = .{};
         // Callbacks may themselves return Timeout or OutOfMemory. Keep their
         // stream-local rejection policy separate from internal failures that
         // discard decoder/body progress and prevent connection reuse.
@@ -10450,11 +10457,13 @@ pub const Connection = struct {
             (failure == error.OutOfMemory and !callback_failed))
         {
             if (active_stream_id) |stream_id| {
-                self.failDiscardedRequest(stream_id);
+                self.failDiscardedRequestBefore(stream_id, cleanup_budget.get(self, deadline, read_timed_out));
             }
         };
         var receive_credit: flow_credit.Tracker = .{};
-        errdefer self.releaseDiscardedMessageCapacity(receive_credit.unreleased_connection_bytes);
+        errdefer if (active_stream_id != null or receive_credit.unreleased_connection_bytes != 0) {
+            self.releaseDiscardedMessageCapacityBefore(receive_credit.unreleased_connection_bytes, cleanup_budget.get(self, deadline, read_timed_out and !callback_failed));
+        };
         while (true) {
             var pending_owned: ?OwnedFrame = null;
             defer if (pending_owned) |*owned| {
@@ -10536,7 +10545,7 @@ pub const Connection = struct {
                     // the whole stream so a rejected head cannot leave the
                     // client waiting.
                     callback_failed = true;
-                    self.cancelPeerRequest(stream_id);
+                    self.abandonPeerRequestBefore(stream_id, .cancel, cleanup_budget.get(self, deadline, false));
                     return @as(anyerror!StreamingRequest, err);
                 };
             }
@@ -10572,6 +10581,7 @@ pub const Connection = struct {
                         if (self.queueCompletePeerRequestFrameUntil(
                             frame,
                             deadline,
+                            &cleanup_budget,
                         ) catch |err| {
                             read_timed_out =
                                 deadline != null and err == error.Timeout;
@@ -10595,7 +10605,7 @@ pub const Connection = struct {
                                 self.limits.max_body_bytes,
                                 (frame.header.flags & flag_end_stream) != 0,
                             ) catch |err| {
-                                self.releaseDiscardedMessageCapacity(frame.payload.len);
+                                self.releaseDiscardedMessageCapacityBefore(frame.payload.len, cleanup_budget.get(self, deadline, false));
                                 return @as(anyerror!StreamingRequest, err);
                             };
                             if (data.data.len != 0) {
@@ -10610,14 +10620,13 @@ pub const Connection = struct {
                                         // restore exact shared connection
                                         // credit and cancel this stream before
                                         // surfacing the application error.
-                                        self.releaseConnectionCapacity(
-                                            frame.payload.len,
-                                        ) catch {};
+                                        const before = cleanup_budget.get(self, deadline, false);
+                                        self.releaseDiscardedMessageCapacityBefore(frame.payload.len, before);
                                         // Even final request DATA leaves the
                                         // server response half open; terminate
                                         // it when the application rejects the
                                         // body.
-                                        self.cancelPeerRequest(stream_id);
+                                        self.abandonPeerRequestBefore(stream_id, .cancel, before);
                                         return @as(anyerror!StreamingRequest, err);
                                     };
                                 }
@@ -10803,6 +10812,7 @@ pub const Connection = struct {
         var current_stream_id: ?u31 = null;
         var stream_error_code: ?http2.ErrorCode = null;
         var callback_failed = false;
+        var cleanup_budget: request_cleanup.Budget = .{};
         errdefer |err| request_batch_cleanup.abort(self, requests[0..initialized], .{
             .cause = err,
             .stream_id = current_stream_id,
@@ -10812,12 +10822,13 @@ pub const Connection = struct {
                 (err == error.OutOfMemory and !callback_failed and
                     (initialized != 0 or active_uninitialized_stream_id != null)),
             .callback_failed = callback_failed,
+            .before = cleanup_budget.get(self, deadline, err == error.Timeout and !callback_failed),
         }, .{
-            .sendConnectionError = sendServeReadError,
+            .sendConnectionError = sendServeReadErrorBefore,
             .streamErrorCode = serveRequestStreamErrorCode,
-            .reset = writeResetStreamFrame,
-            .terminalReset = writeTerminalResetStream,
-            .errorReset = writeLocalErrorResetStream,
+            .reset = writeResetStreamFrameUntil,
+            .terminalReset = writeTerminalResetStreamUntil,
+            .errorReset = writeLocalErrorResetStreamUntil,
             .releasePeer = releasePeerStream,
             .forgetWindows = forgetStreamWindows,
             .pendingId = PendingRequest.streamId,
@@ -10825,8 +10836,8 @@ pub const Connection = struct {
         });
         // All batch members are discarded on failure. Reclaim the DATA still
         // held by each member before abort() removes its stream windows.
-        errdefer for (credits[0..initialized]) |credit| {
-            self.releaseDiscardedMessageCapacity(credit.unreleased_connection_bytes);
+        errdefer |err| for (credits[0..initialized]) |credit| {
+            self.releaseDiscardedMessageCapacityBefore(credit.unreleased_connection_bytes, cleanup_budget.get(self, deadline, err == error.Timeout and !callback_failed));
         };
 
         while (completed < requests.len) {
@@ -10984,7 +10995,7 @@ pub const Connection = struct {
                     defer flow_credit.account(credits[0..initialized], index, connection_before, self.recv_connection_window.value, data.adaptive_connection_increment) catch unreachable;
                     defer self.releaseDataFrameBudget(data);
                     if (done[index]) {
-                        self.releaseDiscardedMessageCapacity(frame.payload.len);
+                        self.releaseDiscardedMessageCapacityBefore(frame.payload.len, cleanup_budget.get(self, deadline, false));
                         stream_error_code = .stream_closed;
                         return error.UnexpectedFrame;
                     }
@@ -10995,7 +11006,7 @@ pub const Connection = struct {
                         self.limits.max_body_bytes,
                         (frame.header.flags & flag_end_stream) != 0,
                     ) catch |err| {
-                        self.releaseDiscardedMessageCapacity(frame.payload.len);
+                        self.releaseDiscardedMessageCapacityBefore(frame.payload.len, cleanup_budget.get(self, deadline, false));
                         return @errorCast(err);
                     };
                     if (data.data.len != 0) {
@@ -11008,9 +11019,7 @@ pub const Connection = struct {
                             // The error path resets every batch member, so no
                             // stream credit will be consumed again. Restore
                             // only the shared connection window.
-                            self.releaseConnectionCapacity(
-                                frame.payload.len,
-                            ) catch {};
+                            self.releaseDiscardedMessageCapacityBefore(frame.payload.len, cleanup_budget.get(self, deadline, false));
                             return @errorCast(err);
                         };
                     }
@@ -11904,6 +11913,7 @@ pub const Connection = struct {
         expected_length: ?usize,
         deadline: ?std.Io.Clock.Timestamp,
         receive_credit: *flow_credit.Tracker,
+        cleanup_budget: *request_cleanup.Budget,
     ) Error!RequestBodyFrame {
         const borrowed = try self.readBufferedFrameWithDeadline(deadline);
         const header = borrowed.frame.header;
@@ -11918,7 +11928,7 @@ pub const Connection = struct {
         defer receive_credit.observe(connection_before, self.recv_connection_window.value, data.adaptive_connection_increment);
         defer self.releaseDataFrameBudget(data);
         _ = checkedBodyLength(expected_length, body.items.len, data.data.len, self.limits.max_body_bytes, (header.flags & flag_end_stream) != 0) catch |err| {
-            self.releaseDiscardedMessageCapacity(borrowed.frame.payload.len);
+            self.releaseDiscardedMessageCapacityBefore(borrowed.frame.payload.len, cleanup_budget.get(self, deadline, false));
             return @errorCast(err);
         };
         try body.appendSlice(self.allocator, data.data);
@@ -11937,6 +11947,7 @@ pub const Connection = struct {
         self: *Connection,
         frame: http2.Frame,
         deadline: ?std.Io.Clock.Timestamp,
+        cleanup_budget: *request_cleanup.Budget,
     ) Error!bool {
         if (frame.header.frame_type != .headers) return false;
         const stream_id = frame.header.stream_id;
@@ -11959,7 +11970,7 @@ pub const Connection = struct {
         var release_stream_on_error = true;
         errdefer |failure| if (release_stream_on_error) {
             if (failure == error.OutOfMemory) {
-                self.failDiscardedRequest(stream_id);
+                self.failDiscardedRequestBefore(stream_id, cleanup_budget.get(self, deadline, false));
             } else {
                 self.releasePeerStream(stream_id);
             }
@@ -11971,7 +11982,7 @@ pub const Connection = struct {
                 // HPACK block still needs CONTINUATION. It was admitted above,
                 // so retire it independently from the active request whose
                 // reader will also fail closed.
-                self.cancelPeerRequest(stream_id);
+                self.abandonPeerRequestBefore(stream_id, .cancel, cleanup_budget.get(self, deadline, true));
                 release_stream_on_error = false;
             }
             return @as(Error!bool, err);
@@ -13289,12 +13300,22 @@ pub const Connection = struct {
     }
 
     fn sendServeReadError(self: *Connection, _: anyerror) void {
+        if (self.serve_read_connection_error == null and self.serve_read_stream_error == null) return;
+        self.sendServeReadErrorBefore(error.InvalidFrame, response_cleanup.cleanupDeadline(self, null));
+    }
+
+    fn sendServeReadErrorBefore(self: *Connection, _: anyerror, before: ?std.Io.Clock.Timestamp) void {
         if (self.serve_read_connection_error == null) {
             if (self.serve_read_stream_error) |stream_error| {
-                self.writeLocalErrorResetStream(
-                    stream_error.stream_id,
-                    stream_error.code,
-                ) catch {};
+                if (!self.terminal_write_failed) {
+                    if (before) |deadline| self.writeLocalErrorResetStreamUntil(stream_error.stream_id, stream_error.code, deadline) catch {
+                        self.aggregate_timeout_unusable = true;
+                        self.terminal_write_failed = true;
+                    } else {
+                        self.aggregate_timeout_unusable = true;
+                        self.terminal_write_failed = true;
+                    }
+                }
                 self.releasePeerStream(stream_error.stream_id);
                 self.forgetStreamWindows(stream_error.stream_id);
             }
@@ -13310,12 +13331,19 @@ pub const Connection = struct {
             .push_disabled => .{ .code = .protocol_error, .debug_data = "push-disabled" },
         };
         self.aggregate_timeout_unusable = true;
+        if (self.terminal_write_failed) return;
+        if (before == null) {
+            self.terminal_write_failed = true;
+            return;
+        }
         self.sendGoAwayUntil(
             self.lastPeerProcessedStreamId(),
             mapping.code,
             mapping.debug_data,
-            null,
-        ) catch {};
+            before,
+        ) catch {
+            self.terminal_write_failed = true;
+        };
     }
 
     pub fn serve(
@@ -14126,6 +14154,7 @@ pub const Connection = struct {
                 absolute,
             ) catch |err| {
                 self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
                 return err;
             };
             return;
@@ -14139,6 +14168,7 @@ pub const Connection = struct {
             payload,
         ) catch |err| {
             self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
             return err;
         };
     }
@@ -14157,12 +14187,14 @@ pub const Connection = struct {
                 absolute,
             ) catch |err| {
                 self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
                 return err;
             };
             return;
         }
         return self.transportForIo().writeAll(encoded) catch |err| {
             self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
             return err;
         };
     }
@@ -14426,12 +14458,7 @@ pub const Connection = struct {
         stream_id: u31,
     ) void {
         if (!self.outboundStreamIsActive(stream_id)) return;
-        if (!self.aggregate_timeout_unusable) {
-            self.writeResetStreamFrame(stream_id, .cancel) catch {};
-        }
-        self.releaseLocalStream(stream_id);
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+        self.terminateOwnedStream(stream_id, .cancel) catch {};
     }
 
     /// Fail a tunnel locally when its byte stream can no longer be framed
@@ -14444,22 +14471,14 @@ pub const Connection = struct {
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        if (!self.aggregate_timeout_unusable and
-            self.outboundStreamIsActive(stream_id))
-        {
-            self.writeResetStreamFrameUntil(
-                stream_id,
-                .cancel,
-                deadline,
-            ) catch {
-                // A failed stream write has unknown prefix visibility. Keep
-                // the shared connection out of every reuse path.
-                self.aggregate_timeout_unusable = true;
-            };
+        if (!self.outboundStreamIsActive(stream_id)) {
+            self.releaseLocalStream(stream_id);
+            self.releasePeerStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+            return;
         }
-        self.releaseLocalStream(stream_id);
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+        const before = response_cleanup.limitDeadline(self, deadline);
+        stream_termination.reset(self, stream_id, http2.ErrorCode.cancel, before, local_stream_termination_hooks) catch {};
     }
 
     /// Terminate an admitted peer request that an upper protocol adapter can
@@ -15110,6 +15129,10 @@ pub const Connection = struct {
                 // frames observes the same accounting as a successful update.
                 self.recv_connection_window.update(increment) catch
                     unreachable;
+                // The byte stream is physically closed; this known terminal
+                // close must still permit complete buffered sibling frames.
+                // Other write failures keep the terminal-write guard set.
+                self.terminal_write_failed = false;
             },
             else => return err,
         };
@@ -15188,10 +15211,12 @@ pub const Connection = struct {
             var committed: usize = 0;
             self.transportForIo().writeAllWithDeadline(encoded[0..encoded_len], &committed, absolute) catch |err| {
                 self.aggregate_timeout_unusable = true;
+                self.terminal_write_failed = true;
                 return err;
             };
         } else self.transportForIo().writeAll(encoded[0..encoded_len]) catch |err| {
             self.aggregate_timeout_unusable = true;
+            self.terminal_write_failed = true;
             return err;
         };
     }
@@ -15513,8 +15538,12 @@ pub const Connection = struct {
     }
 
     fn failDiscardedRequest(self: *Connection, stream_id: u31) void {
-        request_cleanup.failClosed(self, stream_id, .{
-            .reset = writeTerminalResetStream,
+        self.failDiscardedRequestBefore(stream_id, response_cleanup.cleanupDeadline(self, null));
+    }
+
+    fn failDiscardedRequestBefore(self: *Connection, stream_id: u31, before: ?std.Io.Clock.Timestamp) void {
+        request_cleanup.failClosed(self, stream_id, before, .{
+            .reset = writeTerminalResetStreamUntil,
             .releasePeer = releasePeerStream,
             .forgetWindows = forgetStreamWindows,
             .pendingId = PendingRequest.streamId,
@@ -15523,17 +15552,17 @@ pub const Connection = struct {
     }
 
     fn releaseDiscardedMessageCapacity(self: *Connection, amount: usize) void {
-        self.releaseDiscardedMessageCapacityUntil(amount, null);
+        if (amount == 0) return;
+        self.releaseDiscardedMessageCapacityBefore(amount, response_cleanup.cleanupDeadline(self, null));
+    }
+
+    fn releaseDiscardedMessageCapacityBefore(self: *Connection, amount: usize, before: ?std.Io.Clock.Timestamp) void {
+        request_cleanup.refundBefore(self, amount, before, .{ .refund = releaseConnectionCapacityUntil });
     }
 
     fn releaseDiscardedMessageCapacityUntil(self: *Connection, amount: usize, deadline: ?std.Io.Clock.Timestamp) void {
-        if (self.terminal_write_failed) return;
-        self.releaseConnectionCapacityUntil(amount, deadline) catch {
-            // An indeterminate WINDOW_UPDATE prefix forbids any subsequent
-            // refund or cancellation from extending the damaged byte stream.
-            self.aggregate_timeout_unusable = true;
-            self.terminal_write_failed = true;
-        };
+        if (amount == 0) return;
+        self.releaseDiscardedMessageCapacityBefore(amount, response_cleanup.limitDeadline(self, deadline));
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
@@ -21694,8 +21723,8 @@ pub const Tunnel = struct {
 
     pub fn reset(self: *Tunnel, error_code: http2.ErrorCode) Error!void {
         if (self.released.load(.acquire)) return error.ConnectionClosed;
-        try self.connection.sendResetStream(self.stream_id, error_code);
-        self.finishReset();
+        defer self.finishReset();
+        return self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     pub fn abort(
@@ -34771,20 +34800,22 @@ test "HTTP/2 adaptive window partial write fails closed without local commit" {
 }
 
 test "HTTP/2 internal error GOAWAY bypasses public fail-fast guard" {
+    if (comptime builtin.os.tag != .linux) return;
     const allocator = std.testing.allocator;
     const RecordingWriter = struct {
+        var active: std.atomic.Value(?*@This()) = .init(null);
         bytes: [128]u8 = undefined,
         len: usize = 0,
         writes: usize = 0,
 
         fn write(
-            context: ?*anyopaque,
+            _: ?*anyopaque,
             _: net.Socket.Handle,
             header: []const u8,
             _: []const []const u8,
             _: usize,
         ) net.Stream.Writer.Error!usize {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const self = active.load(.acquire).?;
             self.writes += 1;
             const count = @min(header.len, self.bytes.len - self.len);
             if (count == 0) return error.SocketUnconnected;
@@ -34797,15 +34828,17 @@ test "HTTP/2 internal error GOAWAY bypasses public fail-fast guard" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     var writer: RecordingWriter = .{};
-    var vtable = threaded.io().vtable.*;
+    RecordingWriter.active.store(&writer, .release);
+    defer RecordingWriter.active.store(null, .release);
+    const io = threaded.io();
+    var fixture = try @import("runtime/testing/blocked_output.zig").BlockedOutput.init(io, .server);
+    defer fixture.deinit();
+    const connection = &fixture.connection;
+    var vtable = io.vtable.*;
     vtable.netWrite = RecordingWriter.write;
-    var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .server,
-        .serve_read_connection_error = .frame_sequence,
-    };
+    connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    defer connection.io = io;
+    connection.serve_read_connection_error = .frame_sequence;
 
     connection.sendServeReadError(error.UnexpectedFrame);
     try std.testing.expect(connection.aggregate_timeout_unusable);

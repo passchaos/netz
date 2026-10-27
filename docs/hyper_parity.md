@@ -3668,3 +3668,25 @@ and already inactive materialized requests retire without touching transport
 or the I/O clock. Regression coverage includes TCP blocking, partial resets,
 zero cleanup budget, OOM, gRPC duplex wrappers, sibling completion, and real
 authenticated TLS 1.2/1.3 server records.
+
+## Discarded request and CONNECT cleanup budgets
+
+Aggregate, streaming and batch request-reader failures now capture a single
+terminal cleanup deadline for held connection-credit refunds and all required
+RST_STREAM frames, including already queued sibling requests. Timeout selects
+a fresh bounded cleanup budget; OOM and application rejection keep an earlier
+live operation deadline. A captured deadline is never renewed between refund
+and reset, and zero cleanup budget skips transport output while restoring local
+credit and releasing parser, flow-control and request ownership.
+
+Failed WINDOW_UPDATE and control-frame output prevents a later CANCEL/GOAWAY
+from extending an indeterminate byte-stream prefix. Application errors remain
+unchanged, including callback rejection after a partially written refund.
+The existing known-peer-close exception still restores late-reset credit and
+allows complete buffered sibling responses to drain; other output failures
+retain the terminal-write guard.
+Recorded serve-read GOAWAY and stream-error cleanup also use bounded output. CONNECT
+abandonment, tunnel reset and abort follow the same finite default policy, and
+an explicit absolute abort deadline remains expired instead of being renewed.
+TCP regressions cover stalled cancellation, zero-output cleanup, exact local
+credit, partial refund/reset handling and both endpoint roles.

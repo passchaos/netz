@@ -19,6 +19,17 @@ pub fn cleanupDeadline(connection: anytype, operation_deadline: ?std.Io.Clock.Ti
     return null;
 }
 
+/// Bound terminal output while preserving a supplied absolute deadline even
+/// after expiry. Never renew a refund/reset budget already captured by a caller.
+pub fn limitDeadline(connection: anytype, existing: ?std.Io.Clock.Timestamp) ?std.Io.Clock.Timestamp {
+    const cap = cleanupDeadline(connection, null) orelse return null;
+    if (existing) |deadline| {
+        if (deadline.clock != .awake) return null;
+        return deadline_policy.earlier(deadline, cap);
+    }
+    return cap;
+}
+
 /// Refund and reset share one absolute cleanup deadline. Expiry during the
 /// refund never renews the budget or permits a reset after a partial write.
 pub fn returnCapacity(connection: anytype, amount: usize, before: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) void {
