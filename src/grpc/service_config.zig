@@ -4,6 +4,7 @@ const std = @import("std");
 const call = @import("call.zig");
 const streaming = @import("stream/runtime.zig");
 const wire = @import("wire.zig");
+const health_config = @import("service_config/health.zig");
 
 pub const Error = std.mem.Allocator.Error || error{InvalidServiceConfig};
 
@@ -39,6 +40,7 @@ const JsonServiceConfig = struct {
     methodConfig: []const JsonMethodConfig = &.{},
     loadBalancingConfig: ?[]const std.json.Value = null,
     loadBalancingPolicy: ?[]const u8 = null,
+    healthCheckConfig: ?health_config.JsonConfig = null,
 };
 
 pub const LoadBalancingPolicy = enum {
@@ -101,6 +103,7 @@ pub const ServiceConfig = struct {
     methods: []const MethodConfig,
     retry_throttler: ?*call.RetryThrottler,
     load_balancing: LoadBalancingConfig,
+    health_check_service_name: ?[]const u8,
 
     pub fn parse(
         allocator: std.mem.Allocator,
@@ -204,6 +207,7 @@ pub const ServiceConfig = struct {
             .methods = methods,
             .retry_throttler = throttler,
             .load_balancing = load_balancing,
+            .health_check_service_name = try health_config.serviceName(parsed.healthCheckConfig),
         };
     }
 
@@ -223,6 +227,16 @@ pub const ServiceConfig = struct {
 
     pub fn loadBalancingConfig(self: *const ServiceConfig) LoadBalancingConfig {
         return self.load_balancing;
+    }
+
+    /// Null disables client health checking. An explicitly empty name enables
+    /// the server's overall health service, as in gRPC Core's global config.
+    pub fn healthCheckServiceName(self: *const ServiceConfig) ?[]const u8 {
+        return self.health_check_service_name;
+    }
+
+    test {
+        _ = @import("service_config/health_tests.zig");
     }
 
     pub fn methodPolicy(

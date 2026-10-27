@@ -7,6 +7,7 @@ const channel = @import("../channel.zig");
 const call = @import("../call.zig");
 const http2 = @import("../../http2/mod.zig");
 const wire = @import("../wire.zig");
+const service_config = @import("../service_config.zig");
 
 pub const Error = health.WatchError || channel.Error || error{
     HealthWatchStopped,
@@ -17,6 +18,9 @@ pub const Options = struct {
     watch: health.WatchOptions = .{},
     channel_options: channel.Options = .{},
     backoff: channel.BackoffPolicy = .{},
+    /// Explicit service override for configured construction. Empty selects
+    /// overall server health; null permits the config or watch.service name.
+    service_override: ?[]const u8 = null,
 };
 
 pub const Failure = union(enum) {
@@ -62,6 +66,37 @@ pub const ReconnectingWatch = struct {
         target: channel.Target,
         options: Options,
     ) Error!ReconnectingWatch {
+        var resolved = options;
+        if (options.service_override) |name| resolved.watch.service = name;
+        return initResolved(allocator, io, target, resolved, null);
+    }
+
+    /// Return null without allocating or connecting when checking is disabled.
+    /// service_override wins, then a non-empty explicit watch.service, then
+    /// healthCheckConfig.serviceName. Explicit channel options override the
+    /// service config's load-balancing policy. The selected name is copied.
+    pub fn initWithServiceConfig(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        target: channel.Target,
+        options: Options,
+        config: *const service_config.ServiceConfig,
+    ) Error!?ReconnectingWatch {
+        const name = options.service_override orelse
+            (if (options.watch.service.len != 0) options.watch.service else config.healthCheckServiceName()) orelse
+            return null;
+        var resolved = options;
+        resolved.watch.service = name;
+        return try initResolved(allocator, io, target, resolved, config);
+    }
+
+    fn initResolved(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        target: channel.Target,
+        options: Options,
+        config: ?*const service_config.ServiceConfig,
+    ) Error!ReconnectingWatch {
         try options.backoff.validate();
         try call.validateCustomMetadata(options.watch.metadata);
         try call.validateCustomBinaryMetadata(options.watch.binary_metadata);
@@ -73,9 +108,13 @@ pub const ReconnectingWatch = struct {
         errdefer allocator.free(service);
         const owner = try allocator.create(channel.Channel);
         errdefer allocator.destroy(owner);
-        owner.* = try channel.Channel.init(allocator, io, target, options.channel_options);
+        owner.* = if (config) |configured|
+            try channel.Channel.initWithServiceConfig(allocator, io, target, options.channel_options, configured)
+        else
+            try channel.Channel.init(allocator, io, target, options.channel_options);
         var retained = options;
         retained.watch.service = service;
+        if (retained.service_override != null) retained.service_override = service;
         return .{
             .allocator = allocator,
             .io = io,
@@ -254,4 +293,5 @@ fn expired(io: std.Io, deadline: std.Io.Clock.Timestamp) bool {
 
 test {
     _ = @import("reconnecting_tests.zig");
+    _ = @import("configured_tests.zig");
 }

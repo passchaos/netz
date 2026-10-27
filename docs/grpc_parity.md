@@ -1024,8 +1024,9 @@ and business deflate negotiation exercise independent decoder state.
 This establishes the shared-connection stream primitive needed by a background
 subchannel owner. The existing Channel still waits for quiescent stream state
 before connection selection, and `ReconnectingWatch` still owns its dedicated
-Channel. Background dispatch, per-backend health-gated selection and standard
-`healthCheckConfig` parsing/application remain the next integration work.
+Channel. Background dispatch and per-backend health-gated selection remain the next
+integration work. Standard `healthCheckConfig` now constructs reconnecting
+client Health Watches as described below.
 
 
 The pinned grpc-cpp forward gate independently verifies two concurrent
@@ -1042,3 +1043,45 @@ optimized modes. Hyper h2c/TLS interop also passed. On this host the grpc-cpp
 reference was rebuilt with `CC=/usr/bin/gcc CXX=/usr/bin/g++` because the
 PATH-selected Clang could not locate the C++ standard headers; compiler
 selection remains an ordinary caller-provided environment.
+
+
+## Service-configured client Health Watch
+
+`ServiceConfig.healthCheckServiceName()` exposes the owned standard global
+`healthCheckConfig.serviceName`. As in the locally audited gRPC Core client
+channel parser and optional JSON-field loader, a missing or null config,
+missing/null serviceName, or an empty config object leaves checking disabled.
+An explicitly empty string enables overall server health. Unknown extension
+fields are ignored, while malformed objects, non-string service names,
+duplicate known fields and invalid UTF-8 are rejected. JSON integer arrays are
+rejected even though Zig's generic byte-slice JSON decoder would accept them.
+
+`ReconnectingWatch.initWithServiceConfig` returns a nullable owning Watch.
+Disabled construction allocates nothing and performs no connection I/O.
+`Options.service_override` has first priority and can explicitly select the
+empty service; a non-empty `watch.service` is next, followed by the configured
+name. The selected name is copied and load-balancing policy is inherited
+through the existing Channel constructor. Explicit Channel options still win,
+and the ServiceConfig can be destroyed after construction. The existing
+Health Watch service-name bound is checked before transport I/O.
+
+```zig
+var config = try netz.grpc.ServiceConfig.parse(allocator,
+    \\{"healthCheckConfig":{"serviceName":"demo.Echo"}}
+);
+defer config.deinit();
+if (try netz.grpc.health.ReconnectingWatch.initWithServiceConfig(
+    allocator, io, target, .{}, &config,
+)) |configured| {
+    var watch = configured;
+    defer watch.deinit();
+    try watch.waitForServingWithTimeout(.fromSeconds(30));
+}
+```
+
+The local gates cover disabled construction with a failing allocator and a
+connector probe, name ownership after JSON/config destruction, explicit name
+and balancing precedence, transactional allocation failure, and real h2c
+named/overall Watch delivery and cancellation without grpc-timeout. This
+configures the existing consumption-driven Watch; applying those live health
+updates to a background per-subchannel application picker remains open.

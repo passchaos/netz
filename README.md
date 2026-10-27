@@ -907,6 +907,8 @@ Current protocol coverage includes:
   generation-stamped concurrent watches that survive Channel shutdown,
   dedicated client Health Watch with automatic reconnect/backoff, bounded
   setup and resumable reads, SERVING waits and UNIMPLEMENTED disablement,
+  standard healthCheckConfig parsing with configured/explicit service selection
+  and allocation-free disabled Watch construction,
   same-connection client Health Watch and business duplex streams driven by
   one owner, with independent framing/compression and sibling cancellation,
   stream-level encoding with per-message compression opt-out on sequential and
