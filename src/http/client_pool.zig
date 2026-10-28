@@ -8,8 +8,8 @@
 const std = @import("std");
 const client = @import("client.zig");
 const deadline_policy = @import("../internal/deadline.zig");
-const timed_mutex = @import("../internal/timed_mutex.zig");
-const fifo_admission = @import("../internal/fifo_admission.zig");
+const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
+const owned_admission = @import("../internal/owned_fifo_admission.zig");
 const connection_budget = @import("../internal/connection_budget.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const http3 = @import("../http3/mod.zig");
@@ -72,7 +72,7 @@ pub const Pool = struct {
     mutex: std.Io.Mutex = .init,
     idle: IdlePool,
     connections: usize = 0,
-    capacity_waiters: fifo_admission.Queue = .{},
+    capacity_waiters: owned_admission.Queue = .{},
     shared_budget: *connection_budget.Budget,
     tickets: pool_tickets.Manager,
     http3: ?*h3_support.State,
@@ -141,7 +141,7 @@ pub const Pool = struct {
         // must finish before destruction.
         self.close();
         std.debug.assert(self.connections == 0);
-        std.debug.assert(self.capacity_waiters.count() == 0);
+        std.debug.assert(self.capacity_waiters.count(self.io) == 0);
         self.idle.deinit();
         self.tickets.deinit();
         if (self.http3) |state| state.deinit();
@@ -248,7 +248,7 @@ pub const Pool = struct {
         var key = try originKeyForUri(self.allocator, uri_text);
         var key_owned = true;
         defer if (key_owned) key.deinit();
-        var waiter: fifo_admission.Queue.Waiter = .{};
+        var waiter: owned_admission.Queue.Waiter = .{};
         var shared_waiter: connection_budget.Waiter = .{};
         defer self.cancelCapacityWaiter(&waiter);
         defer self.shared_budget.cancel(&shared_waiter);
@@ -335,7 +335,7 @@ pub const Pool = struct {
     pub fn waitingCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.capacity_waiters.count();
+        return self.capacity_waiters.count(self.io);
     }
 
     pub fn totalWaitingCount(self: *Pool) usize {
@@ -396,7 +396,7 @@ pub const Pool = struct {
         uri_text: []const u8,
         key: *http3.OriginKey,
         key_owned: *bool,
-        waiter: ?*fifo_admission.Queue.Waiter,
+        waiter: ?*owned_admission.Queue.Waiter,
         shared_waiter: ?*connection_budget.Waiter,
         blocked_on_shared: *bool,
         deadline: ?std.Io.Clock.Timestamp,
@@ -404,30 +404,31 @@ pub const Pool = struct {
     ) OperationError!Lease {
         blocked_on_shared.* = false;
         var displaced: ?client.Connection = null;
-        try timed_mutex.lock(&self.mutex, self.io, deadline);
+        var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer admission_lock.unlock();
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             return error.PoolClosed;
         }
-        if (!self.capacity_waiters.mayAttempt(waiter)) {
+        if (!self.capacity_waiters.mayAttempt(waiter, self.io)) {
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
             if (waiter) |queued| {
                 if (!queued.linked) {
-                    self.capacity_waiters.enqueue(queued);
+                    try self.capacity_waiters.enqueue(queued, self.allocator, self.io);
                 } else if (queued.isNotified()) {
                     queued.rearm();
                 }
             }
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
         _ = self.pruneExpiredLocked(nowMilliseconds(self.io));
         if (self.idle.acquire(key.origin(), nowMilliseconds(self.io))) |connection| {
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
             self.finishAdmissionLocked(waiter);
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             const owned_key = key.*;
             key_owned.* = false;
             return .{
@@ -444,17 +445,17 @@ pub const Pool = struct {
             if (self.idle.idleCount() == 0) {
                 if (waiter) |queued| {
                     if (!queued.linked) {
-                        self.capacity_waiters.enqueue(queued);
+                        try self.capacity_waiters.enqueue(queued, self.allocator, self.io);
                     } else {
                         queued.rearm();
                     }
                 }
-                self.mutex.unlock(self.io);
+                admission_lock.unlock();
                 return error.ConnectionLimitReached;
             }
             displaced = self.idle.takeOldest();
         } else {
-            self.shared_budget.tryReserve(shared_waiter) catch |err| switch (err) {
+            self.shared_budget.tryReserveBefore(shared_waiter, deadline) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
                     if (self.idle.takeOldest()) |connection| {
                         if (shared_waiter) |queued| {
@@ -463,13 +464,13 @@ pub const Pool = struct {
                         displaced = connection;
                     } else {
                         blocked_on_shared.* = true;
-                        self.mutex.unlock(self.io);
+                        admission_lock.unlock();
                         return error.ConnectionLimitReached;
                     }
                 },
-                error.PoolClosed => {
-                    self.mutex.unlock(self.io);
-                    return error.PoolClosed;
+                error.PoolClosed, error.OutOfMemory, error.Timeout, error.Canceled => {
+                    admission_lock.unlock();
+                    return err;
                 },
             };
             if (displaced == null) {
@@ -477,7 +478,7 @@ pub const Pool = struct {
             }
         }
         self.finishAdmissionLocked(waiter);
-        self.mutex.unlock(self.io);
+        admission_lock.unlock();
         if (displaced) |connection_value| {
             var connection = connection_value;
             connection.close();
@@ -637,26 +638,26 @@ pub const Pool = struct {
 
     fn finishAdmissionLocked(
         self: *Pool,
-        waiter: ?*fifo_admission.Queue.Waiter,
+        waiter: ?*owned_admission.Queue.Waiter,
     ) void {
         if (waiter) |queued| {
             if (queued.linked) {
                 std.debug.assert(self.capacity_waiters.remove(queued));
             }
+            queued.deinit();
         }
         if (self.hasCapacityLocked()) self.notifyCapacityWaiterLocked();
     }
 
     fn cancelCapacityWaiter(
         self: *Pool,
-        waiter: *fifo_admission.Queue.Waiter,
+        waiter: *owned_admission.Queue.Waiter,
     ) void {
-        // Only this caller links/unlinks its waiter. Notification leaves
-        // membership unchanged, so unused cleanup needs no admission lock.
-        if (!waiter.linked) return;
-        self.mutex.lockUncancelable(self.io);
-        self.capacity_waiters.cancel(waiter, self.io);
-        self.mutex.unlock(self.io);
+        if (!self.capacity_waiters.abandon(waiter, self.io)) return;
+        if (self.mutex.tryLock()) {
+            self.capacity_waiters.pruneAbandoned(self.io);
+            self.mutex.unlock(self.io);
+        }
     }
 
     fn hasCapacityLocked(self: *const Pool) bool {

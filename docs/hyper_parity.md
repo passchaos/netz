@@ -1718,11 +1718,14 @@ never evicted, and a genuinely all-leased/all-connecting pool still returns or
 waits on `ConnectionLimitReached`. Cross-authority TCP regressions for HTTP/1
 and HTTP/2 set total and idle capacity to one, proving the second origin
 connects, the first socket observes EOF, and the live count never exceeds one.
-Capacity waits now use a shared allocation-free intrusive FIFO admission queue
-rather than generation broadcasts. New acquisitions cannot barge ahead of
-blocked callers; timeout/cancellation unlinks a stack-owned ticket and wakes its
-successor. Real TCP tests hold the sole slot, enqueue two waiters in a known
-order, and prove that they acquire in that order.
+Capacity waits use a FIFO queue with shared ownership of nodes allocated only
+when a caller actually blocks on capacity. New acquisitions cannot barge ahead
+of blocked callers. Timeout/cancellation retires the caller's cursor without
+waiting for the pool mutex; the next queue access removes abandoned nodes and
+preserves the successor's turn. A shared retry epoch also prompts sleepers to
+recheck ownership when departure races a capacity notification. Real TCP tests
+hold the sole slot, enqueue two waiters in a known order, and prove that they
+acquire in that order.
 HTTP/1, HTTP/2, ordinary HTTP/3 and dispatcher-shared HTTP/3 leases also make
 `release` and `discard` idempotent on the same handle. Ownership is marked
 inactive before returning or destroying the connection, so repeated cleanup
@@ -3749,8 +3752,9 @@ then receives another health update and cancels just Watch.
 
 ## Initial HTTP pool mutex admission
 
-The HTTP/1.1, HTTP/2 and negotiated TCP pools now acquire their first ownership
-mutex under the caller's original awake-clock deadline. Timeout or cancellation
+The HTTP/1.1, HTTP/2, owning HTTP/3 and negotiated TCP pools acquire their first
+ownership mutex under the caller's original awake-clock deadline. Shared
+TCP/HTTP3 budget admission also retains that bound. Timeout or cancellation
 while that mutex belongs to another operation returns before inspecting idle
 connections, registering a FIFO waiter or reserving a connection. Spurious
 wakes retain the same absolute bound. A waiter that never registered skips its
@@ -3765,10 +3769,51 @@ The independent Hyper/rustls process gate holds the negotiated pool's mutex
 after the first response, requires a 10 ms request to time out while the lock
 stays held, then completes the second request over the same authenticated
 HTTP/1.1 or HTTP/2 connection. Hyper must receive exactly two requests on one
-connection, and pool reuse counters must still match those two exchanges.
+connection. The gate also checks reuse and idle-lookup counters across its
+additional lease and failed admission attempts.
 
-This establishes the pre-admission contract. Cleanup for already-linked
-stack-owned FIFO waiters and connection-slot retirement still reacquire their
-ownership locks without a deadline; those later lifetime boundaries remain
-separate audit work. Evidence is recorded in
-`docs/evidence/http_pool_admission/2026-10-28.json`.
+The initial TCP mutex regression is recorded in
+`docs/evidence/http_pool_admission/2026-10-28.json`. The following lifetime
+section extends its ownership contract to already-registered capacity waits.
+
+## HTTP pool waiter lifetime
+
+The HTTP/1.1, HTTP/2, owning HTTP/3 and negotiated TCP capacity queues, plus the
+shared TCP/HTTP3 budget, retain their own reference to each waiting node.
+Registration allocates one node only after capacity or an older FIFO waiter
+prevents acquisition. Immediate capacity claims and connection reuse allocate
+no waiting node. Successful admission retires both node references; timeout and
+cancellation publish abandonment and retire the caller's reference immediately.
+The list reference keeps delayed notification independent of caller stack
+storage. Queue access, notification, close and final destruction prune abandoned
+nodes. Admission guards release their mutex even when node allocation fails.
+
+Departure increments a shared retry epoch without acquiring the pool mutex.
+Sleeping callers may retry, and the mutex-protected FIFO check remains the
+authority for claiming capacity. This covers a departure that races the owner's
+last notification: the next live waiter still has a wake to recheck ownership.
+Spurious wakes retain the original deadline. Tests cover notifier retention,
+head/middle abandonment, retry hints, FIFO order, allocation failure and retry.
+
+The pool regressions cover 80 already-queued timeout/cancellation cases across
+acquisition and complete-request relative/absolute APIs, including shared-budget
+waiting. Each caller returns while its cleanup mutex remains occupied and the
+original leased reservation remains intact; counter and close paths later retire
+the abandoned node. Another 32 cases cover initial mutex admission in all four
+pools, and four cover shared-budget admission with and without reclamation.
+Allocation-failure sweeps verify TCP pool admission ownership and capacity,
+with targeted budget checks for reservation failure followed by successful retry.
+
+The Hyper/rustls gate additionally leases the sole authenticated connection,
+starts a 10 ms capacity wait and occupies the pool mutex from FIFO sleep through
+timeout. It observes the returned error while the queue still retains exactly
+one reference to the abandoned node, then retires that node and completes the
+next request over the original HTTP/1.1 or HTTP/2 connection. Each server still
+receives exactly two requests on one connection. Pool statistics also include
+the extra lease acquisition and the failed idle lookup during capacity waiting.
+
+Connection-slot retirement and subsequent transport/ticket/reclamation cleanup
+still have separate ownership-lock boundaries to audit. This evidence establishes
+capacity-waiter departure, not every later acquisition or request cleanup phase.
+The current snapshot is recorded in
+`docs/evidence/http_pool_waiter_lifetime/2026-10-29.json`.

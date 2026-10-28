@@ -9,7 +9,8 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
-const fifo_admission = @import("../../internal/fifo_admission.zig");
+const owned_admission = @import("../../internal/owned_fifo_admission.zig");
+const timed_mutex = @import("../../internal/timed_mutex.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
@@ -516,7 +517,7 @@ pub fn Pool(comptime Runtime: type) type {
         idle: IdlePool,
         leased: usize = 0,
         connections: usize = 0,
-        capacity_waiters: fifo_admission.Queue = .{},
+        capacity_waiters: owned_admission.Queue = .{},
         closed: bool = false,
 
         const Self = @This();
@@ -627,7 +628,7 @@ pub fn Pool(comptime Runtime: type) type {
             // Leases retain a pool pointer; the caller must return them before
             // destroying the pool just as with HTTP/1 and HTTP/2 pools.
             std.debug.assert(self.leased == 0);
-            std.debug.assert(self.capacity_waiters.count() == 0);
+            std.debug.assert(self.capacity_waiters.count(self.io) == 0);
             self.close();
             std.debug.assert(self.connections == self.idle.idleCount());
             self.idle.deinit();
@@ -710,7 +711,7 @@ pub fn Pool(comptime Runtime: type) type {
                     null,
                 );
             }
-            var waiter: fifo_admission.Queue.Waiter = .{};
+            var waiter: owned_admission.Queue.Waiter = .{};
             var shared_waiter: connection_budget.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
             defer self.cancelSharedWaiter(&shared_waiter);
@@ -752,7 +753,7 @@ pub fn Pool(comptime Runtime: type) type {
         fn acquireUriForWaiter(
             self: *Self,
             uri_text: []const u8,
-            waiter: ?*fifo_admission.Queue.Waiter,
+            waiter: ?*owned_admission.Queue.Waiter,
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
             shared_reclaimer: ?connection_budget.Reclaimer,
@@ -778,7 +779,7 @@ pub fn Pool(comptime Runtime: type) type {
         fn acquireUriForWaiterBefore(
             self: *Self,
             uri_text: []const u8,
-            waiter: ?*fifo_admission.Queue.Waiter,
+            waiter: ?*owned_admission.Queue.Waiter,
             shared_waiter: ?*connection_budget.Waiter,
             blocked_on_shared: *bool,
             deadline: ?std.Io.Clock.Timestamp,
@@ -802,7 +803,10 @@ pub fn Pool(comptime Runtime: type) type {
                 origin,
             );
 
-            self.mutex.lockUncancelable(self.io);
+            timed_mutex.lock(&self.mutex, self.io, deadline) catch |err| {
+                origin_key.deinit();
+                return err;
+            };
             if (self.closed) {
                 if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
                 self.cancelSharedWaiter(shared_waiter);
@@ -811,11 +815,15 @@ pub fn Pool(comptime Runtime: type) type {
                 key.deinit();
                 return error.PoolClosed;
             }
-            if (!self.capacity_waiters.mayAttempt(waiter)) {
+            if (!self.capacity_waiters.mayAttempt(waiter, self.io)) {
                 self.cancelSharedWaiter(shared_waiter);
                 if (waiter) |queued| {
                     if (!queued.linked) {
-                        self.capacity_waiters.enqueue(queued);
+                        self.capacity_waiters.enqueue(queued, self.allocator, self.io) catch |err| {
+                            self.mutex.unlock(self.io);
+                            origin_key.deinit();
+                            return err;
+                        };
                     } else if (queued.isNotified()) {
                         queued.rearm();
                     }
@@ -849,7 +857,11 @@ pub fn Pool(comptime Runtime: type) type {
                     self.cancelSharedWaiter(shared_waiter);
                     if (waiter) |queued| {
                         if (!queued.linked) {
-                            self.capacity_waiters.enqueue(queued);
+                            self.capacity_waiters.enqueue(queued, self.allocator, self.io) catch |err| {
+                                self.mutex.unlock(self.io);
+                                origin_key.deinit();
+                                return err;
+                            };
                         } else {
                             queued.rearm();
                         }
@@ -875,7 +887,7 @@ pub fn Pool(comptime Runtime: type) type {
                     early_request,
                 );
             } else {
-                self.reserveShared(shared_waiter, null) catch |err| {
+                self.reserveShared(shared_waiter, null, deadline) catch |err| {
                     if (err == error.ConnectionLimitReached) {
                         if (self.idle.takeOldest()) |displaced| {
                             self.cancelSharedWaiter(shared_waiter);
@@ -895,6 +907,7 @@ pub fn Pool(comptime Runtime: type) type {
                         self.reserveShared(
                             shared_waiter,
                             shared_reclaimer,
+                            deadline,
                         ) catch |retry_err| {
                             blocked_on_shared.* = retry_err ==
                                 error.ConnectionLimitReached;
@@ -1049,7 +1062,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.io,
                 deadline,
             );
-            var waiter: fifo_admission.Queue.Waiter = .{};
+            var waiter: owned_admission.Queue.Waiter = .{};
             var shared_waiter: connection_budget.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
             defer self.cancelSharedWaiter(&shared_waiter);
@@ -1709,7 +1722,7 @@ pub fn Pool(comptime Runtime: type) type {
             else
                 null;
             if (early_metadata) |output| output.* = null;
-            var waiter: fifo_admission.Queue.Waiter = .{};
+            var waiter: owned_admission.Queue.Waiter = .{};
             var shared_waiter: connection_budget.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
             defer self.cancelSharedWaiter(&shared_waiter);
@@ -2131,7 +2144,7 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn waitingCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            return self.capacity_waiters.count();
+            return self.capacity_waiters.count(self.io);
         }
 
         pub fn pruneExpired(self: *Self) usize {
@@ -2263,12 +2276,13 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             waiter: ?*connection_budget.Waiter,
             reclaimer: ?connection_budget.Reclaimer,
-        ) connection_budget.Error!void {
+            deadline: ?std.Io.Clock.Timestamp,
+        ) connection_budget.ReservationError!void {
             const budget = self.options.shared_connection_budget orelse return;
             if (reclaimer) |idle| {
-                try budget.tryReserveReclaiming(waiter, idle);
+                try budget.tryReserveReclaimingBefore(waiter, idle, deadline);
             } else {
-                try budget.tryReserve(waiter);
+                try budget.tryReserveBefore(waiter, deadline);
             }
         }
 
@@ -2293,23 +2307,26 @@ pub fn Pool(comptime Runtime: type) type {
 
         fn finishAdmissionLocked(
             self: *Self,
-            waiter: ?*fifo_admission.Queue.Waiter,
+            waiter: ?*owned_admission.Queue.Waiter,
         ) void {
             if (waiter) |queued| {
                 if (queued.linked) {
                     std.debug.assert(self.capacity_waiters.remove(queued));
                 }
+                queued.deinit();
             }
             if (self.hasCapacityLocked()) self.notifyCapacityWaiterLocked();
         }
 
         fn cancelCapacityWaiter(
             self: *Self,
-            waiter: *fifo_admission.Queue.Waiter,
+            waiter: *owned_admission.Queue.Waiter,
         ) void {
-            self.mutex.lockUncancelable(self.io);
-            self.capacity_waiters.cancel(waiter, self.io);
-            self.mutex.unlock(self.io);
+            if (!self.capacity_waiters.abandon(waiter, self.io)) return;
+            if (self.mutex.tryLock()) {
+                self.capacity_waiters.pruneAbandoned(self.io);
+                self.mutex.unlock(self.io);
+            }
         }
 
         fn hasCapacityLocked(self: *const Self) bool {

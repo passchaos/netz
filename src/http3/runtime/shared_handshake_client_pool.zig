@@ -1723,9 +1723,9 @@ pub fn Pool(comptime Runtime: type) type {
             var reservation_active = false;
             if (self.options.shared_connection_budget) |budget| {
                 if (reclaimer) |value|
-                    try budget.tryReserveReclaiming(waiter, value)
+                    try budget.tryReserveReclaimingBefore(waiter, value, absolute)
                 else
-                    try budget.tryReserve(waiter);
+                    try budget.tryReserveBefore(waiter, absolute);
                 reservation_active = true;
             }
             errdefer if (reservation_active) self.releaseShared(1);
@@ -1825,9 +1825,9 @@ pub fn Pool(comptime Runtime: type) type {
             var reservation_active = false;
             if (self.options.shared_connection_budget) |budget| {
                 if (reclaimer) |value|
-                    try budget.tryReserveReclaiming(shared_waiter, value)
+                    try budget.tryReserveReclaimingBefore(shared_waiter, value, deadline)
                 else
-                    try budget.tryReserve(shared_waiter);
+                    try budget.tryReserveBefore(shared_waiter, deadline);
                 reservation_active = true;
             }
             errdefer if (reservation_active) self.releaseShared(1);

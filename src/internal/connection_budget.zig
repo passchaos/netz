@@ -5,14 +5,16 @@
 //! displacement transfer the existing reservation without touching this count.
 
 const std = @import("std");
-const fifo_admission = @import("fifo_admission.zig");
+const owned_admission = @import("owned_fifo_admission.zig");
+const MutexGuard = @import("mutex_guard.zig").Guard;
 
-pub const Error = error{
+pub const Error = std.mem.Allocator.Error || error{
     ConnectionLimitReached,
     PoolClosed,
 };
 
-pub const Waiter = fifo_admission.Queue.Waiter;
+pub const ReservationError = Error || std.Io.Timeout.Error || std.Io.Cancelable;
+pub const Waiter = owned_admission.Queue.Waiter;
 
 pub const Reclaimer = struct {
     context: *anyopaque,
@@ -25,7 +27,7 @@ pub const Budget = struct {
     limit: usize,
     mutex: std.Io.Mutex = .init,
     connections: usize = 0,
-    waiters: fifo_admission.Queue = .{},
+    waiters: owned_admission.Queue = .{},
     closed: bool = false,
 
     pub fn create(
@@ -45,29 +47,40 @@ pub const Budget = struct {
     pub fn deinit(self: *Budget) void {
         const allocator = self.allocator;
         std.debug.assert(self.connections == 0);
-        std.debug.assert(self.waiters.count() == 0);
+        std.debug.assert(self.waiters.count(self.io) == 0);
         self.* = undefined;
         allocator.destroy(self);
     }
 
-    /// Reserve one connection without blocking. A bounded caller supplies its
-    /// stack waiter and sleeps only after this method releases the mutex.
+    /// Try one connection reservation. A caller keeps a stack cursor; an
+    /// owned waiting node is allocated only when capacity/FIFO blocks it.
     pub fn tryReserve(
         self: *Budget,
         waiter: ?*Waiter,
     ) Error!void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        return self.tryReserveBefore(waiter, null) catch |err| switch (err) {
+            error.Timeout, error.Canceled => unreachable,
+            else => return @errorCast(err),
+        };
+    }
+
+    pub fn tryReserveBefore(
+        self: *Budget,
+        waiter: ?*Waiter,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReservationError!void {
+        var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer admission_lock.unlock();
         if (self.closed) {
             if (waiter) |queued| self.waiters.cancel(queued, self.io);
             return error.PoolClosed;
         }
-        if (!self.waiters.mayAttempt(waiter) or
+        if (!self.waiters.mayAttempt(waiter, self.io) or
             (self.limit != 0 and self.connections >= self.limit))
         {
             if (waiter) |queued| {
                 if (!queued.linked) {
-                    self.waiters.enqueue(queued);
+                    try self.waiters.enqueue(queued, self.allocator, self.io);
                 } else if (queued.isNotified()) {
                     queued.rearm();
                 }
@@ -78,6 +91,7 @@ pub const Budget = struct {
             if (queued.linked) {
                 std.debug.assert(self.waiters.remove(queued));
             }
+            queued.deinit();
         }
         self.connections += 1;
         if (self.hasCapacityLocked()) self.waiters.notifyHead(self.io);
@@ -91,21 +105,34 @@ pub const Budget = struct {
         waiter: ?*Waiter,
         reclaimer: Reclaimer,
     ) Error!void {
-        self.mutex.lockUncancelable(self.io);
+        return self.tryReserveReclaimingBefore(waiter, reclaimer, null) catch |err| switch (err) {
+            error.Timeout, error.Canceled => unreachable,
+            else => return @errorCast(err),
+        };
+    }
+
+    pub fn tryReserveReclaimingBefore(
+        self: *Budget,
+        waiter: ?*Waiter,
+        reclaimer: Reclaimer,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReservationError!void {
+        var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer admission_lock.unlock();
         if (self.closed) {
             if (waiter) |queued| self.waiters.cancel(queued, self.io);
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             return error.PoolClosed;
         }
-        if (!self.waiters.mayAttempt(waiter)) {
+        if (!self.waiters.mayAttempt(waiter, self.io)) {
             if (waiter) |queued| {
                 if (!queued.linked) {
-                    self.waiters.enqueue(queued);
+                    try self.waiters.enqueue(queued, self.allocator, self.io);
                 } else if (queued.isNotified()) {
                     queued.rearm();
                 }
             }
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
         if (self.limit == 0 or self.connections < self.limit) {
@@ -113,25 +140,25 @@ pub const Budget = struct {
                 if (queued.linked) {
                     std.debug.assert(self.waiters.remove(queued));
                 }
+                queued.deinit();
             }
             self.connections += 1;
             if (self.hasCapacityLocked()) self.waiters.notifyHead(self.io);
-            self.mutex.unlock(self.io);
+            admission_lock.unlock();
             return;
         }
-        self.mutex.unlock(self.io);
+        admission_lock.unlock();
 
         _ = reclaimer.reclaim(reclaimer.context);
-        return self.tryReserve(waiter);
+        return self.tryReserveBefore(waiter, deadline);
     }
 
     pub fn cancel(self: *Budget, waiter: *Waiter) void {
-        // Membership belongs to this caller; other budget users only notify
-        // it. A waiter that never registered owns no shared cleanup work.
-        if (!waiter.linked) return;
-        self.mutex.lockUncancelable(self.io);
-        self.waiters.cancel(waiter, self.io);
-        self.mutex.unlock(self.io);
+        if (!self.waiters.abandon(waiter, self.io)) return;
+        if (self.mutex.tryLock()) {
+            self.waiters.pruneAbandoned(self.io);
+            self.mutex.unlock(self.io);
+        }
     }
 
     /// Release destroyed connections and wake the oldest cross-pool waiter.
@@ -168,7 +195,7 @@ pub const Budget = struct {
     pub fn waitingCount(self: *Budget) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.waiters.count();
+        return self.waiters.count(self.io);
     }
 
     /// Return whether this caller currently owns the FIFO right to replace an
@@ -178,7 +205,7 @@ pub const Budget = struct {
         defer self.mutex.unlock(self.io);
         return !self.closed and self.limit != 0 and
             self.connections >= self.limit and
-            self.waiters.mayAttempt(waiter);
+            self.waiters.mayAttempt(waiter, self.io);
     }
 
     fn hasCapacityLocked(self: *const Budget) bool {

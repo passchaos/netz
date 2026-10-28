@@ -93,6 +93,8 @@ test {
     _ = @import("client_tests.zig");
     _ = @import("client_pool_tests.zig");
     _ = @import("client_pool/admission_tests.zig");
+    _ = @import("../internal/owned_fifo_admission/tests.zig");
+    _ = @import("../internal/connection_budget/admission_tests.zig");
     _ = @import("client_pool_http3_tests.zig");
     _ = @import("client_pool/http3_origin_tests.zig");
     _ = @import("client_pool/http3_shared_tests.zig");

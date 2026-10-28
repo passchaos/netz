@@ -50,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer first.deinit();
     try verifyAdmissionTimeout(&pool, io, second_uri);
+    try verifyQueuedTimeout(&pool, io, second_uri);
     var second = try pool.requestUriWithTimeout(
         second_uri,
         .{ .headers = &.{.{
@@ -73,12 +74,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const stats = pool.stats();
     if (pool.connectionCount() != 1 or pool.idleCount() != 1 or
-        stats.total_reused != 1 or stats.total_misses != 1)
+        stats.total_reused != 2 or stats.total_misses != 2)
     {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
 }
@@ -100,8 +101,63 @@ fn verifyAdmissionTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !v
     }
     if (pool.mutex.tryLock()) return error.PoolMutexReleased;
     if (pool.connections != 1 or pool.idle.idleCount() != 1 or
-        pool.capacity_waiters.count() != 0)
+        pool.capacity_waiters.count(io) != 0)
     {
         return error.InvalidPoolState;
     }
+}
+
+const QueuedGate = struct {
+    pool: *netz.http.Pool,
+    base: std.Io,
+    held: bool = false,
+    var active: ?*QueuedGate = null;
+
+    fn wait(userdata: ?*anyopaque, pointer: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        const self = active.?;
+        if (!self.held) {
+            self.pool.mutex.lockUncancelable(self.base);
+            self.held = true;
+        }
+        return self.base.vtable.futexWait(userdata, pointer, expected, timeout);
+    }
+};
+
+fn verifyQueuedTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {
+    const previous_limit = pool.options.max_connections;
+    pool.options.max_connections = 1;
+    defer pool.options.max_connections = previous_limit;
+    // Keep the sole authenticated connection leased so the next request
+    // actually enters capacity waiting instead of creating another socket.
+    var lease = try pool.acquireUriWithTimeout(uri, .fromSeconds(5));
+    defer lease.release();
+    var gate = QueuedGate{ .pool = pool, .base = io };
+    var table = io.vtable.*;
+    table.futexWait = QueuedGate.wait;
+    QueuedGate.active = &gate;
+    pool.io = .{ .userdata = io.userdata, .vtable = &table };
+    defer {
+        pool.io = io;
+        QueuedGate.active = null;
+        if (gate.held) pool.mutex.unlock(io);
+    }
+    const started = std.Io.Clock.awake.now(io);
+    if (pool.requestUriWithTimeout(uri, .{}, .fromMilliseconds(10))) |value| {
+        var response = value;
+        response.deinit();
+        return error.AdmittedWhileCapacityLeased;
+    } else |err| {
+        if (err != error.Timeout) return err;
+    }
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    if (elapsed.nanoseconds > std.Io.Duration.fromSeconds(1).nanoseconds) return error.QueuedDeadlineOverrun;
+    if (!gate.held or pool.mutex.tryLock()) return error.PoolMutexReleased;
+    if (pool.connections != 1 or pool.idle.idleCount() != 0 or pool.capacity_waiters.len != 1) return error.InvalidPoolState;
+    const node = pool.capacity_waiters.head.?;
+    if (node.state.load(.acquire) != .abandoned or node.references.load(.acquire) != 1) return error.InvalidWaiterOwnership;
+    pool.io = io;
+    QueuedGate.active = null;
+    pool.mutex.unlock(io);
+    gate.held = false;
+    if (pool.waitingCount() != 0) return error.WaiterNotRetired;
 }

@@ -1,0 +1,223 @@
+{
+  "baseline_revision": "16182c81e3698fba2f058edcdff251232f56bb23",
+  "change": "Allow HTTP capacity waiters to retire their caller ownership without waiting for the pool cleanup mutex",
+  "before": {
+    "passed": 134,
+    "total": 137,
+    "failed": 3,
+    "regressions": [
+      "HTTP/1 pool queued timeout and cancellation return before waiter cleanup lock",
+      "HTTP/2 pool queued timeout and cancellation return before waiter cleanup lock",
+      "unified HTTP pool queued timeout and cancellation return before waiter cleanup lock"
+    ],
+    "first_failed_case": {
+      "api": "acquireUriWithDeadline",
+      "outcome": "Timeout",
+      "cleanup": "counter",
+      "queued_mutex_kept_occupied": true,
+      "expected_unbounded_waits": 0,
+      "observed_unbounded_waits": 1
+    },
+    "failure": "expired FIFO wait still acquired an uncancelable pool mutex before its stack node could be removed; the fixture had to rescue that mutex",
+    "command": "zig build test-lib -Dtest-filter='pool queued timeout and cancellation' --summary all"
+  },
+  "after": {
+    "lifecycle_tests": {
+      "passed": 261,
+      "total": 261
+    },
+    "package_tests": {
+      "passed": 21,
+      "total": 21
+    },
+    "standalone_primitive_tests": {
+      "passed": 8,
+      "total": 8
+    },
+    "queued_departure_cases": 80,
+    "initial_pool_mutex_cases": 32,
+    "shared_budget_mutex_cases": 4,
+    "pools": [
+      "HTTP/1.1",
+      "HTTP/2",
+      "owning HTTP/3",
+      "negotiated TCP"
+    ],
+    "api_forms": [
+      "acquireUriWithDeadline",
+      "acquireUriWithTimeout",
+      "requestUriWithDeadline",
+      "requestUriWithTimeout"
+    ],
+    "outcomes": [
+      "Timeout",
+      "Canceled"
+    ],
+    "cleanup_modes": [
+      "waiting counter",
+      "close"
+    ],
+    "original_reservation_preserved": true,
+    "caller_returns_with_cleanup_mutex_still_occupied": true,
+    "unbounded_waits_during_departure": 0,
+    "ownership": {
+      "wait_node_allocations_per_registration": 1,
+      "wait_node_allocations_for_unblocked_reservation_or_idle_reuse": 0,
+      "references_when_registered": 2,
+      "queue_references_after_caller_departure": 1,
+      "caller_cursor_retired_without_list_mutation": true,
+      "reclamation": [
+        "next queue ownership check",
+        "waiting counter",
+        "notification",
+        "close",
+        "final destruction"
+      ],
+      "background_cleanup_tasks": 0
+    },
+    "allocation_failure": {
+      "tcp_pools": "std.testing.checkAllAllocationFailures covers initialization, URI staging and waiting-node registration; every failed call releases admission mutex and preserves the original leased slot",
+      "shared_budget": "direct and reclaiming registration return OutOfMemory with an unlocked mutex, no queued node and the original reservation; releasing that slot permits retry with the same failing allocator",
+      "public_error": "OutOfMemory"
+    },
+    "notification": {
+      "queue_authority": "FIFO head under the owning pool mutex",
+      "sleep_hint": "shared epoch changes prompt ownership recheck; hints cannot claim capacity",
+      "race": "abandonment after the owner's final capacity notification still wakes the successor to recheck and prune",
+      "notifier_storage_retained_through_caller_departure": true,
+      "abandoned_node_not_revived_by_notification": true,
+      "spurious_wakes_preserve_original_absolute_awake_deadline": true,
+      "wake_policy": "epoch notification wakes sleeping callers; each rechecks FIFO before any claim"
+    },
+    "admission": {
+      "pool_mutex": "original caller deadline in all four pools",
+      "shared_budget_mutex": "original caller deadline for direct and reclaiming admission, including shared HTTP/3 request-driver and direct URI acquisition",
+      "scope_guard": "early allocation failures unlock without leaking a pool or budget reservation"
+    }
+  },
+  "interop": {
+    "hyper": {
+      "protocols": [
+        "http/1.1",
+        "h2"
+      ],
+      "transport": "authenticated rustls TLS",
+      "initial_mutex_timeout_ms": 10,
+      "queued_timeout_ms": 10,
+      "maximum_observer_bound_ms": 1000,
+      "server_requests_per_protocol": 2,
+      "server_connections_per_protocol": 1,
+      "pool_reuses_per_protocol": 2,
+      "pool_idle_misses_per_protocol": 2,
+      "queued_node_state_after_caller_returns": "abandoned",
+      "queued_node_references_after_caller_returns": 1,
+      "waiting_count_after_later_reclamation": 0,
+      "client_io": "zio-std-io",
+      "server_io": "hyper-tokio",
+      "build_steps_passed": 8,
+      "build_steps_total": 8
+    },
+    "http3": {
+      "peer": "quic-go v0.59.0",
+      "transport": "TLS 1.3 over QUIC through SOCKS5 UDP ASSOCIATE",
+      "origins": 3,
+      "http3_requests": 4,
+      "tcp_discovery_tunnels": 3,
+      "udp_associations": 1,
+      "active_quic_connections": 2,
+      "total_quic_connections": 4,
+      "domain_route_limit": 2,
+      "route_churn": true,
+      "remote_dns": true,
+      "shared_endpoint": true,
+      "client_io": "zio-std-io",
+      "server_io": "quic-go-netpoll",
+      "build_steps_passed": 8,
+      "build_steps_total": 8
+    }
+  },
+  "references": {
+    "existing_ownership_pattern": {
+      "files": [
+        "src/grpc/channel/connectivity.zig",
+        "src/grpc/channel/connectivity/waiter.zig"
+      ],
+      "behavior": "caller and tracker references retain waiting storage through notification; atomic abandonment permits caller departure before list reclamation"
+    },
+    "hyper": {
+      "root": "/nav_env/Work/hyper",
+      "revision": "084473f728f9d07b3be5845475aa2f62ed9ff579",
+      "files": [
+        "src/client/dispatch.rs",
+        "src/proto/h1/dispatch.rs",
+        "src/proto/h2/client.rs"
+      ],
+      "behavior": "request callbacks are checked for cancellation before message submission"
+    },
+    "quic_go": {
+      "module": "github.com/quic-go/quic-go",
+      "version": "v0.59.0",
+      "module_checksum": "h1:OLJkp1Mlm/aS7dpKgTc6cnpynnD2Xg7C1pwL6vy/SAw=",
+      "cached_source": "/home/passchaos/go/pkg/mod/github.com/quic-go/quic-go@v0.59.0/http3/transport.go",
+      "fixture": "tools/interop/quic_go_module/http3_socks5",
+      "role": "independent wire, TLS, endpoint reuse and route-churn oracle"
+    }
+  },
+  "verification_commands": [
+    "zig test src/internal/owned_fifo_admission.zig",
+    "zig build test-lib -Dtest-filter='client pool' -Dtest-filter='unified HTTP pool' -Dtest-filter='pool deadline' -Dtest-filter='pool request deadline' -Dtest-filter='pool queued timeout' -Dtest-filter='pool waiter allocation' -Dtest-filter='owned FIFO' -Dtest-filter='shared connection budget' -Dtest-filter='HTTP/2 shared' -Dtest-filter='HTTP/3 pool' -Dtest-filter='HTTP/3 shared pool' -Dtest-filter='HTTP/3 exclusive pool' -Dtest-filter='HTTP/3 cloneable senders' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http-unified-hyper -Doptimize=ReleaseFast --summary all",
+    "zig build interop-http3-socks5-pool -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio",
+    "netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio",
+    "HTTP/3 SOCKS5 interoperability passed: origins=3 discovery=http1 h3_requests=4 tcp_tunnels=3 udp_associations=1 active_quic_connections=2 total_quic_connections=4 domain_route_limit=2 route_churn=true remote_dns=true shared_endpoint=true tls13=true client_io=zio-std-io server_io=quic-go-netpoll"
+  ],
+  "remaining_boundaries": [
+    "connection-slot retirement after failed connection setup",
+    "subsequent transport, ticket and reclamation ownership locks"
+  ],
+  "performance_evidence": "No waiting-node allocation on unblocked reserve/reuse; throughput under many queued callers is not benchmarked by this change.",
+  "toolchains": {
+    "zig": "0.16.0",
+    "go": "go1.24.13"
+  },
+  "source_sha256": {
+    "docs/hyper_parity.md": "8d27e6d3263f48c7292a2543437e91ef61856182badda0e04b6aa68348e5d566",
+    "src/grpc/channel/connectivity.zig": "f32a15ecedc03967e04ed951e98b1c1c8d893d61cade297844d3dbff25462ccc",
+    "src/grpc/channel/connectivity/waiter.zig": "4ad99104ba2c5fa8802c9fbc1007fe4d3a356f4bf149dd79bad9faa0f4bd8fab",
+    "src/http/client_pool.zig": "f00eb6347689afab0609d01cc828a857fbe7a060c66608effd452f0f1b4d6100",
+    "src/http/client_pool/admission_tests.zig": "43a73805b6c31e82784dd7dfc7e55dce2ab4c33a0797847668f92294da1b8bb7",
+    "src/http/mod.zig": "d0781dd0337cbcdbfc100c40b18ef8675c24f2313090e75788fdaf14945276cb",
+    "src/http1/client_pool.zig": "7e22dc7f589aff3b569b849c97bf0b0629cb8c895b822a37484d082cc3fe5d39",
+    "src/http1/client_pool/admission_tests.zig": "97abe148c59f08ec8a8f2e5d0fd50f4d278a6c9b47762266670eaeb6a766ec7c",
+    "src/http2/client_pool.zig": "f8e7fbdc6eb5e8a3cdf2e6a9f7f2fe79550ce939ae9ca9f6a480e24d9a7b92a5",
+    "src/http2/client_pool/admission_tests.zig": "826a1727fa814abe36f1cca31e2c1d37fec880e65c5b563cc69506c4f3b89bab",
+    "src/http3/runtime.zig": "e59eb9aaf422ac70051d406e9a2a862a45f83ba62a371cdc045eb96487e21d12",
+    "src/http3/runtime/handshake_client_pool.zig": "69f8b4bccc7b98167f1f68b95063361c42dc7a026cc19b858786c00c8a7623a9",
+    "src/http3/runtime/handshake_client_pool/admission_tests.zig": "eb305c3fae5131932ddb3e2be5bd3cb4128ef76ecedb01965b1ac9b276988554",
+    "src/http3/runtime/shared_handshake_client_pool.zig": "9cd74a9d996f6df6330af5ca3bf11e83a8f3076bbae7968701e75a81c6932315",
+    "src/internal/connection_budget.zig": "ac128b67196cd57791d816a49fc4e9903a6130754934a8b0abbc55a4fdacfe89",
+    "src/internal/connection_budget/admission_tests.zig": "c03be6b4cd67c5cd90b829568db0855f9882a165b3d82f984bc12ffb4f1c23e5",
+    "src/internal/mutex_guard.zig": "b00e4de879ecf2cffc09fd620844f86dc77d2ffbba6040ba9de96bdb54d5192f",
+    "src/internal/owned_fifo_admission.zig": "dd69d291cf0a2da11c04c8565863644d0c661c2f6552637010657eb79fd2d589",
+    "src/internal/owned_fifo_admission/node.zig": "4d7c63ab9a32ec917f76ccf915d6a25adcf59eafeb01bac7476f85aa88fa3977",
+    "src/internal/owned_fifo_admission/tests.zig": "d942a13b54d6b203b2906576cafa042725ec98ca44bcd3dd033198b3931b6aaf",
+    "src/internal/owned_fifo_admission/waiter.zig": "da8906c6eed3ab781137d0cf605cb625b2f5312b404cfe2ce4cbda36d05417c9",
+    "src/internal/pool_admission_test_support.zig": "bfaa831fca70c9a8204a2c74014ad48e930a8b8c48277db584f35519ee23d5a6",
+    "src/internal/pool_waiter_allocation_test_support.zig": "0a7cc10e0407d11dc9ab4cf825b7ab1893de49aa9d8a3c4eaf7ff8906edcd089",
+    "src/internal/pool_waiter_cleanup_test_support.zig": "cbeea2eb6a8bc2dbd2b1728ddf4a6a7048fdd968dcc85a295e8fa7afd9c67190",
+    "tools/interop/http3_socks5_pool.py": "3ac707c3f21ac2aa6734eb4a9799dda918996c0743bd736349db88a1dca4731a",
+    "tools/interop/http3_socks5_pool_client.zig": "f60360fe489c01f071f536011755ef0c91d8168f39e50507e71f91fb5affc32f",
+    "tools/interop/http_unified_hyper.sh": "5dd028820dd416fa23b9b6a10c6da1ea18aaa987bdd054902f0c90d8ad9aaacc",
+    "tools/interop/http_unified_hyper_client.zig": "8d33db415cbe6474a0599588858a8e1a1474e5eed0a61f1d62d9fd10480000ee",
+    "tools/interop/quic_go_module/go.mod": "42f9111a8e29246b8d725c5db0aaa5fbf096e8d2b8c0183975562204af480247",
+    "tools/interop/quic_go_module/go.sum": "34b952e5bb4512f341159a1be569fcd138d30d757d6c987ca15bf4e289ca511b"
+  },
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai"
+}

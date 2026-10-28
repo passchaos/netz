@@ -1,6 +1,6 @@
 //! Deterministic lock contention for the owning HTTP pool regression tests.
 const std = @import("std");
-const fifo_admission = @import("fifo_admission.zig");
+const owned_admission = @import("owned_fifo_admission.zig");
 const connection_budget = @import("connection_budget.zig");
 
 const Operation = enum { acquire_deadline, acquire_timeout, request_deadline, request_timeout };
@@ -45,14 +45,20 @@ const Probe = struct {
 };
 
 pub fn exercise(pool: anytype, base: std.Io) !void {
+    return exerciseUri(pool, base, "http://127.0.0.1:1/");
+}
+
+pub fn exerciseUri(pool: anytype, base: std.Io, uri: []const u8) !void {
     const deadline: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(1003) };
-    // A closed pool gives the old code a safe result after the rescue unlock,
-    // and proves deadline/cancellation wins before shared state is admitted.
-    pool.closed = true;
-    defer pool.closed = false;
-    var older: fifo_admission.Queue.Waiter = .{};
-    pool.capacity_waiters.enqueue(&older);
-    defer _ = pool.capacity_waiters.remove(&older);
+    // The older FIFO head keeps an unbounded baseline from dialing after
+    // its rescue unlock. Expired/canceled admission must leave that head
+    // and all capacity accounting untouched while the lock stays occupied.
+    var older: owned_admission.Queue.Waiter = .{};
+    try pool.capacity_waiters.enqueue(&older, std.testing.allocator, base);
+    defer {
+        _ = pool.capacity_waiters.remove(&older);
+        older.deinit();
+    }
     const shared: ?*connection_budget.Budget = if (@hasField(@TypeOf(pool.*), "shared_budget")) pool.shared_budget else null;
     for ([_]bool{ false, true }) |canceled| {
         for (std.enums.values(Operation)) |operation| {
@@ -86,24 +92,70 @@ pub fn exercise(pool: anytype, base: std.Io) !void {
             }
             const expected = if (canceled) error.Canceled else error.Timeout;
             switch (operation) {
-                .acquire_deadline => try std.testing.expectError(expected, pool.acquireUriWithDeadline("http://127.0.0.1:1/", deadline)),
-                .acquire_timeout => try std.testing.expectError(expected, pool.acquireUriWithTimeout("http://127.0.0.1:1/", .fromNanoseconds(3))),
-                .request_deadline => try std.testing.expectError(expected, pool.requestUriWithDeadline("http://127.0.0.1:1/", .{}, deadline)),
-                .request_timeout => try std.testing.expectError(expected, pool.requestUriWithTimeout("http://127.0.0.1:1/", .{}, .fromNanoseconds(3))),
+                .acquire_deadline => try std.testing.expectError(expected, pool.acquireUriWithDeadline(uri, deadline)),
+                .acquire_timeout => try std.testing.expectError(expected, pool.acquireUriWithTimeout(uri, .fromNanoseconds(3))),
+                .request_deadline => try std.testing.expectError(expected, pool.requestUriWithDeadline(uri, .{}, deadline)),
+                .request_timeout => try std.testing.expectError(expected, pool.requestUriWithTimeout(uri, .{}, .fromNanoseconds(3))),
             }
             try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
             try std.testing.expectEqual(@as(usize, if (canceled) 1 else 3), probe.bounded_waits);
             try std.testing.expect(probe.deadline_preserved);
             try std.testing.expect(!pool.mutex.tryLock());
             try std.testing.expectEqual(@as(usize, 0), pool.connections);
-            try std.testing.expectEqual(@as(usize, 1), pool.capacity_waiters.count());
-            try std.testing.expect(pool.capacity_waiters.mayAttempt(&older));
+            try std.testing.expectEqual(@as(usize, 1), pool.capacity_waiters.count(base));
+            try std.testing.expect(pool.capacity_waiters.mayAttempt(&older, base));
             try std.testing.expect(!older.isNotified());
             if (shared) |budget| {
                 try std.testing.expect(!budget.mutex.tryLock());
                 try std.testing.expectEqual(@as(usize, 0), budget.connections);
-                try std.testing.expectEqual(@as(usize, 0), budget.waiters.count());
+                try std.testing.expectEqual(@as(usize, 0), budget.waiters.count(base));
             }
+        }
+    }
+}
+
+pub fn exerciseBudget(budget: *connection_budget.Budget, base: std.Io) !void {
+    const Reclaim = struct {
+        calls: usize = 0,
+        fn run(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return false;
+        }
+    };
+    for ([_]bool{ false, true }) |canceled| {
+        for ([_]bool{ false, true }) |reclaiming| {
+            var waiter: connection_budget.Waiter = .{};
+            defer budget.cancel(&waiter);
+            var probe = Probe{ .mutex = &budget.mutex, .canceled = canceled };
+            var table = base.vtable.*;
+            table.now = Probe.now;
+            table.futexWait = Probe.wait;
+            table.futexWaitUncancelable = Probe.waitUncancelable;
+            table.futexWake = Probe.wake;
+            budget.io = .{ .userdata = &probe, .vtable = &table };
+            defer budget.io = base;
+            budget.mutex.lockUncancelable(base);
+            defer {
+                _ = budget.mutex.tryLock();
+                budget.mutex.unlock(base);
+            }
+            var reclaim: Reclaim = .{};
+            const deadline: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(1003) };
+            const expected = if (canceled) error.Canceled else error.Timeout;
+            if (reclaiming) {
+                try std.testing.expectError(expected, budget.tryReserveReclaimingBefore(&waiter, .{ .context = &reclaim, .reclaim = Reclaim.run }, deadline));
+            } else {
+                try std.testing.expectError(expected, budget.tryReserveBefore(&waiter, deadline));
+            }
+            try std.testing.expectEqual(@as(usize, 0), reclaim.calls);
+            try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
+            try std.testing.expectEqual(@as(usize, if (canceled) 1 else 3), probe.bounded_waits);
+            try std.testing.expect(probe.deadline_preserved);
+            try std.testing.expect(!budget.mutex.tryLock());
+            try std.testing.expectEqual(@as(usize, 0), budget.connections);
+            try std.testing.expectEqual(@as(usize, 0), budget.waiters.count(base));
+            try std.testing.expect(waiter.node == null);
         }
     }
 }
