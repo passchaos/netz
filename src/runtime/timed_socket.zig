@@ -1,9 +1,10 @@
-//! Native timed socket writes for matching zio tasks behind std.Io.
+//! Native timed socket operations for matching zio tasks behind std.Io.
 const std = @import("std");
 const zio = @import("zio");
 const deadline_policy = @import("../internal/deadline.zig");
 
 pub const Error = std.Io.net.Stream.Writer.Error || std.Io.Timeout.Error;
+pub const ReadError = std.Io.net.Stream.Reader.Error || std.Io.Timeout.Error;
 
 pub fn available(io: std.Io) bool {
     const runtime = zio.Runtime.fromIo(io) orelse return false;
@@ -46,6 +47,30 @@ pub fn tryWriteParts(io: std.Io, stream: std.Io.net.Stream, header: []const u8, 
 fn netHandle(stream: std.Io.net.Stream) zio.ev.Backend.NetHandle {
     const Handle = zio.ev.Backend.NetHandle;
     return if (@typeInfo(Handle) == .pointer) @ptrCast(stream.socket.handle) else stream.socket.handle;
+}
+
+/// A matching native read avoids std.Io.Batch's concurrent operation task.
+/// Timeout/cancellation joins NetRecv before returning borrowed storage;
+/// a completed read racing interruption retains its naturally received bytes.
+pub fn tryRead(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, deadline: std.Io.Clock.Timestamp) ?ReadError!usize {
+    if (!available(io)) return null;
+    _ = deadline_policy.usableAwake(io, deadline) catch |err| return @as(ReadError!usize, err);
+    if (buffer.len == 0) return @as(ReadError!usize, 0);
+    var storage: [1]zio.os.iovec = undefined;
+    const count = zio.net.readBuf(netHandle(stream), .fromSlice(buffer, &storage), .fromStd(.{ .deadline = deadline })) catch |err| return @as(ReadError!usize, mapReadError(err));
+    return @as(ReadError!usize, count);
+}
+
+fn mapReadError(err: anyerror) ReadError {
+    return switch (err) {
+        error.Timeout => error.Timeout,
+        error.Canceled => error.Canceled,
+        error.ConnectionResetByPeer, error.ConnectionAborted, error.ConnectionTimedOut => error.ConnectionResetByPeer,
+        error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        else => error.Unexpected,
+    };
 }
 
 fn mapError(err: anyerror) Error {

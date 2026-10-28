@@ -6,6 +6,7 @@ const net = std.Io.net;
 test {
     _ = @import("stream_io_deadline_tests.zig");
     _ = @import("../runtime/timed_socket_tests.zig");
+    _ = @import("../runtime/timed_socket_read_tests.zig");
 }
 
 pub const TimedReadError = net.Stream.Reader.Error ||
@@ -28,6 +29,7 @@ pub fn readSomeWithDeadline(
     buffer: []u8,
     deadline: std.Io.Clock.Timestamp,
 ) TimedReadError!usize {
+    if (@import("../runtime/timed_socket.zig").tryRead(io, stream, buffer, deadline)) |result| return result;
     if (builtin.os.tag == .windows) {
         var incoming: net.IncomingMessage = .init;
         const maybe_err, const message_count = (try io.operateTimeout(
