@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
-            "multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded ping_pong=4 half_duplex=4 " ++
+            "multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded shared_admission=deadline ping_pong=4 half_duplex=4 " ++
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++

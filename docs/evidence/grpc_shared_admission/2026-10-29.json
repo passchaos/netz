@@ -1,0 +1,107 @@
+{
+  "baseline_revision": "5153a8cb4168763497748a924758e5dc1db055a0",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Bound shared gRPC call state/queue admission with the logical RPC deadline and retire unsubmitted stream state without cleanup locking",
+  "before": {
+    "passed": 130,
+    "total": 132,
+    "failed": 2,
+    "regressions": [
+      "gRPC shared admission bounds explicit inherited and capped RPC deadlines",
+      "gRPC shared enqueue preserves caller ownership during timed lock admission"
+    ],
+    "failure": "held state mutex used an uncancelable wait; baseline rescue returned SharedChannelClosed after ignoring the RPC bound instead of Timeout",
+    "command": "zig build test-lib -Dtest-filter='gRPC shared admission' -Dtest-filter='gRPC shared enqueue' --summary all"
+  },
+  "after": {
+    "grpc_tests": {
+      "passed": 360,
+      "total": 360
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "deadline_rpc_cases": 18,
+    "no_timeout_cancellation_cases": 4,
+    "timed_direct_enqueue_cases": 2,
+    "unsubmitted_stream_cleanup_cases": 2,
+    "rpc_forms": [
+      "unary",
+      "explicit retry unary",
+      "duplex startup"
+    ],
+    "timeout_sources": [
+      "explicit",
+      "inherited service config",
+      "stricter configured cap"
+    ],
+    "outcomes": [
+      "Timeout",
+      "Canceled"
+    ],
+    "ownership": {
+      "original_deadline_captured_at_rpc_entry": true,
+      "immutable_owned_service_config_resolved_before_lock_wait": true,
+      "state_and_enqueue_locks_use_the_same_rpc_budget": true,
+      "no_timeout_rpc_lock_admission_is_cancelable": true,
+      "unsubmitted_stream_has_only_its_opening_owner": true,
+      "enqueue_failure_retires_unsubmitted_call_without_parent_mutex": true,
+      "parent_reference_count_preserved_after_failed_admission": true,
+      "queue_links_and_counts_preserved": true,
+      "endpoint_selection_and_demand_not_changed_on_failed_admission": true,
+      "retry_metadata_and_throttle_tokens_not_spent_before_admission": true,
+      "unsubmitted_stream_allocation_freed_once": true
+    },
+    "fixture": "retained Sender owns its immutable config after the owning channel/worker group is destroyed; allocator fixture occupies state mutex between stream creation and enqueue and verifies sole-owner cleanup",
+    "remaining_boundary": "already registered stack Jobs still join endpoint retirement and their cancellation cleanup locks remain a separate audit"
+  },
+  "interop": {
+    "reference_root": "/home/passchaos/Work/grpc",
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "bazel_version": "8.7.0- (@non-git)",
+    "bazel_executable": "/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel",
+    "java_home": "/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "native_shared_state_mutex_held_during_rpc_admission": true,
+    "unary_and_duplex_admission_timeout_ms": 10,
+    "no_expired_call_queued": true,
+    "subsequent_shared_unary": "2 concurrent responses plus health admission",
+    "subsequent_shared_duplex": "2 independent bounded streams",
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "matrix": "canonical unary/streaming compression, metadata, status, cancellation/reuse, health gating, ping-pong, slow-consumer and RPC/channel soak",
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "server_path": "/home/passchaos/Work/grpc/bazel-bin/test/cpp/interop/interop_server",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared admission' -Dtest-filter='gRPC shared enqueue' -Dtest-filter='gRPC shared stream admission' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc BAZEL=/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel JAVA_HOME=/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "eb744980b7a08667331f36f1e84c072961d482055edad8e4fdf63a9ed6f4722f",
+    "src/grpc/channel/shared.zig": "420bf1e33fba8001cbdf3d9d5a27a1574388d704e6fa5f99870f69830790fb6e",
+    "src/grpc/channel/shared/admission_tests.zig": "098f29fb07cc5dda2bd360b5ca23873f0a8c8082ec8ef07861da788eec3143cc",
+    "src/grpc/channel/shared/state.zig": "828a149bc3c07021fa961a48bd6a27926467dfd1b234b0923af7dcd5652ae224",
+    "src/grpc/channel/shared/stream/call.zig": "feebd427fc6facdc5305c53b56468f93415dccdf868f689c3f575a600804365f",
+    "src/grpc/channel/shared/stream/open.zig": "db832c9d3168e901352e904de2df5b9c82235bc74da60a294e1e2f53115b4484",
+    "tools/interop/grpc_cpp.sh": "1bd5ca0a0ffd7dbc397b866a63cd2c9a41c470a36cefcff160f4a16c79dec748",
+    "tools/interop/grpc_cpp_client.zig": "c7a23472a95a4e9cfb20880be269c5d97225fe725977b7546decae8c0a5489d0",
+    "tools/interop/grpc_cpp_shared.zig": "37f88c3816e44371af12ae4ca44e3bcd1526481d89c8a457be463e391b478e55"
+  }
+}

@@ -1407,3 +1407,38 @@ encoded gRPC DATA without mixing raw and decoded receive modes.
         defer event.deinit(allocator);
         if (event == .terminal) break;
     }
+
+## Shared RPC lock admission
+
+Background SharedChannel unary, explicit-retry unary and duplex startup now
+retain the caller's original awake deadline through both initial state admission
+and queue admission. Owned service configuration is immutable after channel
+construction and remains alive through the retained Sender/State references;
+method timeout resolution therefore happens before the first lock wait. Explicit
+timeouts, inherited service-config timeouts and stricter configured caps all
+use the timestamp captured at logical RPC entry. Calls without an RPC timeout
+still use cancelable mutex admission.
+
+An admission Timeout or Canceled result leaves queue links, demand, retry
+attempts and endpoint selection untouched. A duplex call allocated before
+queue admission may be retired by its sole opening owner without reacquiring
+the shared mutex: it has never been submitted to a worker and no capability has
+been returned to the user. This releases the provisional call and parent
+reference even while another owner still holds the state lock. Registered jobs
+continue using the existing worker/cancellation retirement protocol so producer
+buffers remain alive until the endpoint no longer borrows them.
+
+The regressions cover eighteen explicit/inherited/capped RPC deadline outcomes,
+four no-timeout cancellation cases, two direct timed queue admissions and two
+post-allocation stream admission failures. Each observes the original error
+while the state mutex remains occupied, verifies unchanged queue/reference
+counts, and checks that the unsubmitted stream allocation is released once.
+The fixed-version grpc-cpp gate also holds a live native shared State mutex
+before unary and duplex calls, requires both 10 ms timeouts without queuing,
+then completes the existing concurrent unary, health admission and duplex
+exchange over h2c and verified TLS. Evidence is recorded in
+`docs/evidence/grpc_shared_admission/2026-10-29.json`.
+
+This establishes pre-submission lock admission. Registered-job cancellation
+still joins endpoint retirement through the owning state before releasing a
+caller frame; those later cleanup waits remain a separate audit boundary.

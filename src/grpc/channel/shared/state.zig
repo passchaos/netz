@@ -1,4 +1,5 @@
 const std = @import("std");
+const timed_mutex = @import("../../../internal/timed_mutex.zig");
 const channel = @import("../../channel.zig");
 const call = @import("../../call.zig");
 const health = @import("../../health.zig");
@@ -62,6 +63,14 @@ pub const State = struct {
     pub fn unlock(self: *State) void {
         self.mutex.unlock(self.io);
     }
+    pub fn lockBefore(self: *State, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline != null) {
+            try timed_mutex.lock(&self.mutex, self.io, deadline);
+        } else {
+            try self.mutex.lock(self.io);
+        }
+    }
+
     pub fn endpointCountLocked(self: *State) usize {
         if (self.closed) return 0;
         var count: usize = 0;
@@ -306,7 +315,7 @@ pub const State = struct {
         return job;
     }
     pub fn enqueue(self: *State, job: *Job) Error!void {
-        self.lock();
+        try self.lockBefore(job.deadline);
         if (self.closed) {
             self.unlock();
             return error.SharedChannelClosed;
@@ -367,16 +376,19 @@ pub const State = struct {
         }
     }
     pub fn unary(self: *State, options: call.UnaryCallOptions, explicit_retry: ?call.RetryPolicy, entered: std.Io.Timestamp) Error!call.UnaryResponse {
-        self.lock();
-        const closed = self.closed;
-        self.unlock();
-        if (closed) return error.SharedChannelClosed;
         var resolved: service_config.ResolvedUnary = .{ .options = options, .retry_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
         if (self.config) |*config| resolved = try config.resolveUnary(options);
         if (explicit_retry) |policy| resolved.retry_policy = policy;
+        // Service configuration is immutable after construction and remains
+        // owned by this retained State. Resolve it before lock admission so a
+        // configured timeout bounds that first wait as well.
+        const deadline: ?std.Io.Clock.Timestamp = if (resolved.options.timeout) |timeout| .{ .raw = entered.addDuration(timeout.duration()), .clock = .awake } else null;
+        try self.lockBefore(deadline);
+        const closed = self.closed;
+        self.unlock();
+        if (closed) return error.SharedChannelClosed;
         if (resolved.options.message.len > resolved.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
         resolved.options.wait_for_ready = resolved.wait_for_ready;
-        const deadline: ?std.Io.Clock.Timestamp = if (resolved.options.timeout) |timeout| .{ .raw = entered.addDuration(timeout.duration()), .clock = .awake } else null;
         return retry.runWithDeadline(self, self.allocator, resolved.options, resolved.retry_policy, deadline, attempt);
     }
 };

@@ -118,6 +118,13 @@ pub fn Call(comptime State: type) type {
             self.write = null;
             write.done.set(self.parent.io);
         }
+        /// The opening caller owns the sole reference until enqueue succeeds.
+        /// No endpoint owner or capability can observe this unpublished call.
+        pub fn retireUnsubmitted(self: *Self, err: anyerror) void {
+            std.debug.assert(self.refs.load(.acquire) == 1 and self.write == null);
+            self.retireLocked(err);
+        }
+
         pub fn retireLocked(self: *Self, err: ?anyerror) void {
             if (self.retired) return;
             if (err) |value| if (self.failure == null) {
