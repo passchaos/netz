@@ -260,19 +260,19 @@ test "WebSocket Unix listener accept deadline expires without a client" {
     const io = threaded.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var path_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(io, &path_storage);
-    const socket_path = try std.fmt.bufPrint(
-        path_storage[directory_len..],
-        "/websocket-accept-deadline.sock",
-        .{},
+    // TmpDir lives under this cwd-relative path. Keep the Unix address
+    // bounded even when the checkout itself exceeds sun_path's capacity.
+    var path_storage: [std.Io.net.UnixAddress.max_len]u8 = undefined;
+    const full_path = try std.fmt.bufPrint(
+        &path_storage,
+        ".zig-cache/tmp/{s}/websocket-accept-deadline.sock",
+        .{tmp.sub_path},
     );
-    const full_path = path_storage[0 .. directory_len + socket_path.len];
     const address = try std.Io.net.UnixAddress.init(full_path);
     var server = try runtime.UnixServer.listen(allocator, io, address, .{});
     defer {
         server.deinit();
-        std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
+        tmp.dir.deleteFile(io, "websocket-accept-deadline.sock") catch {};
     }
 
     try std.testing.expectError(
