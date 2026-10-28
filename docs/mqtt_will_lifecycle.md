@@ -39,11 +39,13 @@ zig build interop-mqtt-will-lifecycle -Doptimize=ReleaseFast --summary all -- --
 ```
 
 It is also included in `interop-mqtt-broker-config`. The configured broker's
-source verifier now locks 29 upstream process files and rejects missing or
-changed source bytes. The two added hashes are retained in
-[`mqtt_broker_config.py`](../tools/interop/mqtt_broker_config.py); the scenario
+source verifier now locks 36 upstream process files and rejects missing or
+changed source bytes. Will fingerprints live in
+[`will_sources.py`](../tools/interop/mqtt_scenarios/will_sources.py); the scenario
 implementation lives in
 [`mqtt_scenarios/will_lifecycle.py`](../tools/interop/mqtt_scenarios/will_lifecycle.py).
-The wire-vector gate's separate 294 curated scenarios are unaffected by this
-process coverage expansion. Other upstream plugin, process and configuration
-behaviors still require their own parity evidence.
+The [delayed Will gate](mqtt_will_delay.md) now adds nine upstream timing/Session
+scenarios and three supplemental cause/ownership checks. The wire-vector gate's
+separate 294 curated scenarios are unaffected by this process
+coverage expansion. Other upstream plugin, process and configuration behaviors
+still require their own parity evidence.

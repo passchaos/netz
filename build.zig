@@ -1757,6 +1757,19 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_will_lifecycle_step.dependOn(&mqtt_will_lifecycle.step);
 
+    const mqtt_will_delay = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_will_delay.addArtifactArg(mqtt_vectors_broker);
+    mqtt_will_delay.addArg("--only-will-delay");
+    if (b.args) |args| mqtt_will_delay.addArgs(args);
+    const mqtt_will_delay_step = b.step(
+        "interop-mqtt-will-delay",
+        "Verify source-locked Will Delay, Session expiry and replacement lifecycle",
+    );
+    mqtt_will_delay_step.dependOn(&mqtt_will_delay.step);
+
     const mqtt_deadline_benchmark_check = b.addSystemCommand(&.{
         "python3", "-m", "unittest", "mqtt_deadline_bench.test_check",
     });

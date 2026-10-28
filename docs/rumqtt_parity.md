@@ -5773,6 +5773,14 @@ proxy evidence for the entire suite.
    not cover. The dedicated [Will process lifecycle gate](mqtt_will_lifecycle.md)
    additionally verifies both source-locked Will variants and publication-time
    ACL reload behavior without changing the runtime callback lifetime contract.
+   The [delayed Will process gate](mqtt_will_delay.md) additionally covers nine
+   source-locked MQTT 5 scenarios for the minimum Will Delay/Session Expiry
+   deadline, zero-expiry publication, resumed-Session cancellation, and Clean
+   Start replacement. Three further cases verify delayed DISCONNECT reason
+   0x04, normal DISCONNECT suppression and distinct replacement payload
+   ownership. Each case checks exact packets, timed negative intervals,
+   Session Present and duplicate-free cleanup; the shared source catalog now
+   locks 36 process files. Current runtime behavior passes the gate.
 
 3. **Prometheus exposition (new).** `mqtt.broker_prometheus.render(allocator, broker.stats())`
    emits deterministic Prometheus text exposition 0.0.4 from one coherent

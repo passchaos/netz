@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import select
@@ -77,6 +78,8 @@ from mqtt_broker_config_subscription_persistence import (
 from mqtt_scenarios.subscription_lifecycle import run_subscription_lifecycle_case
 from mqtt_scenarios.process import wait_process_line
 from mqtt_scenarios.will_lifecycle import run_will_lifecycle_case
+from mqtt_scenarios.will_delay import run_will_delay_cases
+from mqtt_scenarios.will_sources import MOSQUITTO_WILL_SOURCES
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -84,10 +87,7 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
-    "broker/07-will-qos0.py":
-        "130f7c4006e26511424dae477471ec74701d363804c529d7b3f8bcbaadff2150",
-    "broker/07-will-per-listener.py":
-        "7367b2a038cdccf4312342fed17aa8d923065373127312b0cbfa6b47bfb7f03e",
+    **MOSQUITTO_WILL_SOURCES,
     "broker/02-subscribe-persistence-flipflop.py":
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
     "broker/11-persistent-subscription.py":
@@ -167,6 +167,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-persistence-restart", action="store_true")
     selected.add_argument("--only-subscription-lifecycle", action="store_true")
     selected.add_argument("--only-will-lifecycle", action="store_true")
+    selected.add_argument("--only-will-delay", action="store_true")
     selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -7413,7 +7414,9 @@ def main() -> None:
     args = parse_args()
     source_count = 0
     test_root = args.mosquitto_test_root
-    if test_root is None and (args.only_include_directory or args.only_will_lifecycle):
+    if test_root is None and (
+        args.only_include_directory or args.only_will_lifecycle or args.only_will_delay
+    ):
         test_root = Path.home() / "Work/mosquitto/test"
     if test_root is not None:
         source_count = verify_mosquitto_process_sources(
@@ -7430,6 +7433,19 @@ def main() -> None:
                 "upstream=config-includedir protocols=mqttv311+mqttv5 "
                 "ordered-files=true reload=true rollback=true "
                 "file-add-remove=true live-delivery=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
+        if args.only_will_delay:
+            cases = run_will_delay_cases(args.broker, directory)
+            upstream = sum(case["source"] is not None for case in cases)
+            print("MQTT Will delay cases: " + json.dumps(cases, sort_keys=True))
+            print(
+                "MQTT Will delay integration passed: "
+                f"upstream_cases={upstream} supplemental_cases={len(cases) - upstream} protocol=mqttv5 "
+                "delay_session_expiry=min clean_start=both reconnect_cancel=true "
+                "new_will_owned=true normal_disconnect_suppressed=true "
+                "disconnect_with_will_delayed=true duplicate_will_rejected=true "
                 f"mosquitto_process_sources={source_count} " + RUNTIME
             )
             return
@@ -7666,6 +7682,7 @@ def main() -> None:
         run_username_or_anonymous_case(args.broker, directory)
         run_unix_listener_case(args.broker, directory)
         run_will_lifecycle_case(args.broker, directory)
+        run_will_delay_cases(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)
