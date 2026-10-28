@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const owned_admission = @import("../internal/owned_fifo_admission.zig");
+const retired_capacity = @import("../internal/retired_capacity.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -71,6 +72,7 @@ pub const Pool = struct {
     idle: std.ArrayList(Slot) = .empty,
     sequence: u64 = 0,
     connections: usize = 0,
+    retired_connections: retired_capacity.Retirements = .{},
     capacity_waiters: owned_admission.Queue = .{},
     tls12_tickets: tls_ticket_cache.Cache,
     tls13_tickets: tls_ticket_cache.Tls13Cache,
@@ -121,6 +123,7 @@ pub const Pool = struct {
     /// Outstanding leases remain valid and are closed when returned.
     pub fn close(self: *Pool) void {
         self.mutex.lockUncancelable(self.io);
+        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         self.closed = true;
         for (self.idle.items) |*slot| slot.deinit(self.allocator);
         std.debug.assert(self.connections >= self.idle.items.len);
@@ -530,12 +533,14 @@ pub const Pool = struct {
     pub fn connectionCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.connections;
     }
 
     pub fn waitingCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.capacity_waiters.count(self.io);
     }
 
@@ -605,6 +610,7 @@ pub const Pool = struct {
         var displaced: ?Slot = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
+        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
             admission_lock.unlock();
@@ -618,6 +624,7 @@ pub const Pool = struct {
                     queued.rearm();
                 }
             }
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
@@ -664,6 +671,7 @@ pub const Pool = struct {
                         queued.rearm();
                     }
                 }
+                self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 admission_lock.unlock();
                 return error.ConnectionLimitReached;
             }
@@ -984,11 +992,7 @@ pub const Pool = struct {
     }
 
     fn releaseConnectionSlot(self: *Pool) void {
-        self.mutex.lockUncancelable(self.io);
-        std.debug.assert(self.connections != 0);
-        self.connections -= 1;
-        self.notifyCapacityWaiterLocked();
-        self.mutex.unlock(self.io);
+        self.retired_connections.release(&self.connections, &self.capacity_waiters, &self.mutex, self.io, 1);
     }
 
     fn finishAdmissionLocked(

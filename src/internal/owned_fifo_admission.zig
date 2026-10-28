@@ -127,7 +127,9 @@ pub const Queue = struct {
         }
     }
 
-    fn notifyRetry(self: *Queue, io: std.Io) void {
+    /// A resource change may be published while another caller owns the list.
+    /// This hint touches only the epoch and never waits for the owning mutex.
+    pub fn notifyRetry(self: *Queue, io: std.Io) void {
         _ = self.epoch.fetchAdd(1, .release);
         io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
     }

@@ -11,6 +11,7 @@ const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const owned_admission = @import("../../internal/owned_fifo_admission.zig");
 const timed_mutex = @import("../../internal/timed_mutex.zig");
+const retired_capacity = @import("../../internal/retired_capacity.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
@@ -517,6 +518,7 @@ pub fn Pool(comptime Runtime: type) type {
         idle: IdlePool,
         leased: usize = 0,
         connections: usize = 0,
+        retired_connections: retired_capacity.Retirements = .{},
         capacity_waiters: owned_admission.Queue = .{},
         closed: bool = false,
 
@@ -639,6 +641,7 @@ pub fn Pool(comptime Runtime: type) type {
         /// leases remain valid but are discarded when returned.
         pub fn close(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             var removed: usize = 0;
             if (!self.closed) {
                 self.closed = true;
@@ -807,6 +810,7 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key.deinit();
                 return err;
             };
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             if (self.closed) {
                 if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
                 self.cancelSharedWaiter(shared_waiter);
@@ -828,6 +832,7 @@ pub fn Pool(comptime Runtime: type) type {
                         queued.rearm();
                     }
                 }
+                self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
@@ -866,6 +871,7 @@ pub fn Pool(comptime Runtime: type) type {
                             queued.rearm();
                         }
                     }
+                    self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                     self.mutex.unlock(self.io);
                     var key = origin_key;
                     key.deinit();
@@ -1149,13 +1155,12 @@ pub fn Pool(comptime Runtime: type) type {
                     try self.callConnector(uri, redirect, route) };
             var client = connected.client;
             errdefer client.deinit();
-            self.mutex.lockUncancelable(self.io);
+            try timed_mutex.lock(&self.mutex, self.io, deadline);
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             if (self.closed) {
-                self.connections -= 1;
                 self.mutex.unlock(self.io);
-                self.releaseShared(1);
-                reservation_active = false;
-                client.deinit();
+                // Existing errdefers destroy the client first, then retire
+                // its reservation, and finally release the origin key.
                 return error.PoolClosed;
             }
             self.leased += 1;
@@ -2137,12 +2142,14 @@ pub fn Pool(comptime Runtime: type) type {
 
         pub fn connectionCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             defer self.mutex.unlock(self.io);
             return self.connections;
         }
 
         pub fn waitingCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
+            self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             defer self.mutex.unlock(self.io);
             return self.capacity_waiters.count(self.io);
         }
@@ -2255,11 +2262,7 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         fn releaseReservation(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
-            std.debug.assert(self.connections != 0);
-            self.connections -= 1;
-            self.notifyCapacityWaiterLocked();
-            self.mutex.unlock(self.io);
+            self.retired_connections.release(&self.connections, &self.capacity_waiters, &self.mutex, self.io, 1);
             self.releaseShared(1);
         }
 

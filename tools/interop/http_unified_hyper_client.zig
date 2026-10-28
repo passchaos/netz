@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     defer first.deinit();
     try verifyAdmissionTimeout(&pool, io, second_uri);
     try verifyQueuedTimeout(&pool, io, second_uri);
+    try verifyFailedRetirement(&pool, io);
     var second = try pool.requestUriWithTimeout(
         second_uri,
         .{ .headers = &.{.{
@@ -74,12 +75,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const stats = pool.stats();
     if (pool.connectionCount() != 1 or pool.idleCount() != 1 or
-        stats.total_reused != 2 or stats.total_misses != 2)
+        stats.total_reused != 2 or stats.total_misses != 3)
     {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
 }
@@ -121,6 +122,13 @@ const QueuedGate = struct {
         }
         return self.base.vtable.futexWait(userdata, pointer, expected, timeout);
     }
+
+    fn connect(_: ?*anyopaque, _: *const std.Io.net.IpAddress, _: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
+        const self = active.?;
+        self.pool.mutex.lockUncancelable(self.base);
+        self.held = true;
+        return error.NetworkUnreachable;
+    }
 };
 
 fn verifyQueuedTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {
@@ -160,4 +168,34 @@ fn verifyQueuedTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void
     pool.mutex.unlock(io);
     gate.held = false;
     if (pool.waitingCount() != 0) return error.WaiterNotRetired;
+}
+
+fn verifyFailedRetirement(pool: *netz.http.Pool, io: std.Io) !void {
+    var gate = QueuedGate{ .pool = pool, .base = io };
+    var table = io.vtable.*;
+    table.netConnectIp = QueuedGate.connect;
+    QueuedGate.active = &gate;
+    pool.io = .{ .userdata = io.userdata, .vtable = &table };
+    defer {
+        pool.io = io;
+        QueuedGate.active = null;
+        if (gate.held) pool.mutex.unlock(io);
+    }
+    const started = std.Io.Clock.awake.now(io);
+    if (pool.acquireUriWithTimeout("http://127.0.0.1:1/failed", .fromSeconds(1))) |value| {
+        var lease = value;
+        lease.discard();
+        return error.UnexpectedConnection;
+    } else |err| {
+        if (err != error.NetworkUnreachable) return err;
+    }
+    if (started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds > std.Io.Duration.fromSeconds(1).nanoseconds) return error.RetirementDeadlineOverrun;
+    if (!gate.held or pool.mutex.tryLock()) return error.PoolMutexReleased;
+    if (pool.connections != 2 or pool.retired_connections.pending.load(.acquire) != 1 or pool.idle.idleCount() != 1) return error.InvalidPoolState;
+    if (pool.shared_budget.connectionCount() != 1) return error.InvalidSharedBudget;
+    pool.io = io;
+    QueuedGate.active = null;
+    pool.mutex.unlock(io);
+    gate.held = false;
+    if (pool.connectionCount() != 1 or pool.waitingCount() != 0 or pool.idleCount() != 1) return error.RetirementNotCollected;
 }

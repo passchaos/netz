@@ -3812,8 +3812,55 @@ next request over the original HTTP/1.1 or HTTP/2 connection. Each server still
 receives exactly two requests on one connection. Pool statistics also include
 the extra lease acquisition and the failed idle lookup during capacity waiting.
 
-Connection-slot retirement and subsequent transport/ticket/reclamation cleanup
-still have separate ownership-lock boundaries to audit. This evidence establishes
-capacity-waiter departure, not every later acquisition or request cleanup phase.
-The current snapshot is recorded in
+Successful lease return and subsequent transport/ticket/reclamation cleanup
+have separate ownership-lock boundaries to audit. The waiter evidence establishes
+capacity-waiter departure; the following reservation section covers setup failure
+and final HTTP/3 connection admission. The waiter snapshot is recorded in
 `docs/evidence/http_pool_waiter_lifetime/2026-10-29.json`.
+
+## HTTP connection reservation retirement
+
+Failed HTTP/1.1, HTTP/2, owning HTTP/3 and negotiated TCP connection attempts now
+publish retirement receipts after their resources are gone. The caller retains
+its original Timeout, Canceled or NetworkUnreachable result while a pool or shared
+TCP/HTTP3 budget mutex is occupied. The receipt stores only an atomic count;
+resource release allocates no node and starts no background task. The next owner
+folds receipts into its live count before checking capacity, reporting counters,
+reclaiming an idle reservation or closing the pool. An available mutex folds the
+count immediately. Shared-budget reuse/reclamation feedback also avoids waiting
+for that mutex and prompts the FIFO head to retry.
+
+A release may arrive after admission observed full capacity but before its new
+node captures the retry epoch, or before a notified head rearms its cursor. Each
+failed admission folds receipts again after enqueue/rearm while it still owns
+the mutex. This prevents a retirement hint from being consumed before the new
+wait actually begins. Tests inject release during node allocation and during old
+head pruning, then verify the new head is notified before any counter getter can
+repair a missed receipt. Four concurrent publishers also retire 4096 slots while
+another owner collects; every receipt is applied once.
+
+Owning HTTP/3 connection setup retains the original deadline through the last
+mutex acquisition that publishes its lease. If that step expires, the completed
+client is destroyed once before its reservation is retired. The same order
+applies when Pool close races a completed connect. The previous closed branch
+explicitly destroyed the client and then ran its destruction errdefer again;
+the common error cleanup now owns both destruction and retirement. A counting
+client model checks one destruction, zero leaked leases/slots, and destruction
+before shared-budget release.
+
+The failed-connection tests cover 96 TCP pool cases across the four relative/
+absolute acquisition and complete-request APIs, three original errors, local/
+shared accounting contention and counter/close collection. Six owning HTTP/3
+cases verify both accounting mutexes without creating a transport after failure.
+Additional cases cover the last admission deadline and close/connect race.
+
+The Hyper/rustls process gate preserves its authenticated connection while an
+injected connect for another origin returns NetworkUnreachable with the pool
+mutex occupied. The failed slot's receipt remains pending until that owner
+releases the lock; the shared budget has already returned to one live connection.
+The next request still reuses the original HTTP/1.1 or HTTP/2 TLS connection, and
+each server receives exactly two requests on one connection. The extra failed
+origin contributes one idle-lookup miss. The quic-go SOCKS5 pool gate continues to
+verify three origins, four QUIC connection lifetimes, a two-route limit and one
+shared UDP association. Evidence is recorded in
+`docs/evidence/http_pool_retirement/2026-10-29.json`.

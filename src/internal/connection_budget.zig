@@ -7,6 +7,7 @@
 const std = @import("std");
 const owned_admission = @import("owned_fifo_admission.zig");
 const MutexGuard = @import("mutex_guard.zig").Guard;
+const retired_capacity = @import("retired_capacity.zig");
 
 pub const Error = std.mem.Allocator.Error || error{
     ConnectionLimitReached,
@@ -27,6 +28,7 @@ pub const Budget = struct {
     limit: usize,
     mutex: std.Io.Mutex = .init,
     connections: usize = 0,
+    retired_connections: retired_capacity.Retirements = .{},
     waiters: owned_admission.Queue = .{},
     closed: bool = false,
 
@@ -46,6 +48,7 @@ pub const Budget = struct {
 
     pub fn deinit(self: *Budget) void {
         const allocator = self.allocator;
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         std.debug.assert(self.connections == 0);
         std.debug.assert(self.waiters.count(self.io) == 0);
         self.* = undefined;
@@ -71,6 +74,7 @@ pub const Budget = struct {
     ) ReservationError!void {
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| self.waiters.cancel(queued, self.io);
             return error.PoolClosed;
@@ -85,6 +89,7 @@ pub const Budget = struct {
                     queued.rearm();
                 }
             }
+            self.retired_connections.apply(&self.connections, &self.waiters, self.io);
             return error.ConnectionLimitReached;
         }
         if (waiter) |queued| {
@@ -119,6 +124,7 @@ pub const Budget = struct {
     ) ReservationError!void {
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| self.waiters.cancel(queued, self.io);
             admission_lock.unlock();
@@ -132,6 +138,7 @@ pub const Budget = struct {
                     queued.rearm();
                 }
             }
+            self.retired_connections.apply(&self.connections, &self.waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
@@ -163,24 +170,17 @@ pub const Budget = struct {
 
     /// Release destroyed connections and wake the oldest cross-pool waiter.
     pub fn release(self: *Budget, count: usize) void {
-        if (count == 0) return;
-        self.mutex.lockUncancelable(self.io);
-        std.debug.assert(self.connections >= count);
-        self.connections -= count;
-        self.waiters.notifyHead(self.io);
-        self.mutex.unlock(self.io);
+        self.retired_connections.release(&self.connections, &self.waiters, &self.mutex, self.io, count);
     }
 
-    /// Wake the oldest waiter when an existing reservation became reusable or
-    /// transferable without reducing the total connection count.
+    /// Reuse/reclamation feedback does not wait for an accounting owner.
     pub fn notify(self: *Budget) void {
-        self.mutex.lockUncancelable(self.io);
-        self.waiters.notifyHead(self.io);
-        self.mutex.unlock(self.io);
+        self.retired_connections.notify(&self.connections, &self.waiters, &self.mutex, self.io);
     }
 
     pub fn close(self: *Budget) void {
         self.mutex.lockUncancelable(self.io);
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         self.closed = true;
         self.waiters.notifyAll(self.io);
         self.mutex.unlock(self.io);
@@ -188,12 +188,14 @@ pub const Budget = struct {
 
     pub fn connectionCount(self: *Budget) usize {
         self.mutex.lockUncancelable(self.io);
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         defer self.mutex.unlock(self.io);
         return self.connections;
     }
 
     pub fn waitingCount(self: *Budget) usize {
         self.mutex.lockUncancelable(self.io);
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         defer self.mutex.unlock(self.io);
         return self.waiters.count(self.io);
     }
@@ -202,6 +204,7 @@ pub const Budget = struct {
     /// idle connection while the total budget is full. No reservation changes.
     pub fn mayReclaimFor(self: *Budget, waiter: ?*const Waiter) bool {
         self.mutex.lockUncancelable(self.io);
+        self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         defer self.mutex.unlock(self.io);
         return !self.closed and self.limit != 0 and
             self.connections >= self.limit and
