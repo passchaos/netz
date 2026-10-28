@@ -225,3 +225,42 @@ in [the refreshed comparison](evidence/grpc_shared/2026-10-28-credit-grpc-cpp.js
 The fresh results preserve the small-message advantage in these independent
 workloads. Large persistent and per-call messages still take 2.41x and 2.17x
 the reference wall time; broad gRPC performance superiority remains unproven.
+
+## Native timed socket writes
+
+The internal runtime adapter now uses zio's timed NetSend directly when the
+std.Io belongs to the currently mounted zio execution context. The runtime's
+main task is eligible too. Reserved-thread blockingIo, foreign runtimes,
+non-runtime threads, wrapped vtables and no-suspend regions use the existing
+portable socket-writer path. No zio type appears in the protocol API.
+
+The direct operation preserves socket error mapping and the original awake
+deadline. zio waits for an interrupted operation to finish, keeps a natural
+committed prefix that races timeout/cancellation, and arms a timer only when
+the operation needs to park. This removes the extra writer/timer tasks of the
+generic std.Io.Select wrapper. Tests fill a real TCP send queue, interrupt the
+write, mutate the caller buffer after return, drain the exact known prefix and
+prove that a later marker arrives without abandoned bytes.
+
+Clean 05ea78f3 was compared with clean 1bc897b9 on CPU 0 using the same windows,
+100 warmup and 2000 measured roundtrips. Five samples alternated executable
+order; every payload and terminal status was validated. The final sample set
+ran after protocol verification completed. Full records are retained in
+[the native timed-write A/B](evidence/grpc_shared/2026-10-28-native-timed-write.json).
+
+| Mode | String bytes | Select us/roundtrip | Native timed us/roundtrip | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 18.40 | 17.30 | 1.064x |
+| Persistent RPC | 512 | 18.89 | 17.68 | 1.068x |
+| Persistent RPC | 4096 | 23.83 | 22.05 | 1.081x |
+| Persistent RPC | 262144 | 946.94 | 919.71 | 1.030x |
+| RPC per roundtrip | 0 | 65.74 | 62.63 | 1.050x |
+| RPC per roundtrip | 512 | 66.45 | 64.05 | 1.038x |
+| RPC per roundtrip | 4096 | 72.25 | 68.77 | 1.051x |
+| RPC per roundtrip | 262144 | 1088.81 | 1000.76 | 1.088x |
+
+The retained change improves these workloads by about 3-9%. DATA output under
+a deadline still concatenates borrowed frame headers/payloads into write_batch
+before transport submission; avoiding that copy is the next concrete data-path
+candidate. The earlier external comparison remains a separate pre-change
+snapshot and is not updated by these two-native-executable figures.
