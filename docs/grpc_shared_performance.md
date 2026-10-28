@@ -259,8 +259,66 @@ ran after protocol verification completed. Full records are retained in
 | RPC per roundtrip | 4096 | 72.25 | 68.77 | 1.051x |
 | RPC per roundtrip | 262144 | 1088.81 | 1000.76 | 1.088x |
 
-The retained change improves these workloads by about 3-9%. DATA output under
-a deadline still concatenates borrowed frame headers/payloads into write_batch
-before transport submission; avoiding that copy is the next concrete data-path
-candidate. The earlier external comparison remains a separate pre-change
-snapshot and is not updated by these two-native-executable figures.
+The retained change improves these workloads by about 3-9%. The earlier
+external comparison remains a separate pre-change snapshot and is not updated
+by these two-native-executable figures.
+
+
+## Deadline frame slices and retained buffers
+
+TCP deadline DATA bursts and combined HEADERS/DATA output now submit borrowed
+slices instead of growing the connection's write_batch. The native zio path
+can offer sixteen real vectors at once; other std.Io implementations retain
+joined writer/timer cancellation and advance by the exact count their socket
+writer accepts. Empty slices and short writes across frame boundaries preserve
+one absolute deadline. TLS keeps its contiguous staging transaction for record
+batching and validation of pending-record plaintext retries.
+
+Clean 383fdb56 was compared with clean 09726856 on CPU 0 with the same five
+alternating samples, fixed windows, 100 warmup and 2000 measured roundtrips.
+Telemetry was disabled and each payload and terminal status was validated.
+These results do not demonstrate a throughput improvement: every median is
+within about 1% of its baseline, including a small large-message per-call
+regression. The retained benefit is lower protocol buffer occupancy.
+
+| Mode | String bytes | Contiguous us/roundtrip | Borrowed slices us/roundtrip | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 17.36 | 17.24 | 1.007x |
+| Persistent RPC | 512 | 17.67 | 17.65 | 1.001x |
+| Persistent RPC | 4096 | 21.87 | 21.82 | 1.002x |
+| Persistent RPC | 262144 | 916.72 | 914.96 | 1.002x |
+| RPC per roundtrip | 0 | 61.86 | 61.82 | 1.001x |
+| RPC per roundtrip | 512 | 62.66 | 62.65 | 1.000x |
+| RPC per roundtrip | 4096 | 68.64 | 68.10 | 1.008x |
+| RPC per roundtrip | 262144 | 995.98 | 999.36 | 0.997x |
+
+A separate allocation snapshot used three alternating samples with telemetry,
+100 warmup and ten roundtrips. It measures live client + server + protocol
+allocations after the measured exchanges and before channel/peer teardown;
+preencoded messages, latency storage and runtime allocations use the backing
+allocator and are outside this metric. These telemetry runs overlapped protocol
+verification, so their elapsed and latency fields are not performance evidence.
+
+| Mode | String bytes | Contiguous live bytes | Borrowed slices live bytes | Saved live bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 214630 | 214630 | 0 |
+| Persistent RPC | 512 | 215737 | 215145 | 592 |
+| Persistent RPC | 4096 | 224697 | 218729 | 5968 |
+| Persistent RPC | 262144 | 312780 | 214625 | 98155 |
+| RPC per roundtrip | 0 | 171024 | 171024 | 0 |
+| RPC per roundtrip | 512 | 171616 | 171024 | 592 |
+| RPC per roundtrip | 4096 | 176992 | 171024 | 5968 |
+| RPC per roundtrip | 262144 | 269179 | 171024 | 98155 |
+
+For 262144-byte messages the live protocol allocation median drops by 98155
+bytes (about 96 KiB) per client/server connection pair. The per-call after
+samples ranged from 171024 to 171123 bytes; the other retained-memory groups
+were identical across all three samples. Allocated/freed byte totals during
+the ten measured exchanges are identical between versions in the large-message
+samples. Allocation counts varied; no per-roundtrip allocation-count reduction
+is established. This change removes a retained staging buffer and its copy, while the
+main large-message throughput gap remains open.
+
+[Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
+retain 128 validated result/peer-completion pairs plus source and executable
+fingerprints. They do not replace the independent grpc-cpp comparison.
