@@ -1,0 +1,67 @@
+{
+  "baseline_revision": "8c9c247ef736f92a50aa964ad6e61ef7a2d298e9",
+  "change": "Keep completed WebTransport send recovery independent of unrelated ACK output failures",
+  "before": {
+    "passed": 128,
+    "total": 129,
+    "failure": "completed target recovery returned NetworkDown from final connection ACK submission for unrelated received traffic"
+  },
+  "after": {
+    "focused_passed": 136,
+    "focused_total": 136,
+    "related_passed": 703,
+    "related_total": 703,
+    "target_states": [
+      "FIN acknowledged",
+      "RESET acknowledged",
+      "registered but unwritten"
+    ],
+    "roles": [
+      "client",
+      "server"
+    ],
+    "budgets": [
+      "relative timeout",
+      "absolute awake deadline"
+    ],
+    "sibling_ack_failure_cases": 12,
+    "operation_budget_ms": 10,
+    "optional_ack_attempts": 1,
+    "failed_ack": "original cumulative ACK count and deadline retained",
+    "outbound_sibling": "submitted FIN remains pending for its own ACK; target wait does not consume its recovery",
+    "inbound_sibling": "exact unrelated payload remains available to ordinary stream reader after target completion",
+    "ack_timer": "pending after sibling read; timer submits retry, clears count and deadline only on success; repeated timer call submits no packet",
+    "connection_terminal_cases": 2,
+    "connection_terminal_result": "ConnectionClosed and terminal Session state retained",
+    "existing_contracts": [
+      "receive-only/unknown stream validation",
+      "callback and dispatcher reader exclusion",
+      "invalid and expired clock validation",
+      "target Timeout then retry",
+      "bidi/uni and RESET/FIN isolation",
+      "PTO recovery after dropped target packet",
+      "connection-wide recovery retains bounded final ACK flushing"
+    ]
+  },
+  "validation_note": "Pure ACK output is not limited by ordinary congestion/pacing; regression uses a deterministic actual UDP submission error instead of assuming pacing would block it.",
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport stream recovery' -Dtest-filter='WebTransport recovery' -Dtest-filter='WebTransport flow stream grants' --summary all",
+    "zig build test-lib -Dtest-filter='WebTransport' -Dtest-filter='HTTP/3 stream recovery' --summary all",
+    "zig build interop-webtransport-wtransport -Doptimize=ReleaseFast --summary all"
+  ],
+  "external_gate_scope": "wtransport uses existing stream recovery waits after bidi and uni FIN in both netz roles; cross-process handshake, DATAGRAM, cancel/STOP code, sibling reuse and close semantics corroborate the successful path; local UDP injected-error tests prove ACK-failure isolation.",
+  "interop_records": [
+    "wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1413 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio",
+    "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1350 oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
+  ],
+  "source_sha256": {
+    "src/webtransport/runtime/stream/recovery.zig": "4013cbece75505642c4e63d3d367b579d4bf472699a1f3993b71833d8e818c02",
+    "src/webtransport/runtime/stream/recovery_tests.zig": "d10530af37c24136788b51b90fc9a7ba7f4ac9332bdbdd5275cfcae6f8768769"
+  },
+  "baseline_source_sha256": {
+    "src/webtransport/runtime/stream/recovery.zig": "3dbb75d5099c46df9c2202ad601f5837e422b0506b7a53250bd646243b278f3c",
+    "src/webtransport/runtime/stream/recovery_tests.zig": "be874fc18642b077c6d7ae61badc67a7c7af897af063e987a594f19fa67456d8"
+  }
+}

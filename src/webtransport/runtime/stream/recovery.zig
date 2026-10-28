@@ -15,5 +15,9 @@ pub fn wait(comptime Error: type, control: *control_mod.Control, h3: anytype, re
     defer _ = lifecycle.observe(control, h3, registry);
     // A registered but unwritten send direction has no reliable work yet.
     if (connection.pendingStreamDeliveryRecovery(stream_id)) try h3.waitForStreamRecoveryIdleWithDeadline(stream_id, deadline);
-    _ = try connection.flushPendingAckWithDeadline(deadline);
+    if (lifecycle.terminating(connection)) return error.ConnectionClosed;
+    // This send half is already delivered. An ACK for unrelated received
+    // traffic cannot invalidate that result. Submit it once; failed feedback
+    // keeps QUIC's ACK counters/deadline for its existing connection timer.
+    _ = connection.tryFlushPendingAck() catch {};
 }

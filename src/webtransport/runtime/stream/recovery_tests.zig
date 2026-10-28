@@ -211,3 +211,88 @@ test "WebTransport stream recovery wait drives PTO after target packet loss" {
         try std.testing.expect(!connection.pendingStreamDeliveryRecovery(target));
     }
 }
+
+test "WebTransport stream recovery completion survives a failed sibling ACK" {
+    const Target = enum { fin, reset, unwritten };
+    for (std.enums.values(Role)) |role| {
+        for (std.enums.values(Target)) |kind| {
+            for ([_]bool{ false, true }) |absolute| {
+                var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+                defer threaded.deinit();
+                var pair: Pair = undefined;
+                try pair.init(threaded.io());
+                defer pair.deinit();
+                const connection = pair.connection(role);
+                const deadline = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
+                const first = connection.next_packet_number;
+                const target = try open(&pair, role, .unidirectional);
+                if (kind != .unwritten) {
+                    try send(&pair, role, target, "done", kind == .fin);
+                    if (kind == .reset) try reset(&pair, role, target);
+                    const end = connection.next_packet_number;
+                    try ack(&pair, role, first, end);
+                    try pair.receiveProgress(role, deadline);
+                }
+                try std.testing.expect(!connection.pendingStreamDeliveryRecovery(target));
+                _ = try connection.flushPendingAck();
+                const sibling = try open(&pair, role, .unidirectional);
+                try send(&pair, role, sibling, "outbound", true);
+                try std.testing.expect(connection.pendingStreamDeliveryRecovery(sibling));
+                connection.ack_eliciting_threshold = 1000;
+                connection.requested_max_ack_delay = 1_000_000;
+                const inbound = try open(&pair, opposite(role), .unidirectional);
+                try send(&pair, opposite(role), inbound, "unrelated", false);
+                while (connection.recvStreamStats(inbound) == null) try pair.receiveProgress(role, deadline);
+                try std.testing.expect(connection.ack_eliciting_since_last_ack != 0);
+                const ack_deadline = connection.ackDelayDeadline();
+                try std.testing.expect(ack_deadline != null);
+                const ObservedSend = @import("../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
+                const original_io = connection.endpoint.io;
+                var observed = ObservedSend{ .delegate = original_io, .fail_on_call = 1 };
+                var table = original_io.vtable.*;
+                table.netSend = ObservedSend.netSend;
+                connection.endpoint.io = .{ .userdata = &observed, .vtable = &table };
+                defer connection.endpoint.io = original_io;
+                try wait(&pair, role, target, .fromMilliseconds(10), absolute);
+                try std.testing.expectEqual(@as(usize, 1), observed.calls);
+                try std.testing.expect(!connection.pendingStreamDeliveryRecovery(target));
+                try std.testing.expect(connection.pendingStreamDeliveryRecovery(sibling));
+                try std.testing.expect(connection.ack_eliciting_since_last_ack != 0);
+                try std.testing.expectEqual(ack_deadline, connection.ackDelayDeadline());
+                connection.endpoint.io = original_io;
+                var output: [32]u8 = undefined;
+                const event = switch (role) {
+                    .client => try pair.client.readStreamWithTimeout(&output, .fromSeconds(1)),
+                    .server => try pair.server.readStreamWithTimeout(&output, .fromSeconds(1)),
+                };
+                try std.testing.expect(event == .data and event.data.stream_id == inbound);
+                try std.testing.expectEqualStrings("unrelated", output[0..event.data.bytes]);
+                try std.testing.expect(connection.ack_eliciting_since_last_ack != 0);
+                const before_timer = connection.next_packet_number;
+                try connection.serviceAckDelayTimerAt(ack_deadline.?);
+                try std.testing.expect(connection.next_packet_number > before_timer);
+                try std.testing.expectEqual(@as(u64, 0), connection.ack_eliciting_since_last_ack);
+                try std.testing.expect(connection.ackDelayDeadline() == null);
+                const after_timer = connection.next_packet_number;
+                try connection.serviceAckDelayTimerAt(ack_deadline.?);
+                try std.testing.expectEqual(after_timer, connection.next_packet_number);
+            }
+        }
+    }
+}
+
+test "WebTransport stream recovery completion still rejects a terminated connection" {
+    for (std.enums.values(Role)) |role| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        var pair: Pair = undefined;
+        try pair.init(threaded.io());
+        defer pair.deinit();
+        const target = try open(&pair, role, .unidirectional);
+        const connection = pair.connection(role);
+        try connection.closeApplication(93, "connection closed");
+        try std.testing.expectError(error.ConnectionClosed, wait(&pair, role, target, .fromSeconds(1), true));
+        try std.testing.expect(!connection.pendingStreamDeliveryRecovery(target));
+        try std.testing.expect(pair.control(role).connection_terminated);
+    }
+}

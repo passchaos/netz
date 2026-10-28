@@ -1623,6 +1623,18 @@ stream-scoped delivery query without adding send-path metadata. Wire regressions
 exercise both endpoint roles, bidi/uni FIN and RESET, outstanding sibling FIN,
 preserved inbound data, timeout/retry, and recovery after a dropped target
 packet.
+Once the selected send half is delivered, its completion remains independent
+of a failed ACK for unrelated receive traffic. The WebTransport wrapper now
+tries that cumulative ACK once, retaining QUIC's ACK counters and existing
+deadline on socket failure instead of returning that error for the completed
+stream. The connection timer can retry the ACK without another incoming packet;
+unacknowledged sibling sends and received application bytes stay owned by their
+ordinary paths. Tests cover both roles, relative and absolute budgets, FIN,
+RESET and an unwritten target, exact pending-ACK retention and timer retry.
+An actually closing/draining/closed QUIC connection still returns
+`ConnectionClosed`. Connection-wide recovery waits retain their existing final
+ACK contract. Evidence is recorded in
+`evidence/webtransport_stream_recovery/2026-10-28.json`.
 
 The focused WebTransport and HTTP/3 lifecycle/recovery/QPACK matrix passes 485
 tests in Debug and ReleaseFast, and package reachability passes two tests. The
