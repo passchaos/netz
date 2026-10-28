@@ -8,6 +8,7 @@ const std = @import("std");
 const client_authority = @import("runtime/client/authority.zig");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const timed_mutex = @import("../internal/timed_mutex.zig");
 const http_method = @import("../internal/http_method.zig");
 const netz_runtime = @import("../runtime.zig");
 const http2 = @import("mod.zig");
@@ -216,8 +217,8 @@ pub const Pool = struct {
     }
 
     /// Wait for an idle connection or total-pool capacity within one relative
-    /// timeout. The budget covers queueing only; dialing and HTTP/2 handshake
-    /// deadlines remain controlled by `Options.limits` and `Options.tls`.
+    /// timeout. One budget covers mutex admission, capacity waiting, dialing
+    /// and HTTP/2 bootstrap; stricter configured phase limits still apply.
     pub fn acquireUriWithTimeout(
         self: *Pool,
         uri_text: []const u8,
@@ -663,7 +664,7 @@ pub const Pool = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) AcquireTimeoutError!Lease {
         var displaced: ?Slot = null;
-        self.mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
             self.mutex.unlock(self.io);
@@ -1003,6 +1004,9 @@ pub const Pool = struct {
         self: *Pool,
         waiter: *fifo_admission.Queue.Waiter,
     ) void {
+        // Only this caller links/unlinks its waiter. Notification leaves
+        // membership unchanged, so unused cleanup needs no admission lock.
+        if (!waiter.linked) return;
         self.mutex.lockUncancelable(self.io);
         self.capacity_waiters.cancel(waiter, self.io);
         self.mutex.unlock(self.io);

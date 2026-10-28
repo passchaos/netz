@@ -16,6 +16,7 @@ pub const Header = wire.Header;
 
 test {
     _ = @import("runtime/client_pool_tests.zig");
+    _ = @import("client_pool/admission_tests.zig");
     _ = @import("head/body_framing_tests.zig");
     _ = @import("chunk_size_tests.zig");
 }

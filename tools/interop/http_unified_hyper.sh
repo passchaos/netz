@@ -63,18 +63,21 @@ for protocol in h1 h2; do
     >"$work/server-$protocol.log" 2>&1 &
   server_pid=$!
   wait_for_server "$work/server-$protocol.log" "$protocol"
-  if ! timeout 15s "$client" "$port" "$protocol" \
+  if timeout 15s "$client" "$port" "$protocol" \
       >"$work/client-$protocol.log" 2>&1; then
+    :
+  else
+    client_status=$?
     cat "$work/client-$protocol.log" >&2
     cat "$work/server-$protocol.log" >&2
-    exit 1
+    exit "$client_status"
   fi
   wait "$server_pid"
   server_pid=
   expected_alpn=http/1.1
   if [[ $protocol == h2 ]]; then expected_alpn=h2; fi
   grep -Fq \
-    "netz unified HTTP pool selected Hyper protocol=$protocol alpn=$expected_alpn requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio" \
+    "netz unified HTTP pool selected Hyper protocol=$protocol alpn=$expected_alpn requests=2 connections=1 reusable=true admission_timeout=isolated client_io=zio-std-io server_io=hyper-tokio" \
     "$work/client-$protocol.log"
   grep -Fq \
     "Hyper unified server completed protocol=$protocol alpn=$expected_alpn requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio" \

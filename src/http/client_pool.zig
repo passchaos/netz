@@ -8,6 +8,7 @@
 const std = @import("std");
 const client = @import("client.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const timed_mutex = @import("../internal/timed_mutex.zig");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const connection_budget = @import("../internal/connection_budget.zig");
 const http1_runtime = @import("../http1/runtime.zig");
@@ -403,7 +404,7 @@ pub const Pool = struct {
     ) OperationError!Lease {
         blocked_on_shared.* = false;
         var displaced: ?client.Connection = null;
-        self.mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
@@ -650,6 +651,9 @@ pub const Pool = struct {
         self: *Pool,
         waiter: *fifo_admission.Queue.Waiter,
     ) void {
+        // Only this caller links/unlinks its waiter. Notification leaves
+        // membership unchanged, so unused cleanup needs no admission lock.
+        if (!waiter.linked) return;
         self.mutex.lockUncancelable(self.io);
         self.capacity_waiters.cancel(waiter, self.io);
         self.mutex.unlock(self.io);

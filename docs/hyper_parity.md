@@ -3746,3 +3746,29 @@ and continuation resumption, allocation-free registration, output-limit isolatio
 flow-control stalls. A real gRPC h2c gate additionally interleaves a gzip Health
 Watch and a deflate business RPC on one connection, completes the business RPC,
 then receives another health update and cancels just Watch.
+
+## Initial HTTP pool mutex admission
+
+The HTTP/1.1, HTTP/2 and negotiated TCP pools now acquire their first ownership
+mutex under the caller's original awake-clock deadline. Timeout or cancellation
+while that mutex belongs to another operation returns before inspecting idle
+connections, registering a FIFO waiter or reserving a connection. Spurious
+wakes retain the same absolute bound. A waiter that never registered skips its
+cleanup lock, including the negotiated pool's unused shared TCP/HTTP3 budget
+waiter; notification does not change membership, which remains caller-owned.
+
+Adjacent pool tests exercise acquisition and complete-request APIs with both
+relative and absolute bounds, timeout and cancellation, a pre-existing FIFO
+head, and contended unused shared-budget cleanup. The virtual clock generates
+two spurious wakes before expiry and checks each wait uses the original bound.
+The independent Hyper/rustls process gate holds the negotiated pool's mutex
+after the first response, requires a 10 ms request to time out while the lock
+stays held, then completes the second request over the same authenticated
+HTTP/1.1 or HTTP/2 connection. Hyper must receive exactly two requests on one
+connection, and pool reuse counters must still match those two exchanges.
+
+This establishes the pre-admission contract. Cleanup for already-linked
+stack-owned FIFO waiters and connection-slot retirement still reacquire their
+ownership locks without a deadline; those later lifetime boundaries remain
+separate audit work. Evidence is recorded in
+`docs/evidence/http_pool_admission/2026-10-28.json`.

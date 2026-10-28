@@ -126,6 +126,9 @@ pub const Budget = struct {
     }
 
     pub fn cancel(self: *Budget, waiter: *Waiter) void {
+        // Membership belongs to this caller; other budget users only notify
+        // it. A waiter that never registered owns no shared cleanup work.
+        if (!waiter.linked) return;
         self.mutex.lockUncancelable(self.io);
         self.waiters.cancel(waiter, self.io);
         self.mutex.unlock(self.io);

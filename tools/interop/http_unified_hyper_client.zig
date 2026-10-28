@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
         .fromSeconds(5),
     );
     defer first.deinit();
+    try verifyAdmissionTimeout(&pool, io, second_uri);
     var second = try pool.requestUriWithTimeout(
         second_uri,
         .{ .headers = &.{.{
@@ -77,7 +78,30 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
+}
+
+fn verifyAdmissionTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {
+    pool.mutex.lockUncancelable(io);
+    defer pool.mutex.unlock(io);
+    const started = std.Io.Clock.awake.now(io);
+    if (pool.requestUriWithTimeout(uri, .{}, .fromMilliseconds(10))) |value| {
+        var response = value;
+        response.deinit();
+        return error.AdmittedWhileMutexHeld;
+    } else |err| {
+        if (err != error.Timeout) return err;
+    }
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    if (elapsed.nanoseconds > std.Io.Duration.fromSeconds(1).nanoseconds) {
+        return error.AdmissionDeadlineOverrun;
+    }
+    if (pool.mutex.tryLock()) return error.PoolMutexReleased;
+    if (pool.connections != 1 or pool.idle.idleCount() != 1 or
+        pool.capacity_waiters.count() != 0)
+    {
+        return error.InvalidPoolState;
+    }
 }

@@ -1,0 +1,137 @@
+{
+  "baseline_revision": "e3f7ff5ba048ffe228e4a2295fc078733b5162d5",
+  "change": "Bound initial HTTP/1.1, HTTP/2 and negotiated TCP pool mutex admission and unused waiter cleanup",
+  "before": {
+    "unit_tests": {
+      "passed": 134,
+      "total": 137,
+      "failed": 3,
+      "regressions": [
+        "HTTP/1 pool deadline bounds initial mutex admission and unused waiter cleanup",
+        "HTTP/2 pool deadline bounds initial mutex admission and unused waiter cleanup",
+        "unified HTTP pool deadline bounds initial mutex admission and unused waiter cleanup"
+      ],
+      "failure": "expected Timeout after original virtual deadline expired; returned PoolClosed after unbounded mutex rescue"
+    },
+    "process_gate": {
+      "protocol": "http/1.1",
+      "requested_timeout_ms": 10,
+      "watchdog_seconds": 15,
+      "exit_status": 124,
+      "hyper_received_requests": 1,
+      "expected_completed_requests": 2,
+      "failure": "old client remained blocked while it held the pool ownership mutex; timeout killed it before the second exchange",
+      "baseline_binary": ".zig-cache/o/fdd6f0fbb89f25c903f4975c17d9b3db/netz-http-unified-hyper-client"
+    }
+  },
+  "after": {
+    "related_tests": {
+      "passed": 211,
+      "total": 211
+    },
+    "mutex_cases": 24,
+    "pools": [
+      "HTTP/1.1",
+      "HTTP/2",
+      "negotiated HTTP/1.1 and HTTP/2"
+    ],
+    "api_forms": [
+      "acquireUriWithDeadline",
+      "acquireUriWithTimeout",
+      "requestUriWithDeadline",
+      "requestUriWithTimeout"
+    ],
+    "outcomes": [
+      "Timeout",
+      "Canceled"
+    ],
+    "clock": {
+      "initial_ns": 1000,
+      "absolute_deadline_ns": 1003,
+      "spurious_wakes_before_expiry": 2,
+      "timeout_waits": 3,
+      "canceled_waits": 1,
+      "every_wait_preserves_original_awake_deadline": true
+    },
+    "ownership": {
+      "unbounded_waits": 0,
+      "caller_mutex_remains_held": true,
+      "preexisting_fifo_head_preserved": true,
+      "preexisting_fifo_head_not_notified": true,
+      "no_connection_reserved": true,
+      "negotiated_pool_unused_shared_budget_mutex_remains_held": true,
+      "negotiated_pool_shared_budget_connections": 0,
+      "negotiated_pool_shared_budget_waiters": 0
+    },
+    "interop": {
+      "protocols": [
+        "http/1.1",
+        "h2"
+      ],
+      "transport": "authenticated rustls TLS",
+      "client_io": "zio-std-io",
+      "server_io": "hyper-tokio",
+      "admission_timeout_ms": 10,
+      "maximum_observer_bound_ms": 1000,
+      "requests_per_protocol": 2,
+      "connections_per_protocol": 1,
+      "reused_per_protocol": 1,
+      "misses_per_protocol": 1,
+      "timeout_preserves_idle_connection_and_fifo_state": true,
+      "build_steps_passed": 8,
+      "build_steps_total": 8
+    }
+  },
+  "reference": {
+    "root": "/nav_env/Work/hyper",
+    "revision": "084473f728f9d07b3be5845475aa2f62ed9ff579",
+    "version": "1.11.0",
+    "files": [
+      "src/client/dispatch.rs",
+      "src/proto/h1/dispatch.rs",
+      "src/proto/h2/client.rs"
+    ],
+    "behavior": "H1 polls request callback cancellation before building the message; H2 skips canceled callbacks before request submission. Cancellation before admission must not consume transport ownership."
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='pool deadline bounds initial mutex' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/1 client pool' -Dtest-filter='HTTP/2 client pool' -Dtest-filter='unified HTTP pool' -Dtest-filter='pool deadline' -Dtest-filter='pool request deadline' -Dtest-filter='shared connection budget' -Dtest-filter='FIFO admission' -Dtest-filter='timed mutex' -Dtest-filter='HTTP/3 pool releases a timed-out URI handshake reservation' --summary all",
+    "zig build interop-http-unified-hyper -Doptimize=ReleaseFast --summary all",
+    "zig fmt --check src/http/client_pool.zig src/http1/client_pool.zig src/http2/client_pool.zig src/http/mod.zig src/http1/mod.zig src/http2/mod.zig src/internal/connection_budget.zig src/internal/pool_admission_test_support.zig src/http/client_pool/admission_tests.zig src/http1/client_pool/admission_tests.zig src/http2/client_pool/admission_tests.zig tools/interop/http_unified_hyper_client.zig",
+    "bash -n tools/interop/http_unified_hyper.sh",
+    "git diff --check"
+  ],
+  "interop_records": [
+    "netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio",
+    "netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio"
+  ],
+  "scope": "Initial ownership mutex admission and cleanup for waiters that never linked; successful acquisition and already-registered cleanup retain existing ownership.",
+  "remaining_boundaries": [
+    "already-linked stack-owned FIFO waiter removal",
+    "connection-slot retirement",
+    "locks after initial admission"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/hyper_parity.md": "b3bba717c5fe0d2797d67cae7a55bea94aa9bc7642fe05a0af2e68511a5e2d68",
+    "src/http/client_pool.zig": "a0fe5cd0b7f8e1a7d9913a15ce7f4d4101698326423935be5a5176d9926b6f7e",
+    "src/http/client_pool/admission_tests.zig": "5deff4928bef7e9ad0155d57388b3eaffa672d337d70da80d474eb18cf60eda7",
+    "src/http/mod.zig": "0c68fb2996c6c9ab4833a68efb4d3055724a16affa4a4377f0836edd2debede8",
+    "src/http1/client_pool.zig": "17f3caf2c33382b258fb7fde4448494189af848909be38f853f8dddc29b2bb26",
+    "src/http1/client_pool/admission_tests.zig": "afb423f1cfc38eef61aad035da3912823c0444e7e45ba50d38b923a93244d631",
+    "src/http1/mod.zig": "9f23ff765df97d607deb95a151d9db0628cfab8cff1a83083c3c46357d4f98f5",
+    "src/http2/client_pool.zig": "be16778aba25a0aa42be668b624661cd00de3f2e599ff1bb058989ba3e97ca98",
+    "src/http2/client_pool/admission_tests.zig": "6feb154e9bd204056d38f7e4555c522927672a44126718c51a49a0f799e2aa8d",
+    "src/http2/mod.zig": "f647d23045bdcd24168e1b957911577537f0e5a0ba46fed5d686dd09908107b6",
+    "src/internal/connection_budget.zig": "25db8cd5bff8251bdc4fe3dd8bc79165e5121af76ad7eacf25b0af2fc472c894",
+    "src/internal/fifo_admission.zig": "859e7786be4eb92a3677fd085b9b68f8e5553f1bc384bd1e8a80d8dd5c14b72e",
+    "src/internal/pool_admission_test_support.zig": "7edb794de2e1d80069298bff9de4fb7969192061365173c18b0f115b15d926e2",
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318",
+    "tools/interop/http_unified_hyper.sh": "226ef38301e1ba2b6a9cf80b56aae314b700c997f1ab5f940bc3846b68d248f5",
+    "tools/interop/http_unified_hyper_client.zig": "1b4688863da41bc4260b5d7847a99975ad167a069dc06acdd9efd871b0ef9a88"
+  }
+}

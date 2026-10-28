@@ -4070,6 +4070,7 @@ test {
     _ = priority_field;
     _ = @import("hpack/tests/decoded_fields.zig");
     _ = @import("runtime/client_pool_tests.zig");
+    _ = @import("client_pool/admission_tests.zig");
     _ = @import("runtime/shared_client_pool_tests.zig");
     _ = runtime;
 }
