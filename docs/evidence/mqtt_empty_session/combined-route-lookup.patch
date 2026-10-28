@@ -1,0 +1,161 @@
+diff --git a/src/mqtt/broker.zig b/src/mqtt/broker.zig
+index 78b71173..c6384041 100644
+--- a/src/mqtt/broker.zig
++++ b/src/mqtt/broker.zig
+@@ -7967,7 +7967,9 @@ pub const Broker = struct {
+         more_pending_out.* = false;
+         const handle = slot.sessionHandle() orelse return null;
+         const connection = slot.connection orelse return null;
+-        const route_id = try self.sessions.routeId(handle);
++        // The required route lookup also detects an empty Session. Sent
++        // inflight and detached QoS 0 retain their maintenance/commit path.
++        const route_id = (try self.sessions.routeIdForOutgoingWork(handle)) orelse return null;
+         const authorizers = self.deliveryAuthorizers(slot.accessControl());
+         const client_id = if (authorizers.configured())
+             try self.sessions.clientId(handle)
+diff --git a/src/mqtt/session/mod.zig b/src/mqtt/session/mod.zig
+index 1a37aeb2..bebf0246 100644
+--- a/src/mqtt/session/mod.zig
++++ b/src/mqtt/session/mod.zig
+@@ -1805,8 +1805,7 @@ pub const Store = struct {
+     ) Error!bool {
+         const session = try self.getSession(handle);
+         assertInflightSendCursor(session.*);
+-        return session.next_inflight_send != no_inflight_send or
+-            session.queued_count != 0;
++        return @import("outgoing_status.zig").hasUnselected(session, no_inflight_send);
+     }
+ 
+     pub fn routeId(
+@@ -1816,6 +1815,14 @@ pub const Store = struct {
+         return (try self.getSession(handle)).route_id;
+     }
+ 
++    /// Return the route only while queued, sent inflight or writer-owned
++    /// QoS 0 output remains. This combines handle validation, route lookup and
++    /// the empty-drain observation without querying the Session twice.
++    pub fn routeIdForOutgoingWork(self: *Store, handle: Handle) Error!?u64 {
++        const session = try self.getSession(handle);
++        return if (@import("outgoing_status.zig").hasWork(session)) session.route_id else null;
++    }
++
+     /// Borrow the stable ClientID associated with a Session. The slice remains
+     /// valid until that Session is removed or the Store is deinitialized.
+     pub fn clientId(
+@@ -4079,6 +4086,7 @@ test "Session unselected transmission tracks the QoS 2 handshake" {
+ test {
+     _ = @import("tests.zig");
+     _ = @import("ack_tests.zig");
++    _ = @import("outgoing_status_tests.zig");
+     _ = @import("open_tests.zig");
+     _ = @import("expiry_inspection_tests.zig");
+ }
+diff --git a/src/mqtt/session/outgoing_status.zig b/src/mqtt/session/outgoing_status.zig
+new file mode 100644
+index 00000000..483ca4c9
+--- /dev/null
++++ b/src/mqtt/session/outgoing_status.zig
+@@ -0,0 +1,12 @@
++//! Separate selectable output from transactions that still require maintenance.
++
++pub fn hasUnselected(session: anytype, no_send: u16) bool {
++    return session.next_inflight_send != no_send or session.queued_count != 0;
++}
++
++/// Sent inflight entries still require expiry/ACK handling, and detached
++/// QoS 0 still belongs to its current writer. Neither is an idle Session.
++pub fn hasWork(session: anytype) bool {
++    return session.queued_count != 0 or session.inflight_count != 0 or
++        session.pending_qos0 != null;
++}
+diff --git a/src/mqtt/session/outgoing_status_tests.zig b/src/mqtt/session/outgoing_status_tests.zig
+new file mode 100644
+index 00000000..7694303c
+--- /dev/null
++++ b/src/mqtt/session/outgoing_status_tests.zig
+@@ -0,0 +1,85 @@
++const std = @import("std");
++const mqtt = @import("../mod.zig");
++const session = @import("mod.zig");
++const allocator = std.testing.allocator;
++
++fn hasOutgoingWork(store: *session.Store, handle: session.Handle) !bool {
++    const route = try store.routeIdForOutgoingWork(handle);
++    if (route) |value| try std.testing.expectEqual(try store.routeId(handle), value);
++    return route != null;
++}
++
++test "session outgoing work distinguishes idle and sent QoS1 transactions" {
++    var store = session.Store.init(allocator, .{});
++    defer store.deinit();
++    const opened = try store.open("work-qos1", false, 60, .zero);
++    try std.testing.expect(!try hasOutgoingWork(&store, opened.handle));
++    _ = try store.enqueuePublish(opened.handle, "work/topic", "payload", .{ .qos = .at_least_once, .now = .zero });
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    var storage: [1]session.Transmission = undefined;
++    const transmissions = try store.drainInto(opened.handle, .zero, 1, &storage);
++    try std.testing.expectEqual(@as(usize, 1), transmissions.len);
++    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    _ = try store.handleAck(opened.handle, .puback, transmissions[0].publish.packet_id, 0);
++    try std.testing.expect(!try hasOutgoingWork(&store, opened.handle));
++}
++
++test "session outgoing work retains QoS2 through PUBREL and final PUBCOMP" {
++    var store = session.Store.init(allocator, .{});
++    defer store.deinit();
++    const opened = try store.open("work-qos2", false, 60, .zero);
++    _ = try store.enqueuePublish(opened.handle, "work/topic", "payload", .{ .qos = .exactly_once, .now = .zero });
++    var storage: [1]session.Transmission = undefined;
++    const sent = try store.drainInto(opened.handle, .zero, 1, &storage);
++    const id = sent[0].publish.packet_id;
++    _ = try store.handleAck(opened.handle, .pubrec, id, 0);
++    try std.testing.expect(try store.hasUnselectedTransmission(opened.handle));
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    const release = try store.drainInto(opened.handle, .zero, 1, &storage);
++    try std.testing.expect(release[0] == .pubrel);
++    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    _ = try store.handleAck(opened.handle, .pubcomp, id, 0);
++    try std.testing.expect(!try hasOutgoingWork(&store, opened.handle));
++}
++
++test "session outgoing work retains a detached QoS0 packet until writer commit" {
++    var store = session.Store.init(allocator, .{});
++    defer store.deinit();
++    const opened = try store.open("work-qos0", false, 60, .zero);
++    _ = try store.enqueuePublish(opened.handle, "work/topic", "payload", .{ .qos = .at_most_once, .now = .zero });
++    var storage: [1]session.Transmission = undefined;
++    const sent = try store.drainInto(opened.handle, .zero, 1, &storage);
++    try std.testing.expectEqual(@as(usize, 0), sent[0].publish.packet_id);
++    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    try std.testing.expectError(error.InflightFull, store.drainInto(opened.handle, .zero, 1, &storage));
++    try store.completeQoS0Transmission(opened.handle, try store.routeId(opened.handle), 0);
++    try std.testing.expect(!try hasOutgoingWork(&store, opened.handle));
++}
++
++test "session outgoing work preserves expiry maintenance for sent and queued messages" {
++    var store = session.Store.init(allocator, .{});
++    defer store.deinit();
++    const opened = try store.open("work-expiry", false, 60, .zero);
++    const properties = [_]mqtt.Property{.{ .four_byte = .{ .id = .message_expiry_interval, .value = 1 } }};
++    _ = try store.enqueuePublish(opened.handle, "work/topic", "sent", .{ .qos = .at_least_once, .properties = &properties, .now = .zero });
++    var storage: [1]session.Transmission = undefined;
++    _ = try store.drainInto(opened.handle, .zero, 1, &storage);
++    _ = try store.enqueuePublish(opened.handle, "work/topic", "queued", .{ .qos = .at_least_once, .properties = &properties, .now = .zero });
++    try std.testing.expect(try hasOutgoingWork(&store, opened.handle));
++    try std.testing.expectEqual(@as(usize, 0), (try store.drainInto(opened.handle, .fromNanoseconds(2 * std.time.ns_per_s), 1, &storage)).len);
++    try std.testing.expect(!try hasOutgoingWork(&store, opened.handle));
++}
++
++test "session outgoing work route lookup rejects stale and missing handles" {
++    var store = session.Store.init(allocator, .{});
++    defer store.deinit();
++    const opened = try store.open("route-lookup", false, 60, .zero);
++    const replacement = try store.open("route-lookup", false, 60, .zero);
++    try std.testing.expectError(error.SessionNotFound, store.routeIdForOutgoingWork(opened.handle));
++    try std.testing.expect(!try hasOutgoingWork(&store, replacement.handle));
++    try store.disconnect(replacement.handle, 0, .zero);
++    try std.testing.expectError(error.SessionNotFound, store.routeIdForOutgoingWork(replacement.handle));
++}

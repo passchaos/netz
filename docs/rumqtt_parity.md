@@ -7,6 +7,12 @@ The source references are `~/Work/rumqtt` at `e886a78` and
 persistence format, and conformance suite. Feature, internal microbenchmark,
 and same-client broker results are kept separate.
 
+The [empty Session flush experiment](mqtt_empty_session_performance.md)
+records three rejected broker candidates and 272 complete fixed-driver runs.
+The smallest combined-query candidate repeated a serial instruction reduction,
+but delivery time remained neutral and the large-payload CPU control regressed.
+The production Session/ACK paths retain their baseline behavior.
+
 ## Current feature comparison
 
 Broker teardown now collects shared Session-writer errors while holding the
