@@ -75,6 +75,8 @@ from mqtt_broker_config_subscription_persistence import (
     run_persistent_subscription_snapshot_case,
 )
 from mqtt_scenarios.subscription_lifecycle import run_subscription_lifecycle_case
+from mqtt_scenarios.process import wait_process_line
+from mqtt_scenarios.will_lifecycle import run_will_lifecycle_case
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -82,6 +84,10 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
+    "broker/07-will-qos0.py":
+        "130f7c4006e26511424dae477471ec74701d363804c529d7b3f8bcbaadff2150",
+    "broker/07-will-per-listener.py":
+        "7367b2a038cdccf4312342fed17aa8d923065373127312b0cbfa6b47bfb7f03e",
     "broker/02-subscribe-persistence-flipflop.py":
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
     "broker/11-persistent-subscription.py":
@@ -160,6 +166,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-persistence-restart", action="store_true")
     selected.add_argument("--only-subscription-lifecycle", action="store_true")
+    selected.add_argument("--only-will-lifecycle", action="store_true")
     selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -471,58 +478,6 @@ def mqtt_ping(sock: socket.socket) -> None:
     response = read_mqtt_packet(sock)
     if response != b"\xd0\x00":
         raise AssertionError(f"expected PINGRESP, got {response.hex()}")
-
-
-def wait_process_line(
-    process: subprocess.Popen[str],
-    needle: str,
-    label: str,
-    timeout: float = 5,
-) -> None:
-    assert process.stdout is not None
-    descriptor = process.stdout.fileno()
-    was_blocking = os.get_blocking(descriptor)
-    deadline = time.monotonic() + timeout
-    observed: list[str] = []
-    fragment = ""
-    os.set_blocking(descriptor, False)
-    try:
-        while time.monotonic() < deadline:
-            try:
-                chunk = process.stdout.readline()
-            except BlockingIOError:
-                chunk = ""
-            if chunk:
-                fragment += chunk
-                if fragment.endswith("\n"):
-                    line = fragment.rstrip("\r\n")
-                    fragment = ""
-                    observed.append(line)
-                    if needle in line:
-                        return
-                continue
-            if process.poll() is not None:
-                if fragment:
-                    observed.append(fragment)
-                    if needle in fragment:
-                        return
-                break
-            remaining = max(0.0, deadline - time.monotonic())
-            readable, _, _ = select.select(
-                [process.stdout],
-                [],
-                [],
-                remaining,
-            )
-            if not readable:
-                break
-    finally:
-        os.set_blocking(descriptor, was_blocking)
-    if fragment:
-        observed.append(fragment)
-    raise AssertionError(
-        f"{label}: did not observe {needle!r}; output={observed!r}"
-    )
 
 
 def read_listener_lines(
@@ -7458,7 +7413,7 @@ def main() -> None:
     args = parse_args()
     source_count = 0
     test_root = args.mosquitto_test_root
-    if test_root is None and args.only_include_directory:
+    if test_root is None and (args.only_include_directory or args.only_will_lifecycle):
         test_root = Path.home() / "Work/mosquitto/test"
     if test_root is not None:
         source_count = verify_mosquitto_process_sources(
@@ -7475,6 +7430,17 @@ def main() -> None:
                 "upstream=config-includedir protocols=mqttv311+mqttv5 "
                 "ordered-files=true reload=true rollback=true "
                 "file-add-remove=true live-delivery=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
+        if args.only_will_lifecycle:
+            run_will_lifecycle_case(args.broker, directory)
+            print(
+                "MQTT Will lifecycle integration passed: "
+                "upstream_cases=8 supplemental_cases=2 protocols=mqttv311+mqttv5 "
+                "clean_session=both listener_policy=global+per-listener "
+                "reload_authorization=true retained_denial=true "
+                "denied_will_consumed=true duplicate_will_rejected=true "
                 f"mosquitto_process_sources={source_count} " + RUNTIME
             )
             return
@@ -7699,6 +7665,7 @@ def main() -> None:
         run_listener_anonymous_policy_case(args.broker, directory)
         run_username_or_anonymous_case(args.broker, directory)
         run_unix_listener_case(args.broker, directory)
+        run_will_lifecycle_case(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)

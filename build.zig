@@ -1744,6 +1744,19 @@ pub fn build(b: *std.Build) void {
     mqtt_broker_config_step.dependOn(&mqtt_broker_config.step);
     test_step.dependOn(&mqtt_broker_config.step);
 
+    const mqtt_will_lifecycle = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_will_lifecycle.addArtifactArg(mqtt_vectors_broker);
+    mqtt_will_lifecycle.addArg("--only-will-lifecycle");
+    if (b.args) |args| mqtt_will_lifecycle.addArgs(args);
+    const mqtt_will_lifecycle_step = b.step(
+        "interop-mqtt-will-lifecycle",
+        "Verify source-locked QoS0 Wills and publication-time ACL reload policy",
+    );
+    mqtt_will_lifecycle_step.dependOn(&mqtt_will_lifecycle.step);
+
     const mqtt_broker_includes = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

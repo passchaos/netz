@@ -5704,10 +5704,11 @@ proxy evidence for the entire suite.
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
 3. Expand the source-hash-locked process gate beyond its current 294 curated
-   scenarios. The strict broker configuration adapter now locks twenty-seven
+   scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:
    persistent subscription self-delivery, persisted No Local, queued
    Subscription Identifiers, persistent/clean-session flipflop,
+   QoS 0 Wills with global and per-listener policy,
    Windows-CRLF configuration, missing root configuration, include-directory
    loading, the Unix listener,
    bridge reload, bridge QoS/Retain/Protocol-Version CONNACK capability
@@ -5763,7 +5764,9 @@ proxy evidence for the entire suite.
    `ZZ-broker-check.json`, whose sole test is an empty end-of-suite sentinel.
    The remaining upstream Python process suite still contains portable
    lifecycle and configuration behavior that the current curated gate does
-   not cover.
+   not cover. The dedicated [Will process lifecycle gate](mqtt_will_lifecycle.md)
+   additionally verifies both source-locked Will variants and publication-time
+   ACL reload behavior without changing the runtime callback lifetime contract.
 
 3. **Prometheus exposition (new).** `mqtt.broker_prometheus.render(allocator, broker.stats())`
    emits deterministic Prometheus text exposition 0.0.4 from one coherent
