@@ -5069,6 +5069,7 @@ pub const MessageWriteProgress = common.MessageWriteProgress;
 const MessageIntoReceiveState = common.MessageIntoReceiveState;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("runtime/control/automatic.zig");
+const control_admission = @import("runtime/control/admission.zig");
 const ping_control = @import("runtime/control/ping.zig");
 
 pub const Connection = struct {
@@ -5107,6 +5108,9 @@ pub const Connection = struct {
     /// transactions. The transaction details remain protected by send_mutex.
     application_write_pending: std.atomic.Value(bool) = .init(false),
     automatic_write_pending: std.atomic.Value(bool) = .init(false),
+    /// Receive-owned control storage is published separately from send state.
+    automatic_control_waiting: std.atomic.Value(bool) = .init(false),
+    automatic_control_admission: ?control_admission.Admission = null,
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
     incoming_frame_validated: usize = 0,
@@ -5233,7 +5237,7 @@ pub const Connection = struct {
         if (!self.canSendOpcodeLocked(.binary)) {
             return error.ConnectionClosed;
         }
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (self.tls_server_conn) |connection| {
@@ -5291,6 +5295,7 @@ pub const Connection = struct {
 
     pub fn close(self: *Connection) void {
         self.pending_write.clear();
+        control_admission.clear(self);
         if (self.pending_auto_control) |*pending| {
             pending.deinit(self.allocator);
         }
@@ -5408,7 +5413,7 @@ pub const Connection = struct {
         );
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -5515,7 +5520,7 @@ pub const Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(.binary)) {
@@ -5548,7 +5553,7 @@ pub const Connection = struct {
         );
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -5611,7 +5616,7 @@ pub const Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(.binary)) {
@@ -5722,7 +5727,7 @@ pub const Connection = struct {
         }
         if (!self.pending_write.isPing()) {
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -5796,7 +5801,7 @@ pub const Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(.pong)) {
@@ -5834,7 +5839,7 @@ pub const Connection = struct {
             .ping,
             payload,
         );
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -5851,7 +5856,7 @@ pub const Connection = struct {
             }
             if (!self.pending_write.isPing()) {
                 if (!self.pending_write.isNone() or
-                    self.pending_auto_control != null)
+                    control_admission.pending(self))
                 {
                     return error.WriteInProgress;
                 }
@@ -5878,7 +5883,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -5995,7 +6000,7 @@ pub const Connection = struct {
             if (!pending.matches(payload)) return error.WriteInProgress;
         } else {
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -6130,7 +6135,7 @@ pub const Connection = struct {
         if (self.receiveFailed() or self.writeAborted()) {
             return error.ConnectionClosed;
         }
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -6165,7 +6170,7 @@ pub const Connection = struct {
                     }
                 } else {
                     if (!self.pending_write.isNone() or
-                        self.pending_auto_control != null)
+                        control_admission.pending(self))
                     {
                         return error.WriteInProgress;
                     }
@@ -6193,7 +6198,7 @@ pub const Connection = struct {
         if (self.receiveFailed() or self.writeAborted()) {
             return error.ConnectionClosed;
         }
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -6279,7 +6284,7 @@ pub const Connection = struct {
         opcode: websocket.Opcode,
         payload: []const u8,
     ) Error!void {
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -6379,7 +6384,7 @@ pub const Connection = struct {
         try common.validateOutgoingMessage(self.limits, opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -6433,7 +6438,7 @@ pub const Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(opcode)) {
@@ -6745,7 +6750,7 @@ pub const Connection = struct {
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
-            if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+            if (!self.pending_write.isNone() or control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -6780,7 +6785,7 @@ pub const Connection = struct {
 
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -6840,7 +6845,7 @@ pub const Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(opcode)) {
@@ -7169,13 +7174,13 @@ pub const Connection = struct {
                         self.closeSent(),
                         self.closeReceived(),
                     )) return frame;
-                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.pong, frame.payload, delivery, frame, deadline, 0);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
                 .close => {
                     if (self.closeSent()) return frame;
-                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.close, frame.payload, delivery, frame, deadline, 0);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -7766,7 +7771,7 @@ pub const Connection = struct {
 
     fn ensureNoPendingWrites(self: *Connection) Error!void {
         if (self.application_write_pending.load(.acquire) or
-            self.automatic_write_pending.load(.acquire))
+            control_admission.pending(self))
         {
             return error.WriteInProgress;
         }
@@ -7784,9 +7789,13 @@ pub const Connection = struct {
         delivery: PendingAutomaticControl.Delivery,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Opcode {
-        if (!self.automatic_write_pending.load(.acquire)) return null;
+        if (!control_admission.pending(self)) return null;
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
+        if (self.automatic_control_admission) |waiting| {
+            if (waiting.delivery != delivery) return error.WriteInProgress;
+            return waiting.opcode;
+        }
         const pending = self.pending_auto_control orelse return null;
         if (pending.delivery != delivery) return error.WriteInProgress;
         return pending.opcode;
@@ -7800,7 +7809,7 @@ pub const Connection = struct {
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         if (!self.pending_write.isNone() or
-            self.pending_auto_control != null)
+            control_admission.pending(self))
         {
             self.write_aborted.store(true, .release);
             transportStream(self.transport()).shutdown(self.io, .both) catch {};
@@ -7851,9 +7860,23 @@ pub const Connection = struct {
         delivery: PendingAutomaticControl.Delivery,
         frame: ?websocket.Frame,
     ) Error!void {
-        self.send_mutex.lockUncancelable(self.io);
+        return self.beginAutomaticControlBefore(opcode, payload, delivery, frame, null, 0);
+    }
+
+    fn beginAutomaticControlBefore(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        delivery: PendingAutomaticControl.Delivery,
+        frame: ?websocket.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        consumed_input: usize,
+    ) Error!void {
+        try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
-        return automatic_control.begin(self, self.io, self.role, opcode, payload, delivery, frame, true);
+        const consumed = try control_admission.admit(self, self.io, self.role, true);
+        if (consumed != 0) self.discardBuffered(consumed);
     }
 
     fn resumeAutomaticControl(
@@ -7862,6 +7885,8 @@ pub const Connection = struct {
     ) Error!?websocket.Frame {
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
+        const consumed = try control_admission.admit(self, self.io, self.role, true);
+        if (consumed != 0) self.discardBuffered(consumed);
         const pending = if (self.pending_auto_control) |*value|
             value
         else
@@ -7917,7 +7942,8 @@ pub const Connection = struct {
 test "WebSocket HTTP/1 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 1456), @sizeOf(Connection));
+        // Includes the receive-owned slot for controls waiting on a writer.
+        try std.testing.expectEqual(@as(usize, 1616), @sizeOf(Connection));
     }
 }
 
@@ -7950,6 +7976,9 @@ pub const H2Connection = struct {
     write_aborted: std.atomic.Value(bool) = .init(false),
     application_write_pending: std.atomic.Value(bool) = .init(false),
     automatic_write_pending: std.atomic.Value(bool) = .init(false),
+    /// Receive-owned control storage is published separately from send state.
+    automatic_control_waiting: std.atomic.Value(bool) = .init(false),
+    automatic_control_admission: ?control_admission.Admission = null,
     incoming_data_kind: IncomingDataKind = .none,
     incoming_text_utf8: websocket.Utf8Validator = .{},
     incoming_frame_validated: usize = 0,
@@ -8014,6 +8043,7 @@ pub const H2Connection = struct {
 
     pub fn close(self: *H2Connection) void {
         self.pending_write.clear();
+        control_admission.clear(self);
         if (self.pending_auto_control) |*pending| {
             pending.deinit(self.allocator);
         }
@@ -8081,7 +8111,7 @@ pub const H2Connection = struct {
     ) Error!void {
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
-        if (!self.pending_write.isNone() or self.pending_auto_control != null) {
+        if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
         try self.tunnel.connection.updateTrafficKeys(request_peer_update);
@@ -8278,7 +8308,7 @@ pub const H2Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             try self.ensureCanSendOpcodeLocked(.binary);
@@ -8494,7 +8524,7 @@ pub const H2Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             try self.ensureCanSendOpcodeLocked(.binary);
@@ -8548,7 +8578,7 @@ pub const H2Connection = struct {
         }
         if (!self.pending_write.isPing()) {
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -8623,7 +8653,7 @@ pub const H2Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (!self.canSendOpcodeLocked(.pong)) {
@@ -8662,7 +8692,7 @@ pub const H2Connection = struct {
             .ping,
             payload,
         );
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -8682,7 +8712,7 @@ pub const H2Connection = struct {
             }
             if (!self.pending_write.isPing()) {
                 if (!self.pending_write.isNone() or
-                    self.pending_auto_control != null)
+                    control_admission.pending(self))
                 {
                     return error.WriteInProgress;
                 }
@@ -8703,7 +8733,7 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -8828,7 +8858,7 @@ pub const H2Connection = struct {
             if (!pending.matches(payload)) return error.WriteInProgress;
         } else {
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -8960,7 +8990,7 @@ pub const H2Connection = struct {
         if (self.receiveFailed() or self.writeAborted()) {
             return error.ConnectionClosed;
         }
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -8998,7 +9028,7 @@ pub const H2Connection = struct {
                     }
                 } else {
                     if (!self.pending_write.isNone() or
-                        self.pending_auto_control != null)
+                        control_admission.pending(self))
                     {
                         return error.WriteInProgress;
                     }
@@ -9022,7 +9052,7 @@ pub const H2Connection = struct {
         if (self.receiveFailed() or self.writeAborted()) {
             return error.ConnectionClosed;
         }
-        if (self.automatic_write_pending.load(.acquire) and
+        if (control_admission.pending(self) and
             !self.application_write_pending.load(.acquire))
         {
             _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -9242,7 +9272,7 @@ pub const H2Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             try self.ensureCanSendOpcodeLocked(opcode);
@@ -9662,7 +9692,7 @@ pub const H2Connection = struct {
                 return error.WriteInProgress;
             }
         } else {
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             try self.ensureCanSendOpcodeLocked(opcode);
@@ -9986,13 +10016,13 @@ pub const H2Connection = struct {
                         self.closeSent(),
                         self.closeReceived(),
                     )) return frame;
-                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.pong, frame.payload, delivery, frame, deadline, 0);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
                 .close => {
                     if (self.closeSent()) return frame;
-                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.close, frame.payload, delivery, frame, deadline, 0);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -10643,7 +10673,7 @@ pub const H2Connection = struct {
         opcode: websocket.Opcode,
     ) Error!void {
         if (!self.pending_write.isNone()) return error.WriteInProgress;
-        if (self.pending_auto_control != null) return error.WriteInProgress;
+        if (control_admission.pending(self)) return error.WriteInProgress;
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
     }
 
@@ -10665,7 +10695,7 @@ pub const H2Connection = struct {
 
     fn ensureNoPendingWrites(self: *H2Connection) Error!void {
         if (self.application_write_pending.load(.acquire) or
-            self.automatic_write_pending.load(.acquire))
+            control_admission.pending(self))
         {
             return error.WriteInProgress;
         }
@@ -10683,9 +10713,13 @@ pub const H2Connection = struct {
         delivery: PendingAutomaticControl.Delivery,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Opcode {
-        if (!self.automatic_write_pending.load(.acquire)) return null;
+        if (!control_admission.pending(self)) return null;
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        if (self.automatic_control_admission) |waiting| {
+            if (waiting.delivery != delivery) return error.WriteInProgress;
+            return waiting.opcode;
+        }
         const pending = self.pending_auto_control orelse return null;
         if (pending.delivery != delivery) return error.WriteInProgress;
         return pending.opcode;
@@ -10708,7 +10742,7 @@ pub const H2Connection = struct {
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.pending_write.isNone() or
-            self.pending_auto_control != null)
+            control_admission.pending(self))
         {
             self.abortTunnelAfterReceiveFailureLocked(deadline);
             return;
@@ -10749,9 +10783,23 @@ pub const H2Connection = struct {
         delivery: PendingAutomaticControl.Delivery,
         frame: ?websocket.Frame,
     ) Error!void {
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        return self.beginAutomaticControlBefore(opcode, payload, delivery, frame, null, 0);
+    }
+
+    fn beginAutomaticControlBefore(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        delivery: PendingAutomaticControl.Delivery,
+        frame: ?websocket.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+        consumed_input: usize,
+    ) Error!void {
+        try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
-        return automatic_control.begin(self, self.tunnel.connection.io, self.role, opcode, payload, delivery, frame, false);
+        const consumed = try control_admission.admit(self, self.tunnel.connection.io, self.role, false);
+        if (consumed != 0) self.discardBuffered(consumed);
     }
 
     fn resumeAutomaticControl(
@@ -10760,6 +10808,8 @@ pub const H2Connection = struct {
     ) Error!?websocket.Frame {
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
+        const consumed = try control_admission.admit(self, self.tunnel.connection.io, self.role, false);
+        if (consumed != 0) self.discardBuffered(consumed);
         const pending = if (self.pending_auto_control) |*value|
             value
         else
@@ -10818,7 +10868,7 @@ pub const H2Connection = struct {
 test "WebSocket RFC 8441 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingH2Write));
-        try std.testing.expectEqual(@as(usize, 1488), @sizeOf(H2Connection));
+        try std.testing.expectEqual(@as(usize, 1640), @sizeOf(H2Connection));
     }
 }
 
@@ -11758,8 +11808,10 @@ pub const testing = if (builtin.is_test) struct {
                 connection.pending_close == null;
         return pending_released and
             connection.pending_auto_control == null and
+            connection.automatic_control_admission == null and
             !connection.application_write_pending.load(.acquire) and
             !connection.automatic_write_pending.load(.acquire) and
+            !connection.automatic_control_waiting.load(.acquire) and
             connection.compression_send.payload.capacity == 0 and
             connection.compression_send.encoder == null and
             connection.compression_send.context == null;
@@ -12190,11 +12242,13 @@ fn receiveMessageIntoDirectConnection(
                     connection.closeSent(),
                     connection.closeReceived(),
                 )) {
-                    try connection.beginAutomaticControl(
+                    try connection.beginAutomaticControlBefore(
                         .pong,
                         frame.payload,
                         .message,
                         null,
+                        deadline,
+                        0,
                     );
                     std.debug.assert(
                         (try connection.resumeAutomaticControl(deadline)) == null,
@@ -12206,11 +12260,13 @@ fn receiveMessageIntoDirectConnection(
             .close => {
                 connection.close_received.store(true, .release);
                 if (!connection.closeSent()) {
-                    try connection.beginAutomaticControl(
+                    try connection.beginAutomaticControlBefore(
                         .close,
                         frame.payload,
                         .message,
                         null,
+                        deadline,
+                        0,
                     );
                     std.debug.assert(
                         (try connection.resumeAutomaticControl(deadline)) == null,
@@ -12695,9 +12751,9 @@ fn AllocatingMessageReceiver(comptime TransportConnection: type) type {
         pub const ErrorType = Error;
         pub const receiveFailed = ConnectionType.receiveFailed;
         pub const checkWrites = ConnectionType.ensureNoPendingWrites;
-        pub const pendingControl = ConnectionType.pendingAutomaticControlOpcode;
+        pub const pendingControl = ConnectionType.pendingAutomaticControlOpcodeBefore;
         pub const resumeControl = ConnectionType.resumeAutomaticControl;
-        pub const beginControl = ConnectionType.beginAutomaticControl;
+        pub const beginControl = ConnectionType.beginAutomaticControlBefore;
         pub const discard = ConnectionType.discardBuffered;
         pub const readFrame = receiveMessageFrameBorrowed;
         pub const afterError = closeAfterReceiveError;
@@ -17290,6 +17346,7 @@ test {
     _ = @import("runtime/read_interruption_transport_tests.zig");
     _ = @import("runtime/write_interruption_tests.zig");
     _ = @import("runtime/mutex_deadline_tests.zig");
+    _ = @import("runtime/control/admission_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");

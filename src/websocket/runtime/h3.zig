@@ -29,6 +29,7 @@ const max_batched_payload_slices: usize = 64;
 pub const MessageWriteProgress = common.MessageWriteProgress;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("control/automatic.zig");
+const control_admission = @import("control/admission.zig");
 const ping_control = @import("control/ping.zig");
 
 const PendingMessage = struct {
@@ -458,6 +459,8 @@ pub fn Connection(comptime role: common.Role) type {
         write_aborted: std.atomic.Value(bool) = .init(false),
         application_write_pending: std.atomic.Value(bool) = .init(false),
         automatic_write_pending: std.atomic.Value(bool) = .init(false),
+        automatic_control_waiting: std.atomic.Value(bool) = .init(false),
+        automatic_control_admission: ?control_admission.Admission = null,
         /// A bounded application message, Ping, or Close may own the HTTP/3
         /// DATA sequence. These transaction shapes are mutually exclusive.
         pending_write: PendingWrite = .none,
@@ -504,6 +507,7 @@ pub fn Connection(comptime role: common.Role) type {
 
         pub fn deinit(self: *Self) void {
             self.pending_write.clear();
+            control_admission.clear(self);
             if (self.pending_auto_control) |*pending| {
                 pending.deinit(self.allocator);
             }
@@ -555,7 +559,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -719,7 +723,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone()) return error.WriteInProgress;
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -784,7 +788,7 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.WriteInProgress;
                 }
             } else {
-                if (self.pending_auto_control != null) {
+                if (control_admission.pending(self)) {
                     return error.WriteInProgress;
                 }
                 try self.beginPendingInPlaceLocked(payload);
@@ -909,7 +913,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone()) return error.WriteInProgress;
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -992,7 +996,7 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.WriteInProgress;
                 }
             } else {
-                if (self.pending_auto_control != null) {
+                if (control_admission.pending(self)) {
                     return error.WriteInProgress;
                 }
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1027,7 +1031,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone()) return error.WriteInProgress;
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1106,7 +1110,7 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.WriteInProgress;
                 }
             } else {
-                if (self.pending_auto_control != null) {
+                if (control_admission.pending(self)) {
                     return error.WriteInProgress;
                 }
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1331,7 +1335,7 @@ pub fn Connection(comptime role: common.Role) type {
                 }
             } else {
                 if (!self.pending_write.isNone()) return error.WriteInProgress;
-                if (self.pending_auto_control != null) {
+                if (control_admission.pending(self)) {
                     return error.WriteInProgress;
                 }
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1676,7 +1680,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             if (!self.pending_write.isPing()) {
                 if (!self.pending_write.isNone() or
-                    self.pending_auto_control != null)
+                    control_admission.pending(self))
                 {
                     return error.WriteInProgress;
                 }
@@ -1748,7 +1752,7 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.WriteInProgress;
                 }
             } else {
-                if (self.pending_auto_control != null) {
+                if (control_admission.pending(self)) {
                     return error.WriteInProgress;
                 }
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1790,7 +1794,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .ping,
                 payload,
             );
-            if (self.automatic_write_pending.load(.acquire) and
+            if (control_admission.pending(self) and
                 !self.application_write_pending.load(.acquire))
             {
                 _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -1807,7 +1811,7 @@ pub fn Connection(comptime role: common.Role) type {
                 }
                 if (!self.pending_write.isPing()) {
                     if (!self.pending_write.isNone() or
-                        self.pending_auto_control != null)
+                        control_admission.pending(self))
                     {
                         return error.WriteInProgress;
                     }
@@ -1842,7 +1846,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.automatic_write_pending.load(.acquire) and
+            if (control_admission.pending(self) and
                 !self.application_write_pending.load(.acquire))
             {
                 _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
@@ -1961,7 +1965,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (!pending.matches(payload)) return error.WriteInProgress;
             } else {
                 if (!self.pending_write.isNone() or
-                    self.pending_auto_control != null)
+                    control_admission.pending(self))
                 {
                     return error.WriteInProgress;
                 }
@@ -2082,7 +2086,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            if (self.automatic_write_pending.load(.acquire) and
+            if (control_admission.pending(self) and
                 !self.application_write_pending.load(.acquire))
             {
                 _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -2117,7 +2121,7 @@ pub fn Connection(comptime role: common.Role) type {
                         }
                     } else if (!self.closeSent()) {
                         if (!self.pending_write.isNone() or
-                            self.pending_auto_control != null)
+                            control_admission.pending(self))
                         {
                             return error.WriteInProgress;
                         }
@@ -2150,7 +2154,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            if (self.automatic_write_pending.load(.acquire) and
+            if (control_admission.pending(self) and
                 !self.application_write_pending.load(.acquire))
             {
                 _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
@@ -2206,9 +2210,9 @@ pub fn Connection(comptime role: common.Role) type {
             pub const ErrorType = Error;
             pub const receiveFailed = Self.receiveFailed;
             pub const checkWrites = Self.ensureNoPendingWrites;
-            pub const pendingControl = Self.pendingAutomaticControlOpcode;
+            pub const pendingControl = Self.pendingAutomaticControlOpcodeBefore;
             pub const resumeControl = Self.resumeAutomaticControl;
-            pub const beginControl = Self.beginAutomaticControl;
+            pub const beginControl = Self.beginAutomaticControlBefore;
             pub const discard = Self.discardBuffered;
             pub const readFrame = Self.receiveMessageFrameBorrowed;
             pub const afterError = Self.closeAfterReceiveError;
@@ -2362,11 +2366,13 @@ pub fn Connection(comptime role: common.Role) type {
                 switch (frame.header.opcode) {
                     .ping => {
                         if (!self.closeSent()) {
-                            try self.beginAutomaticControl(
+                            try self.beginAutomaticControlBefore(
                                 .pong,
                                 frame.payload,
                                 .message,
                                 null,
+                                deadline,
+                                0,
                             );
                             std.debug.assert(
                                 (try self.resumeAutomaticControl(deadline)) == null,
@@ -2377,11 +2383,13 @@ pub fn Connection(comptime role: common.Role) type {
                     .pong => continue,
                     .close => {
                         if (!self.closeSent()) {
-                            try self.beginAutomaticControl(
+                            try self.beginAutomaticControlBefore(
                                 .close,
                                 frame.payload,
                                 .message,
                                 null,
+                                deadline,
+                                0,
                             );
                             std.debug.assert(
                                 (try self.resumeAutomaticControl(deadline)) == null,
@@ -2902,7 +2910,7 @@ pub fn Connection(comptime role: common.Role) type {
             switch (frame.header.opcode) {
                 .ping => {
                     if (self.closeSent()) return frame;
-                    try self.beginAutomaticControl(.pong, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.pong, frame.payload, delivery, frame, deadline, 0);
                     return (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                 },
@@ -2912,7 +2920,7 @@ pub fn Connection(comptime role: common.Role) type {
                         self.flushTerminalReceiveAck();
                         return frame;
                     }
-                    try self.beginAutomaticControl(.close, frame.payload, delivery, frame);
+                    try self.beginAutomaticControlBefore(.close, frame.payload, delivery, frame, deadline, 0);
                     const delivered = (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
                     self.flushTerminalReceiveAck();
@@ -2975,7 +2983,7 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 self.abortStreamAfterReceiveFailureLocked();
                 return;
@@ -3028,7 +3036,7 @@ pub fn Connection(comptime role: common.Role) type {
             payload: []const u8,
         ) Error!void {
             if (!self.pending_write.isNone() or
-                self.pending_auto_control != null)
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -3083,7 +3091,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             if (self.writeAborted()) return error.ConnectionClosed;
             if (!self.pending_write.isNone()) return error.WriteInProgress;
-            if (self.pending_auto_control != null) {
+            if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
             if (self.receiveFailed() or self.closeSent()) {
@@ -3111,9 +3119,23 @@ pub fn Connection(comptime role: common.Role) type {
             delivery: PendingAutomaticControl.Delivery,
             frame: ?websocket.Frame,
         ) Error!void {
-            self.send_mutex.lockUncancelable(self.io());
+            return self.beginAutomaticControlBefore(opcode, payload, delivery, frame, null, 0);
+        }
+
+        fn beginAutomaticControlBefore(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            delivery: PendingAutomaticControl.Delivery,
+            frame: ?websocket.Frame,
+            deadline: ?std.Io.Clock.Timestamp,
+            consumed_input: usize,
+        ) Error!void {
+            try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
-            return automatic_control.begin(self, self.io(), role, opcode, payload, delivery, frame, false);
+            const consumed = try control_admission.admit(self, self.io(), role, false);
+            if (consumed != 0) self.discardBuffered(consumed);
         }
 
         fn resumeAutomaticControl(
@@ -3122,6 +3144,8 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!?websocket.Frame {
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
+            const consumed = try control_admission.admit(self, self.io(), role, false);
+            if (consumed != 0) self.discardBuffered(consumed);
             const pending = if (self.pending_auto_control) |*value|
                 value
             else
@@ -3360,7 +3384,7 @@ pub fn Connection(comptime role: common.Role) type {
 
         fn ensureNoPendingWrites(self: *Self) Error!void {
             if (self.application_write_pending.load(.acquire) or
-                self.automatic_write_pending.load(.acquire))
+                control_admission.pending(self))
             {
                 return error.WriteInProgress;
             }
@@ -3378,9 +3402,13 @@ pub fn Connection(comptime role: common.Role) type {
             delivery: PendingAutomaticControl.Delivery,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!?websocket.Opcode {
-            if (!self.automatic_write_pending.load(.acquire)) return null;
+            if (!control_admission.pending(self)) return null;
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
+            if (self.automatic_control_admission) |waiting| {
+                if (waiting.delivery != delivery) return error.WriteInProgress;
+                return waiting.opcode;
+            }
             const pending = self.pending_auto_control orelse return null;
             if (pending.delivery != delivery) {
                 return error.WriteInProgress;
@@ -5928,7 +5956,7 @@ test "WebSocket RFC 9220 connections keep resumable writes compact" {
         // Guard the WebSocket wrapper's footprint independently from the
         // embedded HTTP/3 runtime, whose protocol state and safety-only codec
         // storage evolve separately. No per-frame checkpoint lives here.
-        const wrapper_size: usize = 1392;
+        const wrapper_size: usize = 1552;
         const client_size = @sizeOf(http3.runtime.HandshakeClient) + wrapper_size;
         const server_size = @sizeOf(http3.runtime.HandshakeServerSession) + wrapper_size;
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
@@ -6035,8 +6063,10 @@ pub const testing = if (builtin.is_test) struct {
     pub fn outboundStorageReleased(connection: anytype) bool {
         return connection.pending_write.isNone() and
             connection.pending_auto_control == null and
+            connection.automatic_control_admission == null and
             !connection.application_write_pending.load(.acquire) and
             !connection.automatic_write_pending.load(.acquire) and
+            !connection.automatic_control_waiting.load(.acquire) and
             connection.compression_send.payload.capacity == 0 and
             connection.compression_send.encoder == null and
             connection.compression_send.context == null;

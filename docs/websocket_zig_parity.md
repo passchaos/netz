@@ -1603,12 +1603,25 @@ compression state and mutable caller storage untouched. Deterministic
 regressions hold the lock for a 100-ms observation window while each operation
 uses a 10-ms deadline, across both roles on all three transports. This evidence
 is recorded in `evidence/websocket_mutex_deadline/2026-10-28.json`.
-Fresh automatic-control preparation and fatal receive cleanup still use
-unbounded send-mutex acquisition. Completing bounded receive behavior under
-that contention requires retaining newly consumed control frames or borrowed
-control payloads before returning, and retiring active writers safely during
-fatal cleanup. The outbound admission evidence does not establish those
-remaining receive paths.
+Fresh automatic-control preparation now captures a receive-owned admission
+slot before waiting for the send mutex. Frame readers transfer the consumed
+frame directly; allocating and caller-buffer message readers copy at most
+125 control payload bytes without a new heap allocation. The same absolute
+deadline bounds preparation admission and later reply output. A waiting
+control blocks new outbound transactions through atomic flags, while an
+older partial writer may finish its original payload. Borrowed buffered input
+is discarded once admission succeeds, including after a timeout or secure
+mask-key failure; caller-buffer readers keep their original output pointer
+and length. A concurrent local Close suppresses an unsent reply without
+requesting entropy, and still delivers an owned peer event once. Writer aborts
+leave the receive-owned slot to its owner for disposal, avoiding concurrent
+frame frees. This bounded storage adds 160 bytes to the HTTP/1 and HTTP/3
+wrappers and 152 bytes to RFC 8441. Transport and receive-mode matrices,
+real TCP reply ordering, cancellation, mask-source failures and teardown
+evidence are recorded in `evidence/websocket_control_admission/2026-10-28.json`.
+Fatal receive cleanup still uses unbounded send-mutex acquisition. Retiring
+active writers safely during fatal cleanup remains necessary to complete
+bounded receive behavior under every form of contention.
 Owned Close diagnostics now take over the already-allocated frame payload on
 HTTP/1, RFC 8441 and RFC 9220. Typed Close reads, Ping waits and close-handshake
 waits no longer allocate a second reason buffer after consuming the terminal

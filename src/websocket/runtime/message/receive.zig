@@ -13,7 +13,7 @@ pub fn Controller(comptime Context: type) type {
         pub fn receive(connection: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!common.OwnedMessage {
             if (Context.receiveFailed(connection)) return error.ConnectionClosed;
             if (connection.message_into.active()) return error.InvalidFrame;
-            if (try Context.pendingControl(connection, .message)) |opcode| {
+            if (try Context.pendingControl(connection, .message, deadline)) |opcode| {
                 std.debug.assert((try Context.resumeControl(connection, deadline)) == null);
                 if (opcode == .close) return error.ConnectionClosed;
             }
@@ -28,17 +28,19 @@ pub fn Controller(comptime Context: type) type {
                 const frame = try Context.readFrame(connection, deadline);
                 switch (frame.header.opcode) {
                     .ping => {
-                        if (canSend(connection, .pong)) try Context.beginControl(connection, .pong, frame.payload, .message, null);
-                        Context.discard(connection, frame.consumed);
-                        if (connection.pending_auto_control != null) std.debug.assert((try Context.resumeControl(connection, deadline)) == null);
+                        if (canSend(connection, .pong)) {
+                            try Context.beginControl(connection, .pong, frame.payload, .message, null, deadline, frame.consumed);
+                            std.debug.assert((try Context.resumeControl(connection, deadline)) == null);
+                        } else Context.discard(connection, frame.consumed);
                     },
                     .pong => Context.discard(connection, frame.consumed),
                     .close => {
                         connection.close_received.store(true, .release);
                         clearAssembler(connection);
-                        if (!connection.close_sent.load(.acquire)) try Context.beginControl(connection, .close, frame.payload, .message, null);
-                        Context.discard(connection, frame.consumed);
-                        if (connection.pending_auto_control != null) std.debug.assert((try Context.resumeControl(connection, deadline)) == null);
+                        if (!connection.close_sent.load(.acquire)) {
+                            try Context.beginControl(connection, .close, frame.payload, .message, null, deadline, frame.consumed);
+                            std.debug.assert((try Context.resumeControl(connection, deadline)) == null);
+                        } else Context.discard(connection, frame.consumed);
                         Context.onClose(connection);
                         return error.ConnectionClosed;
                     },
