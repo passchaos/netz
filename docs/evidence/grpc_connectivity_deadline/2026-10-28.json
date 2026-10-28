@@ -1,0 +1,95 @@
+{
+  "baseline_revision": "6a499f9b78e5086a27bc844c9a95fafbec6a85f9",
+  "change": "Bound gRPC connectivity watch registration and abandonment while preserving notification ownership",
+  "before": {
+    "passed": 125,
+    "total": 127,
+    "failed": [
+      "registration mutex contention",
+      "unregister mutex contention"
+    ],
+    "deadline_ms": 10,
+    "locked_observer_ms": 100,
+    "failure": "watch did not return before releasing tracker mutex despite expired deadline"
+  },
+  "after": {
+    "connectivity_focused_passed": 143,
+    "connectivity_focused_total": 143,
+    "grpc_passed": 357,
+    "grpc_total": 357,
+    "package_passed": 21,
+    "package_total": 21,
+    "registration": "timed mutex admission under original awake-clock deadline",
+    "unregister": "atomically abandon independently owned node without reacquiring tracker mutex",
+    "mutex_observations": {
+      "timeout_registration": 1,
+      "timeout_unregister_cleanup_modes": 5,
+      "canceled_registration": 1,
+      "canceled_unregister_cleanup_modes": 5,
+      "deadline_ms": 10,
+      "locked_observer_ms": 100
+    },
+    "cleanup_modes": [
+      "snapshot access",
+      "same-state publication",
+      "next wait",
+      "SHUTDOWN",
+      "final tracker release"
+    ],
+    "notification_races": [
+      "notification precedes cancellation: exact first snapshot returned",
+      "abandonment precedes notification: original failure retained",
+      "caller returns during event wake: publisher reference retains node"
+    ],
+    "spurious_wakes": {
+      "count": 3,
+      "absolute_deadline_ns": 1003,
+      "repeated_original_deadline": true,
+      "final_waiter_list_empty": true
+    },
+    "allocation_failure": "OutOfMemory leaves original Watch cursor and tracker state unchanged; changed state remains readable with zero timeout and no wait allocation",
+    "public_api_error_set": [
+      "Timeout",
+      "Canceled",
+      "OutOfMemory"
+    ],
+    "test_registration": "connectivity module and adjacent tests explicitly registered from grpc/mod.zig; existing terminal SHUTDOWN test now executes",
+    "retained_nodes": "at most outstanding registered waits; reclaimed on next tracker access or final release; no background task",
+    "blocking_wait_allocations": 1,
+    "immediate_changed_or_shutdown_allocations": 0
+  },
+  "reference": {
+    "root": "/home/passchaos/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "files": [
+      "src/core/lib/transport/connectivity_state.h",
+      "src/core/lib/transport/connectivity_state.cc"
+    ],
+    "behavior": "shared watcher ownership through notification; serialized tracker registration/removal; SHUTDOWN orphans outstanding watchers"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC connectivity' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc GRPC_CPP_INTEROP_SERVER=/home/passchaos/Work/grpc/bazel-bin/test/cpp/interop/interop_server TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchains": {
+    "zig": "0.16.0",
+    "grpc_cpp_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd"
+  },
+  "source_sha256": {
+    "src/grpc/channel/connectivity.zig": "f32a15ecedc03967e04ed951e98b1c1c8d893d61cade297844d3dbff25462ccc",
+    "src/grpc/channel/connectivity/waiter.zig": "4ad99104ba2c5fa8802c9fbc1007fe4d3a356f4bf149dd79bad9faa0f4bd8fab",
+    "src/grpc/channel/connectivity/deadline_tests.zig": "685a8ef71ffbce53d446fb4c6ef48508a39612b8a86764565abf24572572ad0d",
+    "src/grpc/channel/connectivity/lifetime_tests.zig": "f83c6217b8c457ffafe9d9d2cd43731aaa9eaf9052dcdf7daa504c5e86f6023c",
+    "src/grpc/mod.zig": "508f7e7c18f55e1e4516098380ddb19f5866ae0e687de4b1829e398fb7481041",
+    "test/package_test.zig": "94b9e4c13762e47bd1fff6ce669b06f28e4262bc78a1602f29446d5c55382b5f",
+    "tools/interop/grpc_cpp_connectivity.zig": "776eca2c53ac238360e1fddbd0b512d52f0d1969dc69d608d5912cca4993cfa9",
+    "tools/interop/grpc_cpp_client.zig": "7ae9ff3bb1bea611a7431fba86e0a3a450ed2671d8b476ada190cbe5bd236d22",
+    "tools/interop/grpc_cpp.sh": "76468d9be95d45aac8289705a8b13c78d0f3613c330927e53295fe3324a88445"
+  }
+}

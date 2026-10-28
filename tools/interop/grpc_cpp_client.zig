@@ -13,6 +13,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
+const connectivity = @import("grpc_cpp_connectivity.zig");
 const InteropClient = netz.grpc.runtime.Channel;
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
@@ -95,7 +96,8 @@ pub fn main(init: std.process.Init) !void {
     );
     var client_live = true;
     defer if (client_live) client.deinit();
-    _ = try client.warmWithTimeout(.fromSeconds(5));
+    var shutdown_watch = try connectivity.warm(&client, io);
+    defer shutdown_watch.deinit();
     if (tls_enabled and
         !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
     {
@@ -119,6 +121,7 @@ pub fn main(init: std.process.Init) !void {
     try runSleepingDeadline(allocator, &client, message_limit);
     client.deinit();
     client_live = false;
+    try connectivity.shutdown(&shutdown_watch);
 
     try runChannelSoak(
         allocator,
@@ -143,6 +146,7 @@ pub fn main(init: std.process.Init) !void {
             "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
             "cancel=begin+after-response reuse=true " ++
+            "connectivity=transition+ready+shutdown " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},

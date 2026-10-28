@@ -1,6 +1,24 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "gRPC package connectivity watch exposes allocation failure without losing cursor" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var channel = try netz.grpc.Channel.init(failing.allocator(), threaded.io(), .{
+        .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } },
+    }, .{});
+    defer channel.deinit();
+    var watch = channel.watchConnectivity();
+    defer watch.deinit();
+    const original = watch.snapshot();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, watch.nextWithTimeout(.fromSeconds(1)));
+    try std.testing.expectEqualDeep(original, watch.snapshot());
+    channel.exitIdle();
+    try std.testing.expectEqual(netz.grpc.ChannelConnectivityState.connecting, (try watch.nextWithTimeout(.zero)).state);
+}
+
 test "public gRPC compression field negotiation honors the last advertisement" {
     const fields = [_]netz.http2.Hpack.HeaderField{
         .{ .name = "grpc-accept-encoding", .value = "gzip" },

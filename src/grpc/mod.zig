@@ -125,6 +125,7 @@ pub const bearerAuthorizationValueLen = auth.bearerAuthorizationValueLen;
 pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
+    _ = @import("channel/connectivity.zig");
     _ = @import("channel/shared.zig");
     _ = compression;
     _ = @import("compression/negotiation_runtime_tests.zig");

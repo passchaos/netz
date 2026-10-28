@@ -1,6 +1,13 @@
 //! Reference-counted gRPC Channel connectivity state and one-shot watches.
 
 const std = @import("std");
+const timed_mutex = @import("../../internal/timed_mutex.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
+
+test {
+    _ = @import("connectivity/deadline_tests.zig");
+    _ = @import("connectivity/lifetime_tests.zig");
+}
 
 pub const State = enum {
     idle,
@@ -15,15 +22,10 @@ pub const Snapshot = struct {
     generation: u64,
 };
 
-pub const WaitError = std.Io.Event.WaitTimeoutError;
+pub const WaitError = std.Io.Event.WaitTimeoutError || std.mem.Allocator.Error;
 pub const ReadyError = WaitError || error{ChannelShutdown};
 
-const Waiter = struct {
-    node: std.DoublyLinkedList.Node = .{},
-    event: std.Io.Event = .unset,
-    registered: bool = false,
-    snapshot: Snapshot = undefined,
-};
+const Waiter = @import("connectivity/waiter.zig").Waiter;
 
 pub const Tracker = struct {
     allocator: std.mem.Allocator,
@@ -33,6 +35,7 @@ pub const Tracker = struct {
     state: State = .idle,
     generation: u64 = 0,
     waiters: std.DoublyLinkedList = .{},
+    abandoned_waiters: std.atomic.Value(bool) = .init(false),
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -52,6 +55,9 @@ pub const Tracker = struct {
         const previous = self.references.fetchSub(1, .acq_rel);
         std.debug.assert(previous != 0);
         if (previous != 1) return;
+        // No caller references remain. Outstanding nodes can only be waits
+        // that already returned under lock contention; retire their list refs.
+        self.pruneAbandonedLocked();
         std.debug.assert(self.waiters.first == null);
         const allocator = self.allocator;
         self.* = undefined;
@@ -61,11 +67,13 @@ pub const Tracker = struct {
     pub fn snapshot(self: *Tracker) Snapshot {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.pruneAbandonedLocked();
         return self.snapshotLocked();
     }
 
     pub fn setState(self: *Tracker, state: State) void {
         self.mutex.lockUncancelable(self.io);
+        self.pruneAbandonedLocked();
         if (self.state == .shutdown or self.state == state) {
             self.mutex.unlock(self.io);
             return;
@@ -75,9 +83,8 @@ pub const Tracker = struct {
         const current_snapshot = self.snapshotLocked();
         while (self.waiters.popFirst()) |node| {
             const waiter: *Waiter = @fieldParentPtr("node", node);
-            waiter.registered = false;
-            waiter.snapshot = current_snapshot;
-            waiter.event.set(self.io);
+            waiter.notify(self.io, current_snapshot);
+            waiter.release();
         }
         self.mutex.unlock(self.io);
     }
@@ -87,43 +94,70 @@ pub const Tracker = struct {
         generation: u64,
         deadline: std.Io.Clock.Timestamp,
     ) WaitError!Snapshot {
-        var waiter: Waiter = .{};
-        self.mutex.lockUncancelable(self.io);
+        // An immediately available changed snapshot or SHUTDOWN still wins
+        // with a zero timeout. Contended admission uses the supplied bound.
+        if (!self.mutex.tryLock()) try timed_mutex.lock(&self.mutex, self.io, deadline);
+        self.pruneAbandonedLocked();
         const current = self.snapshotLocked();
         if (current.generation != generation or current.state == .shutdown) {
             self.mutex.unlock(self.io);
             return current;
         }
-        if (deadline.clock != .awake or
-            deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
-        {
+        _ = deadline_policy.usableAwake(self.io, deadline) catch |err| {
             self.mutex.unlock(self.io);
-            return error.Timeout;
-        }
-        waiter.registered = true;
+            return err;
+        };
+        const waiter = Waiter.create(self.allocator) catch |err| {
+            self.mutex.unlock(self.io);
+            return err;
+        };
+        defer waiter.release();
+        // One caller reference and one list reference; the list may outlive
+        // timeout/cancellation when its lock belongs to a state publisher.
+        waiter.retain();
         self.waiters.append(&waiter.node);
         self.mutex.unlock(self.io);
 
-        waiter.event.waitTimeout(
-            self.io,
-            .{ .deadline = deadline },
-        ) catch |err| {
-            self.mutex.lockUncancelable(self.io);
-            if (waiter.registered) {
-                self.waiters.remove(&waiter.node);
-                waiter.registered = false;
-                self.mutex.unlock(self.io);
-                return err;
-            }
-            const changed = waiter.snapshot;
-            self.mutex.unlock(self.io);
-            return changed;
-        };
-        return waiter.snapshot;
+        while (true) {
+            waiter.event.waitTimeout(
+                self.io,
+                .{ .deadline = deadline },
+            ) catch |err| {
+                if (waiter.state.load(.acquire) == .notified) return waiter.snapshot;
+                // Event reports both expiration and a spurious futex wake as
+                // Timeout. Only the caller's original bound ends this watch.
+                if (err == error.Timeout) {
+                    if (deadline_policy.usableAwake(self.io, deadline)) |_| continue else |_| {}
+                }
+                if (waiter.abandon()) {
+                    self.abandoned_waiters.store(true, .release);
+                    if (self.mutex.tryLock()) {
+                        self.pruneAbandonedLocked();
+                        self.mutex.unlock(self.io);
+                    }
+                    return err;
+                }
+                return waiter.snapshot;
+            };
+            return waiter.snapshot;
+        }
     }
 
     fn snapshotLocked(self: *const Tracker) Snapshot {
         return .{ .state = self.state, .generation = self.generation };
+    }
+
+    fn pruneAbandonedLocked(self: *Tracker) void {
+        if (!self.abandoned_waiters.swap(false, .acq_rel)) return;
+        var node = self.waiters.first;
+        while (node) |current| {
+            node = current.next;
+            const waiter: *Waiter = @fieldParentPtr("node", current);
+            if (waiter.state.load(.acquire) == .abandoned) {
+                self.waiters.remove(current);
+                waiter.release();
+            }
+        }
     }
 };
 

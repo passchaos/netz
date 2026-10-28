@@ -949,6 +949,26 @@ valid until explicitly released. Tests cover immediate stale-generation
 completion, timeout then reuse, task cancellation, multi-watcher broadcast,
 real READY notification and shutdown after the Channel storage is gone.
 
+Connectivity-watch deadlines also bound tracker-mutex admission. A blocking
+wait owns a small heap node shared with the tracker, so timeout or cancellation
+can abandon that node atomically without waiting to remove a stack pointer
+under a contended lock. Notification and abandonment race once; a notification
+that already won preserves its exact snapshot. The publisher retains its node
+reference through the event wake, while abandoned nodes are reclaimed by the
+next tracker access or final tracker release. Ordinary active registration
+does not scan the waiter list unless an abandoned node needs cleanup. Spurious
+event wakes recheck the caller's original absolute deadline instead of ending
+the watch early. Changed generations and SHUTDOWN remain immediately available
+with a zero timeout and allocate no wait node. Blocking waits now expose
+`OutOfMemory` in their error set; a failed allocation leaves the cursor and
+tracker unchanged for retry. Adjacent connectivity tests hold registration
+and unregistration locks beyond a 10-ms deadline, cover cancellation, both
+notification races, node reclamation, allocation failure and repeated spurious
+wakes. The grpc-cpp process fixture observes real channel transition/READY
+notifications over h2c and verified TLS, then reads retained SHUTDOWN after
+Channel destruction. Evidence is recorded in
+`evidence/grpc_connectivity_deadline/2026-10-28.json`.
+
 The resolver worker and connectivity tracker are background control-plane
 work. Connection creation, HTTP/2 ownership and picker mutation remain
 serialized at the intentionally single-owner Channel boundary. A fully
