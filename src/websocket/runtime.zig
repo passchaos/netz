@@ -5070,6 +5070,7 @@ const MessageIntoReceiveState = common.MessageIntoReceiveState;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("runtime/control/automatic.zig");
 const control_admission = @import("runtime/control/admission.zig");
+const receive_cleanup = @import("runtime/receive_failure/cleanup.zig");
 const ping_control = @import("runtime/control/ping.zig");
 
 pub const Connection = struct {
@@ -5104,6 +5105,7 @@ pub const Connection = struct {
     /// A fatal receive raced a retained outbound transaction, so the byte
     /// stream was aborted instead of appending a Close after a partial frame.
     write_aborted: std.atomic.Value(bool) = .init(false),
+    receive_abort_pending: std.atomic.Value(bool) = .init(false),
     /// Lock-free receive-side visibility for resumable application/Ping/Close
     /// transactions. The transaction details remain protected by send_mutex.
     application_write_pending: std.atomic.Value(bool) = .init(false),
@@ -5233,7 +5235,7 @@ pub const Connection = struct {
         request_peer_update: bool,
     ) Error!void {
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         if (!self.canSendOpcodeLocked(.binary)) {
             return error.ConnectionClosed;
         }
@@ -5294,6 +5296,7 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
+        self.finishDeferredReceiveAbortLocked(null);
         self.pending_write.clear();
         control_admission.clear(self);
         if (self.pending_auto_control) |*pending| {
@@ -5412,7 +5415,7 @@ pub const Connection = struct {
             parts,
         );
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
@@ -5506,7 +5509,7 @@ pub const Connection = struct {
             parts,
         );
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -5552,7 +5555,7 @@ pub const Connection = struct {
             payload,
         );
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
@@ -5602,7 +5605,7 @@ pub const Connection = struct {
         }
         try common.validateOutgoingMessageLength(self.limits, payload.len);
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -5720,7 +5723,7 @@ pub const Connection = struct {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try common.validateOutgoingControlFrame(self.limits, .ping, payload);
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isMessage() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -5787,7 +5790,7 @@ pub const Connection = struct {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try common.validateOutgoingControlFrame(self.limits, .pong, payload);
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -5847,7 +5850,7 @@ pub const Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-            defer self.send_mutex.unlock(self.io);
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io, deadline);
             if (self.pending_write.isMessage() or
                 self.pending_write.isClose())
@@ -5891,7 +5894,7 @@ pub const Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-            defer self.send_mutex.unlock(self.io);
+            defer self.unlockSendBefore(deadline);
             try self.resumePendingControlLocked(
                 .ping,
                 payload,
@@ -5988,7 +5991,7 @@ pub const Connection = struct {
         );
         try common.validateOutgoingControlFrame(self.limits, .close, payload);
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.receiveFailed() or self.writeAborted()) {
             return error.ConnectionClosed;
@@ -6143,7 +6146,7 @@ pub const Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-            defer self.send_mutex.unlock(self.io);
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io, deadline);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
@@ -6206,7 +6209,7 @@ pub const Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-            defer self.send_mutex.unlock(self.io);
+            defer self.unlockSendBefore(deadline);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
@@ -6275,7 +6278,7 @@ pub const Connection = struct {
             return error.ConnectionClosed;
         }
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         try self.sendFrameValidatedLocked(opcode, payload);
     }
 
@@ -6383,7 +6386,7 @@ pub const Connection = struct {
         }
         try common.validateOutgoingMessage(self.limits, opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
@@ -6423,7 +6426,7 @@ pub const Connection = struct {
     ) Error!void {
         progress.* = .{};
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -6749,7 +6752,7 @@ pub const Connection = struct {
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.io);
-            defer self.send_mutex.unlock(self.io);
+            defer self.unlockSendBefore(null);
             if (!self.pending_write.isNone() or control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
@@ -6784,7 +6787,7 @@ pub const Connection = struct {
         }
 
         self.send_mutex.lockUncancelable(self.io);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(null);
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
@@ -6831,7 +6834,7 @@ pub const Connection = struct {
             fragments,
         );
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
             return error.WriteInProgress;
@@ -7791,7 +7794,7 @@ pub const Connection = struct {
     ) Error!?websocket.Opcode {
         if (!control_admission.pending(self)) return null;
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         if (self.automatic_control_admission) |waiting| {
             if (waiting.delivery != delivery) return error.WriteInProgress;
             return waiting.opcode;
@@ -7801,12 +7804,42 @@ pub const Connection = struct {
         return pending.opcode;
     }
 
+    fn abortReceiveTransportLocked(self: *Connection, deadline: ?std.Io.Clock.Timestamp) bool {
+        _ = deadline;
+        transportStream(self.transport()).shutdown(self.io, .both) catch {};
+        return true;
+    }
+
+    fn finishDeferredReceiveAbortLocked(self: *Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        if (!self.receive_abort_pending.load(.acquire)) return;
+        receive_cleanup.finishLocked(self, self.io, deadline, false, abortReceiveTransportLocked);
+    }
+
+    fn unlockSendBefore(self: *Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        self.finishDeferredReceiveAbortLocked(deadline);
+        self.send_mutex.unlock(self.io);
+    }
+
+    fn deferReceiveAbort(self: *Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        receive_cleanup.request(self);
+        transportStream(self.transport()).shutdown(self.io, .both) catch {};
+        // Publication may race the original holder's unlock. A free mutex
+        // lets this receiver retire local state without waiting again.
+        if (self.send_mutex.tryLock()) {
+            defer self.send_mutex.unlock(self.io);
+            self.finishDeferredReceiveAbortLocked(deadline);
+        }
+    }
+
     fn finishReceiveFailure(
         self: *Connection,
         code: websocket.CloseCode,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        self.send_mutex.lockUncancelable(self.io);
+        timed_mutex.lock(&self.send_mutex, self.io, deadline) catch {
+            self.deferReceiveAbort(deadline);
+            return;
+        };
         defer self.send_mutex.unlock(self.io);
         if (!self.pending_write.isNone() or
             control_admission.pending(self))
@@ -7826,7 +7859,12 @@ pub const Connection = struct {
             self.beginPendingControlLocked(
                 .close,
                 payload,
-            ) catch return;
+            ) catch {
+                self.write_aborted.store(true, .release);
+                transportStream(self.transport()).shutdown(self.io, .both) catch {};
+                common.clearPendingOutboundLocked(self);
+                return;
+            };
             self.resumePendingCloseLocked(absolute) catch {
                 self.write_aborted.store(true, .release);
                 transportStream(self.transport()).shutdown(self.io, .both) catch {};
@@ -7844,9 +7882,12 @@ pub const Connection = struct {
 
     fn finishAbruptReceiveEnd(
         self: *Connection,
-        _: ?std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        self.send_mutex.lockUncancelable(self.io);
+        timed_mutex.lock(&self.send_mutex, self.io, deadline) catch {
+            self.deferReceiveAbort(deadline);
+            return;
+        };
         defer self.send_mutex.unlock(self.io);
         self.write_aborted.store(true, .release);
         transportStream(self.transport()).shutdown(self.io, .both) catch {};
@@ -7874,7 +7915,7 @@ pub const Connection = struct {
     ) Error!void {
         try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         const consumed = try control_admission.admit(self, self.io, self.role, true);
         if (consumed != 0) self.discardBuffered(consumed);
     }
@@ -7884,7 +7925,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Frame {
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
-        defer self.send_mutex.unlock(self.io);
+        defer self.unlockSendBefore(deadline);
         const consumed = try control_admission.admit(self, self.io, self.role, true);
         if (consumed != 0) self.discardBuffered(consumed);
         const pending = if (self.pending_auto_control) |*value|
@@ -7974,6 +8015,7 @@ pub const H2Connection = struct {
     /// Set when a retained outbound WebSocket frame forces this CONNECT stream
     /// to be reset instead of appending a protocol Close after a partial frame.
     write_aborted: std.atomic.Value(bool) = .init(false),
+    receive_abort_pending: std.atomic.Value(bool) = .init(false),
     application_write_pending: std.atomic.Value(bool) = .init(false),
     automatic_write_pending: std.atomic.Value(bool) = .init(false),
     /// Receive-owned control storage is published separately from send state.
@@ -8042,6 +8084,7 @@ pub const H2Connection = struct {
     }
 
     pub fn close(self: *H2Connection) void {
+        self.finishDeferredReceiveAbortLocked(null);
         self.pending_write.clear();
         control_admission.clear(self);
         if (self.pending_auto_control) |*pending| {
@@ -8110,7 +8153,7 @@ pub const H2Connection = struct {
         request_peer_update: bool,
     ) Error!void {
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
@@ -8235,7 +8278,7 @@ pub const H2Connection = struct {
             payload,
         );
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         try self.ensureCanSendOpcodeLocked(.binary);
 
         var mask_key: [4]u8 = undefined;
@@ -8291,7 +8334,7 @@ pub const H2Connection = struct {
         }
         try common.validateOutgoingMessageLength(self.limits, payload.len);
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -8406,7 +8449,7 @@ pub const H2Connection = struct {
             parts,
         );
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         try self.ensureCanSendOpcodeLocked(.binary);
 
         if (self.permessage_deflate and
@@ -8507,7 +8550,7 @@ pub const H2Connection = struct {
             parts,
         );
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -8568,7 +8611,7 @@ pub const H2Connection = struct {
         );
         try common.validateOutgoingControlFrame(self.limits, .ping, payload);
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -8636,7 +8679,7 @@ pub const H2Connection = struct {
         );
         try common.validateOutgoingControlFrame(self.limits, .pong, payload);
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -8700,7 +8743,7 @@ pub const H2Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(
                 self.tunnel.connection.io,
                 deadline,
@@ -8741,7 +8784,7 @@ pub const H2Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            defer self.unlockSendBefore(deadline);
             if (self.pending_write.isMessage() or
                 self.pending_write.isClose())
             {
@@ -8843,7 +8886,7 @@ pub const H2Connection = struct {
         );
         try common.validateOutgoingControlFrame(self.limits, .close, payload);
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -8998,7 +9041,7 @@ pub const H2Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(
                 self.tunnel.connection.io,
                 deadline,
@@ -9060,7 +9103,7 @@ pub const H2Connection = struct {
         }
         {
             try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            defer self.unlockSendBefore(deadline);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
@@ -9127,7 +9170,7 @@ pub const H2Connection = struct {
             return error.ConnectionClosed;
         }
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         try self.sendFrameValidatedLocked(opcode, payload);
     }
 
@@ -9257,7 +9300,7 @@ pub const H2Connection = struct {
     ) Error!void {
         progress.* = .{};
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -9556,7 +9599,7 @@ pub const H2Connection = struct {
         }
         try common.validateOutgoingMessage(self.limits, opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         try self.ensureCanSendOpcodeLocked(opcode);
 
         if (self.permessage_deflate and
@@ -9596,7 +9639,7 @@ pub const H2Connection = struct {
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            defer self.unlockSendBefore(null);
             try self.ensureCanSendOpcodeLocked(opcode);
             if (plain_len >= self.compression_threshold) {
                 const compressed = try self.compressMessagePartsLocked(
@@ -9628,7 +9671,7 @@ pub const H2Connection = struct {
         }
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(null);
         try self.ensureCanSendOpcodeLocked(opcode);
 
         self.writeUncompressedFragmentsLocked(opcode, fragments) catch |err| {
@@ -9675,7 +9718,7 @@ pub const H2Connection = struct {
             fragments,
         );
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
             deadline,
@@ -10715,7 +10758,7 @@ pub const H2Connection = struct {
     ) Error!?websocket.Opcode {
         if (!control_admission.pending(self)) return null;
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         if (self.automatic_control_admission) |waiting| {
             if (waiting.delivery != delivery) return error.WriteInProgress;
             return waiting.opcode;
@@ -10729,9 +10772,33 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        self.write_aborted.store(true, .release);
+        receive_cleanup.request(self);
+        self.finishDeferredReceiveAbortLocked(deadline);
+    }
+
+    fn abortReceiveTransportLocked(self: *H2Connection, deadline: ?std.Io.Clock.Timestamp) bool {
         self.tunnel.abort(deadline);
-        common.clearPendingOutboundLocked(self);
+        return true;
+    }
+
+    fn finishDeferredReceiveAbortLocked(self: *H2Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        if (!self.receive_abort_pending.load(.acquire)) return;
+        receive_cleanup.finishLocked(self, self.tunnel.connection.io, deadline, true, abortReceiveTransportLocked);
+    }
+
+    fn unlockSendBefore(self: *H2Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        self.finishDeferredReceiveAbortLocked(deadline);
+        self.send_mutex.unlock(self.tunnel.connection.io);
+    }
+
+    fn deferReceiveAbort(self: *H2Connection, deadline: ?std.Io.Clock.Timestamp) void {
+        receive_cleanup.request(self);
+        // Publication may race the original holder's unlock. A free mutex
+        // lets this receiver retire local state without waiting again.
+        if (self.send_mutex.tryLock()) {
+            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            self.finishDeferredReceiveAbortLocked(deadline);
+        }
     }
 
     fn finishReceiveFailure(
@@ -10739,7 +10806,10 @@ pub const H2Connection = struct {
         code: websocket.CloseCode,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline) catch {
+            self.deferReceiveAbort(deadline);
+            return;
+        };
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.pending_write.isNone() or
             control_admission.pending(self))
@@ -10754,7 +10824,10 @@ pub const H2Connection = struct {
             .{ .code = code },
         ) catch return;
         if (deadline) |absolute| {
-            self.beginPendingCloseLocked(payload) catch return;
+            self.beginPendingCloseLocked(payload) catch {
+                self.abortTunnelAfterReceiveFailureLocked(deadline);
+                return;
+            };
             self.resumePendingCloseLocked(absolute) catch {
                 self.abortTunnelAfterReceiveFailureLocked(deadline);
             };
@@ -10771,7 +10844,10 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) void {
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline) catch {
+            self.deferReceiveAbort(deadline);
+            return;
+        };
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         self.abortTunnelAfterReceiveFailureLocked(deadline);
     }
@@ -10797,7 +10873,7 @@ pub const H2Connection = struct {
     ) Error!void {
         try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         const consumed = try control_admission.admit(self, self.tunnel.connection.io, self.role, false);
         if (consumed != 0) self.discardBuffered(consumed);
     }
@@ -10807,7 +10883,7 @@ pub const H2Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Frame {
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
-        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        defer self.unlockSendBefore(deadline);
         const consumed = try control_admission.admit(self, self.tunnel.connection.io, self.role, false);
         if (consumed != 0) self.discardBuffered(consumed);
         const pending = if (self.pending_auto_control) |*value|
@@ -11694,19 +11770,8 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn pendingH2AutomaticControlProgress(
         connection: *const H2Connection,
-    ) ?struct {
-        opcode: websocket.Opcode,
-        committed: usize,
-        total: usize,
-        retains_frame: bool,
-    } {
-        const pending = connection.pending_auto_control orelse return null;
-        return .{
-            .opcode = pending.opcode,
-            .committed = pending.committed,
-            .total = pending.len,
-            .retains_frame = pending.frame != null,
-        };
+    ) ?control_admission.Progress {
+        return control_admission.progressForTest(connection);
     }
 
     pub fn pendingH2MessageProgress(
@@ -11747,19 +11812,8 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn pendingAutomaticControlProgress(
         connection: *const Connection,
-    ) ?struct {
-        opcode: websocket.Opcode,
-        committed: usize,
-        total: usize,
-        retains_frame: bool,
-    } {
-        const pending = connection.pending_auto_control orelse return null;
-        return .{
-            .opcode = pending.opcode,
-            .committed = pending.committed,
-            .total = pending.len,
-            .retains_frame = pending.frame != null,
-        };
+    ) ?control_admission.Progress {
+        return control_admission.progressForTest(connection);
     }
 
     pub fn pendingCloseProgress(
@@ -12593,6 +12647,7 @@ fn closeAfterReceiveError(
 
 fn failReceive(connection: anytype) bool {
     if (connection.receive_failed.swap(true, .acq_rel)) return false;
+    control_admission.clear(connection);
     if (connection.message_assembler) |*assembler| assembler.deinit();
     connection.message_assembler = null;
     connection.message_into.reset();
@@ -17342,6 +17397,11 @@ test {
     _ = @import("runtime/transport_end_tests.zig");
     _ = @import("runtime/transport_end_h2_tests.zig");
     _ = @import("runtime/receive_failure_tests.zig");
+    _ = @import("runtime/receive_failure/deadline_tests.zig");
+    _ = @import("runtime/receive_failure/writer_lifetime_tests.zig");
+    _ = @import("runtime/receive_failure/multiplex_tests.zig");
+    _ = @import("runtime/receive_failure/cleanup_tests.zig");
+    _ = @import("runtime/receive_failure/diagnostic_tests.zig");
     _ = @import("runtime/read_interruption_tests.zig");
     _ = @import("runtime/read_interruption_transport_tests.zig");
     _ = @import("runtime/write_interruption_tests.zig");

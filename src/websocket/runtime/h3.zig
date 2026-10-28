@@ -30,6 +30,7 @@ pub const MessageWriteProgress = common.MessageWriteProgress;
 const PendingAutomaticControl = common.PendingAutomaticControl;
 const automatic_control = @import("control/automatic.zig");
 const control_admission = @import("control/admission.zig");
+const receive_cleanup = @import("receive_failure/cleanup.zig");
 const ping_control = @import("control/ping.zig");
 
 const PendingMessage = struct {
@@ -457,6 +458,7 @@ pub fn Connection(comptime role: common.Role) type {
         /// A retained outbound frame forced the Extended CONNECT stream to be
         /// cancelled instead of appending a Close after a partial frame.
         write_aborted: std.atomic.Value(bool) = .init(false),
+        receive_abort_pending: std.atomic.Value(bool) = .init(false),
         application_write_pending: std.atomic.Value(bool) = .init(false),
         automatic_write_pending: std.atomic.Value(bool) = .init(false),
         automatic_control_waiting: std.atomic.Value(bool) = .init(false),
@@ -506,6 +508,7 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.finishDeferredReceiveAbortLocked(null);
             self.pending_write.clear();
             control_admission.clear(self);
             if (self.pending_auto_control) |*pending| {
@@ -557,7 +560,7 @@ pub fn Connection(comptime role: common.Role) type {
 
         pub fn initiateKeyUpdate(self: *Self) Error!void {
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             if (!self.pending_write.isNone() or
                 control_admission.pending(self))
             {
@@ -610,7 +613,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             try common.validateOutgoingMessage(self.limits, .text, text);
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             try self.sendDataFrameValidatedLocked(.text, text);
         }
 
@@ -663,7 +666,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             try self.sendDataFrameValidatedLocked(.binary, payload);
         }
 
@@ -721,7 +724,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             try self.validateBinaryInPlace(payload.len);
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (control_admission.pending(self)) {
                 return error.WriteInProgress;
@@ -774,7 +777,7 @@ pub fn Connection(comptime role: common.Role) type {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             try self.validateBinaryInPlace(payload.len);
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
@@ -911,7 +914,7 @@ pub fn Connection(comptime role: common.Role) type {
                 parts,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (control_admission.pending(self)) {
                 return error.WriteInProgress;
@@ -982,7 +985,7 @@ pub fn Connection(comptime role: common.Role) type {
                 parts,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
@@ -1029,7 +1032,7 @@ pub fn Connection(comptime role: common.Role) type {
                 fragments,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (control_admission.pending(self)) {
                 return error.WriteInProgress;
@@ -1096,7 +1099,7 @@ pub fn Connection(comptime role: common.Role) type {
                 fragments,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
@@ -1322,7 +1325,7 @@ pub fn Connection(comptime role: common.Role) type {
             progress.* = .{};
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
 
             if (self.pending_write.messagePtr()) |pending| {
@@ -1673,7 +1676,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isMessage() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
@@ -1738,7 +1741,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
@@ -1802,7 +1805,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             {
                 try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-                defer self.send_mutex.unlock(self.io());
+                defer self.unlockSendBefore(deadline);
                 _ = try deadline_policy.usableAwake(self.io(), deadline);
                 if (self.pending_write.isMessage() or
                     self.pending_write.isClose())
@@ -1854,7 +1857,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             {
                 try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-                defer self.send_mutex.unlock(self.io());
+                defer self.unlockSendBefore(deadline);
                 if (self.pending_write.isMessage() or
                     self.pending_write.isClose())
                 {
@@ -1884,7 +1887,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             try self.sendControlFrameLocked(.close, payload);
         }
 
@@ -1953,7 +1956,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
@@ -2012,7 +2015,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             try self.sendControlFrameLocked(.close, payload);
         }
 
@@ -2105,7 +2108,7 @@ pub fn Connection(comptime role: common.Role) type {
                 );
                 {
                     try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-                    defer self.send_mutex.unlock(self.io());
+                    defer self.unlockSendBefore(deadline);
                     _ = try deadline_policy.usableAwake(self.io(), deadline);
                     if (self.receiveFailed() or self.writeAborted()) {
                         return error.ConnectionClosed;
@@ -2162,7 +2165,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             {
                 try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-                defer self.send_mutex.unlock(self.io());
+                defer self.unlockSendBefore(deadline);
                 if (self.receiveFailed() or self.writeAborted()) {
                     return error.ConnectionClosed;
                 }
@@ -2951,7 +2954,7 @@ pub fn Connection(comptime role: common.Role) type {
             // QUIC FIN/reset without a WebSocket Close is an abnormal closure.
             // Do not invent a Close frame after the peer ended this direction.
             if (!self.failReceive()) return;
-            self.finishAbruptReceiveEnd();
+            self.finishAbruptReceiveEnd(deadline);
         }
 
         fn flushTerminalReceiveAck(self: *Self) void {
@@ -2961,18 +2964,41 @@ pub fn Connection(comptime role: common.Role) type {
             _ = self.h3.established.connection.tryFlushPendingAck() catch {};
         }
 
-        fn abortStreamAfterReceiveFailureLocked(self: *Self) void {
-            self.write_aborted.store(true, .release);
-            self.h3.tryCancelRequest(
-                self.stream_id,
-                http3.ApplicationErrorCode.request_cancelled,
-            ) catch {};
-            common.clearPendingOutboundLocked(self);
+        fn abortStreamAfterReceiveFailureLocked(self: *Self, deadline: ?std.Io.Clock.Timestamp) void {
+            receive_cleanup.request(self);
+            self.finishDeferredReceiveAbortLocked(deadline);
         }
 
         fn abortAfterUnboundedMessageWriteLocked(self: *Self) void {
             self.discardCompressionPreviewLocked();
-            self.abortStreamAfterReceiveFailureLocked();
+            self.abortStreamAfterReceiveFailureLocked(null);
+        }
+
+        fn abortReceiveTransportLocked(self: *Self, deadline: ?std.Io.Clock.Timestamp) bool {
+            if (deadline) |before| {
+                self.h3.cancelRequestWithDeadline(self.stream_id, http3.ApplicationErrorCode.request_cancelled, before) catch return false;
+            } else {
+                self.h3.tryCancelRequest(self.stream_id, http3.ApplicationErrorCode.request_cancelled) catch return false;
+            }
+            return true;
+        }
+
+        fn finishDeferredReceiveAbortLocked(self: *Self, deadline: ?std.Io.Clock.Timestamp) void {
+            if (!self.receive_abort_pending.load(.acquire)) return;
+            receive_cleanup.finishLocked(self, self.io(), deadline, true, abortReceiveTransportLocked);
+        }
+
+        fn unlockSendBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) void {
+            self.finishDeferredReceiveAbortLocked(deadline);
+            self.send_mutex.unlock(self.io());
+        }
+
+        fn deferReceiveAbort(self: *Self, deadline: ?std.Io.Clock.Timestamp) void {
+            receive_cleanup.request(self);
+            if (self.send_mutex.tryLock()) {
+                defer self.send_mutex.unlock(self.io());
+                self.finishDeferredReceiveAbortLocked(deadline);
+            }
         }
 
         fn finishReceiveFailure(
@@ -2980,12 +3006,15 @@ pub fn Connection(comptime role: common.Role) type {
             code: websocket.CloseCode,
             deadline: ?std.Io.Clock.Timestamp,
         ) void {
-            self.send_mutex.lockUncancelable(self.io());
+            timed_mutex.lock(&self.send_mutex, self.io(), deadline) catch {
+                self.deferReceiveAbort(deadline);
+                return;
+            };
             defer self.send_mutex.unlock(self.io());
             if (!self.pending_write.isNone() or
                 control_admission.pending(self))
             {
-                self.abortStreamAfterReceiveFailureLocked();
+                self.abortStreamAfterReceiveFailureLocked(deadline);
                 return;
             }
             if (self.closeSent()) return;
@@ -2995,27 +3024,34 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .code = code },
             ) catch return;
             if (deadline) |absolute| {
-                self.beginPendingCloseLocked(payload) catch return;
+                self.beginPendingCloseLocked(payload) catch {
+                    self.abortStreamAfterReceiveFailureLocked(deadline);
+                    return;
+                };
                 self.resumePendingCloseLocked(absolute) catch {
-                    self.abortStreamAfterReceiveFailureLocked();
+                    self.abortStreamAfterReceiveFailureLocked(deadline);
                 };
                 return;
             }
             self.writeFrame(.close, payload, true, true) catch {
-                self.abortStreamAfterReceiveFailureLocked();
+                self.abortStreamAfterReceiveFailureLocked(deadline);
                 return;
             };
             self.close_sent.store(true, .release);
         }
 
-        fn finishAbruptReceiveEnd(self: *Self) void {
-            self.send_mutex.lockUncancelable(self.io());
+        fn finishAbruptReceiveEnd(self: *Self, deadline: ?std.Io.Clock.Timestamp) void {
+            timed_mutex.lock(&self.send_mutex, self.io(), deadline) catch {
+                self.deferReceiveAbort(deadline);
+                return;
+            };
             defer self.send_mutex.unlock(self.io());
-            self.abortStreamAfterReceiveFailureLocked();
+            self.abortStreamAfterReceiveFailureLocked(deadline);
         }
 
         fn failReceive(self: *Self) bool {
             if (self.receive_failed.swap(true, .acq_rel)) return false;
+            control_admission.clear(self);
             if (self.message_assembler) |*assembler| assembler.deinit();
             self.message_assembler = null;
             self.message_into.reset();
@@ -3080,7 +3116,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload,
             );
             self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(null);
             try self.sendControlFrameLocked(opcode, payload);
         }
 
@@ -3133,7 +3169,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             try control_admission.stage(self, opcode, payload, delivery, frame, consumed_input);
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             const consumed = try control_admission.admit(self, self.io(), role, false);
             if (consumed != 0) self.discardBuffered(consumed);
         }
@@ -3143,7 +3179,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!?websocket.Frame {
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             const consumed = try control_admission.admit(self, self.io(), role, false);
             if (consumed != 0) self.discardBuffered(consumed);
             const pending = if (self.pending_auto_control) |*value|
@@ -3404,7 +3440,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!?websocket.Opcode {
             if (!control_admission.pending(self)) return null;
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
-            defer self.send_mutex.unlock(self.io());
+            defer self.unlockSendBefore(deadline);
             if (self.automatic_control_admission) |waiting| {
                 if (waiting.delivery != delivery) return error.WriteInProgress;
                 return waiting.opcode;
@@ -5986,19 +6022,8 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn pendingAutomaticControlProgress(
         connection: anytype,
-    ) ?struct {
-        opcode: websocket.Opcode,
-        committed: usize,
-        total: usize,
-        retains_frame: bool,
-    } {
-        const pending = connection.pending_auto_control orelse return null;
-        return .{
-            .opcode = pending.opcode,
-            .committed = pending.committed,
-            .total = pending.len,
-            .retains_frame = pending.frame != null,
-        };
+    ) ?control_admission.Progress {
+        return control_admission.progressForTest(connection);
     }
 
     pub fn bufferInitial(connection: anytype, bytes: []const u8) !void {

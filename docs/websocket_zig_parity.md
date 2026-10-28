@@ -1619,9 +1619,24 @@ frame frees. This bounded storage adds 160 bytes to the HTTP/1 and HTTP/3
 wrappers and 152 bytes to RFC 8441. Transport and receive-mode matrices,
 real TCP reply ordering, cancellation, mask-source failures and teardown
 evidence are recorded in `evidence/websocket_control_admission/2026-10-28.json`.
-Fatal receive cleanup still uses unbounded send-mutex acquisition. Retiring
-active writers safely during fatal cleanup remains necessary to complete
-bounded receive behavior under every form of contention.
+Fatal receive cleanup now includes send-mutex waiting in the receive's original
+deadline. Expiration or cancellation preserves the already-observed protocol
+or transport error, publishes terminal write state, and leaves the active
+writer's descriptors and compression storage intact. TCP shutdown interrupts
+socket output; H2/H3 stream cancellation runs only after the send owner can
+touch transport state safely. Every send-lock release retires pending state
+after its I/O has returned, using that operation's own output deadline. An
+expired multiplexed cancellation budget starts no output and keeps a retry
+flag for a later owner or the final destructor's normal cancellation policy.
+A post-publication try-lock covers a race with the original holder's unlock.
+When contention clears before expiration, mapped Close diagnostics are still
+sent within the original budget. Failed Close preparation, including a client
+mask-source failure, retires the byte stream or affected CONNECT stream while
+preserving the input error. Adjacent `runtime/receive_failure/` tests
+cover blocked ownership, original errors, actual writer-buffer lifetime,
+Close 1002, unchanged cancellation deadlines, native H2 RST_STREAM and H3
+RESET_STREAM/STOP_SENDING with preserved sibling streams. Evidence is recorded
+in `evidence/websocket_fatal_cleanup/2026-10-28.json`.
 Owned Close diagnostics now take over the already-allocated frame payload on
 HTTP/1, RFC 8441 and RFC 9220. Typed Close reads, Ping waits and close-handshake
 waits no longer allocate a second reason buffer after consuming the terminal

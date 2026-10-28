@@ -29,6 +29,23 @@ pub fn pending(connection: anytype) bool {
         connection.automatic_control_waiting.load(.acquire);
 }
 
+/// A queued control already has a known logical wire length even when mutex
+/// admission or mask preparation has not run. Test snapshots cover both owners.
+pub const Progress = struct { opcode: websocket.Opcode, committed: usize, total: usize, retains_frame: bool };
+
+pub fn progressForTest(connection: anytype) ?Progress {
+    if (connection.pending_auto_control) |pending_control| {
+        return .{ .opcode = pending_control.opcode, .committed = pending_control.committed, .total = pending_control.len, .retains_frame = pending_control.frame != null };
+    }
+    const waiting = connection.automatic_control_admission orelse return null;
+    const payload_len = switch (waiting.payload) {
+        .frame => |frame| frame.payload.len,
+        .copy => |copy| copy.len,
+    };
+    const masked = if (comptime @hasField(@TypeOf(connection.*), "role")) connection.role == .client else connection.h3.established.connection.config.local_endpoint == .client;
+    return .{ .opcode = waiting.opcode, .committed = 0, .total = 2 + payload_len + @as(usize, if (masked) 4 else 0), .retains_frame = waiting.payload == .frame };
+}
+
 /// Capture a consumed frame or a bounded copy before waiting for the mutex.
 /// Frame ownership transfers even on a local conflict or validation error.
 pub fn stage(connection: anytype, opcode: websocket.Opcode, payload: []const u8, delivery: common.PendingAutomaticControl.Delivery, frame: ?websocket.Frame, consumed_input: usize) automatic.Error!void {
