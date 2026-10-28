@@ -5512,6 +5512,22 @@ proxy evidence for the entire suite.
    and moved median throughput from 11,133 to 11,241 publishes/s (1.0%). This
    is a targeted ownership/copy result rather than closure of the broader
    durable QoS 2 scheduling gap.
+   [Shared Publication metadata](mqtt_shared_properties.md) now extends this
+   ownership to source property strings and binary values. Each Session keeps
+   independent descriptors, subscription identifiers, expiry and logical byte
+   accounting; unrelated or reordered caller metadata is still deep-owned.
+   A four-pair fixed-binary 64-Session/256-message comparison reduced the
+   metadata/shared row from 100,608 to 18,688 allocations and 32,520,448 to
+   6,650,112 incremental live bytes, with a paired median enqueue-time ratio
+   of 0.2975. All 224 benchmark records validated content and zero teardown
+   bytes. Empty-property controls retain identical allocation/byte counts.
+   Exact QoS 1/2 production snapshot peers additionally found and guard a
+   baseline packet-adoption bug: compacted Topic/payload bytes could overwrite
+   old parser property slices before subsequent destinations copied them.
+   A stable complete source metadata view now follows Publication adoption,
+   preserving properties for routing and ACLs. These are Session-store memory
+   and correctness results; process RSS and whole-broker throughput are not
+   established by this benchmark.
    Session drain now keeps its current-connection Receive Maximum usage as
    explicit bounded state instead of counting sent PUBLISH records across the
    inflight array on every call. The counter excludes unsent/retry PUBLISH and

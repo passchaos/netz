@@ -1789,6 +1789,29 @@ pub fn build(b: *std.Build) void {
     mqtt_session_expiry_restart_step.dependOn(&mqtt_session_expiry_oracle_tests.step);
     test_step.dependOn(&mqtt_session_expiry_oracle_tests.step);
 
+    const mqtt_shared_properties = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_shared_properties.addArtifactArg(mqtt_vectors_broker);
+    mqtt_shared_properties.addArg("--only-shared-properties");
+    if (b.args) |args| mqtt_shared_properties.addArgs(args);
+    const mqtt_shared_properties_step = b.step(
+        "interop-mqtt-shared-properties",
+        "Verify shared Session metadata across publisher teardown and process recovery",
+    );
+    mqtt_shared_properties_step.dependOn(&mqtt_shared_properties.step);
+    const mqtt_shared_properties_checker_tests = b.addSystemCommand(&.{
+        "python3", "-m", "unittest", "mqtt_shared_properties_ab_test",
+    });
+    mqtt_shared_properties_checker_tests.setCwd(b.path("tools/interop"));
+    const mqtt_shared_properties_checker_step = b.step(
+        "test-mqtt-shared-properties-benchmark",
+        "Check complete shared MQTT metadata benchmark samples and accounting",
+    );
+    mqtt_shared_properties_checker_step.dependOn(&mqtt_shared_properties_checker_tests.step);
+    test_step.dependOn(&mqtt_shared_properties_checker_tests.step);
+
     const mqtt_deadline_benchmark_check = b.addSystemCommand(&.{
         "python3", "-m", "unittest", "mqtt_deadline_bench.test_check",
     });
@@ -3219,6 +3242,12 @@ pub fn build(b: *std.Build) void {
             .path = "examples/bench_mqtt_retained.zig",
             .run_step = "bench-mqtt-retained",
             .description = "Benchmark MQTT retained-message exact and wildcard lookup",
+        },
+        .{
+            .exe_name = "netz-bench-mqtt-shared-properties",
+            .path = "examples/bench_mqtt_shared_properties.zig",
+            .run_step = "bench-mqtt-shared-properties",
+            .description = "Benchmark shared MQTT Session metadata allocations and logical ownership",
         },
         .{
             .exe_name = "netz-bench-mqtt-session",

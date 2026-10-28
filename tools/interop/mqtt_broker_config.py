@@ -82,6 +82,7 @@ from mqtt_scenarios.will_delay import run_will_delay_cases
 from mqtt_scenarios.will_sources import MOSQUITTO_WILL_SOURCES
 from mqtt_scenarios.session_expiry_sources import MOSQUITTO_SESSION_EXPIRY_SOURCES
 from mqtt_scenarios.session_expiry_restart import run_cases as run_session_expiry_restart_cases
+from mqtt_scenarios.shared_properties import run as run_shared_properties_cases
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -172,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-will-lifecycle", action="store_true")
     selected.add_argument("--only-will-delay", action="store_true")
     selected.add_argument("--only-session-expiry-restart", action="store_true")
+    selected.add_argument("--only-shared-properties", action="store_true")
     selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -7440,6 +7442,10 @@ def main() -> None:
                 f"mosquitto_process_sources={source_count} " + RUNTIME
             )
             return
+        if args.only_shared_properties:
+            run_shared_properties_cases(args.broker, directory)
+            print("MQTT shared property integration passed: qos=1+2 sessions=2 generations=3 exact_properties=true topic_alias_removed=true subscription_identifiers=17+29 duplicate_rejected=true " + RUNTIME)
+            return
         if args.only_session_expiry_restart:
             print("MQTT Session expiry restart broker: " + json.dumps({
                 "executable": str(args.broker.resolve()),
@@ -7705,6 +7711,7 @@ def main() -> None:
         run_will_lifecycle_case(args.broker, directory)
         run_will_delay_cases(args.broker, directory)
         run_session_expiry_restart_cases(args.broker, directory)
+        run_shared_properties_cases(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)

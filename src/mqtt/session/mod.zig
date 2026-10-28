@@ -3,7 +3,7 @@
 //! Sessions are addressed by generation-checked handles, so callers never hold
 //! pointers invalidated by table growth. Variable-length protocol data is
 //! owned for the Session lifetime; multi-destination offline fanout may share
-//! immutable Topic Name and payload bytes through a reference-counted broker
+//! immutable Topic Name, payload and property values through a reference-counted broker
 //! Publication. Queue/inflight scans write borrowed views into caller storage
 //! and allocate only when a previously unsent message moves into inflight.
 
@@ -17,6 +17,8 @@ const identifiers = @import("identifiers.zig");
 pub const PacketIdentifierOwnership = identifiers.Ownership;
 pub const SharedPublication = @import("../broker/publication.zig").Publication;
 const shared_publication_wire = std.math.maxInt(usize);
+const shared_publication_properties = shared_publication_wire - 1;
+const shared_properties = @import("shared_properties.zig");
 
 pub const Error = mqtt.Error || error{
     SessionNotFound,
@@ -291,8 +293,10 @@ const OwnedPublish = struct {
         allocator: std.mem.Allocator,
         cache: *StorageCache,
     ) void {
-        owned_properties.deinit(allocator, self.properties);
-        if (self.wire_allocation_len == shared_publication_wire) {
+        if (self.wire_allocation_len == shared_publication_properties) {
+            allocator.free(self.properties);
+        } else owned_properties.deinit(allocator, self.properties);
+        if (self.wire_allocation_len >= shared_publication_properties) {
             SharedPublication.ownerForBytes(self.wire).release();
         } else {
             const allocation = self.wire.ptr[0..self.wire_allocation_len];
@@ -1961,8 +1965,9 @@ pub const Store = struct {
     }
 
     /// Queue one Session-specific delivery while sharing the immutable Topic
-    /// Name and payload owned by a broker Publication. QoS, Retain, properties,
-    /// expiry accounting, and byte limits remain independent per Session.
+    /// Name, payload and source property values owned by a broker Publication.
+    /// QoS, Retain, property descriptors, expiry accounting and logical byte
+    /// limits remain independent per Session; unrelated properties are copied.
     pub fn enqueueSharedPublicationTrackingSnapshotChange(
         self: *Store,
         handle: Handle,
@@ -3313,18 +3318,19 @@ fn clonePublishFromSharedPublication(
     properties: []const mqtt.Property,
     now_ns: i96,
 ) Error!OwnedPublish {
-    const property_result = owned_properties.clone(
+    const property_result = shared_properties.clone(
         allocator,
         properties,
+        publication.properties,
         keepQueuedProperty,
     ) catch |err| switch (err) {
         error.OwnedPropertyLimitExceeded => return error.SessionByteLimitExceeded,
         else => return @errorCast(err),
     };
-    errdefer owned_properties.deinit(
-        allocator,
-        property_result.properties,
-    );
+    errdefer if (property_result.borrows_values)
+        allocator.free(property_result.properties)
+    else
+        owned_properties.deinit(allocator, property_result.properties);
     const wire_len = std.math.add(
         usize,
         publication.topic().len,
@@ -3333,14 +3339,14 @@ fn clonePublishFromSharedPublication(
     const bytes = std.math.add(
         usize,
         wire_len,
-        property_result.allocation_bytes,
+        property_result.logical_bytes,
     ) catch return error.SessionByteLimitExceeded;
     publication.retain();
     return .{
         // A reserved allocation length tags this as a shared Publication. The
         // complete bytes slice recovers its coallocated owner at release.
         .wire = publication.bytes,
-        .wire_allocation_len = shared_publication_wire,
+        .wire_allocation_len = if (property_result.borrows_values) shared_publication_properties else shared_publication_wire,
         .topic = publication.bytes[0..publication.topic().len],
         .payload = publication.bytes[publication.topic().len..],
         .qos = qos,
@@ -4081,4 +4087,5 @@ test {
     _ = @import("ack_tests.zig");
     _ = @import("open_tests.zig");
     _ = @import("expiry_inspection_tests.zig");
+    _ = @import("shared_properties_tests.zig");
 }

@@ -1853,6 +1853,7 @@ test "finite listener rejects beyond its own live connection limit" {
     try held.ping();
     try held.disconnect(0);
     try waitForPeerClose(&held);
+    try waitForNoConnections(&broker);
 
     var replacement = try runtime.Client.connect(
         allocator,

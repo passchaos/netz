@@ -545,6 +545,7 @@ pub const AuthenticationHandler = struct {
 };
 
 const Publication = publication_mod.Publication;
+const source_view = @import("broker/source_view.zig");
 
 const Delivery = struct {
     publication: *Publication,
@@ -6594,6 +6595,7 @@ pub const Broker = struct {
         prefixed_packet: ?*runtime.OwnedPacket,
         pending_qos2: ?*qos2_mod.Pending,
     ) Error!RoutePlan {
+        var source = publish;
         if (self.pruneExpiredSessionRoutesLocked(now) != 0) {
             if (persistent_changed) |changed| changed.* = true;
         }
@@ -6601,9 +6603,9 @@ pub const Broker = struct {
             self.canonicalPublisherId(id)
         else
             null;
-        const retained_result: retained_mod.StoreResult = if (publish.retain)
+        const retained_result: retained_mod.StoreResult = if (source.retain)
             self.retained.applyParsedPublishWithSource(
-                publish,
+                source,
                 route_publisher_id,
                 source_client_id,
                 source_username,
@@ -6619,7 +6621,7 @@ pub const Broker = struct {
         const match_storage = try self.matchRoutesForPublisherLocked(
             publisher_id,
             route_publisher_id,
-            publish.topic,
+            source.topic,
         );
         const matches = match_storage.items;
         errdefer match_storage.deinit(self.allocator);
@@ -6638,15 +6640,15 @@ pub const Broker = struct {
             // allocation (and shared cursor) single-pass; this count-only
             // query cannot advance shared-subscription selection.
             has_matching_subscriber = self.router.hasTopicMatch(
-                publish.topic,
+                source.topic,
             );
         }
         var session_plan_scratch: session_delivery.Scratch = .{};
         var session_plan = try session_delivery.Plan.initWithScratch(
             self.allocator,
             matches,
-            publish.qos,
-            publish.retain,
+            source.qos,
+            source.retain,
             upgrade_outgoing_qos,
             &session_plan_scratch,
         );
@@ -6655,6 +6657,8 @@ pub const Broker = struct {
         defer if (shared_route_publication) |publication| {
             publication.release();
         };
+        var source_properties: source_view.Properties = .{};
+        defer source_properties.deinit(self.allocator);
         // `prefixed_packet` is also present when a small PUBLISH borrows the
         // connection's stack storage. Share online Session bytes only when an
         // ingress packet or released QoS 2 transaction already owns backing
@@ -6723,11 +6727,11 @@ pub const Broker = struct {
                 !authorizers.authorize(.{
                     .client_id = try self.sessions.clientId(handle),
                     .username = if (online) destination.?.username() else null,
-                    .topic = publish.topic,
-                    .payload = publish.payload,
+                    .topic = source.topic,
+                    .payload = source.payload,
                     .qos = route.qos,
                     .retain = route.retain,
-                    .properties = publish.properties,
+                    .properties = source.properties,
                 }))
             {
                 // A read denial suppresses every overlapping subscription for
@@ -6759,13 +6763,21 @@ pub const Broker = struct {
                 (can_adopt_source or !online))
             blk: {
                 if (shared_route_publication == null) {
+                    try source_properties.capture(self.allocator, source.properties);
                     shared_route_publication = try self.createRoutePublicationLocked(
-                        publish,
+                        source,
                         1,
                         now,
                         prefixed_packet,
                         pending_qos2,
                     );
+                    source_properties.bind(shared_route_publication.?);
+                    // Packet adoption moves Topic/payload and invalidates the
+                    // old parser's nested property slices. Every later route
+                    // and ACL sees this stable owned view instead.
+                    source.topic = shared_route_publication.?.topic();
+                    source.payload = shared_route_publication.?.payload();
+                    source.properties = source_properties.items();
                 }
                 break :blk shared_route_publication;
             } else null;
@@ -6774,7 +6786,7 @@ pub const Broker = struct {
                 session_plan.identifiersFor(route),
                 route.retain,
                 route.qos,
-                publish,
+                source,
                 now,
                 &route_persistent_changed,
                 &route_enqueued,
@@ -6882,7 +6894,7 @@ pub const Broker = struct {
             for (0..plan.len) |_| shared.retain();
             break :blk shared;
         } else self.createRoutePublicationLocked(
-            publish,
+            source,
             plan.len,
             now,
             prefixed_packet,
@@ -6923,7 +6935,7 @@ pub const Broker = struct {
                 if (upgrade_outgoing_qos)
                     match.subscription.qos
                 else
-                    minQos(publish.qos, match.subscription.qos),
+                    minQos(source.qos, match.subscription.qos),
                 destination.connection.?.localMaximumQoS(),
             );
             if (duplicate) |delivery| {
@@ -6937,14 +6949,14 @@ pub const Broker = struct {
                 );
                 delivery.retain = delivery.retain or
                     (match.subscription.retain_as_published and
-                        publish.retain);
+                        source.retain);
                 continue;
             }
             const delivery = Delivery{
                 .publication = publication.?,
                 .qos = delivery_qos,
                 .retain = if (match.subscription.retain_as_published)
-                    publish.retain
+                    source.retain
                 else
                     false,
                 .subscription_identifier = match.subscription_identifier,
@@ -8793,6 +8805,7 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
     const wire = allocation[@sizeOf(Publication)..];
     @memset(wire, 0xaa);
     @memcpy(wire[5..17], "shared/topic");
+    @memcpy(wire[17..25], "text/bin");
     @memcpy(wire[31..45], "shared-payload");
     var packet = runtime.OwnedPacket{
         .bytes = wire,
@@ -8800,6 +8813,10 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
         .prefix_len = @sizeOf(Publication),
     };
     defer packet.deinit(allocator);
+    var property_fields = [_]mqtt.Property{
+        .{ .utf8 = .{ .id = .content_type, .value = wire[17..25] } },
+        .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+    };
     var plan = try broker.enqueuePublishLocked(
         false,
         null,
@@ -8809,7 +8826,7 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
             .retain = false,
             .topic = wire[5..17],
             .packet_id = 1,
-            .properties = &.{},
+            .properties = &property_fields,
             .payload = wire[31..45],
         },
         null,
@@ -8859,6 +8876,10 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
         second[0].publish.payload.ptr,
     );
     try std.testing.expectEqual(wire.ptr, first[0].publish.topic.ptr);
+    try std.testing.expectEqual(@as(usize, 1), first[0].publish.properties.len);
+    try std.testing.expectEqual(@as(usize, 1), second[0].publish.properties.len);
+    try std.testing.expectEqualStrings("text/bin", first[0].publish.properties[0].utf8.value);
+    try std.testing.expectEqualStrings("text/bin", second[0].publish.properties[0].utf8.value);
     try std.testing.expectEqualStrings("shared/topic", first[0].publish.topic);
     try std.testing.expectEqualStrings(
         "shared-payload",
@@ -10508,6 +10529,7 @@ fn validateLocalPublish(publish: mqtt.Publish) Error!void {
 
 test {
     _ = load_metrics;
+    _ = @import("broker/source_view_tests.zig");
     _ = @import("broker_tests.zig");
     _ = @import("broker/persistence_tests.zig");
     _ = @import("broker/local_consumer_tests.zig");

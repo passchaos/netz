@@ -314,7 +314,7 @@ fn sliceWithin(container: []const u8, child: []const u8) bool {
         child.len <= container.len - offset;
 }
 
-fn keepForwardProperty(property: mqtt.Property) bool {
+pub fn keepForwardProperty(property: mqtt.Property) bool {
     // Topic Alias is scoped to the publisher connection. Subscription
     // Identifier is generated from each matching broker subscription below.
     return !((property == .two_byte and
