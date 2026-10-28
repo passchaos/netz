@@ -1,6 +1,18 @@
 const std = @import("std");
 const pool_mod = @import("../client_pool.zig");
 
+test "HTTP/2 pool closed TLS lease returns without output or waiting" {
+    try @import("../../internal/pool_returns/success_test_support.zig").exerciseClosed(pool_mod.Pool, true);
+}
+
+test "HTTP/2 pool completed TLS response returns under pool and ticket contention" {
+    inline for (.{ false, true }) |ticket| try @import("../../internal/pool_returns/success_test_support.zig").exerciseTls(pool_mod.Pool, true, ticket);
+}
+
+test "HTTP/2 pool returns a completed response before connection return lock" {
+    try @import("../../internal/pool_returns/success_test_support.zig").exercise(pool_mod.Pool, true);
+}
+
 test "HTTP/2 pool retirement between capacity check and enqueue wakes its caller" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

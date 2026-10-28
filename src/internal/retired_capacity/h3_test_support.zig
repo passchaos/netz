@@ -15,8 +15,8 @@ pub const Client = struct {
         self.trace.drops += 1;
     }
 
-    pub fn isReusable(_: *const Client) bool {
-        return false;
+    pub fn isReusable(self: *const Client) bool {
+        return self.trace.reusable;
     }
     pub fn peerOriginExcluded(_: *const Client, _: http3.Origin) bool {
         return false;
@@ -56,6 +56,7 @@ pub const Pool = owning.Pool(Runtime);
 
 pub const Trace = struct {
     base: std.Io,
+    reusable: bool = false,
     pool: ?*Pool = null,
     budget: ?*budget_mod.Budget = null,
     held_mutex: ?*std.Io.Mutex = null,

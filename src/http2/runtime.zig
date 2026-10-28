@@ -4178,6 +4178,20 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Retire a terminal lease without any TLS shutdown output.
+    pub fn closeWithoutCloseNotify(self: *Connection) void {
+        if (self.transport) |transport| switch (transport) {
+            .tls_client => |connection| switch (connection.records) {
+                inline else => |*records| records.failed = true,
+            },
+            .tls_server => |connection| switch (connection.records) {
+                inline else => |*records| records.failed = true,
+            },
+            .tcp => {},
+        };
+        self.close();
+    }
+
     /// Whether an exclusive client lease can safely return this connection to
     /// an idle pool. GOAWAY, live streams, queued application frames, or push
     /// mode make reuse ambiguous, so the pool closes those connections rather

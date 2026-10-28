@@ -12,6 +12,7 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const owned_admission = @import("../../internal/owned_fifo_admission.zig");
 const timed_mutex = @import("../../internal/timed_mutex.zig");
 const retired_capacity = @import("../../internal/retired_capacity.zig");
+const pool_returns = @import("../../internal/pool_returns.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
@@ -516,15 +517,27 @@ pub fn Pool(comptime Runtime: type) type {
         options: Options(Runtime),
         mutex: std.Io.Mutex = .init,
         idle: IdlePool,
+        returns: ReturnQueue = .{},
         leased: usize = 0,
         connections: usize = 0,
         retired_connections: retired_capacity.Retirements = .{},
+        retired_leases: retired_capacity.Retirements = .{},
         capacity_waiters: owned_admission.Queue = .{},
         closed: bool = false,
 
         const Self = @This();
         const Client = Runtime.HandshakeClient;
-        const IdlePool = http3.origin_pool.Pool(Client);
+        const ReturnPayload = struct { client_value: Client, origin_key: http3.OriginKey, returned_at_ms: u64 };
+        const ReturnQueue = pool_returns.Queue(ReturnPayload);
+        const IdleClient = struct {
+            client_value: Client,
+            return_node: *ReturnQueue.Node,
+            fn deinit(self: *IdleClient) void {
+                self.client_value.deinit();
+                self.return_node.destroy();
+            }
+        };
+        const IdlePool = http3.origin_pool.Pool(IdleClient);
         const ConnectRoute = union(enum) {
             origin,
             alt_svc: http3.AltSvcTarget,
@@ -547,6 +560,7 @@ pub fn Pool(comptime Runtime: type) type {
         pub const Lease = struct {
             pool: *Self,
             client_value: Client,
+            return_node: *ReturnQueue.Node,
             /// Origin that authenticated and created this QUIC connection.
             /// It remains stable across RFC 9412 cross-origin reuse.
             origin_key: http3.OriginKey,
@@ -593,6 +607,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.pool.release(
                     self.client_value,
                     self.origin_key,
+                    self.return_node,
                 );
                 self.client_value = undefined;
                 self.origin_key = undefined;
@@ -603,6 +618,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.active = false;
                 self.deinitRequestOrigin();
                 self.pool.discard(self.client_value, self.origin_key);
+                self.return_node.destroy();
                 self.client_value = undefined;
                 self.origin_key = undefined;
             }
@@ -629,9 +645,9 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn deinit(self: *Self) void {
             // Leases retain a pool pointer; the caller must return them before
             // destroying the pool just as with HTTP/1 and HTTP/2 pools.
+            self.close();
             std.debug.assert(self.leased == 0);
             std.debug.assert(self.capacity_waiters.count(self.io) == 0);
-            self.close();
             std.debug.assert(self.connections == self.idle.idleCount());
             self.idle.deinit();
             self.* = undefined;
@@ -642,9 +658,22 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn close(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+            _ = self.retired_leases.drain(&self.leased);
             var removed: usize = 0;
             if (!self.closed) {
                 self.closed = true;
+                var returned = self.returns.close(self.io);
+                while (returned) |node| {
+                    returned = node.next;
+                    var client = node.value.client_value;
+                    var key = node.value.origin_key;
+                    client.deinit();
+                    key.deinit();
+                    node.destroy();
+                    self.connections -= 1;
+                    self.leased -= 1;
+                    removed += 1;
+                }
                 const idle_count = self.idle.idleCount();
                 self.idle.deinit();
                 self.idle = IdlePool.init(
@@ -654,7 +683,7 @@ pub fn Pool(comptime Runtime: type) type {
                 );
                 std.debug.assert(self.connections >= idle_count);
                 self.connections -= idle_count;
-                removed = idle_count;
+                removed += idle_count;
             }
             self.capacity_waiters.notifyAll(self.io);
             self.mutex.unlock(self.io);
@@ -810,7 +839,9 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key.deinit();
                 return err;
             };
+            self.collectReturnsLocked();
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+            _ = self.retired_leases.drain(&self.leased);
             if (self.closed) {
                 if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
                 self.cancelSharedWaiter(shared_waiter);
@@ -832,7 +863,9 @@ pub fn Pool(comptime Runtime: type) type {
                         queued.rearm();
                     }
                 }
+                self.collectReturnsLocked();
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+                _ = self.retired_leases.drain(&self.leased);
                 self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
@@ -871,7 +904,9 @@ pub fn Pool(comptime Runtime: type) type {
                             queued.rearm();
                         }
                     }
+                    self.collectReturnsLocked();
                     self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+                    _ = self.retired_leases.drain(&self.leased);
                     self.mutex.unlock(self.io);
                     var key = origin_key;
                     key.deinit();
@@ -948,14 +983,16 @@ pub fn Pool(comptime Runtime: type) type {
                     origin_key.deinit();
                     return .{
                         .pool = self,
-                        .client_value = pooled.handle,
+                        .client_value = pooled.handle.client_value,
+                        .return_node = pooled.handle.return_node,
                         .origin_key = pooled.key,
                         .was_reused = true,
                     };
                 }
                 const lease: Lease = .{
                     .pool = self,
-                    .client_value = pooled.handle,
+                    .client_value = pooled.handle.client_value,
+                    .return_node = pooled.handle.return_node,
                     .origin_key = pooled.key,
                     .request_origin_key = origin_key,
                     .was_reused = true,
@@ -977,8 +1014,9 @@ pub fn Pool(comptime Runtime: type) type {
             context: *const anyopaque,
             connection_origin: http3.Origin,
             requested_origin: http3.Origin,
-            client: *const Client,
+            client_value: *const IdleClient,
         ) bool {
+            const client = &client_value.client_value;
             const reuse: *const ReuseContext = @ptrCast(@alignCast(context));
             std.debug.assert(http3.sameOrigin(
                 reuse.requested_origin,
@@ -1118,6 +1156,8 @@ pub fn Pool(comptime Runtime: type) type {
             errdefer origin_key.deinit();
             var reservation_active = true;
             errdefer if (reservation_active) self.releaseReservation();
+            const return_node = try ReturnQueue.Node.create(self.allocator);
+            errdefer return_node.destroy();
             var prepared: ?Runtime.PreparedEarlyRequest = if (early_request) |early|
                 try Runtime.PreparedEarlyRequest.initWithOptions(
                     self.allocator,
@@ -1157,6 +1197,7 @@ pub fn Pool(comptime Runtime: type) type {
             errdefer client.deinit();
             try timed_mutex.lock(&self.mutex, self.io, deadline);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+            _ = self.retired_leases.drain(&self.leased);
             if (self.closed) {
                 self.mutex.unlock(self.io);
                 // Existing errdefers destroy the client first, then retire
@@ -1169,6 +1210,7 @@ pub fn Pool(comptime Runtime: type) type {
             const lease: Lease = .{
                 .pool = self,
                 .client_value = client,
+                .return_node = return_node,
                 .origin_key = origin_key,
                 .was_reused = false,
                 .early_disposition = connected.disposition,
@@ -2124,6 +2166,8 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn idleCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
+            _ = self.retired_leases.drain(&self.leased);
             _ = self.pruneExpiredLocked();
             return self.idle.idleCount();
         }
@@ -2131,32 +2175,42 @@ pub fn Pool(comptime Runtime: type) type {
         pub fn stats(self: *Self) http3.origin_pool.Stats {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
+            _ = self.retired_leases.drain(&self.leased);
             return self.idle.stats();
         }
 
         pub fn leasedCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
+            _ = self.retired_leases.drain(&self.leased);
             return self.leased;
         }
 
         pub fn connectionCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+            _ = self.retired_leases.drain(&self.leased);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
             return self.connections;
         }
 
         pub fn waitingCount(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
+            _ = self.retired_leases.drain(&self.leased);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
             return self.capacity_waiters.count(self.io);
         }
 
         pub fn pruneExpired(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            self.collectReturnsLocked();
+            _ = self.retired_leases.drain(&self.leased);
             return self.pruneExpiredLocked();
         }
 
@@ -2165,6 +2219,7 @@ pub fn Pool(comptime Runtime: type) type {
         /// eligible.
         pub fn evictOldestIdle(self: *Self) bool {
             self.mutex.lockUncancelable(self.io);
+            self.collectReturnsLocked();
             if (self.closed) {
                 self.mutex.unlock(self.io);
                 return false;
@@ -2188,32 +2243,63 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             client_value: Client,
             origin_key: http3.OriginKey,
+            return_node: *ReturnQueue.Node,
+        ) void {
+            return_node.value = .{ .client_value = client_value, .origin_key = origin_key, .returned_at_ms = nowMillis(self.io) };
+            if (self.returns.publish(return_node, self.io)) {
+                self.capacity_waiters.notifyRetry(self.io);
+                self.notifyShared();
+                return;
+            }
+            var client = client_value;
+            var key = origin_key;
+            client.deinit();
+            key.deinit();
+            return_node.destroy();
+            self.retired_leases.retire(1);
+            self.releaseReservation();
+        }
+
+        fn collectReturnsLocked(self: *Self) void {
+            var current = self.returns.take();
+            while (current) |node| {
+                current = node.next;
+                const payload = node.value;
+                self.releaseReturnedLocked(payload.client_value, payload.origin_key, node, payload.returned_at_ms);
+            }
+        }
+
+        fn releaseReturnedLocked(
+            self: *Self,
+            client_value: Client,
+            origin_key: http3.OriginKey,
+            return_node: *ReturnQueue.Node,
+            returned_at_ms: u64,
         ) void {
             var client = client_value;
-            self.mutex.lockUncancelable(self.io);
             std.debug.assert(self.leased != 0);
             self.leased -= 1;
             if (self.closed or !client.isReusable()) {
                 self.connections -= 1;
-                self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
                 client.deinit();
+                return_node.destroy();
                 self.releaseShared(1);
-                self.notifyCapacityWaiter();
+                self.notifyCapacityWaiterLocked();
                 return;
             }
             const idle_before = self.idle.idleCount();
             self.idle.releaseKey(
-                client,
+                .{ .client_value = client, .return_node = return_node },
                 origin_key,
-                nowMillis(self.io),
+                returned_at_ms,
             ) catch {
                 self.connections -= 1;
-                self.mutex.unlock(self.io);
                 client.deinit();
+                return_node.destroy();
                 self.releaseShared(1);
-                self.notifyCapacityWaiter();
+                self.notifyCapacityWaiterLocked();
                 return;
             };
             const idle_after = self.idle.idleCount();
@@ -2227,7 +2313,6 @@ pub fn Pool(comptime Runtime: type) type {
             std.debug.assert(self.connections >= dropped);
             self.connections -= dropped;
             self.notifyCapacityWaiterLocked();
-            self.mutex.unlock(self.io);
             if (dropped != 0) {
                 self.releaseShared(dropped);
             } else {
@@ -2256,7 +2341,7 @@ pub fn Pool(comptime Runtime: type) type {
             self.notifyCapacityWaiter();
         }
 
-        fn dropClient(_: std.mem.Allocator, client_value: Client) void {
+        fn dropClient(_: std.mem.Allocator, client_value: IdleClient) void {
             var client = client_value;
             client.deinit();
         }

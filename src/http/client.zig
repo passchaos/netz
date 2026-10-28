@@ -68,6 +68,14 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    pub fn closeWithoutCloseNotify(self: *Connection) void {
+        switch (self.value) {
+            .http1 => |*value| value.closeWithoutCloseNotify(),
+            .http2 => |*value| value.closeWithoutCloseNotify(),
+        }
+        self.* = undefined;
+    }
+
     pub fn protocol(self: Connection) Protocol {
         return switch (self.value) {
             .http1 => .http1,

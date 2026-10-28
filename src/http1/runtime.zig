@@ -3442,6 +3442,20 @@ pub const Client = struct {
         self.* = undefined;
     }
 
+    /// Retire a completed/closed-pool lease without writing TLS shutdown.
+    pub fn closeWithoutCloseNotify(self: *Client) void {
+        if (self.tls_conn) |conn| conn.write_closed = true;
+        if (self.tls_vail_conn) |conn| {
+            self.tls_vail_conn = null;
+            conn.deinitWithoutCloseNotify();
+            // The TLS connection already owns and closes the socket.
+            if (self.default_host) |host| self.allocator.free(host);
+            self.inbuf.deinit(self.allocator);
+            self.write_scratch.deinit(self.allocator);
+            self.* = undefined;
+        } else self.close();
+    }
+
     pub fn peerCertificates(
         self: *const Client,
     ) ?[]const []const u8 {

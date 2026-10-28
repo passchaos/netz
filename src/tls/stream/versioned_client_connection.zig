@@ -538,6 +538,14 @@ pub const Connection = struct {
             init(allocator, io, stream, mapped);
     }
 
+    /// Release a terminal transport without writing further TLS records.
+    pub fn deinitWithoutCloseNotify(self: *Connection) void {
+        switch (self.records) {
+            inline else => |*records| records.failed = true,
+        }
+        self.deinit();
+    }
+
     pub fn deinit(self: *Connection) void {
         if (self.shouldSendCloseNotify()) {
             self.sendCloseNotify() catch {};

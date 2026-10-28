@@ -27,6 +27,8 @@ pub fn main(init: std.process.Init) !void {
         } } },
     });
     defer pool.deinit();
+    var completed_return_locked = false;
+    defer if (completed_return_locked) pool.mutex.unlock(io);
     const first_uri = try std.fmt.allocPrint(
         allocator,
         "https://localhost:{d}/one",
@@ -39,16 +41,25 @@ pub fn main(init: std.process.Init) !void {
         .{port},
     );
     defer allocator.free(second_uri);
+    var initial_lease = try pool.acquireUriWithTimeout(first_uri, .fromSeconds(5));
+    defer initial_lease.discard();
+    pool.mutex.lockUncancelable(io);
+    completed_return_locked = true;
     const label = if (expected == .http2) "h2" else "h1";
-    var first = try pool.requestUriWithTimeout(
-        first_uri,
+    var first = try initial_lease.connection().requestWithDeadline(
+        "/one",
         .{ .headers = &.{.{
             .name = "x-netz-unified",
             .value = label,
         }} },
-        .fromSeconds(5),
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) }),
     );
     defer first.deinit();
+    initial_lease.release();
+    if (pool.mutex.tryLock() or pool.returns.head.load(.acquire) == null) return error.InvalidCompletedReturn;
+    pool.mutex.unlock(io);
+    completed_return_locked = false;
+    _ = pool.idleCount();
     try verifyAdmissionTimeout(&pool, io, second_uri);
     try verifyQueuedTimeout(&pool, io, second_uri);
     try verifyFailedRetirement(&pool, io);
@@ -80,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
 }

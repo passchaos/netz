@@ -11,6 +11,7 @@ const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const owned_admission = @import("../internal/owned_fifo_admission.zig");
 const retired_capacity = @import("../internal/retired_capacity.zig");
+const pool_returns = @import("../internal/pool_returns.zig");
 const connection_budget = @import("../internal/connection_budget.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const http3 = @import("../http3/mod.zig");
@@ -62,7 +63,22 @@ pub const Http3EarlyDataOptions = h3_support.EarlyDataOptions;
 pub const Http3RememberedSettingsStats = h3_support.RememberedSettingsStats;
 
 pub const Stats = origin_pool.Stats;
-const IdlePool = origin_pool.Pool(client.Connection);
+const ReturnPayload = struct {
+    connection_value: client.Connection,
+    origin_key: http3.OriginKey,
+    reusable: bool,
+    returned_at_ms: u64,
+};
+const ReturnQueue = pool_returns.Queue(ReturnPayload);
+const IdleConnection = struct {
+    connection_value: client.Connection,
+    return_node: *ReturnQueue.Node,
+    fn close(self: *IdleConnection) void {
+        self.connection_value.close();
+        self.return_node.destroy();
+    }
+};
+const IdlePool = origin_pool.Pool(IdleConnection);
 
 pub const Pool = struct {
     pub const RequestOperationError = OperationError;
@@ -72,6 +88,7 @@ pub const Pool = struct {
     options: Options,
     mutex: std.Io.Mutex = .init,
     idle: IdlePool,
+    returns: ReturnQueue = .{},
     connections: usize = 0,
     retired_connections: retired_capacity.Retirements = .{},
     capacity_waiters: owned_admission.Queue = .{},
@@ -157,7 +174,19 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         self.closed = true;
-        var removed: usize = 0;
+        var returned = self.returns.close(self.io);
+        var returned_count: usize = 0;
+        while (returned) |node| {
+            returned = node.next;
+            var connection = node.value.connection_value;
+            var key = node.value.origin_key;
+            connection.close();
+            key.deinit();
+            node.destroy();
+            self.connections -= 1;
+            returned_count += 1;
+        }
+        var removed: usize = returned_count;
         while (self.idle.takeOldest()) |connection_value| {
             var connection = connection_value;
             connection.close();
@@ -310,6 +339,7 @@ pub const Pool = struct {
     pub fn idleCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         _ = self.pruneExpiredLocked(nowMilliseconds(self.io));
         return self.idle.idleCount();
     }
@@ -319,6 +349,7 @@ pub const Pool = struct {
         defer key.deinit();
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         _ = self.pruneExpiredLocked(nowMilliseconds(self.io));
         return self.idle.idleCountForOrigin(key.origin());
     }
@@ -326,6 +357,7 @@ pub const Pool = struct {
     pub fn connectionCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.connections;
     }
@@ -339,6 +371,7 @@ pub const Pool = struct {
     pub fn waitingCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.capacity_waiters.count(self.io);
     }
@@ -364,6 +397,7 @@ pub const Pool = struct {
     pub fn stats(self: *Pool) Stats {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         _ = self.pruneExpiredLocked(nowMilliseconds(self.io));
         return self.idle.stats();
     }
@@ -371,6 +405,7 @@ pub const Pool = struct {
     pub fn pruneExpired(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         return self.pruneExpiredLocked(nowMilliseconds(self.io));
     }
 
@@ -408,9 +443,10 @@ pub const Pool = struct {
         isolate_origin_state: bool,
     ) OperationError!Lease {
         blocked_on_shared.* = false;
-        var displaced: ?client.Connection = null;
+        var displaced: ?IdleConnection = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
@@ -427,6 +463,7 @@ pub const Pool = struct {
                     queued.rearm();
                 }
             }
+            self.collectReturnsLocked();
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
@@ -440,7 +477,8 @@ pub const Pool = struct {
             key_owned.* = false;
             return .{
                 .pool = self,
-                .connection_value = connection,
+                .connection_value = connection.connection_value,
+                .return_node = connection.return_node,
                 .origin_key = owned_key,
                 .was_reused = true,
             };
@@ -457,6 +495,7 @@ pub const Pool = struct {
                         queued.rearm();
                     }
                 }
+                self.collectReturnsLocked();
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 admission_lock.unlock();
                 return error.ConnectionLimitReached;
@@ -494,6 +533,8 @@ pub const Pool = struct {
         }
         var reserved = true;
         errdefer if (reserved) self.releaseConnectionSlot();
+        const return_node = try ReturnQueue.Node.create(self.allocator);
+        errdefer return_node.destroy();
 
         const secure = std.ascii.eqlIgnoreCase(key.scheme, "https");
         var tls12_ticket = if (secure and
@@ -558,6 +599,7 @@ pub const Pool = struct {
         return .{
             .pool = self,
             .connection_value = connection,
+            .return_node = return_node,
             .origin_key = owned_key,
         };
     }
@@ -567,6 +609,38 @@ pub const Pool = struct {
         connection_value: client.Connection,
         origin_key_value: http3.OriginKey,
         reusable: bool,
+        return_node: *ReturnQueue.Node,
+    ) void {
+        return_node.value = .{ .connection_value = connection_value, .origin_key = origin_key_value, .reusable = reusable, .returned_at_ms = nowMilliseconds(self.io) };
+        if (self.returns.publish(return_node, self.io)) {
+            self.capacity_waiters.notifyRetry(self.io);
+            self.shared_budget.notify();
+            return;
+        }
+        var connection = connection_value;
+        var key = origin_key_value;
+        connection.closeWithoutCloseNotify();
+        key.deinit();
+        return_node.destroy();
+        self.releaseConnectionSlot();
+    }
+
+    fn collectReturnsLocked(self: *Pool) void {
+        var current = self.returns.take();
+        while (current) |node| {
+            current = node.next;
+            const payload = node.value;
+            self.releaseReturnedLocked(payload.connection_value, payload.origin_key, payload.reusable, node, payload.returned_at_ms);
+        }
+    }
+
+    fn releaseReturnedLocked(
+        self: *Pool,
+        connection_value: client.Connection,
+        origin_key_value: http3.OriginKey,
+        reusable: bool,
+        return_node: *ReturnQueue.Node,
+        returned_at_ms: u64,
     ) void {
         var connection = connection_value;
         var origin_key = origin_key_value;
@@ -585,11 +659,13 @@ pub const Pool = struct {
         }
         if (!reusable) {
             connection.close();
+            return_node.destroy();
             origin_key.deinit();
-            self.releaseConnectionSlot();
+            self.connections -= 1;
+            self.shared_budget.release(1);
+            self.notifyCapacityWaiterLocked();
             return;
         }
-        self.mutex.lockUncancelable(self.io);
         if (self.closed) {
             self.tickets.removeForConnection(
                 origin_key.host,
@@ -597,27 +673,27 @@ pub const Pool = struct {
                 &connection,
             );
             connection.close();
+            return_node.destroy();
             origin_key.deinit();
             std.debug.assert(self.connections != 0);
             self.connections -= 1;
             self.notifyCapacityWaiterLocked();
-            self.mutex.unlock(self.io);
             self.shared_budget.release(1);
             return;
         }
         const before = self.idle.idleCount();
         self.idle.releaseKey(
-            connection,
+            .{ .connection_value = connection, .return_node = return_node },
             origin_key,
-            nowMilliseconds(self.io),
+            returned_at_ms,
         ) catch {
             connection.close();
+            return_node.destroy();
             const after = self.idle.idleCount();
             const closed_count = before + 1 - after;
             std.debug.assert(self.connections >= closed_count);
             self.connections -= closed_count;
             self.notifyCapacityWaiterLocked();
-            self.mutex.unlock(self.io);
             self.shared_budget.release(closed_count);
             return;
         };
@@ -628,7 +704,6 @@ pub const Pool = struct {
         if (closed_count != 0 or self.hasCapacityLocked()) {
             self.notifyCapacityWaiterLocked();
         }
-        self.mutex.unlock(self.io);
         if (closed_count != 0) {
             self.shared_budget.release(closed_count);
         } else {
@@ -687,6 +762,7 @@ pub const Pool = struct {
     fn reclaimOldestTcpIdleErased(context: *anyopaque) bool {
         const self: *Pool = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(self.io);
+        self.collectReturnsLocked();
         if (self.closed) {
             self.mutex.unlock(self.io);
             return false;
@@ -718,6 +794,7 @@ pub const Pool = struct {
 
 pub const Lease = struct {
     pool: *Pool,
+    return_node: *ReturnQueue.Node,
     connection_value: client.Connection,
     origin_key: http3.OriginKey,
     was_reused: bool = false,
@@ -740,6 +817,7 @@ pub const Lease = struct {
             self.connection_value,
             self.origin_key,
             self.connection_value.isReusable(),
+            self.return_node,
         );
         self.connection_value = undefined;
         self.origin_key = undefined;
@@ -749,6 +827,7 @@ pub const Lease = struct {
         if (!self.active) return;
         self.active = false;
         self.connection_value.close();
+        self.return_node.destroy();
         self.origin_key.deinit();
         self.pool.releaseConnectionSlot();
         self.connection_value = undefined;
@@ -756,7 +835,7 @@ pub const Lease = struct {
     }
 };
 
-fn dropConnection(_: std.mem.Allocator, connection_value: client.Connection) void {
+fn dropConnection(_: std.mem.Allocator, connection_value: IdleConnection) void {
     var connection = connection_value;
     connection.close();
 }

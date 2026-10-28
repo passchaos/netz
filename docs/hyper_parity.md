@@ -3864,3 +3864,57 @@ origin contributes one idle-lookup miss. The quic-go SOCKS5 pool gate continues 
 verify three origins, four QUIC connection lifetimes, a two-route limit and one
 shared UDP association. Evidence is recorded in
 `docs/evidence/http_pool_retirement/2026-10-29.json`.
+
+## Completed HTTP connection returns
+
+HTTP/1.1, HTTP/2, the negotiated TCP pool and owning HTTP/3 leases preallocate
+a return node when establishing a new connection. The node follows the
+connection through idle storage and each subsequent lease. A completed lease
+publishes its owned connection/key to a concurrent return queue and sends a FIFO
+retry hint without acquiring the pool or ticket-cache mutex, allocating memory
+or starting a task. Duplicate release/discard calls on the inactive handle do
+not publish again. Connection counts continue to include pending returns, so a
+concurrent cache miss cannot create sockets beyond the total budget.
+
+Each return records its monotonic timestamp before publication, so collector
+delay does not renew the connection's idle age. The next acquisition,
+idle/counter query, reclamation or explicit close collects
+returned connections in publication order. It applies the existing reuse policy,
+ticket retention and per-origin/global idle limits. The same persistent node is
+retained when the connection is reused and destroyed when its transport is
+retired. Admission also collects after enqueue/rearm so a return that races the
+capacity check remains visible before a waiter sleeps. This preserves the prior
+FIFO claim rules; publication hints grant no connection ownership by themselves.
+
+Pool close stops new publications and waits for already-admitted publishers,
+whose permit covers only atomic publication. It then destroys queued and idle
+connections. A later release retains its own connection, skips TLS close_notify
+output and retires socket/node/key/accounting once. The owning HTTP/3 pool folds
+late returned lease counts together with connection-retirement receipts. Public
+closeWithoutCloseNotify helpers expose the terminal no-output cleanup to the
+HTTP/1.1, HTTP/2 and negotiated transports; ordinary explicit runtime close
+retains its existing shutdown policy.
+
+Real TCP regressions reproduce the old completed-response return lock wait and
+now verify complete bodies return with that mutex still occupied, followed by
+two requests on one connection. Eight TLS cases additionally occupy either the
+pool mutex or TLS 1.3 ticket-cache mutex while responding, then verify reuse.
+Four late TLS lease cases close the pool before the response and count network
+writes across repeated release/discard, proving no shutdown output is emitted.
+Owning HTTP/3 tests check persistent return-node reuse, late-close retirement and
+client destruction counts. Concurrent queue tests match every accepted return
+to exactly one close-owned node. Allocation failure before return-node creation
+releases its connection reservation without making a network connection.
+
+The Hyper/rustls gate completes its first HTTP/1.1 or HTTP/2 TLS request through
+a previously acquired lease while the pool mutex stays occupied, publishes the
+return, then runs the original admission/queued-timeout/failure-retirement
+checks and completes the second request on the same authenticated connection.
+The quic-go SOCKS5 gate continues its shared-endpoint route-churn and reuse
+checks. Snapshot evidence is recorded in
+`docs/evidence/http_completed_returns/2026-10-29.json`.
+
+Collector ticket-cache work and explicit pool/idle teardown retain their
+existing synchronous behavior. This change establishes timely departure of a
+completed lease; those later collector and teardown deadlines remain separate
+work. No queued-return throughput benchmark is claimed by these tests.

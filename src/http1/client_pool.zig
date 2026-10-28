@@ -9,6 +9,8 @@
 const std = @import("std");
 const owned_admission = @import("../internal/owned_fifo_admission.zig");
 const retired_capacity = @import("../internal/retired_capacity.zig");
+const pool_returns = @import("../internal/pool_returns.zig");
+const authority_returns = @import("../internal/pool_returns/authority_returns.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -56,13 +58,18 @@ const Slot = struct {
     port: u16,
     last_used: u64,
     idle_since_ns: i96,
+    return_node: ?*ReturnQueue.Node = null,
 
     fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
         self.client.close();
         allocator.free(self.tls_host);
+        if (self.return_node) |node| node.destroy();
         self.* = undefined;
     }
 };
+
+const ReturnPayload = struct { slot: Slot, reusable: bool, returned_at_ns: i96 };
+const ReturnQueue = pool_returns.Queue(ReturnPayload);
 
 pub const Pool = struct {
     allocator: std.mem.Allocator,
@@ -70,6 +77,7 @@ pub const Pool = struct {
     options: Options,
     mutex: std.Io.Mutex = .init,
     idle: std.ArrayList(Slot) = .empty,
+    returns: ReturnQueue = .{},
     sequence: u64 = 0,
     connections: usize = 0,
     retired_connections: retired_capacity.Retirements = .{},
@@ -125,6 +133,13 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         self.closed = true;
+        var returned = self.returns.close(self.io);
+        while (returned) |node| {
+            returned = node.next;
+            var slot = node.value.slot;
+            slot.deinit(self.allocator);
+            self.connections -= 1;
+        }
         for (self.idle.items) |*slot| slot.deinit(self.allocator);
         std.debug.assert(self.connections >= self.idle.items.len);
         self.connections -= self.idle.items.len;
@@ -524,6 +539,7 @@ pub const Pool = struct {
     pub fn idleCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
         return self.idle.items.len;
     }
@@ -533,6 +549,7 @@ pub const Pool = struct {
     pub fn connectionCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.connections;
     }
@@ -540,6 +557,7 @@ pub const Pool = struct {
     pub fn waitingCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         return self.capacity_waiters.count(self.io);
     }
@@ -558,6 +576,7 @@ pub const Pool = struct {
         defer endpoint.deinit();
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
         var count: usize = 0;
         for (self.idle.items) |slot| {
@@ -571,6 +590,7 @@ pub const Pool = struct {
     pub fn pruneExpired(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.collectReturnsLocked();
         const before = self.idle.items.len;
         self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
         return before - self.idle.items.len;
@@ -610,6 +630,7 @@ pub const Pool = struct {
         var displaced: ?Slot = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
+        self.collectReturnsLocked();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
@@ -624,6 +645,7 @@ pub const Pool = struct {
                     queued.rearm();
                 }
             }
+            self.collectReturnsLocked();
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
@@ -671,6 +693,7 @@ pub const Pool = struct {
                         queued.rearm();
                     }
                 }
+                self.collectReturnsLocked();
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 admission_lock.unlock();
                 return error.ConnectionLimitReached;
@@ -692,6 +715,8 @@ pub const Pool = struct {
         if (displaced) |*slot| slot.deinit(self.allocator);
         var connection_reserved = true;
         errdefer if (connection_reserved) self.releaseConnectionSlot();
+        const return_node = try ReturnQueue.Node.create(self.allocator);
+        errdefer return_node.destroy();
 
         var tls12_ticket = if (transport == .tls and
             self.options.vail_tls != null and
@@ -877,6 +902,7 @@ pub const Pool = struct {
             .port = endpoint.port,
             .last_used = 0,
             .idle_since_ns = 0,
+            .return_node = return_node,
         } };
     }
 
@@ -922,63 +948,8 @@ pub const Pool = struct {
         return false;
     }
 
-    fn release(self: *Pool, slot_value: Slot, reusable: bool) void {
-        var slot = slot_value;
-        if (slot.transport == .tls and self.options.vail_tls != null) {
-            _ = self.rememberTls13SessionTicket(
-                slot.tls_host,
-                slot.port,
-                &slot.client,
-            ) catch {
-                _ = self.tls13_tickets.remove(slot.tls_host, slot.port);
-            };
-        }
-        if (!reusable or self.options.max_idle_connections == 0 or
-            self.options.max_idle_per_authority == 0)
-        {
-            slot.deinit(self.allocator);
-            self.releaseConnectionSlot();
-            return;
-        }
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.closed) {
-            slot.deinit(self.allocator);
-            self.connections -= 1;
-            self.notifyCapacityWaiterLocked();
-            return;
-        }
-        var same_authority: usize = 0;
-        for (self.idle.items) |idle| {
-            same_authority += @intFromBool(idle.transport == slot.transport and
-                idle.port == slot.port and
-                hostEqual(idle.tls_host, slot.tls_host));
-        }
-        if (same_authority >= self.options.max_idle_per_authority) {
-            slot.deinit(self.allocator);
-            self.connections -= 1;
-            self.notifyCapacityWaiterLocked();
-            return;
-        }
-        self.sequence +%= 1;
-        slot.last_used = self.sequence;
-        slot.idle_since_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
-        if (self.idle.items.len >= self.options.max_idle_connections) {
-            var oldest = self.idle.swapRemove(
-                self.oldestIdleIndexLocked(),
-            );
-            oldest.deinit(self.allocator);
-            self.connections -= 1;
-            self.notifyCapacityWaiterLocked();
-        }
-        self.idle.append(self.allocator, slot) catch {
-            slot.deinit(self.allocator);
-            self.connections -= 1;
-            self.notifyCapacityWaiterLocked();
-            return;
-        };
-        self.notifyCapacityWaiterLocked();
-    }
+    const release = authority_returns.release;
+    const collectReturnsLocked = authority_returns.collect;
 
     fn oldestIdleIndexLocked(self: *const Pool) usize {
         std.debug.assert(self.idle.items.len != 0);
