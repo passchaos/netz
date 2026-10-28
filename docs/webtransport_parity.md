@@ -2204,3 +2204,10 @@ authority. A protected QUIC regression rejects a malformed authority, retains
 the QPACK dynamic entry and admits a normalized healthy sibling without closing
 the connection. Classical CONNECT Host fields are also validated and compared
 without assuming a default transport port.
+
+Later Session flow rejection now preserves a previously parsed CLOSE's code
+and borrowed reason until Control destruction. Generic Capsule rejection had
+cleared inline or heap reason storage while delivered or pending events still
+borrowed it. Client/server regressions cover both storage forms and retained
+sibling progress; incomplete CLOSE reasons are still discarded on rejection.
+See [CLOSE metadata lifetime](webtransport_close_metadata.md).

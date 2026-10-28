@@ -1,0 +1,31 @@
+{
+  "baseline_revision": "588b76228da7e713ea0e27472f90ddfa2d895b4e",
+  "change": "Keep committed CLOSE reason storage through later scoped flow rejection",
+  "before": {
+    "failure": "expected 24, found 0",
+    "point": "committed CLOSE reason length after lifecycle flow rejection"
+  },
+  "after": {
+    "focused_tests": 136,
+    "related_tests": 702,
+    "reason_lengths": [
+      24,
+      512
+    ],
+    "pending_and_delivered_client_events": true,
+    "shared_server_events": true,
+    "uncommitted_storage_released": true,
+    "sibling_preserved": true
+  },
+  "interop_records": [
+    "wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1381 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio",
+    "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1413 oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
+  ],
+  "source_sha256": {
+    "src/webtransport/runtime/session_control.zig": "00f846bd0b5d553c0ab08255a6cb2629bc947735399770a27e2d7b753bd56a1c",
+    "src/webtransport/runtime/session_control/close_metadata_tests.zig": "0962d14f0fab1e4f6a0643ae160d6b21c18be41b028a0ea9b699b0cbb85a8f38",
+    "src/webtransport/runtime.zig": "6993fcd56de7e243af24e87fea5ee7439d7027508288b8b9647f54e276c96292"
+  }
+}

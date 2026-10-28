@@ -19119,6 +19119,7 @@ test {
     _ = @import("runtime/session_control/receive_termination_tests.zig");
     _ = @import("runtime/session_control/receive_sibling_tests.zig");
     _ = @import("runtime/session_control/send_buffered_close_tests.zig");
+    _ = @import("runtime/session_control/close_metadata_tests.zig");
     _ = @import("runtime/session_control/flow_tests.zig");
     _ = @import("runtime/flow/receive.zig");
     _ = @import("runtime/flow/write.zig");

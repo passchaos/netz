@@ -621,11 +621,17 @@ pub const Control = struct {
     }
 
     fn commitCapsuleErrorRejection(self: *Control) void {
+        const committed_close = self.terminal_reported and
+            self.close_code_len == self.close_code_bytes.len and
+            self.capsule_value_remaining == 0;
         self.capsule_error_pending = false;
         self.capsule_error_rejected = true;
         self.terminal_reported = true;
         self.recordLocalCloseFailure(0);
-        self.clearCloseReason();
+        // A later flow rejection must not invalidate an already delivered
+        // or queued CLOSE event. Only incomplete/uncommitted reason storage
+        // can be discarded before Control.deinit.
+        if (!committed_close) self.clearCloseReason();
     }
 
     fn notePostTerminalData(
