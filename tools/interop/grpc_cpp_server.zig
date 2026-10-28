@@ -3,6 +3,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
+const finishConnection = @import("grpc_cpp/connection_finish.zig").finish;
 
 const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
 const half_duplex_service_path =
@@ -252,6 +253,7 @@ pub fn main(init: std.process.Init) !void {
             try serveScenario(allocator, io, &stream, scenario);
         },
     }
+    try finishConnection(&connection.connection);
     std.debug.print(
         "netz grpc server completed: scenario={s} transport={s} " ++
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
@@ -287,17 +289,7 @@ fn serveChannelSoak(
         // Channel soak destroys the client channel immediately after the RPC.
         // Complete a two-phase HTTP/2 shutdown so response delivery cannot
         // race a raw TCP close while the next independent channel connects.
-        connection.connection.gracefulShutdownWithTimeout(
-            .fromSeconds(5),
-        ) catch |err| switch (err) {
-            // ResetChannel may close immediately after receiving the complete
-            // RPC. That peer EOF is the desired per-iteration teardown.
-            error.ConnectionClosed,
-            error.SocketUnconnected,
-            error.UnexpectedEof,
-            => {},
-            else => return err,
-        };
+        try finishConnection(&connection.connection);
         completed += 1;
     }
 }
