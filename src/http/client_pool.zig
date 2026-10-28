@@ -18,6 +18,8 @@ const http3 = @import("../http3/mod.zig");
 const origin_pool = @import("../http3/origin_pool.zig");
 const request_ops = @import("client_pool/requests.zig");
 const pool_tickets = @import("client_pool/tickets.zig");
+const return_tickets = @import("../internal/pool_returns/tickets.zig");
+const timed_mutex = @import("../internal/timed_mutex.zig");
 const h3_support = @import("client_pool/http3.zig");
 const http3_runtime = @import("../http3/runtime.zig");
 const alt_svc_cache = @import("alt_svc_cache.zig");
@@ -446,7 +448,8 @@ pub const Pool = struct {
         var displaced: ?IdleConnection = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
-        self.collectReturnsLocked();
+        try self.collectReturnsBeforeLocked(deadline);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
@@ -463,13 +466,19 @@ pub const Pool = struct {
                     queued.rearm();
                 }
             }
-            self.collectReturnsLocked();
+            try self.collectReturnsBeforeLocked(deadline);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
-        _ = self.pruneExpiredLocked(nowMilliseconds(self.io));
-        if (self.idle.acquire(key.origin(), nowMilliseconds(self.io))) |connection| {
+        _ = self.pruneExpiredBeforeLocked(nowMilliseconds(self.io), deadline);
+        const idle_connection = blk: {
+            const drop = self.idle.drop_fn;
+            if (deadline != null) self.idle.drop_fn = dropConnectionWithoutCloseNotify;
+            defer self.idle.drop_fn = drop;
+            break :blk self.idle.acquire(key.origin(), nowMilliseconds(self.io));
+        };
+        if (idle_connection) |connection| {
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
             self.finishAdmissionLocked(waiter);
             admission_lock.unlock();
@@ -495,7 +504,7 @@ pub const Pool = struct {
                         queued.rearm();
                     }
                 }
-                self.collectReturnsLocked();
+                try self.collectReturnsBeforeLocked(deadline);
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 admission_lock.unlock();
                 return error.ConnectionLimitReached;
@@ -529,7 +538,10 @@ pub const Pool = struct {
         admission_lock.unlock();
         if (displaced) |connection_value| {
             var connection = connection_value;
-            connection.close();
+            if (deadline != null) {
+                connection.connection_value.closeWithoutCloseNotify();
+                connection.return_node.destroy();
+            } else connection.close();
         }
         var reserved = true;
         errdefer if (reserved) self.releaseConnectionSlot();
@@ -626,11 +638,21 @@ pub const Pool = struct {
     }
 
     fn collectReturnsLocked(self: *Pool) void {
+        self.collectReturnsBeforeLocked(null) catch unreachable;
+    }
+
+    fn collectReturnsBeforeLocked(self: *Pool, deadline: ?std.Io.Clock.Timestamp) timed_mutex.Error!void {
         var current = self.returns.take();
+        errdefer self.returns.restore(current);
         while (current) |node| {
-            current = node.next;
-            const payload = node.value;
-            self.releaseReturnedLocked(payload.connection_value, payload.origin_key, payload.reusable, node, payload.returned_at_ms);
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+            const payload = &node.value;
+            if (std.ascii.eqlIgnoreCase(payload.origin_key.scheme, "https")) {
+                try return_tickets.remember(&self.tickets.tls13, &payload.connection_value, payload.origin_key.host, payload.origin_key.port, true, self.io, deadline);
+            }
+            const next = node.next;
+            self.releaseReturnedLocked(payload.connection_value, payload.origin_key, payload.reusable, node, payload.returned_at_ms, deadline);
+            current = next;
         }
     }
 
@@ -641,24 +663,15 @@ pub const Pool = struct {
         reusable: bool,
         return_node: *ReturnQueue.Node,
         returned_at_ms: u64,
+        deadline: ?std.Io.Clock.Timestamp,
     ) void {
         var connection = connection_value;
         var origin_key = origin_key_value;
-        if (std.ascii.eqlIgnoreCase(origin_key.scheme, "https")) {
-            _ = self.tickets.rememberTls13(
-                origin_key.host,
-                origin_key.port,
-                &connection,
-            ) catch {
-                self.tickets.removeTls13ForConnection(
-                    origin_key.host,
-                    origin_key.port,
-                    &connection,
-                );
-            };
-        }
+        const drop = self.idle.drop_fn;
+        if (deadline != null) self.idle.drop_fn = dropConnectionWithoutCloseNotify;
+        defer self.idle.drop_fn = drop;
         if (!reusable) {
-            connection.close();
+            if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
             return_node.destroy();
             origin_key.deinit();
             self.connections -= 1;
@@ -672,7 +685,7 @@ pub const Pool = struct {
                 origin_key.port,
                 &connection,
             );
-            connection.close();
+            if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
             return_node.destroy();
             origin_key.deinit();
             std.debug.assert(self.connections != 0);
@@ -687,7 +700,7 @@ pub const Pool = struct {
             origin_key,
             returned_at_ms,
         ) catch {
-            connection.close();
+            if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
             return_node.destroy();
             const after = self.idle.idleCount();
             const closed_count = before + 1 - after;
@@ -751,6 +764,13 @@ pub const Pool = struct {
     }
 
     fn pruneExpiredLocked(self: *Pool, now_ms: u64) usize {
+        return self.pruneExpiredBeforeLocked(now_ms, null);
+    }
+
+    fn pruneExpiredBeforeLocked(self: *Pool, now_ms: u64, deadline: ?std.Io.Clock.Timestamp) usize {
+        const drop = self.idle.drop_fn;
+        if (deadline != null) self.idle.drop_fn = dropConnectionWithoutCloseNotify;
+        defer self.idle.drop_fn = drop;
         const removed = self.idle.pruneExpired(now_ms);
         std.debug.assert(self.connections >= removed);
         self.connections -= removed;
@@ -838,6 +858,12 @@ pub const Lease = struct {
 fn dropConnection(_: std.mem.Allocator, connection_value: IdleConnection) void {
     var connection = connection_value;
     connection.close();
+}
+
+fn dropConnectionWithoutCloseNotify(_: std.mem.Allocator, connection_value: IdleConnection) void {
+    var connection = connection_value;
+    connection.connection_value.closeWithoutCloseNotify();
+    connection.return_node.destroy();
 }
 
 fn originKeyForUri(

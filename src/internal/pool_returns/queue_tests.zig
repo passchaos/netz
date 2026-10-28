@@ -1,6 +1,35 @@
 const std = @import("std");
 const Queue = @import("../pool_returns.zig").Queue(usize);
 
+test "connection return queue restores unfinished collectors before later publications and close" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue: Queue = .{};
+    var nodes: [3]Queue.Node = undefined;
+    for (&nodes, 0..) |*node, index| node.* = .{ .allocator = std.testing.allocator, .value = index };
+    try std.testing.expect(queue.publish(&nodes[0], io));
+    try std.testing.expect(queue.publish(&nodes[1], io));
+    const first_batch = queue.take();
+    queue.restore(first_batch);
+    try std.testing.expect(queue.publish(&nodes[2], io));
+    var current = queue.take();
+    for (0..3) |index| {
+        try std.testing.expect(current == &nodes[index]);
+        current = current.?.next;
+    }
+    try std.testing.expect(current == null);
+    queue.restore(&nodes[0]);
+    current = queue.close(io);
+    for (0..3) |index| {
+        try std.testing.expect(current == &nodes[index]);
+        current = current.?.next;
+    }
+    try std.testing.expect(current == null);
+    try std.testing.expect(queue.deferred == null);
+    try std.testing.expect(!queue.publish(&nodes[0], io));
+}
+
 test "connection return queue reuses preallocated nodes and preserves publication order" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

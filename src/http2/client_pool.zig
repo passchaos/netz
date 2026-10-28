@@ -66,7 +66,11 @@ const Slot = struct {
     return_node: ?*ReturnQueue.Node = null,
 
     fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
-        self.connection.close();
+        self.deinitBefore(allocator, null);
+    }
+
+    fn deinitBefore(self: *Slot, allocator: std.mem.Allocator, deadline: ?std.Io.Clock.Timestamp) void {
+        if (deadline != null) self.connection.closeWithoutCloseNotify() else self.connection.close();
         allocator.free(self.tls_host);
         if (self.return_node) |node| node.destroy();
         self.* = undefined;
@@ -692,7 +696,8 @@ pub const Pool = struct {
         var displaced: ?Slot = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
-        self.collectReturnsLocked();
+        try self.collectReturnsBeforeLocked(deadline);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
@@ -707,12 +712,12 @@ pub const Pool = struct {
                     queued.rearm();
                 }
             }
-            self.collectReturnsLocked();
+            try self.collectReturnsBeforeLocked(deadline);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             admission_lock.unlock();
             return error.ConnectionLimitReached;
         }
-        self.pruneExpiredLocked(self.awakeNowNs());
+        self.pruneExpiredBeforeLocked(self.awakeNowNs(), deadline);
         var index = self.idle.items.len;
         while (index != 0) {
             index -= 1;
@@ -737,7 +742,7 @@ pub const Pool = struct {
                         queued.rearm();
                     }
                 }
-                self.collectReturnsLocked();
+                try self.collectReturnsBeforeLocked(deadline);
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 admission_lock.unlock();
                 return error.ConnectionLimitReached;
@@ -756,7 +761,7 @@ pub const Pool = struct {
         }
         self.finishAdmissionLocked(waiter);
         admission_lock.unlock();
-        if (displaced) |*slot| slot.deinit(self.allocator);
+        if (displaced) |*slot| slot.deinitBefore(self.allocator, deadline);
         var reserved = true;
         errdefer if (reserved) self.releaseConnectionSlot();
         const return_node = try ReturnQueue.Node.create(self.allocator);
@@ -947,6 +952,7 @@ pub const Pool = struct {
 
     const release = authority_returns.release;
     const collectReturnsLocked = authority_returns.collect;
+    const collectReturnsBeforeLocked = authority_returns.collectBefore;
 
     fn oldestIdleIndexLocked(self: *const Pool) usize {
         std.debug.assert(self.idle.items.len != 0);
@@ -998,6 +1004,10 @@ pub const Pool = struct {
     }
 
     fn pruneExpiredLocked(self: *Pool, now_ns: i96) void {
+        self.pruneExpiredBeforeLocked(now_ns, null);
+    }
+
+    fn pruneExpiredBeforeLocked(self: *Pool, now_ns: i96, deadline: ?std.Io.Clock.Timestamp) void {
         const timeout = self.options.idle_timeout orelse return;
         var index = self.idle.items.len;
         while (index != 0) {
@@ -1005,7 +1015,7 @@ pub const Pool = struct {
             if (now_ns - self.idle.items[index].idle_since_ns <
                 timeout.nanoseconds) continue;
             var expired = self.idle.swapRemove(index);
-            expired.deinit(self.allocator);
+            expired.deinitBefore(self.allocator, deadline);
             self.connections -= 1;
             self.notifyCapacityWaiterLocked();
         }

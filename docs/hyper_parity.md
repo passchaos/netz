@@ -3914,7 +3914,59 @@ The quic-go SOCKS5 gate continues its shared-endpoint route-churn and reuse
 checks. Snapshot evidence is recorded in
 `docs/evidence/http_completed_returns/2026-10-29.json`.
 
-Collector ticket-cache work and explicit pool/idle teardown retain their
-existing synchronous behavior. This change establishes timely departure of a
-completed lease; those later collector and teardown deadlines remain separate
-work. No queued-return throughput benchmark is claimed by these tests.
+The original completed-return snapshot establishes timely departure of a
+completed lease. The collector section below extends that contract to a later
+deadline-bound acquisition. Unbounded getters and explicit pool close retain
+their synchronous policy. No queued-return throughput benchmark is claimed.
+
+## HTTP return collector deadlines
+
+HTTP/1.1, HTTP/2 and negotiated TCP acquisition carry the caller's original
+awake-clock deadline into returned-connection collection. The collector acquires
+the TLS 1.3 cache mutex before taking an authenticated ticket from the connection.
+Timeout or cancellation therefore leaves that ticket in connection-owned storage,
+releases the pool mutex and retains the current node plus its unprocessed
+successors. The return queue keeps this detached list under the pool's ownership
+mutex and processes it ahead of newer publications on the next collection. Pool
+close also drains the retained list exactly once. No retry node is allocated.
+
+Each collector validates the same deadline before consuming a node, including
+the owning HTTP/3 collector. HTTP/1.1 and HTTP/2 share the ticket-admission helper
+and the existing cache store/removal policy under an acquired cache lock. A
+timeout before cache admission neither drops a healthy transport nor reserves a
+new connection. A later successful collector stores the exact ticket and makes
+the same connection eligible for reuse. Acquisition rechecks the deadline after
+collection before claiming idle ownership.
+
+Bounded TCP collection, idle pruning and displacement retire discarded TLS
+transports without extra close_notify output. This prevents a full peer output
+buffer or another write owner from delaying an already-terminal resource's
+accounting release. Unbounded collection and explicit close retain the existing
+TLS shutdown policy. The negotiated idle pool temporarily selects its no-output
+drop callback only while the owning mutex is held; it restores the callback
+before unlocking.
+
+Eight TLS regressions cover timeout/cancellation across HTTP/1.1, HTTP/2 and
+both negotiated protocol choices. Servers actually issue TLS 1.3 tickets. If H2
+bootstrap already cached its ticket, the test transfers that same authenticated
+ticket back to pending connection storage while it owns the cache mutex. Each
+bounded collector returns with the cache mutex still occupied, the pool mutex
+released, the original return node retained and the exact ticket allocation
+unchanged. After unlock, the ticket is cached and a second request reuses the
+same authenticated connection. Four additional TLS cases count writes while a
+bounded collector's zero-idle policy retires its returned connection. The queue
+tests verify retained batch order alongside later publications and close.
+
+The Hyper/rustls process gate holds the TLS 1.3 cache mutex after the first
+response has returned its lease. A 10 ms acquisition returns Timeout and leaves
+one live connection in the retained return list. After cache unlock, the original
+admission, queued-timeout and failed-reservation checks still run, and the server
+receives the second request on the same HTTP/1.1 or HTTP/2 connection. The
+quic-go SOCKS5 pool gate retains its three-origin, four-connection route-churn
+checks. Current evidence is recorded in
+`docs/evidence/http_return_collector/2026-10-29.json`.
+
+Ticket cloning and remembering during new TLS connection setup, unbounded
+getters, and explicit pool close retain separate lock/deadline boundaries.
+This snapshot proves bounded collection and terminal retirement; it does not
+claim that those remaining setup/close paths are fully bounded.

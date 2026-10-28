@@ -839,7 +839,11 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key.deinit();
                 return err;
             };
-            self.collectReturnsLocked();
+            self.collectReturnsBeforeLocked(deadline) catch |err| {
+                self.mutex.unlock(self.io);
+                origin_key.deinit();
+                return err;
+            };
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             _ = self.retired_leases.drain(&self.leased);
             if (self.closed) {
@@ -863,7 +867,11 @@ pub fn Pool(comptime Runtime: type) type {
                         queued.rearm();
                     }
                 }
-                self.collectReturnsLocked();
+                self.collectReturnsBeforeLocked(deadline) catch |err| {
+                    self.mutex.unlock(self.io);
+                    origin_key.deinit();
+                    return err;
+                };
                 self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                 _ = self.retired_leases.drain(&self.leased);
                 self.mutex.unlock(self.io);
@@ -904,7 +912,11 @@ pub fn Pool(comptime Runtime: type) type {
                             queued.rearm();
                         }
                     }
-                    self.collectReturnsLocked();
+                    self.collectReturnsBeforeLocked(deadline) catch |err| {
+                        self.mutex.unlock(self.io);
+                        origin_key.deinit();
+                        return err;
+                    };
                     self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
                     _ = self.retired_leases.drain(&self.leased);
                     self.mutex.unlock(self.io);
@@ -2261,11 +2273,18 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         fn collectReturnsLocked(self: *Self) void {
+            self.collectReturnsBeforeLocked(null) catch unreachable;
+        }
+
+        fn collectReturnsBeforeLocked(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
             var current = self.returns.take();
+            errdefer self.returns.restore(current);
             while (current) |node| {
-                current = node.next;
+                if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+                const next = node.next;
                 const payload = node.value;
                 self.releaseReturnedLocked(payload.client_value, payload.origin_key, node, payload.returned_at_ms);
+                current = next;
             }
         }
 

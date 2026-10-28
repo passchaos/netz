@@ -9,6 +9,9 @@ pub fn Queue(comptime Payload: type) type {
     return struct {
         head: std.atomic.Value(?*Node) = .init(null),
         publishers: std.atomic.Value(u32) = .init(0),
+        /// Detached returns whose collector could not finish its deadline.
+        /// Only the owning pool mutex may access this list.
+        deferred: ?*Node = null,
         const Self = @This();
         const closed_bit: u32 = 1 << 31;
 
@@ -60,7 +63,21 @@ pub fn Queue(comptime Payload: type) type {
                 node.next = reversed;
                 reversed = node;
             }
+            if (self.deferred) |older| {
+                self.deferred = null;
+                var tail = older;
+                while (tail.next) |next| tail = next;
+                tail.next = reversed;
+                return older;
+            }
             return reversed;
+        }
+
+        /// Restore unprocessed nodes after a bounded collector exits. Caller
+        /// owns the pool mutex and detached them with take in this operation.
+        pub fn restore(self: *Self, nodes: ?*Node) void {
+            std.debug.assert(self.deferred == null);
+            self.deferred = nodes;
         }
 
         /// Explicit Pool close waits only for already admitted publications.

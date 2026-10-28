@@ -204,6 +204,22 @@ fn TicketCache(comptime Ops: type) type {
             }
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            return self.storeLocked(server_identity, port, ticket, now);
+        }
+
+        /// Consume a ticket after the caller acquired this cache's mutex.
+        pub fn storeLocked(
+            self: *Self,
+            server_identity: []const u8,
+            port: u16,
+            ticket_value: Ticket,
+            now: u64,
+        ) void {
+            var ticket = ticket_value;
+            if (self.max_entries == 0) {
+                ticket.deinit();
+                return;
+            }
             self.pruneExpiredLocked(now);
             if (self.findAlpn(
                 server_identity,
@@ -247,6 +263,11 @@ fn TicketCache(comptime Ops: type) type {
         ) bool {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            return self.removeLocked(server_identity, port);
+        }
+
+        /// Remove an entry while the caller owns this cache's mutex.
+        pub fn removeLocked(self: *Self, server_identity: []const u8, port: u16) bool {
             const index = self.find(server_identity, port) orelse return false;
             var removed = self.entries.swapRemove(index);
             removed.deinit(self.allocator);
@@ -261,6 +282,11 @@ fn TicketCache(comptime Ops: type) type {
         ) bool {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            return self.removeForAlpnLocked(server_identity, port, alpn);
+        }
+
+        /// Exact-ALPN removal while the caller owns this cache's mutex.
+        pub fn removeForAlpnLocked(self: *Self, server_identity: []const u8, port: u16, alpn: []const u8) bool {
             const index = self.findAlpn(
                 server_identity,
                 port,

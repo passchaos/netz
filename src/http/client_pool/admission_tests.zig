@@ -1,6 +1,16 @@
 const std = @import("std");
 const pool_mod = @import("../client_pool.zig");
 
+test "unified HTTP pool bounded collector retires TLS without extra output" {
+    inline for (.{ false, true }) |h2| try @import("../../internal/pool_returns/success_test_support.zig").exerciseCollectorRetirement(pool_mod.Pool, h2);
+}
+
+test "unified HTTP pool collector deadline retains connection and issued TLS ticket" {
+    inline for (.{ false, true }) |h2| {
+        inline for (.{ false, true }) |canceled| try @import("../../internal/pool_returns/success_test_support.zig").exerciseCollector(pool_mod.Pool, h2, canceled);
+    }
+}
+
 test "unified HTTP pool closed TLS lease returns without output or waiting" {
     inline for (.{ false, true }) |h2| try @import("../../internal/pool_returns/success_test_support.zig").exerciseClosed(pool_mod.Pool, h2);
 }

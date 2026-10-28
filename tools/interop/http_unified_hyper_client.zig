@@ -59,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
     if (pool.mutex.tryLock() or pool.returns.head.load(.acquire) == null) return error.InvalidCompletedReturn;
     pool.mutex.unlock(io);
     completed_return_locked = false;
+    try verifyCollectorTimeout(&pool, io, first_uri);
     _ = pool.idleCount();
     try verifyAdmissionTimeout(&pool, io, second_uri);
     try verifyQueuedTimeout(&pool, io, second_uri);
@@ -91,9 +92,27 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
+}
+
+fn verifyCollectorTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {
+    pool.tickets.tls13.mutex.lockUncancelable(io);
+    defer pool.tickets.tls13.mutex.unlock(io);
+    const started = std.Io.Clock.awake.now(io);
+    if (pool.acquireUriWithTimeout(uri, .fromMilliseconds(10))) |value| {
+        var lease = value;
+        lease.release();
+        return error.UnexpectedCollectorAdmission;
+    } else |err| {
+        if (err != error.Timeout) return err;
+    }
+    if (started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds > std.Io.Duration.fromSeconds(1).nanoseconds) return error.CollectorDeadlineOverrun;
+    if (pool.returns.deferred == null or pool.connections != 1 or pool.idle.idleCount() != 0) return error.InvalidCollectorOwnership;
+    if (pool.tickets.tls13.mutex.tryLock()) return error.TicketMutexReleased;
+    if (!pool.mutex.tryLock()) return error.PoolMutexNotReleased;
+    pool.mutex.unlock(io);
 }
 
 fn verifyAdmissionTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {
