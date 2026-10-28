@@ -1770,6 +1770,25 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_will_delay_step.dependOn(&mqtt_will_delay.step);
 
+    const mqtt_session_expiry_restart = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_session_expiry_restart.addArtifactArg(mqtt_vectors_broker);
+    mqtt_session_expiry_restart.addArg("--only-session-expiry-restart");
+    if (b.args) |args| mqtt_session_expiry_restart.addArgs(args);
+    const mqtt_session_expiry_restart_step = b.step(
+        "interop-mqtt-session-expiry-restart",
+        "Verify persisted Session expiry with shared queues, retained data and resubscription",
+    );
+    mqtt_session_expiry_restart_step.dependOn(&mqtt_session_expiry_restart.step);
+    const mqtt_session_expiry_oracle_tests = b.addSystemCommand(&.{
+        "python3", "-m", "unittest", "mqtt_scenarios.session_expiry_restart_test",
+    });
+    mqtt_session_expiry_oracle_tests.setCwd(b.path("tools/interop"));
+    mqtt_session_expiry_restart_step.dependOn(&mqtt_session_expiry_oracle_tests.step);
+    test_step.dependOn(&mqtt_session_expiry_oracle_tests.step);
+
     const mqtt_deadline_benchmark_check = b.addSystemCommand(&.{
         "python3", "-m", "unittest", "mqtt_deadline_bench.test_check",
     });

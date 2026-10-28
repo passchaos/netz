@@ -32,6 +32,16 @@ class ProcessSourceIdentityTests(unittest.TestCase):
         self.assertEqual(
             set(broker_config.MOSQUITTO_PROCESS_SOURCES),
             {
+                "broker/07-will-qos0.py",
+                "broker/07-will-per-listener.py",
+                "broker/07-will-delay.py",
+                "broker/07-will-delay-session-expiry.py",
+                "broker/07-will-delay-session-expiry2.py",
+                "broker/07-will-delay-session-expiry-0.py",
+                "broker/07-will-delay-reconnect.py",
+                "broker/07-will-delay-recover.py",
+                "broker/07-will-disconnect-with-will.py",
+                "broker/15-persist-client-expired-session.py",
                 "broker/02-subscribe-persistence-flipflop.py",
                 "broker/11-persistent-subscription.py",
                 "broker/11-persistent-subscription-no-local.py",

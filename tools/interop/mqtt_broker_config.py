@@ -80,6 +80,8 @@ from mqtt_scenarios.process import wait_process_line
 from mqtt_scenarios.will_lifecycle import run_will_lifecycle_case
 from mqtt_scenarios.will_delay import run_will_delay_cases
 from mqtt_scenarios.will_sources import MOSQUITTO_WILL_SOURCES
+from mqtt_scenarios.session_expiry_sources import MOSQUITTO_SESSION_EXPIRY_SOURCES
+from mqtt_scenarios.session_expiry_restart import run_cases as run_session_expiry_restart_cases
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -88,6 +90,7 @@ RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
     **MOSQUITTO_WILL_SOURCES,
+    **MOSQUITTO_SESSION_EXPIRY_SOURCES,
     "broker/02-subscribe-persistence-flipflop.py":
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
     "broker/11-persistent-subscription.py":
@@ -168,6 +171,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-subscription-lifecycle", action="store_true")
     selected.add_argument("--only-will-lifecycle", action="store_true")
     selected.add_argument("--only-will-delay", action="store_true")
+    selected.add_argument("--only-session-expiry-restart", action="store_true")
     selected.add_argument("--only-listener-policy-reload", action="store_true")
     selected.add_argument("--only-bridge-reload", action="store_true")
     selected.add_argument(
@@ -7415,7 +7419,7 @@ def main() -> None:
     source_count = 0
     test_root = args.mosquitto_test_root
     if test_root is None and (
-        args.only_include_directory or args.only_will_lifecycle or args.only_will_delay
+        args.only_include_directory or args.only_will_lifecycle or args.only_will_delay or args.only_session_expiry_restart
     ):
         test_root = Path.home() / "Work/mosquitto/test"
     if test_root is not None:
@@ -7433,6 +7437,23 @@ def main() -> None:
                 "upstream=config-includedir protocols=mqttv311+mqttv5 "
                 "ordered-files=true reload=true rollback=true "
                 "file-add-remove=true live-delivery=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
+        if args.only_session_expiry_restart:
+            print("MQTT Session expiry restart broker: " + json.dumps({
+                "executable": str(args.broker.resolve()),
+                "sha256": hashlib.sha256(args.broker.read_bytes()).hexdigest(),
+            }, sort_keys=True))
+            cases = run_session_expiry_restart_cases(args.broker, directory)
+            upstream = sum(case["source"] is not None for case in cases)
+            print("MQTT Session expiry restart cases: " + json.dumps(cases, sort_keys=True))
+            print(
+                "MQTT Session expiry restart integration passed: "
+                f"upstream_cases={upstream} supplemental_cases={len(cases) - upstream} "
+                "protocol=mqttv5 queued=100 inflight=5 generations=4 "
+                "shared_ownership=true retained_preserved=true resubscribe=both "
+                "qos=1+2 durable_pruning=true "
                 f"mosquitto_process_sources={source_count} " + RUNTIME
             )
             return
@@ -7683,6 +7704,7 @@ def main() -> None:
         run_unix_listener_case(args.broker, directory)
         run_will_lifecycle_case(args.broker, directory)
         run_will_delay_cases(args.broker, directory)
+        run_session_expiry_restart_cases(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)

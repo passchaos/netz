@@ -5781,6 +5781,17 @@ proxy evidence for the entire suite.
    ownership. Each case checks exact packets, timed negative intervals,
    Session Present and duplicate-free cleanup; the shared source catalog now
    locks 36 process files. Current runtime behavior passes the gate.
+   The [persistent Session expiry restart gate](mqtt_session_expiry_restart.md)
+   additionally covers all five active variants of
+   `15-persist-client-expired-session.py`, keeping each 100-message queue,
+   the 20-message shared tail, the 30-publication retained prefix and both
+   replacement-subscription choices. A sixth QoS 2 scenario combines shared
+   and retained ownership. Four snapshot/process generations verify initial
+   queue recovery, five unacknowledged deliveries, expiry during downtime,
+   Session Present, exact sibling and retained delivery, durable queue and
+   subscription deletion, and replacement routing. The source catalog now
+   locks 37 process files; its packet oracle rejects late delivery and EOF
+   instead of accepting either as evidence of an empty queue.
 
 3. **Prometheus exposition (new).** `mqtt.broker_prometheus.render(allocator, broker.stats())`
    emits deterministic Prometheus text exposition 0.0.4 from one coherent

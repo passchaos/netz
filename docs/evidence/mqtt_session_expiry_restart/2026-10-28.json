@@ -1,0 +1,142 @@
+{
+  "baseline_revision": "b386e51fa8a1c39ee0e018da51aa711ab930aa32",
+  "change": "Source-locked production Session-expiry snapshot/restart matrix across shared queues, retained data and replacement subscriptions",
+  "runtime_change_required": false,
+  "source": {
+    "path": "broker/15-persist-client-expired-session.py",
+    "sha256": "0aa829459c023b2c6f1e4974be242c727cd74b22ebf2b8a49f14d4e996a53796",
+    "reference_root": "/nav_env/Work/mosquitto/test"
+  },
+  "broker": {
+    "executable": "/nav_env/project-z/netz/.zig-cache/o/4debe3fb3875e6944b92e4ab09238dfd/netz-mqtt-vector-broker",
+    "sha256": "1727d1ecc2f6077e9ffc54054a8a690cb10b564ee6ecede7306b6d9cb33ca6c5"
+  },
+  "cases": [
+    {
+      "case": "queue",
+      "downtime_seconds": 1.200078,
+      "elapsed_seconds": 1.264734,
+      "generations": 4,
+      "published": 100,
+      "qos": 1,
+      "resubscribe": false,
+      "retained_prefix": 0,
+      "shared_queue": 0,
+      "source": "broker/15-persist-client-expired-session.py",
+      "unacknowledged_before_expiry": 5
+    },
+    {
+      "case": "queue-resubscribe",
+      "downtime_seconds": 1.200077,
+      "elapsed_seconds": 1.316155,
+      "generations": 4,
+      "published": 100,
+      "qos": 1,
+      "resubscribe": true,
+      "retained_prefix": 0,
+      "shared_queue": 0,
+      "source": "broker/15-persist-client-expired-session.py",
+      "unacknowledged_before_expiry": 5
+    },
+    {
+      "case": "shared-queue",
+      "downtime_seconds": 1.200071,
+      "elapsed_seconds": 1.339453,
+      "generations": 4,
+      "published": 100,
+      "qos": 1,
+      "resubscribe": false,
+      "retained_prefix": 0,
+      "shared_queue": 20,
+      "source": "broker/15-persist-client-expired-session.py",
+      "unacknowledged_before_expiry": 5
+    },
+    {
+      "case": "shared-queue-resubscribe",
+      "downtime_seconds": 1.200075,
+      "elapsed_seconds": 1.395732,
+      "generations": 4,
+      "published": 100,
+      "qos": 1,
+      "resubscribe": true,
+      "retained_prefix": 0,
+      "shared_queue": 20,
+      "source": "broker/15-persist-client-expired-session.py",
+      "unacknowledged_before_expiry": 5
+    },
+    {
+      "case": "retained-queue",
+      "downtime_seconds": 1.200071,
+      "elapsed_seconds": 1.32794,
+      "generations": 4,
+      "published": 100,
+      "qos": 1,
+      "resubscribe": false,
+      "retained_prefix": 30,
+      "shared_queue": 0,
+      "source": "broker/15-persist-client-expired-session.py",
+      "unacknowledged_before_expiry": 5
+    },
+    {
+      "case": "shared-retained-qos2",
+      "downtime_seconds": 1.200066,
+      "elapsed_seconds": 1.475709,
+      "generations": 4,
+      "published": 100,
+      "qos": 2,
+      "resubscribe": false,
+      "retained_prefix": 30,
+      "shared_queue": 40,
+      "source": null,
+      "unacknowledged_before_expiry": 5
+    }
+  ],
+  "completed_upstream_cases": 5,
+  "completed_supplemental_cases": 1,
+  "completed_process_generations": 24,
+  "initial_publications": 600,
+  "per_case_snapshot_generations": 4,
+  "restored_unacknowledged_per_case": 5,
+  "shared_queue_messages_verified": 80,
+  "oracle_tests": 28,
+  "checks": [
+    "exact Topic Name, payload, QoS, DUP, RETAIN and zero property length",
+    "distinct non-zero restored Packet Identifiers",
+    "expired Session Present false before any replacement SUBSCRIBE",
+    "no old queue on PING barriers",
+    "resubscribe preserves the new route; no resubscribe leaves old route absent",
+    "surviving sibling gets exact shared tail and later marker",
+    "retained replay survives Session pruning and another process generation",
+    "QoS2 PUBLISH/PUBREL interleaving and complete PUBCOMP",
+    "all broker process generations exit successfully"
+  ],
+  "expiry_injection": "Public MQTT 5 DISCONNECT with Session Expiry 1 followed by at least 1.2 seconds of actual process downtime replaces upstream private database expiry editing",
+  "source_integrity_challenges": [
+    {
+      "source": "broker/15-persist-client-expired-session.py",
+      "mode": "missing",
+      "exit_code": 1,
+      "rejected_before_broker_start": true
+    },
+    {
+      "source": "broker/15-persist-client-expired-session.py",
+      "mode": "altered",
+      "exit_code": 1,
+      "rejected_before_broker_start": true
+    }
+  ],
+  "related_persistence_record": "MQTT persistence restart integration passed: upstream=outgoing+properties+expiry mqttv311+mqttv5 generations=three qos=0+1+2 retained-properties=true downtime-expiry=true mosquitto_process_sources=37 client_io=python-socket server_io=zio-std-io",
+  "verification_commands": [
+    "zig build interop-mqtt-session-expiry-restart -Doptimize=ReleaseFast --summary all -- --mosquitto-test-root=/nav_env/Work/mosquitto/test",
+    "zig build interop-mqtt-broker-config -Doptimize=ReleaseFast --summary all -- --only-persistence-restart --mosquitto-test-root=/nav_env/Work/mosquitto/test",
+    "cd tools/interop && python3 -m unittest mqtt_scenarios.session_expiry_restart_test mqtt_mosquitto_packet_sequences_test"
+  ],
+  "source_sha256": {
+    "build.zig": "86340c4a712b5faafe3d3c79f8a952b4feb60254df7a33185bcc00334b42f75d",
+    "tools/interop/mqtt_broker_config.py": "781c3ce52edb87ec788595472da480a03d80eded196df49c2cf2e0c622ea12a4",
+    "tools/interop/mqtt_mosquitto_packet_sequences_test.py": "6b6a22036d1bc7cf0c092952b0d219355cb19ede1c17254b13ce490bf218bc8f",
+    "tools/interop/mqtt_scenarios/session_expiry_sources.py": "be17133d892a5a8aed27be51a9982a720b3753755f14555a8e84f43a7d297188",
+    "tools/interop/mqtt_scenarios/session_expiry_restart.py": "f5d65d4d554940124813884530fabcd2bcc024fe9effc064ed4a055e8d49e648",
+    "tools/interop/mqtt_scenarios/session_expiry_restart_test.py": "7e5eb8616704cd16ddeb5ed2a5ac1658db9104ca2602a2eb6a89b4ac7480ecd3"
+  }
+}
