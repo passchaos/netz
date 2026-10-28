@@ -16,7 +16,7 @@ superiority.
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1, RFC 8441, and RFC 9220; all three clients expose `sendBinaryInPlace` for the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for HTTP/1 Upgrade, RFC 8441, and RFC 9220. Partial receive data and partially sent explicit or automatic control replies remain resumable after timeout without changing their mask, replaying a committed prefix, or losing a peer Ping/Close event | Handler callbacks and automatic default control replies |
-| Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and HTTP/1, RFC 8441, plus RFC 9220 runtime tests exercise concurrent sends (the H2/H3 cases share one compressed encoder) | Documented thread-safe connection writes |
+| Concurrent sends | Serialized by per-connection `std.Io.Mutex`; bounded outbound operations include lock waiting in their original deadline, writers recheck Close state after acquiring it, and HTTP/1, RFC 8441, plus RFC 9220 runtime tests exercise concurrent sends (the H2/H3 cases share one compressed encoder) | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | I/O abstraction | HTTP/1, HTTP/2, and HTTP/3 adapters consume only `std.Io`; backend selection stays outside the protocol API | Custom epoll/kqueue/Windows server backends |
 
@@ -1588,10 +1588,27 @@ level KeyUpdate APIs available because healthy multiplexed siblings may still
 share the parent H2/H3 transport.
 HTTP/1, RFC 8441, and HTTP/3 writers also validate connection Close state after
 acquiring their send mutex, so a sender queued behind Close cannot append a
-data or control frame after the closing handshake has begun. Ping and Close
-deadline APIs revalidate their absolute budget after lock contention. Close
-flags use acquire/release atomics because a sole receive owner and concurrent
-application writers may observe those transitions on different threads.
+data or control frame after the closing handshake has begun. Close flags use
+acquire/release atomics because a sole receive owner and concurrent application
+writers may observe those transitions on different threads.
+Bounded text/binary, sliced, mutable, fragmented, Ping/Pong, explicit Close,
+and active Ping/Close operations now include send-mutex waiting in their
+original absolute deadline. Inspecting or resuming an already-retained
+automatic reply uses the same deadline. `internal/timed_mutex.zig` follows
+the ordinary mutex's contended-state protocol with timed futex waits, rechecks
+the original bound after spurious wakes, and hands a potentially consumed
+unlock notification to another waiter on cancellation or timeout. Expiration
+before admission commits no bytes and leaves pending output, Close state,
+compression state and mutable caller storage untouched. Deterministic
+regressions hold the lock for a 100-ms observation window while each operation
+uses a 10-ms deadline, across both roles on all three transports. This evidence
+is recorded in `evidence/websocket_mutex_deadline/2026-10-28.json`.
+Fresh automatic-control preparation and fatal receive cleanup still use
+unbounded send-mutex acquisition. Completing bounded receive behavior under
+that contention requires retaining newly consumed control frames or borrowed
+control payloads before returning, and retiring active writers safely during
+fatal cleanup. The outbound admission evidence does not establish those
+remaining receive paths.
 Owned Close diagnostics now take over the already-allocated frame payload on
 HTTP/1, RFC 8441 and RFC 9220. Typed Close reads, Ping waits and close-handshake
 waits no longer allocate a second reason buffer after consuming the terminal

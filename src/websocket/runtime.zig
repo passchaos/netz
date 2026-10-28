@@ -34,6 +34,7 @@ const origin_policy = @import("runtime/origin_policy.zig");
 const redirect = @import("runtime/redirect.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const accept_deadline = @import("../internal/accept.zig");
+const timed_mutex = @import("../internal/timed_mutex.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
@@ -5499,7 +5500,7 @@ pub const Connection = struct {
             self.limits,
             parts,
         );
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -5595,7 +5596,7 @@ pub const Connection = struct {
             return error.InvalidFrame;
         }
         try common.validateOutgoingMessageLength(self.limits, payload.len);
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -5713,7 +5714,7 @@ pub const Connection = struct {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try common.validateOutgoingControlFrame(self.limits, .ping, payload);
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isMessage() or self.pending_write.isClose()) {
@@ -5780,7 +5781,7 @@ pub const Connection = struct {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try common.validateOutgoingControlFrame(self.limits, .pong, payload);
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -5836,11 +5837,11 @@ pub const Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
             return self.readPingEvent(payload, deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.io);
+            try timed_mutex.lock(&self.send_mutex, self.io, deadline);
             defer self.send_mutex.unlock(self.io);
             _ = try deadline_policy.usableAwake(self.io, deadline);
             if (self.pending_write.isMessage() or
@@ -5880,11 +5881,11 @@ pub const Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
             return self.readPingEvent(payload, deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.io);
+            try timed_mutex.lock(&self.send_mutex, self.io, deadline);
             defer self.send_mutex.unlock(self.io);
             try self.resumePendingControlLocked(
                 .ping,
@@ -5981,7 +5982,7 @@ pub const Connection = struct {
             close_frame,
         );
         try common.validateOutgoingControlFrame(self.limits, .close, payload);
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.receiveFailed() or self.writeAborted()) {
@@ -6132,11 +6133,11 @@ pub const Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.close_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
             return self.readCloseHandshakeEvent(deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.io);
+            try timed_mutex.lock(&self.send_mutex, self.io, deadline);
             defer self.send_mutex.unlock(self.io);
             _ = try deadline_policy.usableAwake(self.io, deadline);
             if (self.receiveFailed() or self.writeAborted()) {
@@ -6195,11 +6196,11 @@ pub const Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.close_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
             return self.readCloseHandshakeEvent(deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.io);
+            try timed_mutex.lock(&self.send_mutex, self.io, deadline);
             defer self.send_mutex.unlock(self.io);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
@@ -6416,7 +6417,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
         progress.* = .{};
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -6824,7 +6825,7 @@ pub const Connection = struct {
             opcode,
             fragments,
         );
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -7148,7 +7149,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         delivery: PendingAutomaticControl.Delivery,
     ) Error!websocket.Frame {
-        if (try self.pendingAutomaticControlOpcode(delivery)) |_| {
+        if (try self.pendingAutomaticControlOpcodeBefore(delivery, deadline)) |_| {
             if (try self.resumeAutomaticControl(deadline)) |frame| {
                 return frame;
             }
@@ -7775,8 +7776,16 @@ pub const Connection = struct {
         self: *Connection,
         delivery: PendingAutomaticControl.Delivery,
     ) Error!?websocket.Opcode {
+        return self.pendingAutomaticControlOpcodeBefore(delivery, null);
+    }
+
+    fn pendingAutomaticControlOpcodeBefore(
+        self: *Connection,
+        delivery: PendingAutomaticControl.Delivery,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!?websocket.Opcode {
         if (!self.automatic_write_pending.load(.acquire)) return null;
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         const pending = self.pending_auto_control orelse return null;
         if (pending.delivery != delivery) return error.WriteInProgress;
@@ -7851,7 +7860,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Frame {
-        self.send_mutex.lockUncancelable(self.io);
+        try timed_mutex.lock(&self.send_mutex, self.io, deadline);
         defer self.send_mutex.unlock(self.io);
         const pending = if (self.pending_auto_control) |*value|
             value
@@ -8251,7 +8260,7 @@ pub const H2Connection = struct {
             return error.InvalidFrame;
         }
         try common.validateOutgoingMessageLength(self.limits, payload.len);
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -8467,7 +8476,7 @@ pub const H2Connection = struct {
             self.limits,
             parts,
         );
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -8528,7 +8537,7 @@ pub const H2Connection = struct {
             deadline,
         );
         try common.validateOutgoingControlFrame(self.limits, .ping, payload);
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -8596,7 +8605,7 @@ pub const H2Connection = struct {
             deadline,
         );
         try common.validateOutgoingControlFrame(self.limits, .pong, payload);
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -8656,11 +8665,11 @@ pub const H2Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
             return self.readPingEvent(payload, deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             _ = try deadline_policy.usableAwake(
                 self.tunnel.connection.io,
@@ -8697,11 +8706,11 @@ pub const H2Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
             return self.readPingEvent(payload, deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             if (self.pending_write.isMessage() or
                 self.pending_write.isClose())
@@ -8803,7 +8812,7 @@ pub const H2Connection = struct {
             close_frame,
         );
         try common.validateOutgoingControlFrame(self.limits, .close, payload);
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -8954,11 +8963,11 @@ pub const H2Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.close_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
             return self.readCloseHandshakeEvent(deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             _ = try deadline_policy.usableAwake(
                 self.tunnel.connection.io,
@@ -9016,11 +9025,11 @@ pub const H2Connection = struct {
         if (self.automatic_write_pending.load(.acquire) and
             !self.application_write_pending.load(.acquire))
         {
-            _ = try self.pendingAutomaticControlOpcode(.close_wait);
+            _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
             return self.readCloseHandshakeEvent(deadline);
         }
         {
-            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
@@ -9217,7 +9226,7 @@ pub const H2Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
         progress.* = .{};
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -9635,7 +9644,7 @@ pub const H2Connection = struct {
             opcode,
             fragments,
         );
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -9962,7 +9971,7 @@ pub const H2Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         delivery: PendingAutomaticControl.Delivery,
     ) Error!websocket.Frame {
-        if (try self.pendingAutomaticControlOpcode(delivery)) |_| {
+        if (try self.pendingAutomaticControlOpcodeBefore(delivery, deadline)) |_| {
             if (try self.resumeAutomaticControl(deadline)) |frame| {
                 return frame;
             }
@@ -10666,8 +10675,16 @@ pub const H2Connection = struct {
         self: *H2Connection,
         delivery: PendingAutomaticControl.Delivery,
     ) Error!?websocket.Opcode {
+        return self.pendingAutomaticControlOpcodeBefore(delivery, null);
+    }
+
+    fn pendingAutomaticControlOpcodeBefore(
+        self: *H2Connection,
+        delivery: PendingAutomaticControl.Delivery,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!?websocket.Opcode {
         if (!self.automatic_write_pending.load(.acquire)) return null;
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         const pending = self.pending_auto_control orelse return null;
         if (pending.delivery != delivery) return error.WriteInProgress;
@@ -10741,7 +10758,7 @@ pub const H2Connection = struct {
         self: *H2Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!?websocket.Frame {
-        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         const pending = if (self.pending_auto_control) |*value|
             value
@@ -12149,7 +12166,7 @@ fn receiveMessageIntoDirectConnection(
         connection.message_into.reset();
         connection.message_frame_receive.reset();
     };
-    if (try connection.pendingAutomaticControlOpcode(.message)) |opcode| {
+    if (try connection.pendingAutomaticControlOpcodeBefore(.message, deadline)) |opcode| {
         std.debug.assert(
             (try connection.resumeAutomaticControl(deadline)) == null,
         );
@@ -17272,6 +17289,7 @@ test {
     _ = @import("runtime/read_interruption_tests.zig");
     _ = @import("runtime/read_interruption_transport_tests.zig");
     _ = @import("runtime/write_interruption_tests.zig");
+    _ = @import("runtime/mutex_deadline_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/handshake/response_tests.zig");

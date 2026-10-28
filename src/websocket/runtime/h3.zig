@@ -17,6 +17,7 @@ const handshake_storage = @import("handshake/storage.zig");
 const message_buffer = @import("message/buffer.zig");
 const message_state = @import("message/state.zig");
 const frame_validation = @import("message/frame_validation.zig");
+const timed_mutex = @import("../../internal/timed_mutex.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
@@ -768,7 +769,7 @@ pub fn Connection(comptime role: common.Role) type {
             progress.* = .{};
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             try self.validateBinaryInPlace(payload.len);
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -976,7 +977,7 @@ pub fn Connection(comptime role: common.Role) type {
                 self.limits,
                 parts,
             );
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -1090,7 +1091,7 @@ pub fn Connection(comptime role: common.Role) type {
                 opcode,
                 fragments,
             );
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -1316,7 +1317,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) Error!void {
             progress.* = .{};
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
 
@@ -1667,7 +1668,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .ping,
                 payload,
             );
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isMessage() or self.pending_write.isClose()) {
@@ -1732,7 +1733,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .pong,
                 payload,
             );
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.pending_write.isPing() or self.pending_write.isClose()) {
@@ -1792,11 +1793,11 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.automatic_write_pending.load(.acquire) and
                 !self.application_write_pending.load(.acquire))
             {
-                _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+                _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
                 return self.readPingEvent(payload, deadline);
             }
             {
-                self.send_mutex.lockUncancelable(self.io());
+                try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
                 defer self.send_mutex.unlock(self.io());
                 _ = try deadline_policy.usableAwake(self.io(), deadline);
                 if (self.pending_write.isMessage() or
@@ -1844,11 +1845,11 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.automatic_write_pending.load(.acquire) and
                 !self.application_write_pending.load(.acquire))
             {
-                _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+                _ = try self.pendingAutomaticControlOpcodeBefore(.ping_wait, deadline);
                 return self.readPingEvent(payload, deadline);
             }
             {
-                self.send_mutex.lockUncancelable(self.io());
+                try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
                 defer self.send_mutex.unlock(self.io());
                 if (self.pending_write.isMessage() or
                     self.pending_write.isClose())
@@ -1947,7 +1948,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .close,
                 payload,
             );
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             if (self.receiveFailed() or self.writeAborted()) {
@@ -2084,7 +2085,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.automatic_write_pending.load(.acquire) and
                 !self.application_write_pending.load(.acquire))
             {
-                _ = try self.pendingAutomaticControlOpcode(.close_wait);
+                _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
                 return self.readCloseHandshakeEvent(deadline);
             }
             if (!self.closeSent() or self.pending_write.isClose()) {
@@ -2099,7 +2100,7 @@ pub fn Connection(comptime role: common.Role) type {
                     payload,
                 );
                 {
-                    self.send_mutex.lockUncancelable(self.io());
+                    try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
                     defer self.send_mutex.unlock(self.io());
                     _ = try deadline_policy.usableAwake(self.io(), deadline);
                     if (self.receiveFailed() or self.writeAborted()) {
@@ -2152,11 +2153,11 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.automatic_write_pending.load(.acquire) and
                 !self.application_write_pending.load(.acquire))
             {
-                _ = try self.pendingAutomaticControlOpcode(.close_wait);
+                _ = try self.pendingAutomaticControlOpcodeBefore(.close_wait, deadline);
                 return self.readCloseHandshakeEvent(deadline);
             }
             {
-                self.send_mutex.lockUncancelable(self.io());
+                try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
                 defer self.send_mutex.unlock(self.io());
                 if (self.receiveFailed() or self.writeAborted()) {
                     return error.ConnectionClosed;
@@ -2342,7 +2343,7 @@ pub fn Connection(comptime role: common.Role) type {
             try self.message_into.validateOutput(out);
             errdefer |err| self.resetMessageIntoAfterError(err);
             errdefer |err| self.closeAfterReceiveError(err, deadline);
-            if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
+            if (try self.pendingAutomaticControlOpcodeBefore(.message, deadline)) |opcode| {
                 std.debug.assert(
                     (try self.resumeAutomaticControl(deadline)) == null,
                 );
@@ -2802,7 +2803,7 @@ pub fn Connection(comptime role: common.Role) type {
             delivery: PendingAutomaticControl.Delivery,
         ) Error!websocket.Frame {
             if (self.receiveFailed()) return error.ConnectionClosed;
-            if (try self.pendingAutomaticControlOpcode(delivery)) |_| {
+            if (try self.pendingAutomaticControlOpcodeBefore(delivery, deadline)) |_| {
                 if (try self.resumeAutomaticControl(deadline)) |frame| {
                     return frame;
                 }
@@ -3119,7 +3120,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!?websocket.Frame {
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             const pending = if (self.pending_auto_control) |*value|
                 value
@@ -3369,8 +3370,16 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             delivery: PendingAutomaticControl.Delivery,
         ) Error!?websocket.Opcode {
+            return self.pendingAutomaticControlOpcodeBefore(delivery, null);
+        }
+
+        fn pendingAutomaticControlOpcodeBefore(
+            self: *Self,
+            delivery: PendingAutomaticControl.Delivery,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!?websocket.Opcode {
             if (!self.automatic_write_pending.load(.acquire)) return null;
-            self.send_mutex.lockUncancelable(self.io());
+            try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
             defer self.send_mutex.unlock(self.io());
             const pending = self.pending_auto_control orelse return null;
             if (pending.delivery != delivery) {

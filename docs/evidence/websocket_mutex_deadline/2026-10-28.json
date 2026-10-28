@@ -1,0 +1,103 @@
+{
+  "baseline_revision": "d4026e124b56bfb18fb6f8ae33585904afbcd226",
+  "change": "Include send-mutex admission in WebSocket bounded outbound and retained automatic-control operation deadlines",
+  "before": {
+    "focused_passed": 124,
+    "focused_total": 125,
+    "failure": "bounded binary send did not finish within a 100 ms observation window while its send mutex stayed held despite a 10 ms deadline"
+  },
+  "after": {
+    "focused_passed": 147,
+    "focused_total": 147,
+    "transports": [
+      "HTTP/1.1",
+      "RFC 8441 HTTP/2",
+      "RFC 9220 HTTP/3"
+    ],
+    "roles": [
+      "client",
+      "server"
+    ],
+    "operations": [
+      "binary",
+      "text",
+      "slices",
+      "inplace (client)",
+      "fragments",
+      "ping",
+      "pong",
+      "close",
+      "ping_wait",
+      "close_wait",
+      "retained_close_wait"
+    ],
+    "deadline_ms": 10,
+    "locked_observer_ms": 100,
+    "operation_checks": 63,
+    "pre_admission_timeout": {
+      "committed_bytes": 0,
+      "pending_write": "none",
+      "close_sent": false,
+      "inplace_buffer": "unmasked",
+      "retained_control": "preserved with original zero committed cursor"
+    },
+    "mutex_cases": [
+      "original absolute deadline survives spurious wakes",
+      "cancellation passes consumed unlock notification",
+      "expired and non-awake deadlines reject before acquisition",
+      "notified waiter acquires before original deadline",
+      "deadline expiration during fast or contended acquisition releases lock"
+    ],
+    "write_interruptions_and_close_metadata": "existing focused TCP/WSS and HTTP/1/2/3 regressions pass"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='timed mutex' -Dtest-filter='WebSocket bounded send mutex' -Dtest-filter='WebSocket bounded write interruptions' -Dtest-filter='WebSocket HTTP1 Close metadata' -Dtest-filter='WebSocket HTTP2 Close metadata' -Dtest-filter='WebSocket HTTP3 Close metadata' -Dtest-filter='WebSocket close' --summary all",
+    "GO_BIN=/nav_env/Temp/go1.24.13/bin/go zig build interop-websocket-hyper-h2 interop-websocket-h3-quic-go interop-websocket-autobahn-smoke -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchains": {
+    "zig": "0.16.0",
+    "quic_go": "v0.59.0",
+    "go": "1.24.13"
+  },
+  "interop_records": [
+    "Autobahn zio smoke passed: transport=cleartext concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io",
+    "Autobahn zio smoke passed: transport=tls concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io",
+    "netz RFC 8441 client interoperated with Hyper: transport=h2c fragmented-text ping pong bounded-close tls_metadata=n/a key_update=n/a client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio",
+    "netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio",
+    "netz RFC 9220 client interoperated with quic-go: version=1 extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=zio-std-io server_io=quic-go-netpoll",
+    "quic-go RFC 9220 server interoperated with netz: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll",
+    "quic-go RFC 9220 client interoperated with netz: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=quic-go-netpoll server_io=zio-std-io",
+    "netz RFC 9220 server interoperated with quic-go: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=quic-go-netpoll server_io=zio-std-io",
+    "netz RFC 9220 client interoperated with quic-go: version=2 extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=zio-std-io server_io=quic-go-netpoll",
+    "quic-go RFC 9220 server interoperated with netz: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll",
+    "quic-go RFC 9220 client interoperated with netz: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=quic-go-netpoll server_io=zio-std-io",
+    "netz RFC 9220 server interoperated with quic-go: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=quic-go-netpoll server_io=zio-std-io"
+  ],
+  "tooling_attempts": [
+    {
+      "go": "not in PATH",
+      "result": "RFC 9220 script exited 127 before peer execution; supplied installed GO_BIN"
+    },
+    {
+      "go": "1.27.2",
+      "result": "independent Go server fixture rejected its own compressed payload with server permessage-deflate payload 0 did not shrink; netz client then timed out; assertions unchanged"
+    },
+    {
+      "go": "1.24.13",
+      "result": "module declares go 1.24; both roles passed QUIC v1 and v2"
+    }
+  ],
+  "remaining_scope": [
+    "fresh automatic-control preparation still acquires send mutex without a deadline; newly consumed owned frames or borrowed control payloads require safe retention on failed admission",
+    "fatal receive cleanup still acquires send mutex without a deadline; active writer retirement requires safe ownership coordination"
+  ],
+  "source_sha256": {
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318",
+    "src/internal/timed_mutex_tests.zig": "324cfd85bc9c47fbdce9044976b61a17d399d55e8c73c7ce58d956f975f4f9c7",
+    "src/websocket/runtime.zig": "a807e67f9e9f828bf4cebe43620810b8f1ff5c0474dfec1948dcd2b31776da77",
+    "src/websocket/runtime/h3.zig": "9685eb6b91c07574c0ccc592378d27d39a0b143fa8c07618ee8338ce33796ddd",
+    "src/websocket/runtime/mutex_deadline_tests.zig": "d9a088413064692c07541be00e9eebff02558a567fecd7cc4e019f5657aabe1d"
+  }
+}
