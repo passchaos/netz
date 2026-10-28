@@ -1757,6 +1757,17 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_will_lifecycle_step.dependOn(&mqtt_will_lifecycle.step);
 
+    const mqtt_deadline_benchmark_check = b.addSystemCommand(&.{
+        "python3", "-m", "unittest", "mqtt_deadline_bench.test_check",
+    });
+    mqtt_deadline_benchmark_check.setCwd(b.path("tools/interop"));
+    const mqtt_deadline_benchmark_check_step = b.step(
+        "test-mqtt-deadline-benchmark",
+        "Validate complete MQTT deadline-delivery benchmark records",
+    );
+    mqtt_deadline_benchmark_check_step.dependOn(&mqtt_deadline_benchmark_check.step);
+    test_step.dependOn(&mqtt_deadline_benchmark_check.step);
+
     const mqtt_broker_includes = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",
@@ -3182,6 +3193,12 @@ pub fn build(b: *std.Build) void {
             .path = "examples/bench_mqtt_session.zig",
             .run_step = "bench-mqtt-session",
             .description = "Benchmark MQTT persistent-session resume, queue and drain",
+        },
+        .{
+            .exe_name = "netz-bench-mqtt-deadline",
+            .path = "examples/bench_mqtt_deadline.zig",
+            .run_step = "bench-mqtt-deadline",
+            .description = "Benchmark complete QoS 1/2 delivery through deadline Session replay",
         },
         .{
             .exe_name = "netz-bench-mqtt-will",
