@@ -2,6 +2,19 @@
 
 const std = @import("std");
 const deadline_policy = @import("../../../internal/deadline.zig");
+const stream_io = @import("../../../internal/stream_io.zig");
+const native_socket = @import("../../../runtime/timed_socket.zig");
+
+/// Null preserves the full logical-write wrapper for other I/O contexts.
+/// Matching native tasks can park their borrowed vectors under the same
+/// deadline without admitting separate writer and timer tasks.
+pub fn tryTcp(comptime Error: type, io: std.Io, stream: std.Io.net.Stream, prefix: []const u8, payload: []const u8, deadline: std.Io.Clock.Timestamp) ?Error!void {
+    if (!native_socket.available(io)) return null;
+    _ = deadline_policy.usableAwake(io, deadline) catch |err| return @as(Error!void, err);
+    var committed: usize = 0;
+    stream_io.writeAllSlicesTrackedWithDeadline(io, stream, &.{ prefix, payload }, &committed, deadline) catch |err| return @as(Error!void, err);
+    return @as(Error!void, {});
+}
 
 pub fn write(comptime Error: type, io: std.Io, context: anytype, comptime write_fn: anytype, prefix: []const u8, payload: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
     _ = try deadline_policy.usableAwake(io, deadline);

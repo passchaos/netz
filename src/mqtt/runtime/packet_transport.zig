@@ -534,7 +534,11 @@ pub const Transport = union(enum) {
     /// Preserve the ordinary transport's atomic prefix/payload framing while
     /// bounding the complete write. Partial output must retire MQTT ownership.
     pub fn writePacketPartsWithDeadline(self: *Transport, prefix: []const u8, payload: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
-        return @import("transport/write_parts_deadline.zig").write(Error, self.ioHandle(), self, Transport.writePacketPartsForDeadline, prefix, payload, deadline);
+        const timed_parts = @import("transport/write_parts_deadline.zig");
+        if (self.* == .tcp) {
+            if (timed_parts.tryTcp(Error, self.tcp.io, self.tcp.stream, prefix, payload, deadline)) |result| return result;
+        }
+        return timed_parts.write(Error, self.ioHandle(), self, Transport.writePacketPartsForDeadline, prefix, payload, deadline);
     }
 
     fn writePacketPartsForDeadline(self: *Transport, prefix: []const u8, payload: []const u8) Error!void {

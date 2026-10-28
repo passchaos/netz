@@ -9,6 +9,10 @@ const BlockedWrite = @import("../acknowledgement/deadline_tests.zig").BlockedWri
 const Mode = enum { tcp, tls, native_tls, tls12, websocket };
 const Outcome = enum { complete, timeout, network_error };
 
+test {
+    _ = @import("native_parts_deadline_tests.zig");
+}
+
 test "MQTT Session deadline writes preserve complete payload across transports" {
     inline for (std.enums.values(Mode)) |mode| try exercise(mode, .complete);
 }
