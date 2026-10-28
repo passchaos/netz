@@ -49,7 +49,7 @@ fn netHandle(stream: std.Io.net.Stream) zio.ev.Backend.NetHandle {
     return if (@typeInfo(Handle) == .pointer) @ptrCast(stream.socket.handle) else stream.socket.handle;
 }
 
-/// A matching native read avoids std.Io.Batch's concurrent operation task.
+/// A matching native read avoids std.Io.Batch and generic file-read dispatch.
 /// Timeout/cancellation joins NetRecv before returning borrowed storage;
 /// a completed read racing interruption retains its naturally received bytes.
 pub fn tryRead(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, deadline: std.Io.Clock.Timestamp) ?ReadError!usize {
