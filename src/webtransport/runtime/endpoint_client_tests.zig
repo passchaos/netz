@@ -345,8 +345,12 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
             try first.close(&client, 81, "first");
             try second.close(&client, 82, "second");
             try self.done.wait(self.io);
-            try std.testing.expect(try client.removeSession(first.id()));
-            try std.testing.expect(try client.removeSession(second.id()));
+            const removal_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            });
+            try std.testing.expect(try client.removeSessionWithDeadline(first.id(), removal_deadline));
+            try std.testing.expect(try client.removeSessionWithDeadline(second.id(), removal_deadline));
             try std.testing.expectEqual(@as(usize, 0), client.sessionCount());
         }
     };

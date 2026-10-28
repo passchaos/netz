@@ -2186,6 +2186,15 @@ close socket write retains the protocol error and local closing state. Focused
 preconfigured-key QUIC/UDP regressions exercise these boundaries. Existing
 pending/unknown/closed valid Session IDs continue through their scoped handling.
 
+Shared client Session removal now additionally exposes relative-timeout and
+absolute awake-deadline forms. One budget covers partial DRAIN/CLOSE completion,
+CONNECT FIN, associated RESET_STREAM/STOP_SENDING and the final CONNECT receive
+termination. Expiry preserves the mapped Session, original CLOSE metadata and
+committed direction state for retry; completion alone releases the owner.
+The seven owning-module regressions are explicitly registered in the test root,
+along with four existing client test modules. The authenticated two-Session
+test also uses one removal deadline. See [bounded Session removal](webtransport_session_removal.md).
+
 HTTP/3 request authority fields now use the shared `http.authority` parser and
 scheme-based Host comparison. Equivalent HTTP/HTTPS default ports, escaped
 unreserved host bytes and IPv6 representations pass request validation while

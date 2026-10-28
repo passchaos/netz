@@ -1029,34 +1029,21 @@ pub const Client = struct {
         };
     }
 
-    /// Close an active Session normally and complete terminal submissions
-    /// before releasing its owner. Failed writes retain exact CLOSE progress
-    /// for retry; ordinary pacing/credit waits service this connection owner.
-    pub fn removeSession(
-        self: *Client,
-        session_id: webtransport.SessionId,
-    ) Error!bool {
-        const current = self.sessions.get(session_id.value) orelse return false;
-        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
-        if (self.h3.callback_reader_active) return error.ConcurrentRead;
-        if (!self.observeConnection()) try self.pending_open_cleanup.advance(&self.h3);
-        current.control.bindFlow(current.streams.flow);
-        try terminal.finish(
-            &self.h3,
-            &current.control,
-            &current.streams,
-            &current.close_response_pending,
-            &current.close_state,
-            &current.drain_state,
-        );
-        const removed = self.sessions.fetchRemove(session_id.value).?.value;
-        removed.deinit(self);
-        self.allocator.destroy(removed);
-        if (self.last_ready_session_id == session_id.value) {
-            self.last_ready_session_id = null;
-        }
-        return true;
-    }
+    const Removal = @import("endpoint_client/remove.zig").Controller(struct {
+        pub const ClientType = Client;
+        pub const ErrorType = Error;
+        pub const TimeoutErrorType = TimeoutError;
+        pub const observeConnection = Client.observeConnection;
+        pub const deinitSession = Session.deinit;
+    });
+
+    /// Complete terminal submissions before releasing an active Session.
+    /// Failed submissions retain its owner and exact CLOSE progress for retry.
+    pub const removeSession = Removal.removeSession;
+    /// Bound CLOSE, FIN and all associated-stream cleanup with one budget.
+    pub const removeSessionWithTimeout = Removal.removeSessionWithTimeout;
+    /// Resume removal under one awake deadline without replaying prior output.
+    pub const removeSessionWithDeadline = Removal.removeSessionWithDeadline;
 
     pub fn poll(
         self: *Client,

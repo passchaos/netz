@@ -3,12 +3,17 @@
 //! Keep protocol cancellation ahead of the ordinary FIN reply. Each polling
 //! turn submits at most one terminal packet and retains completed progress.
 
+const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
+const quic = @import("../../../quic/mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const webtransport = @import("../../mod.zig");
 const session_control = @import("../session_control.zig");
 const connection_lifecycle = @import("../connection_lifecycle.zig");
 const close_write = @import("close.zig");
 const drain_write = @import("drain.zig");
+
+pub const Error = session_control.Error || quic.runtime.ReceiveTimeoutError;
 
 pub fn advanceOnce(
     h3: *http3.runtime.HandshakeClient,
@@ -72,7 +77,32 @@ pub fn finish(
     close_response_pending: *bool,
     pending_close: *close_write.State,
     pending_drain: *drain_write.State,
-) session_control.Error!void {
+) Error!void {
+    return finishBefore(h3, control, streams, close_response_pending, pending_close, pending_drain, null);
+}
+
+pub fn finishWithDeadline(
+    h3: *http3.runtime.HandshakeClient,
+    control: *session_control.Control,
+    streams: *webtransport.StreamRegistry,
+    close_response_pending: *bool,
+    pending_close: *close_write.State,
+    pending_drain: *drain_write.State,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, deadline);
+    return finishBefore(h3, control, streams, close_response_pending, pending_close, pending_drain, deadline);
+}
+
+fn finishBefore(
+    h3: *http3.runtime.HandshakeClient,
+    control: *session_control.Control,
+    streams: *webtransport.StreamRegistry,
+    close_response_pending: *bool,
+    pending_close: *close_write.State,
+    pending_drain: *drain_write.State,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
     defer _ = connection_lifecycle.observe(control, h3, streams);
     if (connection_lifecycle.observe(control, h3, streams)) {
         close_response_pending.* = false;
@@ -80,35 +110,52 @@ pub fn finish(
         pending_drain.clear();
         return;
     }
-    try inspectControl(h3, control, close_response_pending);
-    try rejectPending(h3, control, close_response_pending);
+    try inspectControl(h3, control, close_response_pending, deadline);
+    try rejectPending(h3, control, close_response_pending, deadline);
     observeSendTerminal(h3, control, close_response_pending);
-    if (pending_drain.pending()) try progressActive(h3, control, close_response_pending, pending_drain);
+    if (pending_drain.pending()) try progressActive(h3, control, close_response_pending, pending_drain, deadline);
     if ((!control.state.closed or pending_close.pending != null) and !control.local_close_sent and !control.local_close_failed) {
         if (pending_close.pending == null) try pending_close.prepare(h3, control, 0, "");
-        try progressActive(h3, control, close_response_pending, pending_close);
+        try progressActive(h3, control, close_response_pending, pending_close, deadline);
     }
     if (!control.local_close_sent and !control.local_close_failed) close_response_pending.* = true;
     if (close_response_pending.*) {
-        h3.sendRequestBodyPaced(control.session_id.value, &.{}, true) catch |err|
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        const sent = if (deadline) |absolute|
+            h3.sendRequestBodyPacedWithDeadline(control.session_id.value, &.{}, true, &progress, absolute)
+        else
+            h3.sendRequestBodyPaced(control.session_id.value, &.{}, true);
+        sent catch |err| {
+            if (progress.fin_committed) {
+                close_response_pending.* = false;
+                control.local_close_sent = true;
+            }
             switch (err) {
-                error.RequestCancelled, error.RequestRejected, error.StreamStopped => {
-                    control.recordLocalCloseFailure(0);
-                },
+                error.RequestCancelled, error.RequestRejected, error.StreamStopped => control.recordLocalCloseFailure(0),
                 else => return err,
-            };
+            }
+        };
         close_response_pending.* = false;
         if (!control.local_close_failed) control.local_close_sent = true;
     }
-    try session_control.terminateStreams(&h3.established.connection, streams);
+    if (deadline) |absolute|
+        try session_control.terminateStreamsWithDeadline(&h3.established.connection, streams, absolute)
+    else
+        try session_control.terminateStreams(&h3.established.connection, streams);
     if (h3.established.connection.recvStreamStats(control.session_id.value)) |stats| {
-        if (stats.final_size == null and stats.reset == null and stats.stop_sending_sent == null) try h3.established.connection.sendStopSending(control.session_id.value, webtransport.ApplicationErrorCode.session_gone);
+        if (stats.final_size == null and stats.reset == null and stats.stop_sending_sent == null) {
+            if (deadline) |absolute|
+                try h3.established.connection.sendStopSendingWithDeadline(control.session_id.value, webtransport.ApplicationErrorCode.session_gone, absolute)
+            else
+                try h3.established.connection.sendStopSending(control.session_id.value, webtransport.ApplicationErrorCode.session_gone);
+        }
     }
 }
 
-fn inspectControl(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool) session_control.Error!void {
+fn inspectControl(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
     while (!control.capsule_error_pending and !control.handledInvalidCapsule()) {
-        const event = control.poll(&h3.established.connection) catch |err| switch (err) {
+        const polled = if (deadline) |absolute| control.pollWithDeadline(&h3.established.connection, absolute) else control.poll(&h3.established.connection);
+        const event = polled catch |err| switch (err) {
             error.InvalidCapsule, error.FlowControlViolation => {
                 if (!control.handledInvalidCapsule()) control.capsule_error_pending = true;
                 break;
@@ -125,27 +172,35 @@ fn inspectControl(h3: *http3.runtime.HandshakeClient, control: *session_control.
     if (control.handledInvalidCapsule()) reply.* = false;
 }
 
-fn rejectPending(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool) session_control.Error!void {
+fn rejectPending(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, deadline: ?std.Io.Clock.Timestamp) Error!void {
     if (control.capsule_error_pending) {
-        _ = try control.rejectInvalidCapsule(&h3.established.connection);
+        _ = if (deadline) |absolute|
+            try control.rejectInvalidCapsuleWithDeadline(&h3.established.connection, absolute)
+        else
+            try control.rejectInvalidCapsule(&h3.established.connection);
         reply.* = false;
     }
-    if (try control.rejectPostTerminalData(&h3.established.connection)) reply.* = false;
+    const rejected = if (deadline) |absolute|
+        try control.rejectPostTerminalDataWithDeadline(&h3.established.connection, absolute)
+    else
+        try control.rejectPostTerminalData(&h3.established.connection);
+    if (rejected) reply.* = false;
     if (control.handledInvalidCapsule()) reply.* = false;
 }
 
-fn progressActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: anytype) session_control.Error!void {
+fn progressActive(h3: *http3.runtime.HandshakeClient, control: *session_control.Control, reply: *bool, state: anytype, deadline: ?std.Io.Clock.Timestamp) Error!void {
     while (state.isPending()) {
-        try inspectControl(h3, control, reply);
-        try rejectPending(h3, control, reply);
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(h3.established.connection.endpoint.io, absolute);
+        try inspectControl(h3, control, reply, deadline);
+        try rejectPending(h3, control, reply, deadline);
         observeSendTerminal(h3, control, reply);
         _ = state.advanceOnce(h3, control, reply) catch |err| switch (err) {
             error.PacingLimited => {
-                try h3.established.connection.waitForPacingAvailability();
+                if (deadline) |absolute| try h3.established.connection.waitForPacingAvailabilityWithDeadline(absolute) else try h3.established.connection.waitForPacingAvailability();
                 continue;
             },
             error.CongestionLimited, error.FlowControlBlocked => {
-                try h3.receiveDetachedResponseProgress(control.session_id.value);
+                if (deadline) |absolute| try h3.receiveDetachedResponseProgressWithDeadline(control.session_id.value, absolute) else try h3.receiveDetachedResponseProgress(control.session_id.value);
                 continue;
             },
             else => return err,

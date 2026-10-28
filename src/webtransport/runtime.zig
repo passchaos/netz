@@ -19165,6 +19165,11 @@ test {
 
 test {
     _ = @import("runtime/endpoint_client/removal_tests.zig");
+    _ = @import("runtime/endpoint_client/removal_deadline_tests.zig");
+    _ = @import("runtime/endpoint_client/receive_credit_tests.zig");
+    _ = @import("runtime/endpoint_client/terminal_tests.zig");
+    _ = @import("runtime/endpoint_client/connection_close_tests.zig");
+    _ = @import("runtime/endpoint_client/flow_tests.zig");
     _ = @import("runtime/endpoint_client/open_timeout_tests.zig");
     _ = @import("runtime/endpoint_client/open_head_tests.zig");
     _ = @import("runtime/endpoint_client/open_rejection_tests.zig");

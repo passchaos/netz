@@ -1,0 +1,45 @@
+{
+  "baseline_revision": "259dd4093a7aea94c867945db4d12f481bb9c959",
+  "change": "Bounded shared client Session removal with retained ownership and terminal progress",
+  "api": [
+    "removeSessionWithTimeout",
+    "removeSessionWithDeadline"
+  ],
+  "budget_clock": "awake",
+  "one_budget_stages": [
+    "pending DRAIN",
+    "CLOSE DATA/FIN",
+    "associated RESET_STREAM",
+    "associated STOP_SENDING",
+    "CONNECT receive STOP_SENDING"
+  ],
+  "executed_new_tests": [
+    "WebTransport endpoint client removal deadline retains partial CLOSE and sibling ownership",
+    "WebTransport endpoint client removal deadline rejects invalid budgets before mutation",
+    "WebTransport endpoint client removal deadline spans CLOSE RESET and STOP without renewal",
+    "WebTransport endpoint client removal deadline resumes an explicit CLOSE metadata",
+    "WebTransport endpoint client removal deadline bounds congestion waits and remains resumable",
+    "WebTransport endpoint client removal deadline completes pending DRAIN before CLOSE",
+    "WebTransport endpoint client removal deadline keeps protocol rejection ahead of FIN"
+  ],
+  "verification": {
+    "owning_module_tests": 219,
+    "public_package_tests": 20,
+    "authenticated_two_session_removal": true,
+    "scope": "Local UDP/QUIC and authenticated tests verify new API; wtransport verifies wire and lifecycle compatibility"
+  },
+  "interop_records": [
+    "wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1413 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io",
+    "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio",
+    "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1381 oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
+  ],
+  "source_sha256": {
+    "src/webtransport/runtime.zig": "1d63a6e9dab6f8053bf13625b9aed68c3e257764c05055dfd603cf346708dcc9",
+    "src/webtransport/runtime/endpoint_client.zig": "70e8964dce1c22e549405b13fe7c9a5bcb24e19d448591caccb850c3d996e8e3",
+    "src/webtransport/runtime/endpoint_client/remove.zig": "104b738a7017370330bf3f0989aa22da02a2fcf61eaa6771e8d7374302d30f3d",
+    "src/webtransport/runtime/endpoint_client/terminal.zig": "ea8ab29013d7e0664388ff5a0134796c398f71e6e6751d1d7ae2a0e882f25eeb",
+    "src/webtransport/runtime/endpoint_client/removal_deadline_tests.zig": "17eca35898fd0173ead9ff9b0fcaf18adf07763119e67a41bf7d10dec933f8e3",
+    "src/webtransport/runtime/endpoint_client_tests.zig": "2f3e59c03ce531123aa6b76f7613e88c55e3ffb16d0e1c8bef9e636d01784b5e"
+  }
+}
