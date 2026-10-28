@@ -3966,7 +3966,50 @@ quic-go SOCKS5 pool gate retains its three-origin, four-connection route-churn
 checks. Current evidence is recorded in
 `docs/evidence/http_return_collector/2026-10-29.json`.
 
-Ticket cloning and remembering during new TLS connection setup, unbounded
-getters, and explicit pool close retain separate lock/deadline boundaries.
-This snapshot proves bounded collection and terminal retirement; it does not
-claim that those remaining setup/close paths are fully bounded.
+The collector snapshot proves bounded collection and terminal retirement.
+New TLS connection setup is covered by the section below. Unbounded getters
+and explicit pool close retain separate lock/deadline boundaries.
+
+## HTTP TLS setup ticket deadlines
+
+New HTTP/1.1, HTTP/2 and negotiated TCP connections retain their caller's
+original awake-clock deadline while cloning TLS 1.2/1.3 session tickets.
+Both origin-only and exact-ALPN clone APIs acquire the cache mutex under that
+bound. If allocation consumes the remainder of the budget, the clone is
+destroyed before returning Timeout and the cached ticket's LRU state remains
+unchanged. Negotiated protocol fallback passes the same timestamp through each
+ALPN lookup instead of renewing the budget.
+
+Post-handshake ticket capture and stale-entry invalidation use a shared setup
+helper. It acquires only the negotiated TLS version's cache before transferring
+a connection-owned ticket. Timeout/cancellation leaves that ticket owned by the
+connection and leaves any old entry intact. A successful retry transfers it once;
+a non-resumed handshake without a new ticket performs the existing invalidation
+under the same cache lock. New-connection errors retire the transport without
+close_notify output when a caller deadline is present, then release the return
+node, cloned tickets, origin/authority data and connection reservations. The
+final lease-publication check also rejects a deadline spent during metadata
+allocation.
+
+Forty-eight pre-connect cases cover two TLS versions, three pools, acquisition
+and complete-request relative/absolute APIs, and timeout/cancellation. Each
+returns before releasing the occupied ticket-cache mutex, makes no network
+connection and restores local/shared connection counts to zero. Owned-ticket
+tests cover eight storage retries, four canceled invalidations and four clone
+allocations that expire the budget; they verify exact ticket storage retention,
+one transfer on retry, cache ownership and an unchanged access clock on timeout.
+Existing real TLS ticket-resumption pool tests continue to verify TLS 1.2 and
+TLS 1.3 connection retirement and reuse.
+
+The Hyper/rustls process gate separately occupies the TLS 1.2 and TLS 1.3 cache
+mutexes before attempts to establish another origin. Each 10 ms acquisition
+times out, preserves the original authenticated idle connection and returns the
+new local/shared reservation. The second HTTP/1.1 or HTTP/2 request still uses
+the first connection; each server receives exactly two requests on one socket.
+The two failed setup attempts contribute two additional idle-lookup misses.
+The quic-go SOCKS5 gate continues its three-origin shared-endpoint checks.
+Evidence is recorded in `docs/evidence/http_tls_setup_tickets/2026-10-29.json`.
+
+These checks establish the TLS setup cache budget and failure ownership.
+Explicit pool close and unbounded observation APIs retain their current
+synchronous contract and remain separate lifecycle work.

@@ -4,6 +4,7 @@ const std = @import("std");
 const client = @import("../client.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_ticket_cache = @import("../../tls/stream/client_ticket_cache.zig");
+const setup_tickets = @import("../../internal/pool_tickets/setup.zig");
 
 pub const Manager = struct {
     io: std.Io,
@@ -42,30 +43,42 @@ pub const Manager = struct {
         host: []const u8,
         port: u16,
     ) !?tls_stream.Tls12SessionTicket {
+        return self.cloneTls12Before(host, port, null);
+    }
+
+    pub fn cloneTls12Before(
+        self: *Manager,
+        host: []const u8,
+        port: u16,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !?tls_stream.Tls12SessionTicket {
         const now = realNowSeconds(self.io);
         return switch (self.options.protocol_policy) {
-            .http2_only => self.tls12.cloneForAlpn(host, port, "h2", now),
-            .http1_only => (try self.tls12.cloneForAlpn(
+            .http2_only => self.tls12.cloneForAlpnBefore(host, port, "h2", now, deadline),
+            .http1_only => (try self.tls12.cloneForAlpnBefore(
                 host,
                 port,
                 "http/1.1",
                 now,
+                deadline,
             )) orelse if (self.options.allow_http1_without_alpn)
-                try self.tls12.cloneForAlpn(host, port, "", now)
+                try self.tls12.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
-            .prefer_http2 => (try self.tls12.cloneForAlpn(
+            .prefer_http2 => (try self.tls12.cloneForAlpnBefore(
                 host,
                 port,
                 "h2",
                 now,
-            )) orelse (try self.tls12.cloneForAlpn(
+                deadline,
+            )) orelse (try self.tls12.cloneForAlpnBefore(
                 host,
                 port,
                 "http/1.1",
                 now,
+                deadline,
             )) orelse if (self.options.allow_http1_without_alpn)
-                try self.tls12.cloneForAlpn(host, port, "", now)
+                try self.tls12.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
         };
@@ -76,33 +89,50 @@ pub const Manager = struct {
         host: []const u8,
         port: u16,
     ) !?tls_stream.Tls13SessionTicket {
+        return self.cloneTls13Before(host, port, null);
+    }
+
+    pub fn cloneTls13Before(
+        self: *Manager,
+        host: []const u8,
+        port: u16,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !?tls_stream.Tls13SessionTicket {
         const now = realNowMilliseconds(self.io);
         return switch (self.options.protocol_policy) {
-            .http2_only => self.tls13.cloneForAlpn(host, port, "h2", now),
-            .http1_only => (try self.tls13.cloneForAlpn(
+            .http2_only => self.tls13.cloneForAlpnBefore(host, port, "h2", now, deadline),
+            .http1_only => (try self.tls13.cloneForAlpnBefore(
                 host,
                 port,
                 "http/1.1",
                 now,
+                deadline,
             )) orelse if (self.options.allow_http1_without_alpn)
-                try self.tls13.cloneForAlpn(host, port, "", now)
+                try self.tls13.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
-            .prefer_http2 => (try self.tls13.cloneForAlpn(
+            .prefer_http2 => (try self.tls13.cloneForAlpnBefore(
                 host,
                 port,
                 "h2",
                 now,
-            )) orelse (try self.tls13.cloneForAlpn(
+                deadline,
+            )) orelse (try self.tls13.cloneForAlpnBefore(
                 host,
                 port,
                 "http/1.1",
                 now,
+                deadline,
             )) orelse if (self.options.allow_http1_without_alpn)
-                try self.tls13.cloneForAlpn(host, port, "", now)
+                try self.tls13.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
         };
+    }
+
+    pub fn rememberSetupBefore(self: *Manager, host: []const u8, port: u16, connection: *client.Connection, attempted_tls13: bool, deadline: ?std.Io.Clock.Timestamp) !void {
+        try setup_tickets.remember12(&self.tls12, connection, host, port, true, self.io, deadline);
+        _ = try setup_tickets.remember13(&self.tls13, connection, host, port, true, attempted_tls13, self.io, deadline);
     }
 
     pub fn rememberTls12(

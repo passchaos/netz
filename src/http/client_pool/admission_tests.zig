@@ -1,6 +1,10 @@
 const std = @import("std");
 const pool_mod = @import("../client_pool.zig");
 
+test "unified HTTP pool TLS setup ticket clone retains the original deadline" {
+    try @import("../../internal/pool_returns/setup_test_support.zig").exercise(pool_mod.Pool);
+}
+
 test "unified HTTP pool bounded collector retires TLS without extra output" {
     inline for (.{ false, true }) |h2| try @import("../../internal/pool_returns/success_test_support.zig").exerciseCollectorRetirement(pool_mod.Pool, h2);
 }

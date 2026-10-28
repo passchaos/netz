@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     completed_return_locked = false;
     try verifyCollectorTimeout(&pool, io, first_uri);
     _ = pool.idleCount();
+    try verifyTlsSetupBudget(&pool, io);
     try verifyAdmissionTimeout(&pool, io, second_uri);
     try verifyQueuedTimeout(&pool, io, second_uri);
     try verifyFailedRetirement(&pool, io);
@@ -87,14 +88,30 @@ pub fn main(init: std.process.Init) !void {
     }
     const stats = pool.stats();
     if (pool.connectionCount() != 1 or pool.idleCount() != 1 or
-        stats.total_reused != 2 or stats.total_misses != 3)
+        stats.total_reused != 2 or stats.total_misses != 5)
     {
         return error.InvalidPoolState;
     }
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
+}
+
+fn verifyTlsSetupBudget(pool: *netz.http.Pool, io: std.Io) !void {
+    for ([_]*std.Io.Mutex{ &pool.tickets.tls12.mutex, &pool.tickets.tls13.mutex }) |mutex| {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        if (pool.acquireUriWithTimeout("https://127.0.0.1:1/setup", .fromMilliseconds(10))) |value| {
+            var lease = value;
+            lease.discard();
+            return error.UnexpectedTlsSetup;
+        } else |err| {
+            if (err != error.Timeout) return err;
+        }
+        if (mutex.tryLock()) return error.TicketMutexReleased;
+        if (pool.connectionCount() != 1 or pool.shared_budget.connectionCount() != 1 or pool.idleCount() != 1) return error.InvalidTlsSetupReservation;
+    }
 }
 
 fn verifyCollectorTimeout(pool: *netz.http.Pool, io: std.Io, uri: []const u8) !void {

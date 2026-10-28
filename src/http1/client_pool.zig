@@ -11,6 +11,7 @@ const owned_admission = @import("../internal/owned_fifo_admission.zig");
 const retired_capacity = @import("../internal/retired_capacity.zig");
 const pool_returns = @import("../internal/pool_returns.zig");
 const authority_returns = @import("../internal/pool_returns/authority_returns.zig");
+const setup_tickets = @import("../internal/pool_tickets/setup.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const tls_stream = @import("../tls/mod.zig").stream;
@@ -726,10 +727,11 @@ pub const Pool = struct {
         var tls12_ticket = if (transport == .tls and
             self.options.vail_tls != null and
             self.options.vail_tls.?.protocol_policy.offersTls12())
-            try self.tls12_tickets.cloneFor(
+            try self.tls12_tickets.cloneForBefore(
                 endpoint.tls_host,
                 endpoint.port,
                 realNowSeconds(self.io),
+                deadline,
             )
         else
             null;
@@ -738,10 +740,11 @@ pub const Pool = struct {
             self.options.vail_tls != null and
             self.options.vail_tls.?.protocol_policy.offersTls13() and
             self.options.vail_tls.?.request_tls13_session_ticket)
-            try self.tls13_tickets.cloneFor(
+            try self.tls13_tickets.cloneForBefore(
                 endpoint.tls_host,
                 endpoint.port,
                 realNowMilliseconds(self.io),
+                deadline,
             )
         else
             null;
@@ -880,25 +883,14 @@ pub const Pool = struct {
                     ),
             },
         };
-        errdefer client.close();
+        errdefer if (deadline != null) client.closeWithoutCloseNotify() else client.close();
         if (transport == .tls and vail_tls_options != null) {
-            self.rememberTls12SessionTicket(endpoint, &client);
-            const remembered_tls13_ticket = try self.rememberTls13SessionTicket(
-                endpoint.tls_host,
-                endpoint.port,
-                &client,
-            );
-            if (!remembered_tls13_ticket and tls13_ticket != null and
-                client.negotiatedTlsProtocol() == .tls13 and
-                !(client.wasTlsSessionResumed() orelse false))
-            {
-                _ = self.tls13_tickets.remove(
-                    endpoint.tls_host,
-                    endpoint.port,
-                );
-            }
+            try setup_tickets.remember12(&self.tls12_tickets, &client, endpoint.tls_host, endpoint.port, false, self.io, deadline);
+            _ = try setup_tickets.remember13(&self.tls13_tickets, &client, endpoint.tls_host, endpoint.port, false, tls13_ticket != null, self.io, deadline);
         }
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
+        errdefer self.allocator.free(tls_host);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         connection_reserved = false;
         return .{ .pool = self, .slot = .{
             .client = client,
@@ -909,48 +901,6 @@ pub const Pool = struct {
             .idle_since_ns = 0,
             .return_node = return_node,
         } };
-    }
-
-    fn rememberTls12SessionTicket(
-        self: *Pool,
-        endpoint: runtime.UriEndpoint,
-        client: *runtime.Client,
-    ) void {
-        if (client.takeTls12SessionTicket()) |ticket| {
-            self.tls12_tickets.store(
-                endpoint.tls_host,
-                endpoint.port,
-                ticket,
-                realNowSeconds(self.io),
-            );
-            return;
-        }
-        if (client.negotiatedTlsProtocol() == .tls12 and
-            !(client.wasTlsSessionResumed() orelse false))
-        {
-            _ = self.tls12_tickets.remove(
-                endpoint.tls_host,
-                endpoint.port,
-            );
-        }
-    }
-
-    fn rememberTls13SessionTicket(
-        self: *Pool,
-        tls_host: []const u8,
-        port: u16,
-        client: *runtime.Client,
-    ) tls_stream.Error!bool {
-        if (try client.takeTls13SessionTicket()) |ticket| {
-            self.tls13_tickets.store(
-                tls_host,
-                port,
-                ticket,
-                realNowMilliseconds(self.io),
-            );
-            return true;
-        }
-        return false;
     }
 
     const release = authority_returns.release;

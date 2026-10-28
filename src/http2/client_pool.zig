@@ -10,6 +10,7 @@ const owned_admission = @import("../internal/owned_fifo_admission.zig");
 const retired_capacity = @import("../internal/retired_capacity.zig");
 const pool_returns = @import("../internal/pool_returns.zig");
 const authority_returns = @import("../internal/pool_returns/authority_returns.zig");
+const setup_tickets = @import("../internal/pool_tickets/setup.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const http_method = @import("../internal/http_method.zig");
@@ -769,10 +770,11 @@ pub const Pool = struct {
 
         var tls12_ticket = if (transport == .tls and
             self.options.tls.protocol_policy.offersTls12())
-            try self.tls12_tickets.cloneFor(
+            try self.tls12_tickets.cloneForBefore(
                 endpoint.tls_host,
                 endpoint.port,
                 realNowSeconds(self.io),
+                deadline,
             )
         else
             null;
@@ -780,10 +782,11 @@ pub const Pool = struct {
         var tls13_ticket = if (transport == .tls and
             self.options.tls.protocol_policy.offersTls13() and
             self.options.tls.request_tls13_session_ticket)
-            try self.tls13_tickets.cloneFor(
+            try self.tls13_tickets.cloneForBefore(
                 endpoint.tls_host,
                 endpoint.port,
                 realNowMilliseconds(self.io),
+                deadline,
             )
         else
             null;
@@ -874,28 +877,17 @@ pub const Pool = struct {
                     ),
             },
         };
-        errdefer connection.close();
+        errdefer if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
         if (transport == .tls) {
-            self.rememberTls12SessionTicket(endpoint, &connection);
-            const remembered_tls13_ticket = try self.rememberTls13SessionTicket(
-                endpoint.tls_host,
-                endpoint.port,
-                &connection,
-            );
-            if (!remembered_tls13_ticket and tls13_ticket != null and
-                connection.negotiatedTlsProtocol() == .tls13 and
-                !(connection.wasTlsSessionResumed() orelse false))
-            {
-                _ = self.tls13_tickets.remove(
-                    endpoint.tls_host,
-                    endpoint.port,
-                );
-            }
+            try setup_tickets.remember12(&self.tls12_tickets, &connection, endpoint.tls_host, endpoint.port, false, self.io, deadline);
+            _ = try setup_tickets.remember13(&self.tls13_tickets, &connection, endpoint.tls_host, endpoint.port, false, tls13_ticket != null, self.io, deadline);
         }
         try client_authority.replace(self.allocator, &connection.default_authority, endpoint.authority);
         connection.default_authority_is_ip = false;
         connection.default_scheme = if (transport == .tls) "https" else "http";
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
+        errdefer self.allocator.free(tls_host);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         reserved = false;
         return .{ .pool = self, .slot = .{
             .connection = connection,
@@ -906,48 +898,6 @@ pub const Pool = struct {
             .idle_since_ns = 0,
             .return_node = return_node,
         } };
-    }
-
-    fn rememberTls12SessionTicket(
-        self: *Pool,
-        endpoint: http1_runtime.UriEndpoint,
-        connection: *runtime.Connection,
-    ) void {
-        if (connection.takeTls12SessionTicket()) |ticket| {
-            self.tls12_tickets.store(
-                endpoint.tls_host,
-                endpoint.port,
-                ticket,
-                realNowSeconds(self.io),
-            );
-            return;
-        }
-        if (connection.negotiatedTlsProtocol() == .tls12 and
-            !(connection.wasTlsSessionResumed() orelse false))
-        {
-            _ = self.tls12_tickets.remove(
-                endpoint.tls_host,
-                endpoint.port,
-            );
-        }
-    }
-
-    fn rememberTls13SessionTicket(
-        self: *Pool,
-        tls_host: []const u8,
-        port: u16,
-        connection: *runtime.Connection,
-    ) tls_stream.Error!bool {
-        if (try connection.takeTls13SessionTicket()) |ticket| {
-            self.tls13_tickets.store(
-                tls_host,
-                port,
-                ticket,
-                realNowMilliseconds(self.io),
-            );
-            return true;
-        }
-        return false;
     }
 
     const release = authority_returns.release;

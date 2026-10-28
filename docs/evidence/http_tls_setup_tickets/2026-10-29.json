@@ -1,0 +1,166 @@
+{
+  "baseline_revision": "daca256e52fa74cd0296976677f98461e6717c5f",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Carry HTTP new TLS connection deadlines through ticket cloning, capture, invalidation and failure cleanup",
+  "before": {
+    "passed": 137,
+    "total": 140,
+    "failed": 3,
+    "regressions": [
+      "HTTP/1 pool TLS setup ticket clone retains the original deadline",
+      "HTTP/2 pool TLS setup ticket clone retains the original deadline",
+      "unified HTTP pool TLS setup ticket clone retains the original deadline"
+    ],
+    "failure": "uncancelable cache admission ignored the operation budget; after rescue unlock acquisition started a network connection and returned NetworkUnreachable instead of Timeout",
+    "expected_network_connections": 0,
+    "observed_network_connections": 1,
+    "command": "zig build test-lib -Dtest-filter='pool TLS setup ticket clone' --summary all"
+  },
+  "after": {
+    "lifecycle_tests": {
+      "passed": 312,
+      "total": 312
+    },
+    "package_tests": {
+      "passed": 21,
+      "total": 21
+    },
+    "preconnect_cases": 48,
+    "pools": [
+      "HTTP/1.1",
+      "HTTP/2",
+      "negotiated TCP"
+    ],
+    "tls_versions": [
+      "TLS 1.2",
+      "TLS 1.3"
+    ],
+    "api_forms": [
+      "acquireUriWithDeadline",
+      "acquireUriWithTimeout",
+      "requestUriWithDeadline",
+      "requestUriWithTimeout"
+    ],
+    "outcomes": [
+      "Timeout",
+      "Canceled"
+    ],
+    "preconnect": {
+      "occupied_cache_mutex_remains_held": true,
+      "unbounded_cache_waits": 0,
+      "network_connections": 0,
+      "local_reserved_slots_after_failure": 0,
+      "shared_reserved_slots_after_failure": 0
+    },
+    "owned_storage_cases": 8,
+    "canceled_invalidation_cases": 4,
+    "clone_allocation_expiry_cases": 4,
+    "storage": {
+      "guard_admission_precedes_ticket_transfer": true,
+      "negotiated_tls_version_only": true,
+      "original_owned_ticket_storage_preserved_on_timeout_or_cancel": true,
+      "old_cache_entry_preserved_on_canceled_invalidation": true,
+      "ticket_transfers_after_successful_retry": 1,
+      "cloned_retry_ticket_matches_stored_identity": true,
+      "capture_invalidation_and_store_share_one_cache_guard": true
+    },
+    "clone_allocation": {
+      "one_original_awake_deadline": true,
+      "expiration_during_allocation_returns_Timeout": true,
+      "partial_clone_deinitialized": true,
+      "cache_access_clock_unchanged_on_expiration": true,
+      "original_cache_ticket_remains_cloneable": true
+    },
+    "cleanup": {
+      "deadline_failed_connection_destruction_skips_close_notify": true,
+      "return_node_and_cloned_tickets_released_on_failure": true,
+      "origin_authority_and_connection_budget_preserved": true,
+      "final_metadata_allocation_rechecks_operation_deadline": true
+    },
+    "scope": "Preconnect public pool calls, shared post-handshake capture helper ownership, clone allocation deadline, existing live TLS ticket-resumption pool tests"
+  },
+  "interop": {
+    "hyper": {
+      "protocols": [
+        "http/1.1",
+        "h2"
+      ],
+      "transport": "authenticated rustls TLS",
+      "cache_contended_versions": [
+        "TLS 1.2",
+        "TLS 1.3"
+      ],
+      "new_origin_setup_deadline_ms": 10,
+      "original_idle_authenticated_connection_preserved": true,
+      "live_local_and_shared_connections_after_each_failed_setup": 1,
+      "requests_per_protocol": 2,
+      "connections_per_protocol": 1,
+      "reuses_per_protocol": 2,
+      "idle_misses_per_protocol": 5,
+      "earlier_admission_queued_timeout_retirement_completed_return_collector_checks_retained": true,
+      "client_io": "zio-std-io",
+      "server_io": "hyper-tokio",
+      "build_steps_passed": 8,
+      "build_steps_total": 8
+    },
+    "http3": {
+      "peer": "quic-go v0.59.0",
+      "transport": "TLS 1.3 over QUIC through SOCKS5 UDP ASSOCIATE",
+      "origins": 3,
+      "http3_requests": 4,
+      "tcp_discovery_tunnels": 3,
+      "udp_associations": 1,
+      "active_quic_connections": 2,
+      "total_quic_connections": 4,
+      "domain_route_limit": 2,
+      "route_churn": true,
+      "remote_dns": true,
+      "shared_endpoint": true,
+      "client_io": "zio-std-io",
+      "server_io": "quic-go-netpoll",
+      "build_steps_passed": 8,
+      "build_steps_total": 8
+    }
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='client pool' -Dtest-filter='unified HTTP pool' -Dtest-filter='pool deadline' -Dtest-filter='pool request deadline' -Dtest-filter='pool queued timeout' -Dtest-filter='pool waiter allocation' -Dtest-filter='pool failed connection retirement' -Dtest-filter='pool retirement between capacity' -Dtest-filter='pool returns a completed' -Dtest-filter='pool completed TLS response' -Dtest-filter='pool closed TLS lease' -Dtest-filter='pool collector deadline' -Dtest-filter='pool bounded collector' -Dtest-filter='connection return' -Dtest-filter='deferred capacity' -Dtest-filter='owned FIFO' -Dtest-filter='shared connection budget' -Dtest-filter='HTTP/2 shared' -Dtest-filter='HTTP/3 pool' -Dtest-filter='HTTP/3 shared pool' -Dtest-filter='HTTP/3 exclusive pool' -Dtest-filter='HTTP/3 cloneable senders' -Dtest-filter='client ticket cache' -Dtest-filter='TLS setup ticket' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http-unified-hyper -Doptimize=ReleaseFast --summary all",
+    "zig build interop-http3-socks5-pool -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio",
+    "netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio",
+    "HTTP/3 SOCKS5 interoperability passed: origins=3 discovery=http1 h3_requests=4 tcp_tunnels=3 udp_associations=1 active_quic_connections=2 total_quic_connections=4 domain_route_limit=2 route_churn=true remote_dns=true shared_endpoint=true tls13=true client_io=zio-std-io server_io=quic-go-netpoll"
+  ],
+  "structure": "shared TLS 1.2/1.3 setup ticket policy replaces duplicated post-handshake capture/invalidation in H1/H2 and negotiated pools; deadline tests adjacent to the helper",
+  "remaining_boundaries": [
+    "explicit pool close",
+    "unbounded observation APIs"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/hyper_parity.md": "d10db1ae6db899aab142f1727d9b2c729232127e4157b19b4097e2a76d7ce3aa",
+    "src/http/client_pool.zig": "081feb4d1a00000fc3769283a627ea630574aee94599900eb4e68c4c655f5cfa",
+    "src/http/client_pool/admission_tests.zig": "448b721856a61a6ab0e8196ee01488b5b576e7d84428cabb62a05e035682c971",
+    "src/http/client_pool/tickets.zig": "fdae7811f1b3d8541cdea9eb2fe034c8ea5d47cf4c121572933ba3156a887efd",
+    "src/http/mod.zig": "dada9bbe52c2684ebc3a3557ff9aae3342b77178b55dd2ffea17b4560831c928",
+    "src/http1/client_pool.zig": "86f9189989fde87d3e0f5f8db055036cc9671291937f9d437687a336559797d1",
+    "src/http1/client_pool/admission_tests.zig": "1a292615cda3b4e00119d1a2e1739518f76fcb246ba25773fbad57afa76f88ad",
+    "src/http2/client_pool.zig": "e6c9ff864692b48761f7b3dbccaa1df0c2f95f67193e952a0a448a4e28603800",
+    "src/http2/client_pool/admission_tests.zig": "00c487242f6133f62f4b85de0ffaf511ce690d9f199a1ecaf2d567cb21d1cd2c",
+    "src/internal/pool_returns/setup_test_support.zig": "0dcf32b1c1f06cc9239f1b85013f9ade17f6a75ab637d34bf765d57a9fa5dd87",
+    "src/internal/pool_tickets/deadline_tests.zig": "4fd08a7ad667dc8b17f337d121d8e4c46cf7ab9271b84c9031391a3b99a84880",
+    "src/internal/pool_tickets/setup.zig": "bef56fc4743c05fa3c30344207b8d75f4dc0aa97e025d2bd708d89e2f0eb2571",
+    "src/tls/stream/client_ticket_cache.zig": "9cff732ee6fa27cc96b159063d5f55e5c7335081d3ccb7189e22677fbd1b199e",
+    "tools/interop/http3_socks5_pool.py": "3ac707c3f21ac2aa6734eb4a9799dda918996c0743bd736349db88a1dca4731a",
+    "tools/interop/http3_socks5_pool_client.zig": "f60360fe489c01f071f536011755ef0c91d8168f39e50507e71f91fb5affc32f",
+    "tools/interop/http_unified_hyper.sh": "54803fe1eb06c0c909c29c8b2c263eb497c69384db60fa03b511a19e7486ec90",
+    "tools/interop/http_unified_hyper_client.zig": "b998f89ae45181398348404201e827fa00a8ad8f5fe1199e7b339135a06b60b0"
+  }
+}

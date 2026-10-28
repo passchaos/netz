@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const vail = @import("vail");
+const Guard = @import("../../internal/mutex_guard.zig").Guard;
+const deadline_policy = @import("../../internal/deadline.zig");
 
 const Tls12Ops = struct {
     const Ticket = vail.tls.tls12_ticket.Cached;
@@ -148,8 +150,19 @@ fn TicketCache(comptime Ops: type) type {
             port: u16,
             now: u64,
         ) !?Ticket {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            return self.cloneForBefore(server_identity, port, now, null);
+        }
+
+        /// Preserve one awake-clock deadline through cache admission and clone.
+        pub fn cloneForBefore(
+            self: *Self,
+            server_identity: []const u8,
+            port: u16,
+            now: u64,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !?Ticket {
+            var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+            defer guard.unlock();
             self.pruneExpiredLocked(now);
             const index = self.find(server_identity, port) orelse return null;
             var ticket = try Ops.clone(
@@ -157,6 +170,7 @@ fn TicketCache(comptime Ops: type) type {
                 self.allocator,
             );
             errdefer ticket.deinit();
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
             self.entries.items[index].last_used = self.nextAccess();
             return ticket;
         }
@@ -171,8 +185,20 @@ fn TicketCache(comptime Ops: type) type {
             alpn: []const u8,
             now: u64,
         ) !?Ticket {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            return self.cloneForAlpnBefore(server_identity, port, alpn, now, null);
+        }
+
+        /// Preserve one awake-clock deadline through cache admission and clone.
+        pub fn cloneForAlpnBefore(
+            self: *Self,
+            server_identity: []const u8,
+            port: u16,
+            alpn: []const u8,
+            now: u64,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !?Ticket {
+            var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+            defer guard.unlock();
             self.pruneExpiredLocked(now);
             const index = self.findAlpn(
                 server_identity,
@@ -184,6 +210,7 @@ fn TicketCache(comptime Ops: type) type {
                 self.allocator,
             );
             errdefer ticket.deinit();
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
             self.entries.items[index].last_used = self.nextAccess();
             return ticket;
         }

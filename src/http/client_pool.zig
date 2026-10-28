@@ -482,6 +482,7 @@ pub const Pool = struct {
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
             self.finishAdmissionLocked(waiter);
             admission_lock.unlock();
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
             const owned_key = key.*;
             key_owned.* = false;
             return .{
@@ -551,14 +552,14 @@ pub const Pool = struct {
         const secure = std.ascii.eqlIgnoreCase(key.scheme, "https");
         var tls12_ticket = if (secure and
             self.options.client.tls.protocol_policy.offersTls12())
-            try self.tickets.cloneTls12(key.host, key.port)
+            try self.tickets.cloneTls12Before(key.host, key.port, deadline)
         else
             null;
         defer if (tls12_ticket) |*ticket| ticket.deinit();
         var tls13_ticket = if (secure and
             self.options.client.tls.protocol_policy.offersTls13() and
             self.options.client.tls.request_tls13_session_ticket)
-            try self.tickets.cloneTls13(key.host, key.port)
+            try self.tickets.cloneTls13Before(key.host, key.port, deadline)
         else
             null;
         defer if (tls13_ticket) |*ticket| ticket.deinit();
@@ -582,29 +583,11 @@ pub const Pool = struct {
             try connector.connectUriWithDeadline(uri_text, absolute)
         else
             try connector.connectUri(uri_text);
-        errdefer connection.close();
+        errdefer if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
         if (secure) {
-            self.tickets.rememberTls12(
-                key.host,
-                key.port,
-                &connection,
-            );
-            const remembered_tls13 = try self.tickets.rememberTls13(
-                key.host,
-                key.port,
-                &connection,
-            );
-            if (!remembered_tls13 and tls13_ticket != null and
-                connection.negotiatedTlsProtocol() == .tls13 and
-                !(connection.wasTlsSessionResumed() orelse false))
-            {
-                self.tickets.removeTls13ForConnection(
-                    key.host,
-                    key.port,
-                    &connection,
-                );
-            }
+            try self.tickets.rememberSetupBefore(key.host, key.port, &connection, tls13_ticket != null, deadline);
         }
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         const owned_key = key.*;
         key_owned.* = false;
         reserved = false;
