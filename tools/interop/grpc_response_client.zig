@@ -2,7 +2,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false, authority: ?[]const u8 = null, host: ?[]const u8 = null, request_payload: []const u8 = "", unary_only: bool = false, status_message: ?[]const u8 = null };
+const Probe = struct { path: []const u8, status: u8, messages: usize, payload: []const u8, details: bool = false, authority: ?[]const u8 = null, host: ?[]const u8 = null, request_payload: []const u8 = "", unary_only: bool = false, status_message: ?[]const u8 = null, shared_probe: bool = false, read_delay_ms: u32 = 0 };
 const Collector = struct {
     probe: Probe,
     count: usize = 0,
@@ -81,5 +81,52 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    std.debug.print("netz gRPC response policy complete io=zio-std-io cases={d} shapes=unary+streaming+duplex reuse=true\n", .{probes.value.len});
+    var channel = try netz.grpc.SharedChannel.init(allocator, io, .{
+        .cleartext_ip = .{
+            .address = .{ .ip4 = .loopback(port) },
+            .limits = .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        },
+    }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var shared_count: usize = 0;
+    for (probes.value) |probe| {
+        if (!probe.shared_probe) continue;
+        var storage: [1]netz.http2.Hpack.HeaderField = undefined;
+        const metadata = requestHeaders(probe, &storage);
+        var rpc = try sender.startDuplex(.{
+            .path = probe.path,
+            .authority = probe.authority,
+            .metadata = metadata,
+            .timeout = .{ .value = 500, .unit = .millisecond },
+            .wait_for_ready = true,
+        });
+        defer rpc.deinit();
+        var writer = rpc.writer();
+        defer writer.deinit();
+        var reader = rpc.reader();
+        defer reader.deinit();
+        try writer.writeFinalMessage(probe.request_payload);
+        try std.Io.sleep(io, .fromMilliseconds(probe.read_delay_ms), .awake);
+        try std.testing.expect(rpc.call.deadline.?.durationFromNow(io).raw.nanoseconds <= 0);
+        var collector: Collector = .{ .probe = probe };
+        while (true) {
+            var event = try reader.next();
+            defer event.deinit(allocator);
+            switch (event) {
+                .message => |message| {
+                    try std.testing.expectEqualStrings(probe.payload, message.payload);
+                    collector.count += 1;
+                },
+                .terminal => |response| {
+                    try check(response, probe, collector.count);
+                    break;
+                },
+                else => {},
+            }
+        }
+        shared_count += 1;
+    }
+    std.debug.print("netz gRPC response policy complete io=zio-std-io cases={d} shared={d} shapes=unary+streaming+duplex+shared reuse=true\n", .{ probes.value.len, shared_count });
 }

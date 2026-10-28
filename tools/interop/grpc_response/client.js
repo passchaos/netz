@@ -32,7 +32,7 @@ const probes = [
   // RESOURCE_EXHAUSTED when it interprets this HTML entity as a message size.
   // Record those differences explicitly; netz applies the documented UNKNOWN
   // fallback and does not deliver non-gRPC entities to application callbacks.
-  {name:'data-fin-no-status', status:2, referenceStatus:13, messages:1, payload:'before', headers:{'content-type':'application/grpc'}, body:frame('before')},
+  {name:'data-fin-no-status', status:2, referenceStatus:13, messages:1, payload:'before', headers:{'content-type':'application/grpc'}, body:frame('before'), shared:true, readDelayMs:550},
   {name:'html-entity-no-status', status:2, referenceStatus:8, headers:{'content-type':'text/html'}, body:Buffer.from('<html>proxy error</html>')},
   {name:'proxy-grpc-type-error-entity', http:503, status:14, headers:{'content-type':'application/grpc'}, body:Buffer.from('proxy error')},
   ...[
@@ -41,7 +41,7 @@ const probes = [
     ['normalized-ipv6-host','[2001:DB8::1]','[2001:db8:0:0:0:0:0:1]:80'],
   ].map(([name,requestAuthority,requestHost]) => ({name,requestAuthority,requestHost,status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}})),
   ...[false,true].map(earlyReset => ({name:earlyReset?'early-upload-no-error-reset':'early-upload-error',status:7,headers:{'content-type':'application/grpc'},body:Buffer.alloc(0),trailers:{'grpc-status':'7','grpc-message':'early%20denial','x-early':'yes'},requestPayload:'x'.repeat(32*1024),statusMessage:'early denial',early:true,earlyReset,unaryOnly:true})),
-  {name:'success-after-early-upload',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'}},
+  {name:'success-after-early-upload',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0'},shared:true,readDelayMs:550},
   {name:'unprocessed-refusal-once',status:0,messages:1,payload:'reply',headers:{'content-type':'application/grpc'},body:frame('reply'),trailers:{'grpc-status':'0','x-early':'yes'},unaryOnly:true,refusedOnce:true},
 ];
 
@@ -74,7 +74,7 @@ function native(executable, port, manifest) {
       if (code !== 0) reject(new Error(`native response-policy exit ${code}: ${output}`));
       else {
         try {
-          assert.match(output, new RegExp(`io=zio-std-io cases=${probes.length} shapes=unary\\+streaming\\+duplex reuse=true`));
+          assert.ok(output.includes('io=zio-std-io cases='+probes.length+' shared='+probes.filter(probe=>probe.shared).length+' shapes=unary+streaming+duplex+shared reuse=true'));
           process.stdout.write(output);
           resolve();
         } catch (error) {reject(error);}
@@ -181,16 +181,16 @@ async function main() {
     try { for (let i=0; i<probes.length; i++) observed.push(await reference(client, probes[i], i, relay)); }
     finally {client.close();}
     const manifest = path.join(work, 'cases.json');
-    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null, request_payload:probe.requestPayload ?? '', unary_only:probe.unaryOnly ?? false, status_message:probe.statusMessage ?? null}))));
+    fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null, request_payload:probe.requestPayload ?? '', unary_only:probe.unaryOnly ?? false, status_message:probe.statusMessage ?? null,shared_probe:probe.shared ?? false,read_delay_ms:probe.readDelayMs ?? 0}))));
     try {await native(process.argv[2], port, manifest);}
     catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}; frames=${JSON.stringify([...relay.captures.values()].map(capture=>({client:capture.clientFrames,server:capture.serverFrames})))}`);}
     if (failure) throw failure;
-    assert.deepEqual(counts, probes.map(probe=>probe.refusedOnce?4:probe.unaryOnly?2:4));
-    assert.equal(sessions.size, 2, 'each client must reuse its one HTTP/2 connection');
+    assert.deepEqual(counts, probes.map(probe=>(probe.refusedOnce?4:probe.unaryOnly?2:4)+(probe.shared?1:0)));
+    assert.equal(sessions.size, 3, 'official, direct-native and shared-native clients must each reuse one HTTP/2 connection');
     const noErrorAfterEndStream = relay.assertResets(2);
     assert.equal(transparentRetries,2);
     const differences = probes.flatMap((probe,i) => observed[i] === probe.status ? [] : [{case:probe.name, netz:probe.status, grpcJs:observed[i]}]);
-    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3),0), transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
+    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3)+(probe.shared?1:0),0), sharedRpcs:probes.filter(probe=>probe.shared).length, sharedReadAfterRpcDeadline:true, transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
   } finally {
     if (relay) await relay.close();
     for (const session of sessions) session.destroy();

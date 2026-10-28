@@ -1,0 +1,54 @@
+{
+  "baseline_revision": "8e7f6d754e686ee830e604a066ca0e84efa5f961",
+  "change": "Publish parsed terminal with final DATA before the next shared-owner deadline check",
+  "regression_before": {
+    "tests_total": 128,
+    "passed": 127,
+    "failed": 1,
+    "observed": "expected null, found error.Timeout",
+    "point": "shared call failure after parsed final DATA and an expired RPC deadline"
+  },
+  "verification_after": {
+    "focused_tests": 160,
+    "single_slot_filter_tests": 129,
+    "io": "std-Io-Threaded for local TCP regressions; zio-std-io for independent client",
+    "rpc_deadline_ms": 500,
+    "reader_pause_ms": 550,
+    "peer_max_concurrent_streams": 1,
+    "truncated_message_error": "BufferTooShort",
+    "connection_reuse": true
+  },
+  "independent_peer": {
+    "reference": "grpc-js-1.14.0",
+    "cases": 26,
+    "nativeRpcs": 74,
+    "sharedRpcs": 2,
+    "sharedReadAfterRpcDeadline": true,
+    "transparentRetries": 2,
+    "maxConcurrentStreams": 1,
+    "noErrorAfterEndStream": 2,
+    "differences": [
+      {
+        "case": "data-fin-no-status",
+        "netz": 2,
+        "grpcJs": 13
+      },
+      {
+        "case": "html-entity-no-status",
+        "netz": 2,
+        "grpcJs": 8
+      }
+    ]
+  },
+  "build_mode": "ReleaseFast",
+  "native_client_sha256": "34c1b2cabe1ac0c56dffcba91e48992d5089ec5c7072ba15989cf039af3f8cc3",
+  "source_sha256": {
+    "src/grpc/channel/shared/stream/owner.zig": "5e3035c228dba5906b40e5d642fcac0fece035ed308c978977d24abd5342e1f5",
+    "src/grpc/channel/shared/stream/tests.zig": "e65f53f1e0fac3c5ff1e7fd55ea732abb40b1032a7079d51fb7431745e726eab",
+    "src/grpc/channel/shared/stream/tests/terminal_deadline.zig": "3a80967a2143385ce81b10cfabbd0f4995ae272a7bbacbbda357b60aa995c5e3",
+    "tools/interop/grpc_response_client.zig": "28b122c3f2d510cea2f79c7d53effa0809f6e9b95ced4253ca2e85280cd3e759",
+    "tools/interop/grpc_response/client.js": "af63e48830646e6d97ca98afeacfae1cd36412e081e7cb5b82e1798a14b9c04b",
+    "tools/interop/grpc_response/relay.js": "e44fd6fdcb26c8543717713603914782d41e07c6adb243af12841eef94a8e384",
+    "tools/interop/grpc_response/package-lock.json": "364ef4919b8561763a3a806674eb8bb564f34083a6e486d9583b84c8491f9b21"
+  }
+}

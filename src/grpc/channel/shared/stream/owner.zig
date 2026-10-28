@@ -45,6 +45,17 @@ pub fn Owner(comptime State: type) type {
             state.unlock();
             call.release();
         }
+        fn complete(worker: anytype, index: usize, response: duplex.Response) void {
+            const state = worker.parent;
+            const call = worker.streams.items[index].call;
+            worker.streams.items[index].stream.deinit();
+            _ = worker.streams.swapRemove(index);
+            state.lock();
+            call.terminal = response;
+            call.retireLocked(null);
+            state.unlock();
+            call.release();
+        }
         fn cloneHead(allocator: std.mem.Allocator, head: duplex.ResponseHead) State.Failure!http2.runtime.DuplexResponseHead {
             const fields = try allocator.alloc(http2.Hpack.HeaderField, head.headers.len);
             errdefer allocator.free(fields);
@@ -139,18 +150,26 @@ pub fn Owner(comptime State: type) type {
                                 continue;
                             };
                             state.unlock();
+                            if (active.stream.pending_terminal != null) {
+                                // Final DATA already committed its terminal
+                                // status. Publish it with the copied bytes
+                                // before another owner turn can expire the RPC
+                                // or attempt credit output on the closed stream.
+                                const terminal = active.stream.pollRawResponseEventBatchedWithDeadline(deadline) catch |err| {
+                                    event.deinit(state.allocator);
+                                    fail(worker, index, err);
+                                    progress = true;
+                                    continue;
+                                };
+                                std.debug.assert(terminal != null and terminal.? == .terminal);
+                                event.deinit(state.allocator);
+                                complete(worker, index, terminal.?.terminal);
+                                progress = true;
+                                continue;
+                            }
                         },
                         .terminal => |response| {
-                            state.lock();
-                            call.terminal = response;
-                            call.changed.set(state.io);
-                            state.unlock();
-                            active.stream.deinit();
-                            _ = worker.streams.swapRemove(index);
-                            state.lock();
-                            call.retireLocked(null);
-                            state.unlock();
-                            call.release();
+                            complete(worker, index, response);
                             progress = true;
                             continue;
                         },

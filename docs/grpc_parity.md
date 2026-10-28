@@ -828,11 +828,12 @@ zig build interop-grpc-response -Doptimize=ReleaseFast
 
 This separate process gate uses a raw Node HTTP/2 peer with one advertised
 concurrent stream slot. A pinned official `@grpc/grpc-js` 1.14.0 client and the
-zio-backed netz unary, sequential and duplex clients each reuse one channel
-across 23 shared cases, with three additional unary cases. The peer
+zio-backed netz unary, sequential and duplex client reuse their persistent
+channels across 23 common cases, with three additional unary cases. A second
+native channel exercises two shared RPCs with deferred consumption. The peer
 validates complete request envelopes or exact rejected-upload prefixes and
-counts all 100 physical attempts (26 reference RPCs and 72 native RPCs,
-including one transparent refusal retry on each client). It covers
+counts all 102 physical attempts: 26 reference RPCs, 74 native RPCs and one
+additional transparent refusal attempt on each original client. It covers
 every HTTP mapping, explicit status precedence,
 missing/trailing metadata, rich status, messages before terminal failure, and
 scheme-normalized Host/:authority pairs with default ports, percent-encoded
@@ -861,7 +862,7 @@ flow metadata stay out of the HTTP origin. TLS constructors retain their
 hostname or explicitly configured authority and certificate/SNI identity.
 The same independent response-policy gate now omits netz's per-call authority
 and requires the raw Node peer to observe the exact connected address/port in
-the 63 native RPCs that use the constructor default, including correct `http`
+the 65 native RPCs that use the constructor default, including correct `http`
 scheme and connection reuse. Nine further native calls supply equivalent Host
 and authority fields and must complete successfully on that same connection.
 
@@ -1339,6 +1340,17 @@ consumed. Decoder/protocol or allocation failure preserves its original error
 and cancels the transport. Known terminal socket-close errors during credit
 output restore local accounting so complete buffered DATA/trailers can still
 be delivered; uncertain partial output retires connection writes/reuse.
+
+The owner now also commits a terminal staged beside final raw DATA in the
+same turn as the encoded bytes enter the ring. The former next-turn deadline
+check could replace that already parsed result with Timeout. One completion
+helper releases the transport and publishes terminal state plus retirement
+together; message decoding and truncated-envelope errors remain consumer-owned.
+Real TCP regressions hold that exact turn boundary through deadline expiry and
+then reuse the only peer stream slot. The independent response-policy gate now
+additionally exercises a shared native connection for DATA FIN/missing-status
+and subsequent normal completion, consuming both after their original deadline.
+See [the terminal deadline evidence](grpc_shared_terminal_deadline.md).
 
 HTTP fallback bodies with a non-gRPC media type are discarded under the RPC
 deadline and return deferred stream credit as their bytes are consumed. A
