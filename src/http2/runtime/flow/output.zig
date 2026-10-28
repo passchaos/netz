@@ -37,11 +37,7 @@ pub fn writeBurst(
 pub fn submit(allocator: std.mem.Allocator, transport: anytype, parts: []const []const u8, batch: *std.ArrayList(u8), deadline: ?std.Io.Clock.Timestamp, submitted: *bool) !void {
     submitted.* = false;
     if (deadline) |absolute| {
-        batch.clearRetainingCapacity();
-        for (parts) |part| try batch.appendSlice(allocator, part);
-        var committed: usize = 0;
-        submitted.* = true;
-        try transport.writeAllWithDeadline(batch.items, &committed, absolute);
+        try transport.writeAllSlicesWithDeadline(allocator, parts, batch, absolute, submitted);
     } else {
         submitted.* = true;
         if (parts.len == 2) try transport.writeAllParts(parts[0], parts[1]) else try transport.writeAllSlices(parts);

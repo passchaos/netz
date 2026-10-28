@@ -189,3 +189,104 @@ test "stream native timed writer reports an abortive TCP reset without losing so
     var task = try io.concurrent(Probe.run, .{ io, pair.client });
     try task.await(io);
 }
+
+test "stream native timed scatter writer preserves all slices across vector limits" {
+    var backend = try Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    var listener = try std.Io.net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{});
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    const Probe = struct {
+        fn run(task_io: std.Io, sender: std.Io.net.Stream, receiver: std.Io.net.Stream) !void {
+            try std.testing.expect(native.available(task_io));
+            var bytes: [37]u8 = undefined;
+            var parts: [39][]const u8 = undefined;
+            parts[0] = "";
+            parts[38] = "";
+            for (&bytes, 0..) |*byte, index| {
+                byte.* = @intCast(index);
+                parts[index + 1] = bytes[index..][0..1];
+            }
+            const deadline = std.Io.Clock.Timestamp.fromNow(task_io, .{ .clock = .awake, .raw = .fromSeconds(1) });
+            var committed: usize = 99;
+            try stream_io.writeAllSlicesTrackedWithDeadline(task_io, sender, &parts, &committed, deadline);
+            try std.testing.expectEqual(bytes.len, committed);
+            var received: [37]u8 = undefined;
+            var count: usize = 0;
+            while (count != received.len) count += try stream_io.readSomeWithDeadline(task_io, receiver, received[count..], deadline);
+            try std.testing.expectEqualSlices(u8, &bytes, &received);
+        }
+    };
+    var task = try io.concurrent(Probe.run, .{ io, client, peer });
+    try task.await(io);
+}
+
+test "stream native timed scatter writer timeout joins borrowed slices and preserves its exact prefix" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var backend = try Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    const pair = try Pair.init(io);
+    defer pair.deinit(io);
+    const payload = try allocator.alloc(u8, 4 * 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 0xa5);
+    const Probe = struct {
+        fn run(task_io: std.Io, sockets: Pair, bytes: []u8) !void {
+            try std.testing.expect(native.available(task_io));
+            const parts: []const []const u8 = &.{ "", bytes[0..3], bytes[3..700000], "", bytes[700000..2100000], bytes[2100000..], "" };
+            var committed: usize = 99;
+            try std.testing.expectError(error.Timeout, stream_io.writeAllSlicesTrackedWithDeadline(task_io, sockets.client, parts, &committed, .fromNow(task_io, .{ .clock = .awake, .raw = .fromMilliseconds(20) })));
+            try std.testing.expect(committed > 0 and committed < bytes.len);
+            @memset(bytes, 0xee);
+            try sockets.drainAndReuse(task_io, committed);
+        }
+    };
+    var task = try io.concurrent(Probe.run, .{ io, pair, payload });
+    try task.await(io);
+}
+
+test "stream native timed scatter writer cancellation joins all borrowed slices" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var backend = try Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    const pair = try Pair.init(io);
+    defer pair.deinit(io);
+    const payload = try allocator.alloc(u8, 4 * 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 0xa5);
+    const Probe = struct {
+        started: std.Io.Event = .unset,
+        committed: usize = 0,
+        fn run(self: *@This(), task_io: std.Io, sockets: Pair, bytes: []u8) !void {
+            const deadline = std.Io.Clock.Timestamp.fromNow(task_io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+            self.committed = try stream_io.writeSomeWithDeadline(task_io, sockets.client, bytes[0..4096], deadline);
+            self.started.set(task_io);
+            const tail = bytes[self.committed..];
+            const parts: []const []const u8 = &.{ tail[0..700000], "", tail[700000..2100000], tail[2100000..] };
+            var later: usize = 0;
+            defer self.committed += later;
+            try stream_io.writeAllSlicesTrackedWithDeadline(task_io, sockets.client, parts, &later, deadline);
+        }
+    };
+    var probe: Probe = .{};
+    var task = try io.concurrent(Probe.run, .{ &probe, io, pair, payload });
+    defer _ = task.cancel(io) catch {};
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) });
+    while (true) {
+        probe.started.waitTimeout(io, .{ .deadline = deadline }) catch |err| {
+            if (err == error.Timeout and deadline.durationFromNow(io).raw.nanoseconds > 0) continue;
+            return err;
+        };
+        break;
+    }
+    try std.testing.expectError(error.Canceled, task.cancel(io));
+    try std.testing.expect(probe.committed > 0 and probe.committed < payload.len);
+    @memset(payload, 0xee);
+    try pair.drainAndReuse(io, probe.committed);
+}

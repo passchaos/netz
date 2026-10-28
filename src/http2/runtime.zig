@@ -433,6 +433,24 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    pub fn writeAllSlicesWithDeadline(
+        self: RuntimeTransport,
+        allocator: std.mem.Allocator,
+        parts: []const []const u8,
+        batch: *std.ArrayList(u8),
+        deadline: std.Io.Clock.Timestamp,
+        submitted: *bool,
+    ) Error!void {
+        return @import("runtime/transport/output.zig").writeAllSlicesWithDeadline(
+            allocator,
+            self,
+            parts,
+            batch,
+            deadline,
+            submitted,
+        );
+    }
+
     pub fn writeAllSlices(
         self: RuntimeTransport,
         parts: []const []const u8,

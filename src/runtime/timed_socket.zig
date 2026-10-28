@@ -30,10 +30,22 @@ pub fn tryWrite(io: std.Io, stream: std.Io.net.Stream, bytes: []const u8, deadli
     if (!available(io)) return null;
     _ = deadline_policy.usableAwake(io, deadline) catch |err| return @as(Error!usize, err);
     var storage: [1]zio.os.iovec_const = undefined;
-    const Handle = zio.ev.Backend.NetHandle;
-    const handle: Handle = if (@typeInfo(Handle) == .pointer) @ptrCast(stream.socket.handle) else stream.socket.handle;
-    const result = zio.net.writeBuf(handle, .fromSlice(bytes, &storage), .fromStd(.{ .deadline = deadline })) catch |err| return @as(Error!usize, mapError(err));
+    const result = zio.net.writeBuf(netHandle(stream), .fromSlice(bytes, &storage), .fromStd(.{ .deadline = deadline })) catch |err| return @as(Error!usize, mapError(err));
     return @as(Error!usize, if (result == 0) error.SocketUnconnected else result);
+}
+
+/// Match std.Io's header/data contract; the last data entry is an empty
+/// splat pattern. The bounded caller offers at most sixteen real vectors.
+pub fn tryWriteParts(io: std.Io, stream: std.Io.net.Stream, header: []const u8, data: []const []const u8, deadline: std.Io.Clock.Timestamp) ?Error!usize {
+    if (!available(io)) return null;
+    _ = deadline_policy.usableAwake(io, deadline) catch |err| return @as(Error!usize, err);
+    const result = zio.net.writeSplatHeader(netHandle(stream), header, data, 0, .fromStd(.{ .deadline = deadline })) catch |err| return @as(Error!usize, mapError(err));
+    return @as(Error!usize, if (result == 0) error.SocketUnconnected else result);
+}
+
+fn netHandle(stream: std.Io.net.Stream) zio.ev.Backend.NetHandle {
+    const Handle = zio.ev.Backend.NetHandle;
+    return if (@typeInfo(Handle) == .pointer) @ptrCast(stream.socket.handle) else stream.socket.handle;
 }
 
 fn mapError(err: anyerror) Error {
