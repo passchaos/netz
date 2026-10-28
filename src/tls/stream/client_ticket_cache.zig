@@ -132,10 +132,17 @@ fn TicketCache(comptime Ops: type) type {
         }
 
         pub fn clear(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            for (self.entries.items) |*entry| entry.deinit(self.allocator);
-            self.entries.clearRetainingCapacity();
+            self.clearBefore(null) catch unreachable;
+        }
+
+        pub fn clearBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+            defer guard.unlock();
+            while (self.entries.items.len != 0) {
+                if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+                var entry = self.entries.pop().?;
+                entry.deinit(self.allocator);
+            }
         }
 
         pub fn count(self: *Self) usize {

@@ -779,6 +779,20 @@ pub const Stream = struct {
         self.close_notify_sent = true;
     }
 
+    pub fn sendCloseNotifyWithDeadline(self: *Stream, io: std.Io, stream: net.Stream, deadline: std.Io.Clock.Timestamp) Error!void {
+        try @import("../../internal/timed_mutex.zig").lock(&self.write_mutex, io, deadline);
+        defer self.write_mutex.unlock(io);
+        if (self.close_notify_sent) return;
+        if (self.failed) return error.ConnectionClosed;
+        if (self.pending_write_len != 0) return error.WriteInProgress;
+        errdefer self.failed = true;
+        try key_update_write.respondUntil(self, io, stream, deadline, .{ .begin = beginPendingWrite, .finish = finishPendingWriteWithDeadline });
+        try self.beginPendingWrite(tls_record.content_type_alert, &.{ 1, 0 });
+        var committed: usize = 0;
+        try self.finishPendingWriteWithDeadline(io, stream, &committed, deadline);
+        self.close_notify_sent = true;
+    }
+
     /// Send a TLS 1.3 KeyUpdate under the current write epoch, then rotate the
     /// write secret and reset its record sequence number as required by RFC
     /// 8446 section 7.2. When requested, the peer responds before its next

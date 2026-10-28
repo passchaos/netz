@@ -65,6 +65,11 @@ pub fn requestUriBefore(
     crossed_origin: bool,
     forward_client_identity: bool,
 ) !client.OwnedResponse {
+    if (pool.http3 != null) {
+        var guard = try @import("../../internal/mutex_guard.zig").Guard.initBefore(&pool.mutex, pool.io, deadline);
+        defer guard.unlock();
+        if (pool.closed) return error.PoolClosed;
+    }
     const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
     const target = try uriTargetAlloc(pool.allocator, uri);
     defer pool.allocator.free(target);

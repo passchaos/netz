@@ -1,6 +1,22 @@
 const std = @import("std");
 const Queue = @import("../pool_returns.zig").Queue(usize);
 
+test "connection return queue deadline close preserves published storage until publisher retires" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var queue: Queue = .{};
+    var node = Queue.Node{ .allocator = std.testing.allocator, .value = 1 };
+    try std.testing.expect(queue.publish(&node, io));
+    queue.publishers.store(1, .release);
+    try std.testing.expectError(error.Timeout, queue.closeBefore(io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(10) })));
+    try std.testing.expect(queue.head.load(.acquire) == &node);
+    try std.testing.expect(!queue.publish(&node, io));
+    _ = queue.publishers.fetchSub(1, .release);
+    try std.testing.expect((try queue.closeBefore(io, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }))) == &node);
+    try std.testing.expect(queue.close(io) == null);
+}
+
 test "connection return queue restores unfinished collectors before later publications and close" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

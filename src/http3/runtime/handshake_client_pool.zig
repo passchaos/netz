@@ -656,38 +656,47 @@ pub fn Pool(comptime Runtime: type) type {
         /// Reject new acquisitions and close every idle client. Outstanding
         /// leases remain valid but are discarded when returned.
         pub fn close(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
+            self.closeBefore(null) catch unreachable;
+        }
+
+        pub fn closeWithTimeout(self: *Self, timeout: std.Io.Duration) (std.Io.Cancelable || error{Timeout})!void {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.closeWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+        }
+
+        pub fn closeWithDeadline(self: *Self, deadline: std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.closeBefore(deadline);
+        }
+
+        pub fn closeBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            try timed_mutex.lock(&self.mutex, self.io, deadline);
+            defer self.mutex.unlock(self.io);
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             _ = self.retired_leases.drain(&self.leased);
-            var removed: usize = 0;
-            if (!self.closed) {
-                self.closed = true;
-                var returned = self.returns.close(self.io);
-                while (returned) |node| {
-                    returned = node.next;
-                    var client = node.value.client_value;
-                    var key = node.value.origin_key;
-                    client.deinit();
-                    key.deinit();
-                    node.destroy();
-                    self.connections -= 1;
-                    self.leased -= 1;
-                    removed += 1;
-                }
-                const idle_count = self.idle.idleCount();
-                self.idle.deinit();
-                self.idle = IdlePool.init(
-                    self.allocator,
-                    self.options.idle,
-                    dropClient,
-                );
-                std.debug.assert(self.connections >= idle_count);
-                self.connections -= idle_count;
-                removed += idle_count;
-            }
+            self.closed = true;
             self.capacity_waiters.notifyAll(self.io);
-            self.mutex.unlock(self.io);
-            self.releaseShared(removed);
+            var current = try self.returns.closeBefore(self.io, deadline);
+            errdefer self.returns.restore(current);
+            while (current) |node| {
+                if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+                current = node.next;
+                var client = node.value.client_value;
+                var key = node.value.origin_key;
+                client.deinit();
+                key.deinit();
+                node.destroy();
+                self.connections -= 1;
+                self.leased -= 1;
+                self.releaseShared(1);
+            }
+            while (self.idle.idleCount() != 0) {
+                if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+                var idle = self.idle.takeOldest().?;
+                idle.deinit();
+                self.connections -= 1;
+                self.releaseShared(1);
+            }
         }
 
         pub fn acquireUri(
@@ -839,11 +848,6 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key.deinit();
                 return err;
             };
-            self.collectReturnsBeforeLocked(deadline) catch |err| {
-                self.mutex.unlock(self.io);
-                origin_key.deinit();
-                return err;
-            };
             self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
             _ = self.retired_leases.drain(&self.leased);
             if (self.closed) {
@@ -854,6 +858,12 @@ pub fn Pool(comptime Runtime: type) type {
                 key.deinit();
                 return error.PoolClosed;
             }
+            self.collectReturnsBeforeLocked(deadline) catch |err| {
+                self.mutex.unlock(self.io);
+                origin_key.deinit();
+                return err;
+            };
+
             if (!self.capacity_waiters.mayAttempt(waiter, self.io)) {
                 self.cancelSharedWaiter(shared_waiter);
                 if (waiter) |queued| {

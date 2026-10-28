@@ -38,7 +38,7 @@ fn notify(connection: anytype, before: ?std.Io.Clock.Timestamp) void {
     var storage: [2]Wake = undefined;
     var select: std.Io.Select(Wake) = .init(connection.io, &storage);
     defer select.cancelDiscard();
-    select.concurrent(.output, @TypeOf(connection.*).sendCloseNotify, .{connection}) catch return;
+    select.concurrent(.output, @TypeOf(connection.*).sendCloseNotifyWithDeadline, .{ connection, absolute }) catch return;
     select.concurrent(.timeout, wait, .{ connection.io, absolute }) catch return;
     _ = select.await() catch return;
 }

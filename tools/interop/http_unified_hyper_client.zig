@@ -92,8 +92,11 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidPoolState;
     }
+    try pool.closeWithTimeout(.fromSeconds(1));
+    try pool.closeWithTimeout(.fromSeconds(1));
+    if (pool.connectionCount() != 0 or pool.idleCount() != 0) return error.IncompletePoolClose;
     std.debug.print(
-        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
 }

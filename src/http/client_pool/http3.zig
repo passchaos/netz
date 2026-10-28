@@ -1,6 +1,8 @@
 //! Optional HTTP/3 backend owned by the unified HTTP pool.
 
 const std = @import("std");
+const Guard = @import("../../internal/mutex_guard.zig").Guard;
+const deadline_policy = @import("../../internal/deadline.zig");
 const alt_svc_cache = @import("../alt_svc_cache.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
@@ -87,17 +89,20 @@ pub const State = struct {
     shared_dispatcher: ?runtime.SharedHandshakeClientPoolRequestDispatcher,
     shared_driver: ?DriverState,
     shared_init_mutex: std.Io.Mutex = .init,
+    close_mutex: std.Io.Mutex = .init,
     cache: alt_svc_cache.Cache,
     settings_mutex: std.Io.Mutex = .init,
     settings: remembered_settings.Cache,
-    closed: bool = false,
+    closed: std.atomic.Value(bool) = .init(false),
 
     const DriverState = struct {
         future: std.Io.Future(void) = undefined,
+        finished: std.Io.Event = .unset,
     };
 
     const Driver = struct {
         fn run(self: *State) void {
+            defer self.driver.finished.set(self.io);
             self.dispatcher.run() catch {
                 self.dispatcher.close();
             };
@@ -106,6 +111,7 @@ pub const State = struct {
 
     const SharedDriver = struct {
         fn run(self: *State) void {
+            defer if (self.shared_driver) |*driver| driver.finished.set(self.io);
             const dispatcher = if (self.shared_dispatcher) |*value|
                 value
             else
@@ -141,7 +147,8 @@ pub const State = struct {
         self.options = options;
         self.settings_mutex = .init;
         self.shared_init_mutex = .init;
-        self.closed = false;
+        self.closed = .init(false);
+        self.close_mutex = .init;
         self.shared_connection_budget = shared_connection_budget;
         self.shared_pool = null;
         self.shared_dispatcher = null;
@@ -243,7 +250,7 @@ pub const State = struct {
         self.shared_init_mutex.lockUncancelable(self.io);
         defer self.shared_init_mutex.unlock(self.io);
         if (self.shared_pool != null) return;
-        if (self.closed) return error.PoolClosed;
+        if (self.closed.load(.acquire)) return error.PoolClosed;
         const proxy = self.options.socks5_proxy.?;
         var association = if (deadline) |absolute|
             try proxy_socks5.associateUdpHostWithDeadline(
@@ -348,19 +355,48 @@ pub const State = struct {
     }
 
     pub fn close(self: *State) void {
-        self.shared_init_mutex.lockUncancelable(self.io);
-        defer self.shared_init_mutex.unlock(self.io);
-        if (self.shared_dispatcher) |*dispatcher| dispatcher.close();
-        self.dispatcher.close();
-        if (self.shared_pool) |*pool| pool.close();
-        self.pool.close();
-        if (self.shared_driver) |*driver| driver.future.await(self.io);
-        self.driver.future.await(self.io);
-        self.cache.clear();
-        self.settings_mutex.lockUncancelable(self.io);
-        self.closed = true;
+        self.closeBefore(null) catch unreachable;
+    }
+
+    pub fn closeBefore(self: *State, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+        var closer = try Guard.initBefore(&self.close_mutex, self.io, deadline);
+        defer closer.unlock();
+        var initializer = try Guard.initBefore(&self.shared_init_mutex, self.io, deadline);
+        defer initializer.unlock();
+        self.closed.store(true, .release);
+        if (self.shared_dispatcher) |*dispatcher| try dispatcher.closeBefore(deadline);
+        try self.dispatcher.closeBefore(deadline);
+        // A producer that was already initializing can now observe CLOSED;
+        // driver completion must not wait while this ownership lock is held.
+        initializer.unlock();
+        if (self.shared_driver) |*driver| try waitFinished(&driver.finished, self.io, deadline);
+        try waitFinished(&self.driver.finished, self.io, deadline);
+        if (deadline == null) {
+            if (self.shared_driver) |*driver| driver.future.await(self.io);
+            self.driver.future.await(self.io);
+        }
+        // The single endpoint driver has stopped before idle routes are freed.
+        if (self.shared_pool) |*pool| try pool.closeBefore(deadline);
+        try self.pool.closeBefore(deadline);
+        try self.cache.clearBefore(deadline);
+        var settings = try Guard.initBefore(&self.settings_mutex, self.io, deadline);
+        defer settings.unlock();
         self.settings.clear();
-        self.settings_mutex.unlock(self.io);
+    }
+
+    fn waitFinished(event: *std.Io.Event, io: std.Io, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+        if (deadline) |until| {
+            while (true) {
+                event.waitTimeout(io, .{ .deadline = until }) catch |err| {
+                    if (err == error.Timeout) {
+                        _ = try deadline_policy.usableAwake(io, until);
+                        continue;
+                    }
+                    return err;
+                };
+                return;
+            }
+        } else event.waitUncancelable(io);
     }
 
     pub fn evictOldestIdle(self: *State) bool {
@@ -385,7 +421,7 @@ pub const State = struct {
     ) ?http3.Settings {
         self.settings_mutex.lockUncancelable(self.io);
         defer self.settings_mutex.unlock(self.io);
-        if (self.closed) return null;
+        if (self.closed.load(.acquire)) return null;
         return self.settings.lookup(origin);
     }
 
@@ -405,7 +441,7 @@ pub const State = struct {
         const self: *State = @ptrCast(@alignCast(context));
         self.settings_mutex.lockUncancelable(self.io);
         defer self.settings_mutex.unlock(self.io);
-        if (self.closed) return;
+        if (self.closed.load(.acquire)) return;
         self.settings.remember(origin, settings) catch {};
     }
 
@@ -421,6 +457,7 @@ pub const State = struct {
         forward_client_identity: bool,
         reclaimer: connection_budget.Reclaimer,
     ) !RequestResult {
+        if (self.closed.load(.acquire)) return error.PoolClosed;
         try self.ensureSocks5SharedEndpoint(deadline);
         const redirect: ?runtime.HandshakeClientPoolRedirectConnectContext =
             if (crossed_origin) .{

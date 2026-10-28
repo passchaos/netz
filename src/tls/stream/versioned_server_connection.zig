@@ -488,6 +488,12 @@ pub const Connection = struct {
         };
     }
 
+    pub fn sendCloseNotifyWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.sendCloseNotifyWithDeadline(self.io, self.stream, deadline),
+        };
+    }
+
     pub fn receivedCloseNotify(self: *const Connection) bool {
         return switch (self.records) {
             inline else => |*records| records.receivedCloseNotify(),

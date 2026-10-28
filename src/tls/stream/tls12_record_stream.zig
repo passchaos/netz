@@ -367,6 +367,20 @@ pub const Stream = struct {
         };
     }
 
+    pub fn sendCloseNotifyWithDeadline(self: *Stream, io: std.Io, stream: net.Stream, deadline: std.Io.Clock.Timestamp) Error!void {
+        try @import("../../internal/timed_mutex.zig").lock(&self.write_mutex, io, deadline);
+        defer self.write_mutex.unlock(io);
+        if (self.close_notify_sent) return;
+        try self.requireWritable();
+        if (self.pending_write_len != 0) return error.WriteInProgress;
+        errdefer self.failed = true;
+        const payload = vail.tls.alert.closeNotify().toBytes();
+        const len = try self.write_traffic.seal(21, &payload, &self.pending_write);
+        var offset: usize = 0;
+        try record_io.writeAllWithDeadline(io, stream, self.pending_write[0..len], &offset, deadline);
+        self.close_notify_sent = true;
+    }
+
     pub fn receivedCloseNotify(self: *const Stream) bool {
         return self.peer_close_notify_received;
     }

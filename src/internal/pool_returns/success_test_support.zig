@@ -14,6 +14,9 @@ const Probe = struct {
     unbounded_waits: usize = 0,
     canceled: bool = false,
     refuse_connect: bool = false,
+    block_close: bool = false,
+    publisher_pending: bool = false,
+    finish: std.Io.Event = .unset,
     outbound_calls: std.atomic.Value(usize) = .init(0),
     var active: ?*Probe = null;
 
@@ -26,6 +29,7 @@ const Probe = struct {
     fn write(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self = active.?;
         _ = self.outbound_calls.fetchAdd(1, .monotonic);
+        if (self.block_close) std.Io.sleep(self.base, .fromSeconds(1), .awake) catch return error.Canceled;
         return self.base.vtable.netWrite(userdata, socket, header, parts, splat);
     }
 
@@ -46,19 +50,19 @@ const Probe = struct {
 };
 
 pub fn exercise(comptime Pool: type, comptime h2: bool) !void {
-    return exerciseShape(Pool, h2, false, false, false, false, false, false);
+    return exerciseShape(Pool, h2, .{});
 }
 
 pub fn exerciseTls(comptime Pool: type, comptime h2: bool, comptime ticket_lock: bool) !void {
-    return exerciseShape(Pool, h2, true, ticket_lock, false, false, false, false);
+    return exerciseShape(Pool, h2, .{ .secure = true, .ticket_lock = ticket_lock });
 }
 
 pub fn exerciseClosed(comptime Pool: type, comptime h2: bool) !void {
-    return exerciseShape(Pool, h2, true, false, true, false, false, false);
+    return exerciseShape(Pool, h2, .{ .secure = true, .late_closed = true });
 }
 
 pub fn exerciseCollector(comptime Pool: type, comptime h2: bool, comptime canceled: bool) !void {
-    return exerciseShape(Pool, h2, true, true, false, true, canceled, false);
+    return exerciseShape(Pool, h2, .{ .secure = true, .ticket_lock = true, .collect = true, .canceled = canceled });
 }
 
 fn returnedTlsConnection(comptime Pool: type, pool: *Pool) *tls.ClientConnection {
@@ -74,10 +78,37 @@ fn returnedTlsConnection(comptime Pool: type, pool: *Pool) *tls.ClientConnection
 }
 
 pub fn exerciseCollectorRetirement(comptime Pool: type, comptime h2: bool) !void {
-    return exerciseShape(Pool, h2, true, false, false, false, false, true);
+    return exerciseShape(Pool, h2, .{ .secure = true, .retire = true });
 }
 
-fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime secure: bool, comptime ticket_lock: bool, comptime late_closed: bool, comptime collect: bool, comptime canceled: bool, comptime retire: bool) !void {
+const Shape = struct {
+    secure: bool = false,
+    ticket_lock: bool = false,
+    late_closed: bool = false,
+    collect: bool = false,
+    canceled: bool = false,
+    retire: bool = false,
+    bounded_close: bool = false,
+    closed_reject: bool = false,
+};
+
+pub fn exerciseBoundedClose(comptime Pool: type, comptime h2: bool) !void {
+    return exerciseShape(Pool, h2, .{ .secure = true, .bounded_close = true });
+}
+
+pub fn exerciseClosedRejection(comptime Pool: type, comptime h2: bool) !void {
+    return exerciseShape(Pool, h2, .{ .secure = true, .ticket_lock = true, .closed_reject = true });
+}
+
+fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime shape: Shape) !void {
+    const secure = shape.secure;
+    const ticket_lock = shape.ticket_lock;
+    const late_closed = shape.late_closed;
+    const collect = shape.collect;
+    const canceled = shape.canceled;
+    const retire = shape.retire;
+    const bounded_close = shape.bounded_close;
+    const closed_reject = shape.closed_reject;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -138,7 +169,7 @@ fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime secure: bool, 
         fn execute(self: *@This()) !void {
             var connection = try self.server.accept();
             defer connection.close();
-            for (0..if (late_closed or retire) 1 else 2) |index| {
+            for (0..if (late_closed or retire or bounded_close or closed_reject) 1 else 2) |index| {
                 var request = if (h2) try connection.readRequest() else try connection.readRequest(.{});
                 defer request.deinit(self.server.allocator);
                 self.requests += 1;
@@ -153,12 +184,19 @@ fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime secure: bool, 
                     try connection.writeResponse(.{ .body = "ready", .request_method = request.request.method });
                 }
             }
+            if (bounded_close or closed_reject) try self.probe.finish.wait(self.server.io);
         }
     };
     var worker = Worker{ .server = &server, .probe = &probe };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     var joined = false;
     defer if (!joined) {
+        probe.block_close = false;
+        probe.finish.set(base);
+        if (probe.publisher_pending) {
+            _ = pool.returns.publishers.fetchSub(1, .release);
+            probe.publisher_pending = false;
+        }
         if (probe.held.load(.acquire)) {
             _ = probe.mutex.tryLock();
             probe.mutex.unlock(base);
@@ -188,6 +226,18 @@ fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime secure: bool, 
     try std.testing.expect(!probe.armed.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
     try std.testing.expect(!probe.mutex.tryLock());
+    if (closed_reject) {
+        const node = pool.returns.head.load(.acquire).?;
+        pool.returns.publishers.store(1, .release);
+        probe.publisher_pending = true;
+        try std.testing.expectError(error.Timeout, pool.closeWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expect(pool.closed);
+        try std.testing.expectError(error.PoolClosed, pool.acquireUriWithTimeout(uri, .fromMilliseconds(10)));
+        try std.testing.expect(pool.returns.head.load(.acquire) == node);
+        try std.testing.expect(!probe.mutex.tryLock());
+        _ = pool.returns.publishers.fetchSub(1, .release);
+        probe.publisher_pending = false;
+    }
     if (collect) {
         // Retain the actual authenticated server ticket in connection state.
         // The collector must not take/lose it before acquiring the cache lock.
@@ -221,6 +271,33 @@ fn exerciseShape(comptime Pool: type, comptime h2: bool, comptime secure: bool, 
     }
     probe.mutex.unlock(base);
     probe.held.store(false, .release);
+    if (closed_reject) {
+        try pool.closeWithTimeout(.fromSeconds(1));
+        try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+        probe.finish.set(base);
+        thread.join();
+        joined = true;
+        if (worker.error_result) |err| return err;
+        return;
+    }
+    if (bounded_close) {
+        probe.block_close = true;
+        try std.testing.expectError(error.Timeout, pool.closeWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expect(pool.closed);
+        try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+        probe.block_close = false;
+        const writes = probe.outbound_calls.load(.acquire);
+        try pool.closeWithTimeout(.fromSeconds(1));
+        try pool.closeWithTimeout(.fromSeconds(1));
+        try std.testing.expectEqual(writes, probe.outbound_calls.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+        probe.finish.set(base);
+        thread.join();
+        joined = true;
+        if (worker.error_result) |err| return err;
+        try std.testing.expectEqual(@as(usize, 1), worker.requests);
+        return;
+    }
     if (late_closed) {
         try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
         try std.testing.expectEqual(@as(usize, 0), pool.idleCount());

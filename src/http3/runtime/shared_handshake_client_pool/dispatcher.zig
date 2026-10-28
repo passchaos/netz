@@ -10,6 +10,7 @@
 //! sole owner until it returns.
 
 const std = @import("std");
+const Guard = @import("../../../internal/mutex_guard.zig").Guard;
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
 const early_data = @import("../../../http/early_data.zig");
@@ -429,10 +430,19 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             closeState(self.state);
         }
 
+        pub fn closeBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            try closeStateBefore(self.state, deadline);
+        }
+
         fn closeState(state: *State) void {
-            state.mutex.lockUncancelable(state.io);
+            closeStateBefore(state, null) catch unreachable;
+        }
+
+        fn closeStateBefore(state: *State, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            var guard = try Guard.initBefore(&state.mutex, state.io, deadline);
+            defer guard.unlock();
             if (state.closed) {
-                state.mutex.unlock(state.io);
+                guard.unlock();
                 return;
             }
             state.closed = true;
@@ -451,7 +461,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 command = next;
             }
             state.activity.set(state.io);
-            state.mutex.unlock(state.io);
+            guard.unlock();
         }
 
         pub fn run(self: *Self) RequestError!void {

@@ -4011,5 +4011,64 @@ The quic-go SOCKS5 gate continues its three-origin shared-endpoint checks.
 Evidence is recorded in `docs/evidence/http_tls_setup_tickets/2026-10-29.json`.
 
 These checks establish the TLS setup cache budget and failure ownership.
-Explicit pool close and unbounded observation APIs retain their current
-synchronous contract and remain separate lifecycle work.
+The close contract below adds explicit deadlines to pool shutdown. Unbounded
+observation APIs retain their synchronous policy.
+
+## Resumable HTTP pool close
+
+HTTP/1.1, HTTP/2, owning HTTP/3 and the unified pool expose closeWithDeadline and
+closeWithTimeout. One awake-clock budget covers ownership admission, in-flight
+return publication, idle/returned transport shutdown and cache cleanup. A failed
+initial mutex admission leaves the pool open. After closing begins, new
+acquisitions are rejected and FIFO waiters wake even if later cleanup times out
+or is canceled. Unprocessed return nodes remain on the pool-owned deferred list,
+and unprocessed idle entries/caches remain owned by their module. Another close
+call or deinit completes the remainder; repeated completed close is harmless.
+The caller still returns outstanding leases and finishes acquisitions before
+destroying the pool object.
+Closed acquisitions check the stop state before invoking a return collector, so
+a retained TLS connection and an occupied cache lock cannot delay rejection.
+
+TLS 1.2/1.3 close_notify has deadline-aware writer admission and record output.
+TLS 1.3 first responds to an owed KeyUpdate under that same budget. Timeout or
+cancellation before writer admission leaves record state intact. Partial alert
+output consumes its nonce once, marks the record stream failed and prevents a
+retry from reusing its encryption epoch. Pool shutdown releases the terminal
+transport even when alert output could not finish, and mirrors that destruction
+in its local/shared accounting before returning the deadline error. Standard
+library HTTP/1 TLS flushes its already-encrypted alert through bounded socket
+output. No destructor retries unbounded TLS shutdown after a bounded attempt.
+The existing HTTP/2 terminal TLS cleanup helper also uses the new writer-bound
+method; its earlier outer timer could not interrupt an uncancelable writer lock.
+
+The unified H3 backend serializes close and initialization, marks its stop
+state atomically, stops both request dispatchers and waits for driver completion
+under the caller budget before freeing single-reader endpoint routes. It keeps
+the heap-owned driver events/futures on an interrupted close; deinit joins the
+futures before freeing the backend. The initialization mutex is released before
+driver completion waiting. Partial unified close also prevents the H3 request
+path from bypassing the pool's closed state. A connection attempt started before
+close rechecks ownership at final publication, before ticket saving, and cannot
+publish a new lease or repopulate shutdown ticket caches after close.
+
+The close tests cover pool, publisher, ticket and shared-budget contention with
+relative/absolute bounds and timeout/cancellation, followed by successful retry.
+H3 tests exercise six backend cleanup locks, owning-pool admission, retained
+publishers and checked-out leases, live initialized driver shutdown and repeated
+close. Socket-backed TLS tests check authenticated alert EOF, owed
+KeyUpdate ordering, writer-lock interruption and partial ciphertext nonce use.
+Four real TLS pool cases block alert output, then verify the connection is
+retired once and a close retry emits no further alert. Public package tests
+exercise the new close API through all three TCP pool exports.
+
+Two old-state regressions are independently reproduced from the previous
+revision: late connection publication after completed Pool.close, and an
+uncancelable writer wait in HTTP/2 terminal TLS cleanup. The current Hyper/rustls
+H1/H2 and quic-go SOCKS5 H3 process gates complete their earlier request/reuse
+checks, then invoke bounded close twice and verify zero live connections. The
+H3 gate uses one shared UDP association and two live QUIC routes before close.
+Evidence is recorded in `docs/evidence/http_pool_close/2026-10-29.json`.
+
+Plain close and observation calls keep their unbounded ownership-admission
+policy. The bounded close APIs provide an explicit interruption and retry
+contract; a timed-out close retains its pool object until cleanup is completed.

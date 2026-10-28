@@ -464,7 +464,7 @@ def main() -> None:
             "h3_requests=4 udp_associations=1 active_quic_connections=2 "
             "total_quic_connections=4 domain_route_limit=2 "
             "route_churn=true remote_dns=true shared_endpoint=true "
-            "tls_verified=true client_io=zio-std-io"
+            "tls_verified=true close_deadline=complete client_io=zio-std-io"
         )
         if expected not in result.stdout:
             raise AssertionError(f"missing client result: {result.stdout}")
@@ -476,7 +476,7 @@ def main() -> None:
             "active_quic_connections=2 total_quic_connections=4 "
             "domain_route_limit=2 route_churn=true remote_dns=true "
             "shared_endpoint=true "
-            "tls13=true client_io=zio-std-io server_io=quic-go-netpoll"
+            "tls13=true close_deadline=complete client_io=zio-std-io server_io=quic-go-netpoll"
         )
 
 

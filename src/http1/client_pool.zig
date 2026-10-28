@@ -134,26 +134,9 @@ pub const Pool = struct {
 
     /// Reject new acquisitions and close all currently idle connections.
     /// Outstanding leases remain valid and are closed when returned.
-    pub fn close(self: *Pool) void {
-        self.mutex.lockUncancelable(self.io);
-        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
-        self.closed = true;
-        var returned = self.returns.close(self.io);
-        while (returned) |node| {
-            returned = node.next;
-            var slot = node.value.slot;
-            slot.deinit(self.allocator);
-            self.connections -= 1;
-        }
-        for (self.idle.items) |*slot| slot.deinit(self.allocator);
-        std.debug.assert(self.connections >= self.idle.items.len);
-        self.connections -= self.idle.items.len;
-        self.idle.clearRetainingCapacity();
-        self.capacity_waiters.notifyAll(self.io);
-        self.mutex.unlock(self.io);
-        self.tls12_tickets.clear();
-        self.tls13_tickets.clear();
-    }
+    pub const close = @import("../internal/pool_returns/close.zig").close;
+    pub const closeWithDeadline = @import("../internal/pool_returns/close.zig").closeWithDeadline;
+    pub const closeWithTimeout = @import("../internal/pool_returns/close.zig").closeWithTimeout;
 
     pub fn requestUri(
         self: *Pool,
@@ -635,14 +618,15 @@ pub const Pool = struct {
         var displaced: ?Slot = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
-        try self.collectReturnsBeforeLocked(deadline);
-        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
             admission_lock.unlock();
             return error.PoolClosed;
         }
+        try self.collectReturnsBeforeLocked(deadline);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+
         if (!self.capacity_waiters.mayAttempt(waiter, self.io)) {
             if (waiter) |queued| {
                 if (!queued.linked) {
@@ -884,12 +868,16 @@ pub const Pool = struct {
             },
         };
         errdefer if (deadline != null) client.closeWithoutCloseNotify() else client.close();
+
+        const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
+        errdefer self.allocator.free(tls_host);
+        var publication = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer publication.unlock();
+        if (self.closed) return error.PoolClosed;
         if (transport == .tls and vail_tls_options != null) {
             try setup_tickets.remember12(&self.tls12_tickets, &client, endpoint.tls_host, endpoint.port, false, self.io, deadline);
             _ = try setup_tickets.remember13(&self.tls13_tickets, &client, endpoint.tls_host, endpoint.port, false, tls13_ticket != null, self.io, deadline);
         }
-        const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
-        errdefer self.allocator.free(tls_host);
         if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         connection_reserved = false;
         return .{ .pool = self, .slot = .{

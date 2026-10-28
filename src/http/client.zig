@@ -76,6 +76,14 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    pub fn closeWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!void {
+        defer self.* = undefined;
+        return switch (self.value) {
+            .http1 => |*value| value.closeWithDeadline(deadline),
+            .http2 => |*value| value.closeWithDeadline(deadline),
+        };
+    }
+
     pub fn protocol(self: Connection) Protocol {
         return switch (self.value) {
             .http1 => .http1,

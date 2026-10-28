@@ -8,6 +8,7 @@
 //! remains valid until completion.
 
 const std = @import("std");
+const Guard = @import("../../../internal/mutex_guard.zig").Guard;
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
 const authority = @import("shared/authority.zig");
@@ -316,10 +317,19 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             closeState(self.state);
         }
 
+        pub fn closeBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            try closeStateBefore(self.state, deadline);
+        }
+
         fn closeState(state: *State) void {
-            state.mutex.lockUncancelable(state.io);
+            closeStateBefore(state, null) catch unreachable;
+        }
+
+        fn closeStateBefore(state: *State, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            var guard = try Guard.initBefore(&state.mutex, state.io, deadline);
+            defer guard.unlock();
             if (state.closed) {
-                state.mutex.unlock(state.io);
+                guard.unlock();
                 return;
             }
             state.closed = true;
@@ -341,7 +351,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             while (route) |active| : (route = active.next) {
                 active.activity.set(state.io);
             }
-            state.mutex.unlock(state.io);
+            guard.unlock();
         }
 
         pub fn run(self: *Self) (Error || std.Io.Cancelable)!void {

@@ -7,6 +7,7 @@
 //! a broken QUIC path cannot be retried on every TCP response.
 
 const std = @import("std");
+const Guard = @import("../internal/mutex_guard.zig").Guard;
 const http3 = @import("../http3/mod.zig");
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -193,8 +194,12 @@ pub const Cache = struct {
     }
 
     pub fn clear(self: *Cache) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        self.clearBefore(null) catch unreachable;
+    }
+
+    pub fn clearBefore(self: *Cache, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+        var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+        defer guard.unlock();
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.clearRetainingCapacity();
         self.index.clearRetainingCapacity();

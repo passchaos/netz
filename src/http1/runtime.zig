@@ -3456,6 +3456,24 @@ pub const Client = struct {
         } else self.close();
     }
 
+    /// Attempt a bounded TLS shutdown and release the transport even if its
+    /// alert could not finish. Pool close accounts this resource exactly once.
+    pub fn closeWithDeadline(self: *Client, deadline: std.Io.Clock.Timestamp) Error!void {
+        defer self.closeWithoutCloseNotify();
+        if (self.tls_vail_conn) |connection| {
+            try connection.sendCloseNotifyWithDeadline(deadline);
+        } else if (self.tls_conn) |connection| {
+            if (connection.write_closed) return;
+            if (connection.pending_timed_plaintext_len != 0 or connection.net_writer.interface.buffered().len != 0 or connection.client.writer.buffered().len != 0) return error.WriteInProgress;
+            try connection.client.end();
+            while (connection.net_writer.interface.buffered().len != 0) {
+                const n = try stream_io.writeSomeWithDeadline(connection.io, connection.stream, connection.net_writer.interface.buffered(), deadline);
+                _ = connection.net_writer.interface.consume(n);
+            }
+            connection.write_closed = true;
+        }
+    }
+
     pub fn peerCertificates(
         self: *const Client,
     ) ?[]const []const u8 {

@@ -1,5 +1,6 @@
 //! Preallocated connection returns with explicit ownership during Pool close.
 const std = @import("std");
+const deadline_policy = @import("deadline.zig");
 
 test {
     _ = @import("pool_returns/queue_tests.zig");
@@ -83,11 +84,20 @@ pub fn Queue(comptime Payload: type) type {
         /// Explicit Pool close waits only for already admitted publications.
         /// Every later publisher retains and destroys its own connection.
         pub fn close(self: *Self, io: std.Io) ?*Node {
+            return self.closeBefore(io, null) catch unreachable;
+        }
+
+        /// Stop publications, but retain all nodes if an existing publisher
+        /// cannot complete within the caller's original close deadline.
+        pub fn closeBefore(self: *Self, io: std.Io, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!?*Node {
             _ = self.publishers.fetchOr(closed_bit, .acq_rel);
             while (true) {
                 const state = self.publishers.load(.acquire);
                 if (state == closed_bit) return self.take();
-                io.futexWaitUncancelable(u32, &self.publishers.raw, state);
+                if (deadline) |until| {
+                    _ = try deadline_policy.usableAwake(io, until);
+                    try io.futexWaitTimeout(u32, &self.publishers.raw, state, .{ .deadline = until });
+                } else io.futexWaitUncancelable(u32, &self.publishers.raw, state);
             }
         }
     };

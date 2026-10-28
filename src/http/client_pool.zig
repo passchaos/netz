@@ -172,37 +172,9 @@ pub const Pool = struct {
 
     /// Reject new acquisitions and close all idle connections. Existing
     /// leases remain valid but are closed instead of pooled when returned.
-    pub fn close(self: *Pool) void {
-        self.mutex.lockUncancelable(self.io);
-        self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
-        self.closed = true;
-        var returned = self.returns.close(self.io);
-        var returned_count: usize = 0;
-        while (returned) |node| {
-            returned = node.next;
-            var connection = node.value.connection_value;
-            var key = node.value.origin_key;
-            connection.close();
-            key.deinit();
-            node.destroy();
-            self.connections -= 1;
-            returned_count += 1;
-        }
-        var removed: usize = returned_count;
-        while (self.idle.takeOldest()) |connection_value| {
-            var connection = connection_value;
-            connection.close();
-            std.debug.assert(self.connections != 0);
-            self.connections -= 1;
-            removed += 1;
-        }
-        self.capacity_waiters.notifyAll(self.io);
-        self.mutex.unlock(self.io);
-        self.shared_budget.close();
-        self.shared_budget.release(removed);
-        self.tickets.clear();
-        if (self.http3) |state| state.close();
-    }
+    pub const close = @import("client_pool/close.zig").close;
+    pub const closeWithDeadline = @import("client_pool/close.zig").closeWithDeadline;
+    pub const closeWithTimeout = @import("client_pool/close.zig").closeWithTimeout;
 
     pub fn acquireUri(self: *Pool, uri_text: []const u8) Error!Lease {
         return self.acquireUriWithOriginIsolation(uri_text, false);
@@ -448,8 +420,6 @@ pub const Pool = struct {
         var displaced: ?IdleConnection = null;
         var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
         defer admission_lock.unlock();
-        try self.collectReturnsBeforeLocked(deadline);
-        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
             if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
@@ -457,6 +427,9 @@ pub const Pool = struct {
             admission_lock.unlock();
             return error.PoolClosed;
         }
+        try self.collectReturnsBeforeLocked(deadline);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+
         if (!self.capacity_waiters.mayAttempt(waiter, self.io)) {
             if (shared_waiter) |queued| self.shared_budget.cancel(queued);
             if (waiter) |queued| {
@@ -584,6 +557,9 @@ pub const Pool = struct {
         else
             try connector.connectUri(uri_text);
         errdefer if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
+        var publication = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer publication.unlock();
+        if (self.closed) return error.PoolClosed;
         if (secure) {
             try self.tickets.rememberSetupBefore(key.host, key.port, &connection, tls13_ticket != null, deadline);
         }

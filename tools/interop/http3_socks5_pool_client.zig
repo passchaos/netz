@@ -119,12 +119,16 @@ pub fn main(init: std.process.Init) !void {
     }
     try std.testing.expectEqual(@as(usize, 2), pool.http3ConnectionCount());
     try std.testing.expectEqual(@as(usize, 2), pool.http3IdleCount());
+    try pool.closeWithTimeout(.fromSeconds(5));
+    try pool.closeWithTimeout(.fromSeconds(5));
+    try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
     std.debug.print(
         "HTTP/3 SOCKS5 pool passed: origins=3 discovery=http1 " ++
             "h3_requests=4 udp_associations=1 active_quic_connections=2 " ++
             "total_quic_connections=4 domain_route_limit=2 " ++
             "route_churn=true remote_dns=true shared_endpoint=true " ++
-            "tls_verified=true client_io=zio-std-io\n",
+            "tls_verified=true close_deadline=complete client_io=zio-std-io\n",
         .{},
     );
 }

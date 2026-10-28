@@ -34,8 +34,12 @@ pub const Manager = struct {
     }
 
     pub fn clear(self: *Manager) void {
-        self.tls12.clear();
-        self.tls13.clear();
+        self.clearBefore(null) catch unreachable;
+    }
+
+    pub fn clearBefore(self: *Manager, deadline: ?std.Io.Clock.Timestamp) !void {
+        try self.tls12.clearBefore(deadline);
+        try self.tls13.clearBefore(deadline);
     }
 
     pub fn cloneTls12(

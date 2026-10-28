@@ -4192,6 +4192,15 @@ pub const Connection = struct {
         self.close();
     }
 
+    pub fn closeWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!void {
+        defer self.closeWithoutCloseNotify();
+        if (self.transport) |transport| switch (transport) {
+            .tls_client => |connection| try connection.sendCloseNotifyWithDeadline(deadline),
+            .tls_server => |connection| try connection.sendCloseNotifyWithDeadline(deadline),
+            .tcp => {},
+        };
+    }
+
     /// Whether an exclusive client lease can safely return this connection to
     /// an idle pool. GOAWAY, live streams, queued application frames, or push
     /// mode make reuse ambiguous, so the pool closes those connections rather

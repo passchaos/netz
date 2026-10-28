@@ -179,11 +179,15 @@ pub const Budget = struct {
     }
 
     pub fn close(self: *Budget) void {
-        self.mutex.lockUncancelable(self.io);
+        self.closeBefore(null) catch unreachable;
+    }
+
+    pub fn closeBefore(self: *Budget, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+        var guard = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        defer guard.unlock();
         self.retired_connections.apply(&self.connections, &self.waiters, self.io);
         self.closed = true;
         self.waiters.notifyAll(self.io);
-        self.mutex.unlock(self.io);
     }
 
     pub fn connectionCount(self: *Budget) usize {

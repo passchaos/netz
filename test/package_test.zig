@@ -1,6 +1,25 @@
 const std = @import("std");
 const netz = @import("netz");
 
+test "public HTTP pools expose resumable deadline and timeout shutdown" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    inline for (.{ netz.http1.client_pool.Pool, netz.http2.client_pool.Pool, netz.http.Pool }) |Pool| {
+        var pool = try Pool.init(std.testing.allocator, io, .{});
+        defer pool.deinit();
+        try std.testing.expectError(error.Timeout, pool.closeWithTimeout(.zero));
+        try pool.closeWithDeadline(.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+        try pool.closeWithTimeout(.fromSeconds(1));
+        try std.testing.expectError(error.PoolClosed, pool.acquireUri("http://127.0.0.1:1/"));
+    }
+    var connector = netz.http3.runtime.HandshakeClientPoolDefaultConnector{ .options = .{ .handshake = .{ .original_destination_connection_id = &.{1}, .local_connection_id = &.{2} } } };
+    var h3_pool = try netz.http3.runtime.HandshakeClientPool.init(std.testing.allocator, io, .{ .local_address = .{ .ip4 = .loopback(0) }, .connector = connector.connector() });
+    defer h3_pool.deinit();
+    try h3_pool.closeWithTimeout(.fromSeconds(1));
+    try h3_pool.closeWithDeadline(.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+}
+
 test "gRPC package connectivity watch exposes allocation failure without losing cursor" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

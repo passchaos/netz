@@ -1369,9 +1369,17 @@ pub fn Pool(comptime Runtime: type) type {
         }
 
         pub fn close(self: *Self) void {
-            if (self.closed) return;
+            self.closeBefore(null) catch unreachable;
+        }
+
+        /// The request driver must have relinquished endpoint ownership.
+        pub fn closeBefore(self: *Self, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || error{Timeout})!void {
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
             self.closed = true;
-            while (self.firstIdleHandle()) |handle| self.dropEntry(handle);
+            while (self.firstIdleHandle()) |handle| {
+                if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+                self.dropEntry(handle);
+            }
         }
 
         pub fn address(self: *const Self) std.Io.net.IpAddress {
