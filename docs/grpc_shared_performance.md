@@ -322,3 +322,41 @@ main large-message throughput gap remains open.
 [Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
 retain 128 validated result/peer-completion pairs plus source and executable
 fingerprints. They do not replace the independent grpc-cpp comparison.
+
+## Shared owner scan-cached awake time
+
+SharedChannel endpoint owners now derive operation deadlines and streaming
+expiry decisions from the matching zio event-loop awake snapshot. An I/O poll
+refreshes that snapshot before the next owner operation; repeated checks in one
+scheduler scan no longer issue separate VDSO clock reads. Foreign `std.Io`
+implementations keep their ordinary clock behavior. This follows grpc-core's
+`Party` use of `ScopedTimeCache`, including invalidation at blocking boundaries,
+without exposing zio in the public gRPC API. Unary timeout classification also
+reuses its first result instead of reading the same deadline twice.
+
+Eight fixed-binary AB/BA pairs pinned the complete native client/server process
+to CPU 10. Each arm used 100 warmups, 2,000 measured roundtrips, fixed 65,535-
+byte stream/connection windows, pre-encoded identity messages, full byte
+validation, and exact peer completion. All PMU, throughput and p50 rows below
+favor the candidate in every pair except the 256-KiB per-call throughput row,
+which won seven of eight.
+
+| Workload | Instructions | Cycles | Throughput | P50 |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent, 0 bytes | 1.0225x | 1.0650x | 1.0401x | 1.0405x |
+| Persistent, 4 KiB | 1.0179x | 1.0577x | 1.0355x | 1.0386x |
+| Persistent, 256 KiB | 1.0125x | 1.0433x | 1.0194x | 1.0183x |
+| RPC per roundtrip, 256 KiB | 1.0119x | 1.0388x | 1.0115x | 1.0141x |
+
+Matched zero-loss 256-KiB profiles moved `clock_gettime` self samples from
+19.50% to 15.41%; its child below `Worker.tick` moved from 8.74% to 4.35%.
+Separately sampled percentages are explanatory, while the fixed-binary pairs
+are the causal evidence. Debug and ReleaseFast focused gates each pass 181/181,
+package tests pass 22/22, and the pinned grpc-cpp forward matrix passes h2c and
+certificate-verified TLS across shared unary/duplex, cancellation/reuse,
+deadline, health, keepalive, compression and soak scenarios.
+
+This reduces scheduler-clock overhead across message sizes but does not close
+the independent grpc-cpp 256-KiB data-copy/window gap. Full identities,
+profiles, PMU summaries and verification records are in
+[the cached-clock evidence](evidence/grpc_shared_cached_clock/2026-10-29.json).

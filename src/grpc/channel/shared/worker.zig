@@ -1,5 +1,6 @@
 //! One task owns an endpoint's connection, health stream, and application RPCs.
 const std = @import("std");
+const netz_runtime = @import("../../../runtime.zig");
 const channel = @import("../../channel.zig");
 const http2 = @import("../../../http2/mod.zig");
 const duplex = @import("../../stream/duplex.zig");
@@ -62,10 +63,21 @@ pub fn Worker(comptime State: type) type {
         }
 
         fn outputDeadline(self: *Self) std.Io.Clock.Timestamp {
-            return .fromNow(self.parent.io, .{ .raw = self.parent.options.operation_timeout, .clock = .awake });
+            // Match grpc-core's Party/ExecCtx scoped time cache: one event-loop
+            // scan shares its awake-clock snapshot, while any intervening I/O
+            // poll refreshes the value before the next operation deadline.
+            return netz_runtime.cachedAwakeTimestamp(self.parent.io)
+                .addDuration(.{
+                .raw = self.parent.options.operation_timeout,
+                .clock = .awake,
+            });
         }
         fn expired(self: *Self, time: ?std.Io.Clock.Timestamp) bool {
-            return if (time) |value| value.durationFromNow(self.parent.io).raw.nanoseconds <= 0 else false;
+            return if (time) |value| std.Io.Clock.Timestamp.compare(
+                value,
+                .lte,
+                netz_runtime.cachedAwakeTimestamp(self.parent.io),
+            ) else false;
         }
         fn minimum(a: ?std.Io.Clock.Timestamp, b: ?std.Io.Clock.Timestamp) ?std.Io.Clock.Timestamp {
             if (a == null) return b;
@@ -183,8 +195,12 @@ pub fn Worker(comptime State: type) type {
             var i: usize = 0;
             while (i < self.active.items.len) {
                 const item = &self.active.items[i];
-                if (self.parent.canceled(item.job) or self.expired(item.job.deadline)) {
-                    self.failActive(i, if (self.expired(item.job.deadline)) error.Timeout else error.Canceled);
+                const timed_out = self.expired(item.job.deadline);
+                if (self.parent.canceled(item.job) or timed_out) {
+                    self.failActive(
+                        i,
+                        if (timed_out) error.Timeout else error.Canceled,
+                    );
                     progress = true;
                     continue;
                 }

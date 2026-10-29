@@ -1,5 +1,6 @@
 //! Endpoint-thread transport progress for shared streaming calls.
 const std = @import("std");
+const netz_runtime = @import("../../../../runtime.zig");
 const duplex = @import("../../../stream/duplex.zig");
 const http2 = @import("../../../../http2/mod.zig");
 const Job = @import("../job.zig").Job;
@@ -79,6 +80,7 @@ pub fn Owner(comptime State: type) type {
         }
         pub fn tick(worker: anytype, output: std.Io.Clock.Timestamp) State.Failure!bool {
             const state = worker.parent;
+            const now = netz_runtime.cachedAwakeTimestamp(state.io);
             var progress = false;
             var index: usize = 0;
             while (index < worker.streams.items.len) {
@@ -89,8 +91,18 @@ pub fn Owner(comptime State: type) type {
                 const write = call.write;
                 const credit = call.credit;
                 state.unlock();
-                const expired = if (call.deadline) |until| until.durationFromNow(state.io).raw.nanoseconds <= 0 else false;
-                const write_expired = if (write) |value| if (value.deadline) |until| until.durationFromNow(state.io).raw.nanoseconds <= 0 else false else false;
+                const expired = if (call.deadline) |until|
+                    std.Io.Clock.Timestamp.compare(until, .lte, now)
+                else
+                    false;
+                const write_expired = if (write) |value| blk: {
+                    const until = value.deadline orelse break :blk false;
+                    break :blk std.Io.Clock.Timestamp.compare(
+                        until,
+                        .lte,
+                        now,
+                    );
+                } else false;
                 if (canceled or expired or write_expired) {
                     fail(worker, index, if (expired or write_expired) error.Timeout else error.Canceled);
                     progress = true;

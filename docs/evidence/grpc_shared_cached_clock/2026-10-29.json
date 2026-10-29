@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "date": "2026-10-29",
+  "feature": "gRPC SharedChannel scan-cached awake deadlines",
+  "decision": "accepted",
+  "scope": {
+    "transport": "h2c",
+    "client_api": "shared",
+    "client_io": "zio-std-io",
+    "server_io": "zio-std-io",
+    "cpu": 10,
+    "schedule": "eight alternating AB/BA pairs per workload",
+    "warmup": 100,
+    "iterations": 2000,
+    "stream_window": 65535,
+    "connection_window": 65535,
+    "validation": "full-bytes plus peer completion"
+  },
+  "design": {
+    "description": "SharedChannel worker operation deadlines and stream/write expiry checks use the matching zio event-loop awake snapshot. Foreign std.Io implementations retain exact Clock.now behavior through the shared runtime helper.",
+    "deadline_semantics": "Every intervening event-loop poll refreshes the snapshot; operations in the same scheduler scan share one timestamp. Public absolute deadlines, RPC deadlines, operation_timeout, timeout errors, and cancellation behavior are unchanged.",
+    "reference": {
+      "repository": "/nav_env/Work/grpc",
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "files": [
+        "src/core/lib/promise/party.cc",
+        "src/core/util/time.cc",
+        "src/core/util/time.h"
+      ],
+      "behavior": "grpc-core Party installs ScopedTimeCache for one wake/poll run and invalidates it at blocking boundaries"
+    }
+  },
+  "identity": {
+    "baseline_stripped_sha256": "00446d4ab86bb1855a372a090d4d5cd0a4d6e115c6c170c9b838070ca6b4de55",
+    "candidate_stripped_sha256": "886a6ef927a8f2864789ad30522e75b9dc4d750de8c39cc2d4656c83c369d963",
+    "baseline_static_bytes": 5610106,
+    "candidate_static_bytes": 5610126,
+    "src/grpc/channel/shared/worker.zig": "9232081000007e8bebf6c9d002f3b7dd511a83a6aa25628e63eff308bad076d8",
+    "src/grpc/channel/shared/stream/owner.zig": "fca36c38462bc7c9a562e87e6e522d582b018569841a77c5fc8620f9b9e4726e"
+  },
+  "paired_improvement": {
+    "persistent_0": {
+      "instructions": {"median": 1.022476354, "wins": 8},
+      "cycles": {"median": 1.064952312, "wins": 8},
+      "throughput": {"median": 1.040063468, "wins": 8},
+      "p50": {"median": 1.040546584, "wins": 8},
+      "p99": {"median": 1.038203391, "wins": 8}
+    },
+    "persistent_4096": {
+      "instructions": {"median": 1.017859721, "wins": 8},
+      "cycles": {"median": 1.057689831, "wins": 8},
+      "throughput": {"median": 1.035535614, "wins": 8},
+      "p50": {"median": 1.038573544, "wins": 8},
+      "p99": {"median": 1.030094893, "wins": 8}
+    },
+    "persistent_262144": {
+      "instructions": {"median": 1.012495412, "wins": 8},
+      "cycles": {"median": 1.043341622, "wins": 8},
+      "throughput": {"median": 1.019417602, "wins": 8},
+      "p50": {"median": 1.018327780, "wins": 8},
+      "p99": {"median": 1.015653707, "wins": 7}
+    },
+    "calls_262144": {
+      "instructions": {"median": 1.011904736, "wins": 8},
+      "cycles": {"median": 1.038767770, "wins": 8},
+      "throughput": {"median": 1.011527056, "wins": 7},
+      "p50": {"median": 1.014114760, "wins": 8},
+      "p99": {"median": 1.004081971, "wins": 5}
+    }
+  },
+  "profiles": {
+    "baseline": {
+      "samples": 11236,
+      "lost_samples": 0,
+      "clock_gettime_self_percent": 19.50,
+      "worker_tick_clock_child_percent": 8.74,
+      "report_sha256": "e32c74468a79ce93ceb092b8b3b1b7cfef77bd9aee2969da9d6b3024c2936790"
+    },
+    "candidate": {
+      "samples": 10000,
+      "lost_samples": 0,
+      "clock_gettime_self_percent": 15.41,
+      "worker_tick_clock_child_percent": 4.35,
+      "report_sha256": "294604ebc666a77040021b8ab5093efcfae5087f6832897c057e2145cc5f7dee"
+    },
+    "interpretation": "Profile percentages are explanatory; fixed-binary PMU and timing pairs above are causal evidence."
+  },
+  "verification": {
+    "debug_focused": {"passed": 181, "total": 181},
+    "release_fast_focused": {"passed": 181, "total": 181},
+    "package": {"passed": 22, "total": 22},
+    "grpc_cpp_forward": {
+      "h2c": "passed",
+      "tls": "passed",
+      "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "bazel": "8.7.0",
+      "bazel_sha256": "bfe9558bd8a2ecfe4841ec46c0dbccb4b469fe22d81f2f859de0de222b3e7ce3"
+    }
+  },
+  "artifacts": {
+    "ab": "zig-out/grpc-shared-cached-clock-ab/20261029T142135Z",
+    "baseline_profile": "zig-out/grpc-256k-profile/20261029T141300Z",
+    "candidate_profile": "zig-out/grpc-256k-cached-clock-profile/20261029T142325Z"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "perf": "6.8.12",
+    "kernel": "6.8.12-1021-rt-tegra",
+    "arch": "aarch64"
+  }
+}

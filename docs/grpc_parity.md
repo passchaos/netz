@@ -1730,3 +1730,22 @@ case remains in the same gate. The pinned grpc-cpp h2c/TLS matrix continues to
 verify exact ACK with `throttles=0`, proving ordinary peers do not spuriously
 back off. Evidence is recorded in
 `docs/evidence/grpc_shared_keepalive_throttle/2026-10-29.json`.
+
+## SharedChannel scan-cached operation time
+
+Endpoint owners now use the matching runtime's scan-cached awake clock for
+operation deadlines and streaming expiry checks. This mirrors grpc-core's
+`Party`-scoped time cache: an intervening event-loop poll refreshes time, while
+several checks in one owner turn share a single snapshot. Foreign `std.Io`
+implementations and all public absolute-deadline APIs retain exact clock
+semantics. The worker also reuses one unary deadline classification rather than
+checking the same timestamp twice.
+
+Eight fixed-binary pairs improved instructions and cycles in every 0-byte,
+4-KiB and 256-KiB persistent arm and every 256-KiB per-call arm. Paired median
+throughput improved 4.01%, 3.55%, 1.94% and 1.15% respectively; the first three
+won 8/8 pairs and the per-call shape won 7/8. Focused Debug/ReleaseFast tests,
+package tests, and the pinned grpc-cpp h2c/TLS forward matrix pass. This is a
+SharedChannel scheduling improvement, not closure of the remaining grpc-cpp
+large-message gap. Evidence is recorded in
+`docs/evidence/grpc_shared_cached_clock/2026-10-29.json`.
