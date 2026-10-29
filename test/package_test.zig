@@ -344,6 +344,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "activeClientDuplexCount"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "pumpClientDuplexWithDeadline"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "pumpClientDuplexWithDeadlineOrWake"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "beginPingProbeWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "takePingProbeAcknowledged"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.ClientDuplexStream, "pollResponseEventWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "pollResponseEventWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "pollResponseEventLimited"));
@@ -366,6 +368,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "sender"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "keepAliveStats"));
+    try std.testing.expect(@hasDecl(netz.grpc, "SharedChannelKeepAliveOptions"));
+    try std.testing.expect(@hasDecl(netz.grpc, "SharedChannelKeepAliveStats"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCount"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCountWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCountWithTimeout"));

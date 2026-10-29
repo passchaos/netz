@@ -1,6 +1,7 @@
 const std = @import("std");
 const channel = @import("../../channel.zig");
 const health = @import("../../health.zig");
+const keepalive = @import("keepalive.zig");
 
 pub const Options = struct {
     channel: channel.Options = .{},
@@ -13,4 +14,7 @@ pub const Options = struct {
     disable_health_check: bool = false,
     health_metadata: health.WatchOptions = .{},
     service_config_json: ?[]const u8 = null,
+    /// grpc-core-compatible HTTP/2 liveness probes. Null disables keepalive;
+    /// the default probes active transports after two hours of peer silence.
+    keepalive: ?keepalive.Options = .{},
 };

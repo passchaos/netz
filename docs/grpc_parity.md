@@ -1626,3 +1626,38 @@ channel before completing resolution, health, shared calls, cancellation and
 soak; its exact record is
 `shared_admission=rpc+resolution+control-deadline`. Evidence is recorded in
 `docs/evidence/grpc_shared_control_deadline/2026-10-29.json`.
+
+## SharedChannel keepalive
+
+`SharedChannelOptions.keepalive` now applies grpc-core's client defaults: a
+two-hour peer-inactivity interval, a 20-second ACK timeout, and no probes while
+the transport has no active RPC unless `permit_without_calls` is enabled. A
+null option disables keepalive. Non-positive intervals or timeouts are rejected
+before any endpoint worker starts.
+
+The shared endpoint owner does not call HTTP/2's blocking keepalive helper.
+Instead, `Connection.beginPingProbeWithDeadline` transactionally writes one
+tracked PING and returns immediately. The existing single frame pump continues
+to route response, health and flow-control frames while exact opaque-payload ACK
+matching advances the probe state. RPC, stream-operation, health and queue
+deadlines remain independently scheduled; an application deadline that ties a
+keepalive deadline wins. A missing exact ACK retires the connection at the
+configured timeout and enters the existing per-endpoint backoff, resolver and
+load-balancing path. Late or mismatched ACKs are legal control frames but cannot
+satisfy a newer probe.
+
+`SharedChannel.keepAliveStats()` exposes lock-free aggregate sent, acknowledged
+and timed-out counts across current and retired endpoint connections. Completion
+counters publish after probe submission so a snapshot cannot report more
+completions than sends.
+
+Real TCP regressions prove default idle suppression, an exact ACK during a
+silent active RPC without extending its 80 ms deadline, and a silent peer's
+30 ms ACK timeout followed by endpoint reconnection and a successful unary RPC.
+The HTTP/2 pump regression keeps an application response ordered while a probe
+is outstanding and rejects stale ACK completion. The authenticated h2c
+state-machine fuzz remains green. The pinned grpc-cpp server independently
+returns the exact ACK over both h2c and certificate-verified TLS; each arm requires
+aggregate telemetry `sent=1, acknowledged=1, timeouts=0` before completing the
+existing shared-channel and soak matrix. Evidence is recorded in
+`docs/evidence/grpc_shared_keepalive/2026-10-29.json`.

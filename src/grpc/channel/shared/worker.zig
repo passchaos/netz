@@ -8,6 +8,7 @@ const health = @import("../../health.zig");
 const connectivity = @import("../connectivity.zig");
 const Active = @import("active.zig").Active;
 const Wake = @import("wake.zig").Wake;
+const keepalive = @import("keepalive.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -32,6 +33,7 @@ pub fn Worker(comptime State: type) type {
         connect_failures: usize = 0,
         connect_at: ?std.Io.Clock.Timestamp = null,
         health_at: ?std.Io.Clock.Timestamp = null,
+        keep_alive: keepalive.Driver = .{},
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
@@ -92,6 +94,7 @@ pub fn Worker(comptime State: type) type {
             while (self.streams.items.len != 0) StreamOwner.fail(self, 0, err);
             self.owner.disconnect() catch {};
             self.connection = null;
+            self.keep_alive.disconnected();
             self.health_disabled = false;
             self.health_at = null;
             self.health_seen = false;
@@ -129,12 +132,18 @@ pub fn Worker(comptime State: type) type {
                 self.publish();
                 self.owner.resetConnectionBackoff();
                 self.connection = try self.owner.connectWithDeadline(.fromNow(self.parent.io, .{ .raw = self.parent.options.channel.backoff.min_connect_timeout, .clock = .awake }));
+                self.keep_alive.connected(self.parent.io);
                 self.connect_at = null;
                 self.connect_failures = 0;
                 self.health_failures = 0;
                 self.local_state = if (self.parent.health_service == null) .ready else .connecting;
             }
             const connection = self.connection.?;
+            self.keep_alive.observeAcknowledgement(
+                self.parent.io,
+                connection,
+                &self.parent.keepalive_counters,
+            );
             if (connection.peer_goaway_last_stream_id != null) {
                 self.dropWatch();
                 self.local_state = .transient_failure;
@@ -256,10 +265,46 @@ pub fn Worker(comptime State: type) type {
                 if (item.call.write) |write| until = minimum(until, write.deadline);
                 self.parent.unlock();
             }
-            _ = connection.pumpClientUntilOrWake(until, self.parent.options.operation_timeout, &self.wake.event) catch |err| {
-                if (err == error.Timeout and !connection.aggregate_timeout_unusable) return;
+            const keep_alive_until = self.keep_alive.nextDeadline(
+                self.parent.options.keepalive,
+                self.hasActiveCalls(),
+            );
+            const keep_alive_first = if (keep_alive_until) |probe|
+                until == null or std.Io.Clock.Timestamp.compare(probe, .lt, until.?)
+            else
+                false;
+            const read_until = if (keep_alive_first) keep_alive_until else until;
+            const event = connection.pumpClientUntilOrWake(
+                read_until,
+                self.parent.options.operation_timeout,
+                &self.wake.event,
+            ) catch |err| {
+                if (err == error.Timeout and !connection.aggregate_timeout_unusable) {
+                    if (keep_alive_first) {
+                        try self.keep_alive.handleDeadline(
+                            self.parent.io,
+                            connection,
+                            self.parent.options.keepalive,
+                            self.hasActiveCalls(),
+                            self.outputDeadline(),
+                            &self.parent.keepalive_counters,
+                        );
+                    }
+                    return;
+                }
                 return err;
             };
+            self.keep_alive.observePump(
+                self.parent.io,
+                connection,
+                event,
+                &self.parent.keepalive_counters,
+            );
+        }
+
+        fn hasActiveCalls(self: *const Self) bool {
+            return self.active.items.len != 0 or
+                self.streams.items.len != 0 or self.watch != null;
         }
 
         fn pollHealth(self: *Self) !bool {

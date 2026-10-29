@@ -140,6 +140,28 @@ fn resolve(_: *anyopaque, allocator: std.mem.Allocator, _: std.Io, host: []const
     return allocator.dupe(std.Io.net.IpAddress, &.{ address, address });
 }
 
+fn verifyKeepAlive(channel: netz.grpc.SharedChannel, io: std.Io) !void {
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    });
+    while (true) {
+        const stats = channel.keepAliveStats();
+        if (stats.acknowledgements != 0) {
+            if (stats.probes_sent != 1 or stats.acknowledgements != 1 or
+                stats.timeouts != 0)
+            {
+                return error.InvalidSharedKeepAliveStats;
+            }
+            return;
+        }
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+            return error.SharedKeepAliveTimeout;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundle: *std.crypto.Certificate.Bundle, lock: *std.Io.RwLock, limits: netz.http2.runtime.Limits) !void {
     const target: netz.grpc.ChannelTarget = if (tls) .{ .tls_host = .{
         .host = "foo.test.google.fr",
@@ -151,6 +173,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     var channel = try netz.grpc.SharedChannel.init(allocator, io, target, .{
         .service_config_json = "{\"healthCheckConfig\":{\"serviceName\":\"\"}}",
         .channel = .{ .address_resolver = .{ .context = &resolver_context, .resolve = resolve }, .resolver_min_refresh_interval = .zero },
+        .keepalive = .{
+            .interval = .fromMilliseconds(250),
+            .timeout = .fromSeconds(2),
+            .permit_without_calls = true,
+        },
     });
     defer channel.deinit();
     var sender = channel.sender();
@@ -174,4 +201,5 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     if (channel.endpointCount() != 1 or try channel.refreshNameResolutionWithTimeout(.fromSeconds(10)) != 1) return error.InvalidSharedAddressMembership;
     try runDuplex(allocator, io, sender);
     try runOperationDeadlinesAndCancellation(allocator, io, sender);
+    try verifyKeepAlive(channel, io);
 }

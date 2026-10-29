@@ -93,6 +93,10 @@ pub const Channel = runtime.Channel;
 pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
 pub const SharedChannelSender = @import("channel/shared.zig").Sender;
 pub const SharedChannelOptions = @import("channel/shared.zig").Options;
+pub const SharedChannelKeepAliveOptions =
+    @import("channel/shared.zig").KeepAliveOptions;
+pub const SharedChannelKeepAliveStats =
+    @import("channel/shared.zig").KeepAliveStats;
 pub const SharedClientDuplex = runtime.SharedClientDuplex;
 pub const SharedStreamWriter = runtime.SharedStreamWriter;
 pub const SharedStreamReader = runtime.SharedStreamReader;

@@ -12,6 +12,8 @@ pub const StreamReader = @import("shared/stream.zig").Reader;
 pub const StreamEvent = @import("shared/stream.zig").Event;
 pub const Error = state_module.Error;
 pub const Options = state_module.Options;
+pub const KeepAliveOptions = @import("shared/keepalive.zig").Options;
+pub const KeepAliveStats = @import("shared/keepalive.zig").Stats;
 
 pub const Sender = struct {
     state: *State,
@@ -87,6 +89,11 @@ pub const SharedChannel = struct {
     pub fn connectivityState(self: SharedChannel) connectivity.State {
         return self.state.tracker.snapshot().state;
     }
+    /// Lock-free aggregate probe telemetry across current and retired endpoint
+    /// connections owned by this SharedChannel.
+    pub fn keepAliveStats(self: SharedChannel) KeepAliveStats {
+        return self.state.keepalive_counters.snapshot();
+    }
     pub fn connectivityStateWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!connectivity.State {
         return (try self.state.tracker.snapshotWithDeadline(deadline)).state;
     }
@@ -141,6 +148,7 @@ test {
     _ = @import("shared/retirement_tests.zig");
     _ = @import("shared/job_tests.zig");
     _ = @import("shared/control_deadline_tests.zig");
+    _ = @import("shared/keepalive_tests.zig");
     _ = @import("shared/resolution/tests.zig");
     _ = @import("shared/stream/tests.zig");
 }

@@ -145,7 +145,7 @@ fi
 
 timeout "$case_timeout" "$client" "$port" >"$work/client.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client.log"
 cat "$work/client.log"
 
@@ -205,6 +205,6 @@ fi
 timeout "$case_timeout" "$client" "$port" "$ca_file" \
   >"$work/client-tls.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client-tls.log"
 cat "$work/client-tls.log"

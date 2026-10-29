@@ -1,0 +1,155 @@
+{
+  "baseline_revision": "4b4e77e156705110f1db14e76b5440f7a595f0db",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Add non-blocking grpc-core-compatible keepalive to SharedChannel with exact ACK tracking, timeout reconnection and aggregate telemetry",
+  "reference": {
+    "root": "/nav_env/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "sources": [
+      "include/grpc/impl/channel_arg_names.h",
+      "src/core/ext/transport/chttp2/transport/keepalive.cc",
+      "src/core/ext/transport/chttp2/transport/ping_abuse_policy.cc"
+    ],
+    "source_sha256": {
+      "include/grpc/impl/channel_arg_names.h": "88b097284b6985f7195f538c31081dcb8a088fdf4ede3d021ab72429c2415c43",
+      "src/core/ext/transport/chttp2/transport/keepalive.cc": "94b20e73bc2b0c538886027d313c972f80ddc36898c13448c5212ce09b8bda80",
+      "src/core/ext/transport/chttp2/transport/ping_abuse_policy.cc": "bc063f13018e5e7321df62e107f36eafd3be7fe15ae858f7069e9646feb1ff77"
+    },
+    "defaults": {
+      "interval_ms": 7200000,
+      "timeout_ms": 20000,
+      "permit_without_calls": false
+    },
+    "observed_contract": "one keepalive loop per transport, inactivity-triggered HTTP/2 PING, finite ACK timeout, idle suppression by default and transport retirement on liveness failure"
+  },
+  "before": {
+    "shared_channel": "the background endpoint owner multiplexed application and Health Watch streams but exposed no keepalive policy",
+    "http2_boundary": "Connection.keepAlive owned the frame reader until inactivity and exact ACK completion, so it could not safely run beside SharedChannel RPC deadlines",
+    "risk": "a half-open persistent channel could remain READY until an application operation discovered the dead peer"
+  },
+  "after": {
+    "configuration": {
+      "default_interval_ms": 7200000,
+      "default_timeout_ms": 20000,
+      "default_permit_without_calls": false,
+      "null_disables_keepalive": true,
+      "non_positive_values_rejected_before_workers": true
+    },
+    "http2_probe": {
+      "write_is_transactional_and_deadline_bounded": true,
+      "wait_does_not_own_the_frame_reader": true,
+      "one_tracked_probe_per_connection": true,
+      "exact_opaque_payload_ack_required": true,
+      "stale_or_mismatched_ack_cannot_complete_probe": true,
+      "application_frames_remain_ordered_while_pending": true,
+      "late_ack_after_abandon_is_legal_but_not_reused": true
+    },
+    "shared_owner": {
+      "single_reader_preserved": true,
+      "application_deadline_wins_equal_timer": true,
+      "rpc_health_and_queue_deadlines_continue_during_probe": true,
+      "active_health_watch_counts_as_an_rpc": true,
+      "ack_timeout_retires_only_the_failed_endpoint": true,
+      "existing_backoff_resolution_and_load_balancing_handle_reconnect": true
+    },
+    "telemetry": {
+      "api": "SharedChannel.keepAliveStats",
+      "fields": [
+        "probes_sent",
+        "acknowledgements",
+        "timeouts"
+      ],
+      "scope": "aggregate across current and retired endpoint connections",
+      "lock_free": true
+    }
+  },
+  "verification": {
+    "focused": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 175,
+      "tests_total": 175
+    },
+    "grpc": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 379,
+      "tests_total": 379
+    },
+    "package": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 22,
+      "tests_total": 22
+    },
+    "http2_connection_fuzz": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 3,
+      "tests_total": 3
+    },
+    "local_cases": [
+      "idle channel suppresses probes when permit_without_calls is false",
+      "active silent RPC receives an exact keepalive ACK without extending its 80 ms RPC deadline",
+      "silent peer reaches a 30 ms ACK timeout, retires the connection and completes a later unary RPC after reconnect",
+      "application response pumping continues while a tracked PING is pending",
+      "mismatched ACK is ignored and the exact ACK publishes one completion edge",
+      "expired write deadline emits no tracked probe"
+    ]
+  },
+  "interop": {
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "per_arm_keepalive": {
+      "interval_ms": 250,
+      "timeout_ms": 2000,
+      "permit_without_calls": true,
+      "probes_sent": 1,
+      "acknowledgements": 1,
+      "timeouts": 0
+    },
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "reported_duration": "6m",
+    "records": [
+      "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+      "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+    ]
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared' -Dtest-filter='HTTP/2 PING' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "zig build fuzz-http2-connection -Doptimize=ReleaseFast --summary all",
+    "BAZEL=/nav_env/Work/grpc/tools/bazel OVERRIDE_BAZEL_WRAPPER_DOWNLOAD_DIR=/nav_env/Temp/netz-grpc-bazel-bin TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "bazel": "8.7.0",
+    "bazel_sha256": "bfe9558bd8a2ecfe4841ec46c0dbccb4b469fe22d81f2f859de0de222b3e7ce3"
+  },
+  "source_sha256": {
+    "src/http2/runtime.zig": "78f8448f8c09c3dfa6036a98381de97e3de52d1f84e1b958338b97891f27bfe0",
+    "src/http2/runtime/ping_probe_tests.zig": "b6332ddaef405f1d7a6d0d5951add7c628c1ff548e2fec051ed18625f4cc2ac7",
+    "src/grpc/channel/shared/keepalive.zig": "63b6f56861d63b1dea049a2d0e58ec1160f0a48553f46a21056727cd50940a77",
+    "src/grpc/channel/shared/keepalive_tests.zig": "7ccd4a52fdf095cd297246598e6df748bb018570f53bdbb1d89dce74b632f46f",
+    "src/grpc/channel/shared/worker.zig": "bfaa1b7d1c64090820533472c641506e03e47348d83bbf96c24cc307fac3ca35",
+    "src/grpc/channel/shared/options.zig": "b572dd58d0144dd2730b0209529d6ac75e500f7d66dfc191ffedb2bb3d91ca05",
+    "src/grpc/channel/shared/state.zig": "39fe455a01b41d7ebffcdcf5b07224ce747da57f50b048fd8419b7c388b5d1cb",
+    "src/grpc/channel/shared/init.zig": "e9ce972daf4280cb8e19b231f64a3f22d4cb79f3a458ad1032594b9ab7a0185b",
+    "src/grpc/channel/shared.zig": "06b4154b4fe52206ce882a59132f7f914fa9e07f915b3fb7eddc461912b95c22",
+    "src/grpc/runtime.zig": "67e04d46ca0d51e89e06b96d8c1781bc7412c98978c899dd4c9ac519b9327873",
+    "src/grpc/mod.zig": "0d409c8d1d8e9eb0a3a7f59ec876e6d22f74eaf66538d2ea89862cae6e69609c",
+    "test/package_test.zig": "e35fb35d27d8c04af6d3d6eb0f38b8ae4bfb47eb45a4a6f20fe15f03ee12cc97",
+    "tools/interop/grpc_cpp_shared.zig": "c925a7dbfa9af2b296a0854bf91fe1792f0694bdfffda56df7cb3c8e662cd8ca",
+    "tools/interop/grpc_cpp_client.zig": "8b13dbb88145cd1b65cca9407e152d95335e2432c69ea81e736f1b5b36b8198b",
+    "tools/interop/grpc_cpp.sh": "8b67a5c17a95f7fcd976ceee3fcda55aaac072011a37cd411c4cb1058bb1a5c4"
+  }
+}

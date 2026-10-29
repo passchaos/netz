@@ -44,6 +44,7 @@ test {
     _ = client_duplex_owner;
     _ = @import("runtime/duplex/client_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
+    _ = @import("runtime/ping_probe_tests.zig");
     _ = @import("runtime/duplex/response_capacity_tests.zig");
     _ = @import("runtime/duplex/batched_credit_tests.zig");
 }
@@ -3994,6 +3995,11 @@ pub const Connection = struct {
     /// application frames were already accounted for at ingress and therefore
     /// do not make an idle connection look newly active when later consumed.
     last_peer_frame_at: ?std.Io.Timestamp = null,
+    /// A background owner may submit one liveness PING without blocking its
+    /// application-frame pump. Exact ACK matching clears the pending payload;
+    /// the owner separately supplies and enforces the liveness deadline.
+    ping_probe_payload: ?[8]u8 = null,
+    ping_probe_acknowledged: bool = false,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -14067,6 +14073,46 @@ pub const Connection = struct {
         return self.pingUntil(data, absolute);
     }
 
+    /// Submit one PING for a single-reader background owner without waiting
+    /// for its ACK. Normal frame pumping continues to process application
+    /// streams and records only an ACK with the exact opaque payload.
+    ///
+    /// The deadline bounds this write only. The owner must enforce its own ACK
+    /// deadline, query `takePingProbeAcknowledged`, and call
+    /// `abandonPingProbe` if that deadline expires.
+    pub fn beginPingProbeWithDeadline(
+        self: *Connection,
+        data: [8]u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        if (reservedInternalPingPayload(data)) return error.InvalidFrame;
+        if (self.ping_probe_payload != null or self.ping_probe_acknowledged) {
+            return error.WriteInProgress;
+        }
+        try self.writeControlFrameUntil(.ping, 0, &data, absolute);
+        self.ping_probe_payload = data;
+    }
+
+    pub fn pingProbePending(self: *const Connection) bool {
+        return self.ping_probe_payload != null;
+    }
+
+    /// Consume the completion edge for the current background probe. A stale
+    /// or mismatched PING ACK never satisfies a later probe.
+    pub fn takePingProbeAcknowledged(self: *Connection) bool {
+        const acknowledged = self.ping_probe_acknowledged;
+        self.ping_probe_acknowledged = false;
+        return acknowledged;
+    }
+
+    /// Stop tracking an expired background probe. Its late ACK remains a legal
+    /// connection-control frame but cannot complete a future payload.
+    pub fn abandonPingProbe(self: *Connection) void {
+        self.ping_probe_payload = null;
+        self.ping_probe_acknowledged = false;
+    }
+
     /// Complete the recommended two-phase HTTP/2 server shutdown handshake.
     /// Existing streams remain usable; the final GOAWAY rejects later request
     /// stream IDs beyond the synchronized processing boundary. This call must
@@ -14322,7 +14368,7 @@ pub const Connection = struct {
                 }
                 const ack_payload =
                     (try http2.PingPayload.parse(borrowed.frame)).data;
-                try self.applyAdaptivePingAck(ack_payload);
+                try self.applyPingAck(ack_payload);
                 // Rust h2 keeps outstanding user/shutdown PING payloads and
                 // only completes the operation when the ACK echoes that exact
                 // opaque value. Unknown ACKs are legal on the wire, but
@@ -14403,7 +14449,7 @@ pub const Connection = struct {
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
             if ((frame.frame.header.flags & flag_ack) != 0) {
-                try self.applyAdaptivePingAck(ping_payload.data);
+                try self.applyPingAck(ping_payload.data);
                 continue;
             }
             try self.writeControlFrameUntil(
@@ -17439,7 +17485,7 @@ pub const Connection = struct {
                         deadline,
                     );
                 } else {
-                    try self.applyAdaptivePingAck(ping_payload.data);
+                    try self.applyPingAck(ping_payload.data);
                 }
                 return true;
             },
@@ -18366,6 +18412,16 @@ pub const Connection = struct {
                     return error.ResponseAvailable;
                 },
                 else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    fn applyPingAck(self: *Connection, payload: [8]u8) Error!void {
+        try self.applyAdaptivePingAck(payload);
+        if (self.ping_probe_payload) |expected| {
+            if (std.mem.eql(u8, &expected, &payload)) {
+                self.ping_probe_payload = null;
+                self.ping_probe_acknowledged = true;
             }
         }
     }

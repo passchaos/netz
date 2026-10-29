@@ -6,6 +6,7 @@ const health = @import("../../health.zig");
 const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
+const keepalive = @import("keepalive.zig");
 const Job = @import("job.zig").Job;
 pub const Options = @import("options.zig").Options;
 pub const Error = health.WatchError || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
@@ -33,6 +34,7 @@ pub const State = struct {
     closed: bool = false,
     selected: ?*Worker = null,
     next_pick: usize = 0,
+    keepalive_counters: keepalive.Counters = .{},
 
     pub const Worker = @import("worker.zig").Worker(State);
     pub const Source = @import("source.zig").Source(Worker);

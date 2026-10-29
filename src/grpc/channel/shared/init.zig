@@ -10,6 +10,7 @@ const Options = @import("options.zig").Options;
 
 pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!*State {
     if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.max_buffered_stream_bytes == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
+    if (options.keepalive) |keepalive| try keepalive.validate();
     try options.channel.backoff.validate();
     if (options.channel.resolver_min_refresh_interval.nanoseconds < 0) return error.InvalidChannelOptions;
     const count = if (target == .resolved) target.resolved.endpoints.len else 1;
