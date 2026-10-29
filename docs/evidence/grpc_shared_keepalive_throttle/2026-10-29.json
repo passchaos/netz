@@ -1,0 +1,161 @@
+{
+  "baseline_revision": "db976252f9c095d2b1a9cc66b40830fd5727d43a",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Throttle SharedChannel keepalive across all endpoints after exact too_many_pings GOAWAY",
+  "reference": {
+    "root": "/nav_env/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "sources": [
+      "include/grpc/impl/channel_arg_names.h",
+      "src/core/ext/transport/chttp2/transport/http2_client_transport.cc",
+      "src/core/ext/transport/chttp2/transport/chttp2_transport.cc",
+      "src/core/client_channel/client_channel_filter.cc"
+    ],
+    "source_sha256": {
+      "include/grpc/impl/channel_arg_names.h": "88b097284b6985f7195f538c31081dcb8a088fdf4ede3d021ab72429c2415c43",
+      "src/core/ext/transport/chttp2/transport/http2_client_transport.cc": "76f615097acc38c845270316833c56207add706d3c8d9c722fdd5af6b356642b",
+      "src/core/ext/transport/chttp2/transport/chttp2_transport.cc": "79a23b2b6d742d0cc33c58473d661a13255fe67427c318c4e29ba0a7fd6f4f7f",
+      "src/core/client_channel/client_channel_filter.cc": "73c31cbfa208ce97a3393e311b47072c1e8d865067a247fa5445db15bc161453"
+    },
+    "observed_contract": "exact ENHANCE_YOUR_CALM plus too_many_pings doubles keepalive time for new transports on every subchannel; updates only increase the channel value",
+    "algorithm": {
+      "multiplier": 2,
+      "maximum_interval_ms": 2147483647
+    }
+  },
+  "before": {
+    "goaway_metadata": "Connection retained only the peer Last-Stream-ID after routing GOAWAY",
+    "reconnect": "SharedChannel retired and reconnected an endpoint with the original keepalive interval",
+    "risk": "an aggressively configured channel could repeatedly trigger server abuse GOAWAY after every reconnect"
+  },
+  "after": {
+    "classification": {
+      "role": "client only",
+      "error_code": "ENHANCE_YOUR_CALM",
+      "debug_data": "too_many_pings",
+      "case_sensitive_exact_match": true,
+      "sticky_for_connection": true,
+      "allocation_required": false,
+      "invalid_increasing_last_stream_id_can_publish": false
+    },
+    "channel_state": {
+      "effective_interval_storage": "atomic i64 nanoseconds",
+      "disabled_sentinel": 0,
+      "compare_exchange_monotonic": true,
+      "proposal_is_derived_from_source_transport_interval": true,
+      "duplicate_same_interval_proposals_coalesce": true,
+      "one_application_per_connection": true,
+      "all_endpoint_workers_woken": true,
+      "new_transports_use_effective_interval": true,
+      "existing_armed_deadlines_recalculate": true,
+      "interval_can_decrease": false,
+      "maximum_interval_ms": 2147483647
+    },
+    "public_observation": {
+      "current_interval": "SharedChannel.keepAliveInterval",
+      "successful_increases": "SharedChannel.keepAliveStats().throttles"
+    }
+  },
+  "validation": {
+    "focused": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 140,
+      "tests_total": 140
+    },
+    "grpc_and_http2_ping": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 390,
+      "tests_total": 390
+    },
+    "package": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 22,
+      "tests_total": 22
+    },
+    "http2_connection_fuzz": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 3,
+      "tests_total": 3
+    },
+    "multi_endpoint_case": {
+      "configured_interval_ms": 100,
+      "effective_interval_ms": 200,
+      "throttles": 1,
+      "probe_acknowledgements": 1,
+      "timeouts": 0,
+      "sibling_minimum_observed_delay_ms": 150
+    },
+    "cap_cases": [
+      "ordinary interval doubles",
+      "duplicate proposals from the same old interval apply once",
+      "value above half maximum saturates to maximum",
+      "disabled keepalive remains null",
+      "configuration above maximum is rejected"
+    ]
+  },
+  "independent_rust": {
+    "cargo_lock_sha256": "19734b66757f53dbcfce9c137038df916c5403c4a1f26539df36be76639c28ef",
+    "server_runtime": "Rust Tokio raw HTTP/2",
+    "client_abuse_runtime": "Rust h2 0.4.15",
+    "build_steps_passed": 9,
+    "build_steps_total": 9,
+    "throttle_record": "Rust HTTP/2 server observed netz gRPC keepalive throttle: configured_ms=100 effective_ms=200 observed_ms=200 exact_ack=true client_io=zio-std-io server_io=rust-tokio",
+    "netz_record": "netz gRPC SharedChannel throttled keepalive from Rust HTTP/2 GOAWAY: configured_ms=100 effective_ms=200 throttles=1 acknowledged=1 client_io=zio-std-io server_io=rust-tokio",
+    "server_enforcement_record": "Rust h2 client observed netz gRPC PING enforcement: transport=h2c acknowledged=3 violating_ack=false goaway=ENHANCE_YOUR_CALM client_io=h2-tokio server_io=zio-std-io"
+  },
+  "grpc_cpp": {
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "per_arm_keepalive": {
+      "probes_sent": 1,
+      "acknowledgements": 1,
+      "timeouts": 0,
+      "throttles": 0
+    },
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='too_many_pings' -Dtest-filter='keepalive' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' -Dtest-filter='HTTP/2 PING' --summary all",
+    "zig build test-package --summary all",
+    "zig build fuzz-http2-connection -Doptimize=ReleaseFast --summary all",
+    "zig build interop-grpc-h2-ping-abuse -Doptimize=ReleaseFast --summary all",
+    "BAZEL=/nav_env/Work/grpc/tools/bazel OVERRIDE_BAZEL_WRAPPER_DOWNLOAD_DIR=/nav_env/Temp/netz-grpc-bazel-bin TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "rust_h2": "0.4.15",
+    "grpc_bazel": "8.7.0"
+  },
+  "source_sha256": {
+    "build.zig": "35ce1f6e7207705c01e54938393f4d647f34c018d543a05874e842af16270a28",
+    "src/http2/runtime.zig": "67a61b990267094b0b6b657a307ff1238c28370e6c7d72b46a981364d00d4cac",
+    "src/grpc/channel/shared/keepalive.zig": "3a2ead47d5ddee899dbccffab238695338e5818a6de789ea58f17c6667b0fdca",
+    "src/grpc/channel/shared/state.zig": "a51bc148ae1facc49bcc7cb660670dda9c6cfc5be444bef6e7407c062f25afaa",
+    "src/grpc/channel/shared/init.zig": "44d2ae8394145095389e5e609f63c9648843772a1b3159082535a33f3b9640fb",
+    "src/grpc/channel/shared/worker.zig": "ee0106bd4fecef7d3e54c3e250e6e1d70d6b2196df3160b1c58ba6bc31ceeaa2",
+    "src/grpc/channel/shared.zig": "a73729753c21b6307e204d881df9669944baab6143ee031aad8258c6ff41ad80",
+    "src/grpc/channel/shared/keepalive_tests.zig": "925660b07463af247c046afa78b71639412411999b55808bcfa67cdba45dadb6",
+    "src/grpc/channel/shared/keepalive_throttle_tests.zig": "b0d5e5b6981495302231c665ff28af7a1d0ce83895a2d280136c07708286dce2",
+    "test/package_test.zig": "bc44a2ef3d7ac1fb12f49782b18f97da9f6e4e66324c1e078b45c6789e6b6b96",
+    "tools/interop/grpc_cpp_shared.zig": "74109f8e68c95f40b4fbf692c95ef64c9ceb4d430b95b4dd0bba8419b4fed144",
+    "tools/interop/grpc_h2_ping_abuse.sh": "998a167744ba92036fa8e7ff7569af4f7353c0fe980fdbb5e719b8027aee0a03",
+    "tools/interop/grpc_h2_keepalive_throttle_client.zig": "a443ee203e326a1e7a0323022a4613b1cdfdf0b56a13c14352158dea9918a49b",
+    "tools/hyper_http2_flow/Cargo.toml": "d8374b036eb448ddae48a3514b24f32bae8584af0e6d7d551d03688985e8471b",
+    "tools/hyper_http2_flow/Cargo.lock": "19734b66757f53dbcfce9c137038df916c5403c4a1f26539df36be76639c28ef",
+    "tools/hyper_http2_flow/src/bin/ping_abuse_client.rs": "d65153dae8ff86e5d1794fc1f2416929b47564398bf4906d70ffaf2d8325978e",
+    "tools/hyper_http2_flow/src/bin/ping_throttle_server.rs": "8c160ff4275e22ee258a95f44d6cb553c350be87cb55d57ad4c706b589857b71"
+  }
+}

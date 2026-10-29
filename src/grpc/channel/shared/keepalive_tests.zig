@@ -94,6 +94,7 @@ test "gRPC shared keepalive suppresses probes on an idle channel by default" {
             .probes_sent = 0,
             .acknowledgements = 0,
             .timeouts = 0,
+            .throttles = 0,
         },
         client.keepAliveStats(),
     );

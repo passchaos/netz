@@ -2224,6 +2224,20 @@ pub fn build(b: *std.Build) void {
         &.{"tools/interop/grpc_h2_ping_abuse.sh"},
     );
     grpc_h2_ping_abuse.addArtifactArg(grpc_cpp_server);
+    const grpc_h2_keepalive_throttle_client = b.addExecutable(.{
+        .name = "netz-grpc-h2-keepalive-throttle-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/grpc_h2_keepalive_throttle_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    grpc_h2_ping_abuse.addArtifactArg(
+        grpc_h2_keepalive_throttle_client,
+    );
     const grpc_h2_ping_abuse_step = b.step(
         "interop-grpc-h2-ping-abuse",
         "Verify gRPC server PING abuse GOAWAY with Rust h2",

@@ -35,6 +35,9 @@ pub const State = struct {
     selected: ?*Worker = null,
     next_pick: usize = 0,
     keepalive_counters: keepalive.Counters = .{},
+    /// Zero means disabled. Config validation keeps enabled intervals within
+    /// i64 nanoseconds so endpoint workers can observe throttling lock-free.
+    keepalive_interval_ns: std.atomic.Value(i64) = .init(0),
 
     pub const Worker = @import("worker.zig").Worker(State);
     pub const Source = @import("source.zig").Source(Worker);
@@ -45,6 +48,48 @@ pub const State = struct {
 
     pub fn retain(self: *State) void {
         _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    pub fn keepAliveOptions(self: *const State) ?keepalive.Options {
+        var options = self.options.keepalive orelse return null;
+        const interval = self.keepalive_interval_ns.load(.acquire);
+        if (interval == 0) return null;
+        options.interval = .fromNanoseconds(interval);
+        return options;
+    }
+
+    pub fn keepAliveInterval(self: *const State) ?std.Io.Duration {
+        const interval = self.keepalive_interval_ns.load(.acquire);
+        return if (interval == 0) null else .fromNanoseconds(interval);
+    }
+
+    pub fn applyKeepAliveThrottle(
+        self: *State,
+        transport_interval: std.Io.Duration,
+    ) bool {
+        if (self.options.keepalive == null) return false;
+        const proposed: i64 = @intCast(keepalive.throttledInterval(
+            transport_interval,
+        ).nanoseconds);
+        var current = self.keepalive_interval_ns.load(.acquire);
+        while (current != 0) {
+            if (proposed <= current) return false;
+            if (self.keepalive_interval_ns.cmpxchgWeak(
+                current,
+                proposed,
+                .acq_rel,
+                .acquire,
+            )) |observed| {
+                current = observed;
+                continue;
+            }
+            _ = self.keepalive_counters.throttles.fetchAdd(1, .release);
+            self.lock();
+            self.wakeAllLocked();
+            self.unlock();
+            return true;
+        }
+        return false;
     }
 
     pub fn release(self: *State) void {

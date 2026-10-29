@@ -94,6 +94,9 @@ pub const SharedChannel = struct {
     pub fn keepAliveStats(self: SharedChannel) KeepAliveStats {
         return self.state.keepalive_counters.snapshot();
     }
+    pub fn keepAliveInterval(self: SharedChannel) ?std.Io.Duration {
+        return self.state.keepAliveInterval();
+    }
     pub fn connectivityStateWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!connectivity.State {
         return (try self.state.tracker.snapshotWithDeadline(deadline)).state;
     }
@@ -149,6 +152,7 @@ test {
     _ = @import("shared/job_tests.zig");
     _ = @import("shared/control_deadline_tests.zig");
     _ = @import("shared/keepalive_tests.zig");
+    _ = @import("shared/keepalive_throttle_tests.zig");
     _ = @import("shared/resolution/tests.zig");
     _ = @import("shared/stream/tests.zig");
 }

@@ -6,6 +6,16 @@ fn awakeNow(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{ .raw = .zero, .clock = .awake });
 }
 
+pub const max_interval: std.Io.Duration =
+    .fromMilliseconds(std.math.maxInt(i32));
+
+pub fn throttledInterval(interval: std.Io.Duration) std.Io.Duration {
+    if (interval.nanoseconds > @divFloor(max_interval.nanoseconds, 2)) {
+        return max_interval;
+    }
+    return .fromNanoseconds(interval.nanoseconds * 2);
+}
+
 /// grpc-core-compatible client keepalive defaults. Null at the containing
 /// SharedChannel option disables probes completely.
 pub const Options = struct {
@@ -14,7 +24,10 @@ pub const Options = struct {
     permit_without_calls: bool = false,
 
     pub fn validate(self: Options) error{InvalidSharedOptions}!void {
-        if (self.interval.nanoseconds <= 0 or self.timeout.nanoseconds <= 0) {
+        if (self.interval.nanoseconds <= 0 or
+            self.interval.nanoseconds > max_interval.nanoseconds or
+            self.timeout.nanoseconds <= 0)
+        {
             return error.InvalidSharedOptions;
         }
     }
@@ -24,12 +37,14 @@ pub const Stats = struct {
     probes_sent: u64,
     acknowledgements: u64,
     timeouts: u64,
+    throttles: u64,
 };
 
 pub const Counters = struct {
     probes_sent: std.atomic.Value(u64) = .init(0),
     acknowledgements: std.atomic.Value(u64) = .init(0),
     timeouts: std.atomic.Value(u64) = .init(0),
+    throttles: std.atomic.Value(u64) = .init(0),
 
     pub fn snapshot(self: *const Counters) Stats {
         // Completion counters publish after probe submission. Read them first,
@@ -37,10 +52,12 @@ pub const Counters = struct {
         // completions than submitted probes.
         const acknowledgements = self.acknowledgements.load(.acquire);
         const timeouts = self.timeouts.load(.acquire);
+        const throttles = self.throttles.load(.acquire);
         return .{
             .probes_sent = self.probes_sent.load(.acquire),
             .acknowledgements = acknowledgements,
             .timeouts = timeouts,
+            .throttles = throttles,
         };
     }
 };
@@ -163,6 +180,18 @@ test "gRPC keepalive defaults and validation match grpc-core channel policy" {
     try std.testing.expectError(
         error.InvalidSharedOptions,
         (Options{ .timeout = .zero }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidSharedOptions,
+        (Options{ .interval = .fromNanoseconds(max_interval.nanoseconds + 1) }).validate(),
+    );
+    try std.testing.expectEqual(
+        std.Io.Duration.fromSeconds(2),
+        throttledInterval(.fromSeconds(1)),
+    );
+    try std.testing.expectEqual(
+        max_interval,
+        throttledInterval(.fromNanoseconds(max_interval.nanoseconds - 1)),
     );
 
     var driver: Driver = .{};

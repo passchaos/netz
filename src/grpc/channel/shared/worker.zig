@@ -34,6 +34,8 @@ pub fn Worker(comptime State: type) type {
         connect_at: ?std.Io.Clock.Timestamp = null,
         health_at: ?std.Io.Clock.Timestamp = null,
         keep_alive: keepalive.Driver = .{},
+        goaway_keepalive_applied: bool = false,
+        connection_keepalive_interval: ?std.Io.Duration = null,
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
@@ -95,6 +97,8 @@ pub fn Worker(comptime State: type) type {
             self.owner.disconnect() catch {};
             self.connection = null;
             self.keep_alive.disconnected();
+            self.goaway_keepalive_applied = false;
+            self.connection_keepalive_interval = null;
             self.health_disabled = false;
             self.health_at = null;
             self.health_seen = false;
@@ -133,6 +137,11 @@ pub fn Worker(comptime State: type) type {
                 self.owner.resetConnectionBackoff();
                 self.connection = try self.owner.connectWithDeadline(.fromNow(self.parent.io, .{ .raw = self.parent.options.channel.backoff.min_connect_timeout, .clock = .awake }));
                 self.keep_alive.connected(self.parent.io);
+                self.goaway_keepalive_applied = false;
+                self.connection_keepalive_interval = if (self.parent.keepAliveOptions()) |options|
+                    options.interval
+                else
+                    null;
                 self.connect_at = null;
                 self.connect_failures = 0;
                 self.health_failures = 0;
@@ -145,6 +154,14 @@ pub fn Worker(comptime State: type) type {
                 &self.parent.keepalive_counters,
             );
             if (connection.peer_goaway_last_stream_id != null) {
+                if (!self.goaway_keepalive_applied and
+                    connection.peerGoAwayTooManyPings())
+                {
+                    self.goaway_keepalive_applied = true;
+                    if (self.connection_keepalive_interval) |interval| {
+                        _ = self.parent.applyKeepAliveThrottle(interval);
+                    }
+                }
                 self.dropWatch();
                 self.local_state = .transient_failure;
                 self.publish();
@@ -265,8 +282,13 @@ pub fn Worker(comptime State: type) type {
                 if (item.call.write) |write| until = minimum(until, write.deadline);
                 self.parent.unlock();
             }
+            const keep_alive_options = self.parent.keepAliveOptions();
+            self.connection_keepalive_interval = if (keep_alive_options) |options|
+                options.interval
+            else
+                null;
             const keep_alive_until = self.keep_alive.nextDeadline(
-                self.parent.options.keepalive,
+                keep_alive_options,
                 self.hasActiveCalls(),
             );
             const keep_alive_first = if (keep_alive_until) |probe|
@@ -284,7 +306,7 @@ pub fn Worker(comptime State: type) type {
                         try self.keep_alive.handleDeadline(
                             self.parent.io,
                             connection,
-                            self.parent.options.keepalive,
+                            keep_alive_options,
                             self.hasActiveCalls(),
                             self.outputDeadline(),
                             &self.parent.keepalive_counters,

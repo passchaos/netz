@@ -45,6 +45,10 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             .round_robin => channel.SelectionPolicy.round_robin,
         } else if (target == .resolved) target.resolved.policy else .pick_first),
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
+        .keepalive_interval_ns = .init(if (options.keepalive) |keepalive|
+            @intCast(keepalive.interval.nanoseconds)
+        else
+            0),
     };
     transferred = true;
     errdefer {

@@ -149,7 +149,7 @@ fn verifyKeepAlive(channel: netz.grpc.SharedChannel, io: std.Io) !void {
         const stats = channel.keepAliveStats();
         if (stats.acknowledgements != 0) {
             if (stats.probes_sent != 1 or stats.acknowledgements != 1 or
-                stats.timeouts != 0)
+                stats.timeouts != 0 or stats.throttles != 0)
             {
                 return error.InvalidSharedKeepAliveStats;
             }

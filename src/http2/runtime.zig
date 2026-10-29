@@ -4031,6 +4031,10 @@ pub const Connection = struct {
     /// a stream without claiming that its request might have been processed.
     last_peer_processed_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
+    /// Sticky classification for grpc-core's keepalive throttling signal.
+    /// The debug bytes are consumed from frame storage, so retain only the
+    /// exact allocation-free predicate needed by channel owners.
+    peer_goaway_too_many_pings: bool = false,
     local_goaway_last_stream_id: ?u31 = null,
     /// Two-phase server shutdown sends its maximum GOAWAY exactly once, then
     /// resumes the fixed PING barrier after a bounded wait times out.
@@ -14802,6 +14806,10 @@ pub const Connection = struct {
         return self.peer_goaway_last_stream_id;
     }
 
+    pub fn peerGoAwayTooManyPings(self: Connection) bool {
+        return self.peer_goaway_too_many_pings;
+    }
+
     /// Classify whether retrying a locally initiated request is safe after the
     /// peer's latest GOAWAY. This reports only processing certainty; callers
     /// must still decide whether the method/body itself is replayable.
@@ -15771,6 +15779,10 @@ pub const Connection = struct {
             if (goaway.last_stream_id > last) return error.InvalidFrame;
         }
         self.peer_goaway_last_stream_id = goaway.last_stream_id;
+        self.peer_goaway_too_many_pings = self.peer_goaway_too_many_pings or
+            (self.role == .client and
+                goaway.error_code == .enhance_your_calm and
+                std.mem.eql(u8, goaway.debug_data, "too_many_pings"));
     }
 
     fn handleGoAwayForStream(self: *Connection, stream_id: u31, goaway: http2.GoAwayPayload) Error!void {
@@ -37296,8 +37308,12 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
 
     try connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} });
     try std.testing.expectEqual(@as(?u31, 7), connection.peer_goaway_last_stream_id);
-    try connection.recordPeerGoAway(.{ .last_stream_id = 5, .error_code = .no_error, .debug_data = &.{} });
+    try std.testing.expect(!connection.peerGoAwayTooManyPings());
+    try connection.recordPeerGoAway(.{ .last_stream_id = 5, .error_code = .enhance_your_calm, .debug_data = "too_many_pings" });
     try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
+    try std.testing.expect(connection.peerGoAwayTooManyPings());
+    try connection.recordPeerGoAway(.{ .last_stream_id = 5, .error_code = .no_error, .debug_data = &.{} });
+    try std.testing.expect(connection.peerGoAwayTooManyPings());
     try std.testing.expectError(error.InvalidFrame, connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} }));
     try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
 }

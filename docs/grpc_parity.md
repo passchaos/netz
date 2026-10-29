@@ -1697,3 +1697,36 @@ interop scenarios against the default-enforcing server, including slow-consumer,
 soak, streaming, compression, cancellation, deadlines, metadata and Bearer
 authentication. Evidence is recorded in
 `docs/evidence/grpc_server_ping_enforcement/2026-10-29.json`.
+
+## SharedChannel keepalive throttling
+
+The HTTP/2 client now retains a sticky, allocation-free classification when a
+peer GOAWAY has both error code `ENHANCE_YOUR_CALM` and exact debug data
+`too_many_pings`. An increasing Last-Stream-ID remains a protocol error and
+cannot publish this classification; ordinary `ENHANCE_YOUR_CALM`, different
+debug data and server-role GOAWAYs do not trigger it.
+
+Each SharedChannel keeps one effective keepalive interval shared across all
+current and future endpoint workers. The first observation of the exact GOAWAY
+on a connection doubles that interval, capped at grpc-core's `INT_MAX`
+milliseconds. A compare/exchange makes concurrent endpoint observations
+monotonic: two transports built with the same old interval propose the same
+doubled value rather than multiplying one another. Each connection applies its
+signal once, and the winning update wakes every endpoint so a sibling with an
+already armed deadline recalculates against the longer interval. The value never
+decreases during the Channel lifetime.
+Disabled keepalive remains disabled.
+
+`SharedChannel.keepAliveInterval()` exposes the current effective duration, and
+`keepAliveStats().throttles` records successful interval increases. Configured
+intervals above the grpc-core maximum are rejected before worker startup.
+
+A real two-endpoint regression has one peer send the exact GOAWAY while the
+other waits for an idle probe; the sibling observes the configured 100 ms
+interval become 200 ms before its first PING. An independent Rust/Tokio raw
+HTTP/2 server repeats the replacement-connection flow and measured exactly
+200 ms, then ACKed the probe. The opposite Rust h2 client → netz server abuse
+case remains in the same gate. The pinned grpc-cpp h2c/TLS matrix continues to
+verify exact ACK with `throttles=0`, proving ordinary peers do not spuriously
+back off. Evidence is recorded in
+`docs/evidence/grpc_shared_keepalive_throttle/2026-10-29.json`.

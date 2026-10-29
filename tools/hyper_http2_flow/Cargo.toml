@@ -47,6 +47,10 @@ path = "src/bin/connect_udp.rs"
 name = "netz-h2-ping-abuse-client"
 path = "src/bin/ping_abuse_client.rs"
 
+[[bin]]
+name = "netz-h2-ping-throttle-server"
+path = "src/bin/ping_throttle_server.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-util = "0.3"
