@@ -1268,6 +1268,47 @@ test "broker Keep Alive zero disables inactivity timeout" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker managed Keep Alive ignores a stale pre-renewal deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "keep-alive-renewed",
+            .keep_alive_seconds = 1,
+        },
+    );
+    defer client.close();
+    try std.Io.sleep(io, .fromMilliseconds(900), .awake);
+    try client.ping();
+    // Cross the original 1.5-second deadline while remaining inside the 1.5
+    // seconds measured from the complete PINGREQ. A stale driver wake must
+    // observe the atomically extended deadline and leave the socket usable.
+    try std.Io.sleep(io, .fromMilliseconds(900), .awake);
+    try client.ping();
+
+    try client.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker maximum Keep Alive replaces MQTT 5 and refuses MQTT 3.1.1" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

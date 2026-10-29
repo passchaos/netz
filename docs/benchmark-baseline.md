@@ -8547,6 +8547,56 @@ profiles are retained under `zig-out/mqtt-ack-flush-lock-handoff-ab` and
 `zig-out/mqtt-ack-flush-lock-handoff-profile`; the combined manifest hashes to
 `b2412a946cfc03433990344caee10d52294169c09c52ee52a39d4b93fb3ccb46`.
 
+The production MQTT broker now moves Keep Alive inactivity scheduling out of
+each packet read and into its existing lifecycle deadline driver. Standalone
+`mqtt.runtime` server APIs retain their per-call timed-read behavior. Finite
+and supervised Broker listeners instead install one exact awake-clock deadline
+after CONNACK, renew it with one atomic update after every complete Control
+Packet, and use an allocation-free progress observer while more than 1,000
+bytes remain in a partial large packet. The driver scans stable connection
+slots only when a lifecycle deadline wakes it. Its compare-and-exchange claim
+cannot override concurrent progress; a stale pre-renewal wake therefore
+reschedules instead of closing the connection. Initial installation is
+serialized with the driver's slot scan and generation snapshot. TCP, TLS,
+WebSocket and WSS all retain the existing 1.5x timeout, zero-disable, large-
+packet renewal, control-frame exclusion and ungraceful Will semantics.
+
+This follows Mosquitto `5cd25465`'s `src/keepalive.c` separation of packet
+activity from the event-loop timeout check. Netz uses its already allocated
+slot table rather than Mosquitto's maximum-Keep-Alive-sized ring. An active
+`runtime.Connection` gains one eight-byte atomic deadline and grows from 824 to
+832 bytes; the 96-byte preallocated `ClientSlot` is unchanged. The scan is
+O(configured slots) per actual/stale lifecycle wake, while packet activity is
+O(1), allocation-free, and takes no broker mutex after first installation.
+
+The missing kernel tool was installed as Ubuntu/NVIDIA package
+`linux-tools-6.8.0-1021-nvidia-tegra` 6.8.0-1021.21; its binary reports perf
+6.8.12 and successfully reads this kernel's user cycles/instructions PMU.
+Before implementation, a 4,435-sample zero-loss profile attributed 3.00% self
+to `common.timedWaitForIoClock`, 2.52% to `runtime.Executor.loopSetTimer`, and
+the timed-read child 2.11% of `ev.loop.Loop.addInternal`. A same-binary
+Keep-Alive-zero control reduced broker instructions by roughly 7.5%, selecting
+the centralized design. The final 4,351-sample profile contains none of
+`timedWaitForIoClock`, `loopSetTimer`, or managed deadline scanning above the
+0.5% report threshold; `__kernel_clock_gettime` moved from 16.50% to 12.59%.
+Profile percentages are explanatory, not additive A/B evidence.
+
+The retained fixed-binary control used eight AB/BA pairs, CPU 0 for one shared
+driver and CPU 1 for the broker, 1,000 warmups, 10,000 measured durable QoS 2
+serial publishes, window one, a 256-byte payload, and a 3,600-second Session.
+Baseline broker, candidate broker and fixed driver SHA-256 values were
+`9559493e4eab6da55d2f99f9ebb383bdb674da6a5bf3ac78409c31e6170cf9c4`,
+`34b50eeb85b9602898cd96d89653fde35e310f59aa2bfacf4c14d27c3ab34f6d`,
+and `e87cfaf79149cadbf1ef8f5cc4b9b7a6aadde705a60131d975df06702caeeee1`.
+Every arm completed exactly 10,000 deliveries with checksum 2,695,000.
+Baseline/candidate broker instructions improved by a 1.058698 paired median
+(5.54% fewer, 8/8 wins) and cycles by 1.117220 (10.49% fewer, 8/8 wins).
+Throughput and latency remained load-sensitive and receive no improvement
+claim. The final same-client Mosquitto gate completed 10,000 exact deliveries;
+netz remained behind at 22,091 versus 31,651 publishes/s, so this removes one
+runtime CPU deficit without closing the broader serial QoS 2 gap. Full data is
+in `docs/evidence/mqtt_managed_keep_alive/2026-10-29.json`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

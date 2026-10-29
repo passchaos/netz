@@ -6,7 +6,7 @@ pub fn Reader(comptime Context: type) type {
     return struct {
         const Error = Context.ErrorType;
 
-        pub fn read(allocator: std.mem.Allocator, ws: anytype, max_packet_size: usize, inactivity_timeout: ?std.Io.Clock.Duration, absolute_deadline: ?std.Io.Clock.Timestamp, owned_prefix_len: usize) Error!Context.PacketType {
+        pub fn read(allocator: std.mem.Allocator, ws: anytype, max_packet_size: usize, inactivity_timeout: ?std.Io.Clock.Duration, absolute_deadline: ?std.Io.Clock.Timestamp, inactivity_observer: ?Context.InactivityObserverType, owned_prefix_len: usize) Error!Context.PacketType {
             var deadline = if (inactivity_timeout) |timeout| Context.fromInactivity(ws.connection.io, timeout) else absolute_deadline;
             var large_progress_bytes: usize = 0;
             var frame = try Context.parse(ws.input.items);
@@ -30,6 +30,11 @@ pub fn Reader(comptime Context: type) type {
                         if (inactivity_timeout) |timeout| {
                             if (ws.input.items.len > large_progress_bytes and parsed.packet_len > ws.input.items.len and parsed.packet_len - ws.input.items.len > progress_threshold) {
                                 deadline = Context.fromInactivity(ws.connection.io, timeout);
+                                large_progress_bytes = ws.input.items.len;
+                            }
+                        } else if (inactivity_observer) |observer| {
+                            if (ws.input.items.len > large_progress_bytes and parsed.packet_len > ws.input.items.len and parsed.packet_len - ws.input.items.len > progress_threshold) {
+                                observer.renew();
                                 large_progress_bytes = ws.input.items.len;
                             }
                         }

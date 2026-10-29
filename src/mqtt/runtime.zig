@@ -209,6 +209,7 @@ pub fn readProxyMetadata(
 }
 
 const PacketTransport = packet_transport.Transport;
+const broker_keep_alive = @import("runtime/broker_keep_alive.zig");
 
 pub const Server = struct {
     io: std.Io,
@@ -3133,6 +3134,10 @@ pub const Connection = struct {
     incoming_topic_alias_maximum: u16 = 16,
     peer_topic_alias_maximum: u16 = 0,
     keep_alive_seconds: u16 = 30,
+    /// Production Broker listeners can move inactivity scheduling to their
+    /// shared deadline driver. Standalone runtime servers retain the ordinary
+    /// per-read timeout APIs below.
+    managed_keep_alive: broker_keep_alive.State = .{},
     capabilities: ConnectionCapabilities = .{},
     proxy_v2_require_client_certificate: bool = false,
     packet_identifiers: packet_identifiers.State = .{},
@@ -3389,6 +3394,53 @@ pub const Connection = struct {
     pub fn interrupt(self: *Connection) Error!void {
         self.transport_unusable.store(true, .release);
         try self.transport.interrupt();
+    }
+
+    /// Begin shared broker inactivity scheduling after successful CONNACK.
+    pub fn startManagedKeepAlive(self: *Connection) ?std.Io.Timestamp {
+        return self.managed_keep_alive.start(
+            self.transport.ioHandle(),
+            keepAliveTimeout(self.keep_alive_seconds),
+        );
+    }
+
+    pub fn managedKeepAliveDeadline(
+        self: *const Connection,
+    ) ?std.Io.Timestamp {
+        return self.managed_keep_alive.deadline();
+    }
+
+    /// Claim a deadline previously observed by the broker driver and interrupt
+    /// the blocking transport read. Concurrent packet progress wins by first
+    /// replacing the expected atomic value.
+    pub fn expireManagedKeepAlive(
+        self: *Connection,
+        expected: std.Io.Timestamp,
+    ) bool {
+        const expected_ns = std.math.cast(
+            i64,
+            expected.nanoseconds,
+        ) orelse return false;
+        if (!self.managed_keep_alive.claimExpired(expected_ns)) return false;
+        self.transport_unusable.store(true, .release);
+        self.transport.interrupt() catch {};
+        return true;
+    }
+
+    pub fn managedKeepAliveTimedOut(self: *const Connection) bool {
+        return self.managed_keep_alive.timedOut();
+    }
+
+    fn renewManagedKeepAlive(self: *Connection) void {
+        self.managed_keep_alive.renew(
+            self.transport.ioHandle(),
+            keepAliveTimeout(self.keep_alive_seconds),
+        );
+    }
+
+    fn renewManagedKeepAliveErased(context: *anyopaque) void {
+        const self: *Connection = @ptrCast(@alignCast(context));
+        self.renewManagedKeepAlive();
     }
 
     /// Return the verified client certificate chain for an mTLS server
@@ -6155,6 +6207,33 @@ pub const Connection = struct {
         }, out);
     }
 
+    /// Broker hot path backed by one shared lifecycle deadline driver rather
+    /// than one timer arm/clear around every socket read. Large packet progress
+    /// renews through the observer; a complete packet renews after validation.
+    pub fn readBrokerEventWithManagedKeepAliveIntoPrefixedOut(
+        self: *Connection,
+        storage: []u8,
+        prefix_len: usize,
+        out: *BrokerEvent,
+    ) Error!void {
+        self.readBrokerEventOptionsOut(.{
+            .inactivity_observer = .{
+                .context = self,
+                .renew_fn = renewManagedKeepAliveErased,
+            },
+            .storage = storage,
+            .prefix_len = prefix_len,
+        }, out) catch |err| {
+            if (self.managedKeepAliveTimedOut()) return error.Timeout;
+            return err;
+        };
+        self.renewManagedKeepAlive();
+        if (self.managedKeepAliveTimedOut()) {
+            out.deinit(self.allocator);
+            return error.Timeout;
+        }
+    }
+
     fn readBrokerEventInternal(
         self: *Connection,
         inactivity_timeout: ?std.Io.Clock.Duration,
@@ -8139,7 +8218,9 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     if (@sizeOf(usize) == 8) {
         // Event retries reuse the existing 24-byte packet ownership slot; optional
         // PROXY metadata remains a pointer instead of an inline descriptor.
-        try std.testing.expectEqual(@as(usize, 824), @sizeOf(Connection));
+        // One eight-byte atomic replaces per-read timer ownership with the
+        // production Broker's shared inactivity deadline driver.
+        try std.testing.expectEqual(@as(usize, 832), @sizeOf(Connection));
         try std.testing.expectEqual(
             @as(usize, 2),
             @sizeOf(ConnectionCapabilities),
@@ -11614,6 +11695,7 @@ test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {
 }
 
 test {
+    _ = broker_keep_alive;
     _ = @import("runtime/receive/event_allocation_tests.zig");
     _ = @import("reconnect/replay_deadline_tests.zig");
     _ = @import("runtime/ping_write_tests.zig");

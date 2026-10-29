@@ -2,10 +2,12 @@
 const std = @import("std");
 const Pending = @import("../acknowledgement/pending.zig").State;
 const deadline_policy = @import("../../../internal/deadline.zig");
+const packet_transport = @import("../packet_transport.zig");
 
 pub const Options = struct {
     deadline: ?std.Io.Clock.Timestamp = null,
     inactivity_timeout: ?std.Io.Clock.Duration = null,
+    inactivity_observer: ?packet_transport.InactivityObserver = null,
     storage: ?[]u8 = null,
     prefix_len: usize = 0,
 };
@@ -104,11 +106,14 @@ pub fn Reader(comptime Context: type) type {
         fn readTransport(connection: *Connection, options: Options) Error!Packet {
             const transport = &connection.transport;
             if (options.storage) |storage| {
-                return if (options.inactivity_timeout) |timeout|
+                return if (options.inactivity_observer) |observer|
+                    transport.readPacketWithInactivityObserverIntoWithPrefix(connection.allocator, connection.limits.max_packet_size, observer, storage, options.prefix_len)
+                else if (options.inactivity_timeout) |timeout|
                     transport.readPacketWithInactivityTimeoutIntoWithPrefix(connection.allocator, connection.limits.max_packet_size, timeout, storage, options.prefix_len)
                 else
                     transport.readPacketIntoWithPrefix(connection.allocator, connection.limits.max_packet_size, storage, options.prefix_len);
             }
+            std.debug.assert(options.inactivity_observer == null);
             if (options.deadline) |deadline| return transport.readPacketWithDeadline(connection.allocator, connection.limits.max_packet_size, deadline);
             if (options.inactivity_timeout) |timeout| return transport.readPacketWithInactivityTimeout(connection.allocator, connection.limits.max_packet_size, timeout);
             return transport.readPacket(connection.allocator, connection.limits.max_packet_size);

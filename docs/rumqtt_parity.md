@@ -5753,6 +5753,28 @@ proxy evidence for the entire suite.
    package tests pass 22/22, and the Mosquitto `5cd25465` same-client gate
    preserves all 4,000 expected deliveries. Full records are in
    [the lazy delivery-writer evidence](evidence/mqtt_lazy_delivery_writer/2026-10-29.json).
+   Production Broker listeners now also enforce Keep Alive through the shared
+   lifecycle deadline driver instead of arming and clearing an I/O timer for
+   every packet read. One atomic per active Connection stores an exact awake-
+   clock deadline; complete packets and >1,000-byte remaining body progress
+   extend it without taking the broker state mutex. The driver claims an expiry
+   with compare-and-exchange, so a concurrent renewal defeats a stale wake.
+   First installation is serialized with its slot/generation scan. Standalone
+   runtime server reads keep their original timed API, and TCP/TLS/WS/WSS retain
+   the 1.5x timeout, zero-disable, partial-packet and WebSocket-control rules.
+   This mirrors Mosquitto's centralized `keepalive.c` lifecycle while reusing
+   netz's bounded slot table rather than allocating a 98,303-entry default
+   timing ring. `runtime.Connection` grows 824 to 832 bytes for the atomic;
+   preallocated `ClientSlot` stays 96 bytes. Eight fixed-binary durable serial
+   QoS 2 pairs reduced broker instructions 5.54% and cycles 10.49% by paired
+   medians with 8/8 wins for each. Timing remained noisy and the final direct
+   Mosquitto comparison still measured 22,091 versus 31,651 publishes/s, so
+   the broader serial/RSS gap remains active. Focused Keep Alive/broker tests
+   pass 221/221, TLS/WSS composition passes 131/131, live-broker fuzz passes
+   3/3, package tests pass 22/22, and Mosquitto gates pass 294 selected vectors
+   plus all 1,825 source-locked sequences. Full PMU, profile and lifecycle
+   evidence is recorded in
+   [the managed Keep Alive evidence](evidence/mqtt_managed_keep_alive/2026-10-29.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

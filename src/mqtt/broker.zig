@@ -8189,8 +8189,11 @@ pub const Broker = struct {
                 self.next_system_stats_ns = null;
             }
             const lifecycle_deadline = earliestDeadline(
-                self.wills.nextDeadline(),
-                self.sessions.nextExpiryDeadline(),
+                self.nextManagedKeepAliveDeadlineLocked(),
+                earliestDeadline(
+                    self.wills.nextDeadline(),
+                    self.sessions.nextExpiryDeadline(),
+                ),
             );
             const retained_deadline = earliestDeadline(
                 lifecycle_deadline,
@@ -8243,6 +8246,7 @@ pub const Broker = struct {
         now: std.Io.Timestamp,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
+        self.expireManagedKeepAliveLocked(now);
         var expired_retained_count: usize = 0;
         if (self.options.retained_expiry_interval) |interval| {
             if (self.next_retained_expiry_ns) |deadline| {
@@ -8290,6 +8294,33 @@ pub const Broker = struct {
             );
         }
         if (published_any) try self.flushAllSlots();
+    }
+
+    fn nextManagedKeepAliveDeadlineLocked(
+        self: *Broker,
+    ) ?std.Io.Timestamp {
+        var earliest: ?std.Io.Timestamp = null;
+        for (self.slots) |slot| {
+            const connection = slot.connection orelse continue;
+            earliest = earliestDeadline(
+                earliest,
+                connection.managedKeepAliveDeadline(),
+            );
+        }
+        return earliest;
+    }
+
+    fn expireManagedKeepAliveLocked(
+        self: *Broker,
+        now: std.Io.Timestamp,
+    ) void {
+        for (self.slots) |slot| {
+            const connection = slot.connection orelse continue;
+            const deadline = connection.managedKeepAliveDeadline() orelse
+                continue;
+            if (deadline.nanoseconds > now.nanoseconds) continue;
+            _ = connection.expireManagedKeepAlive(deadline);
+        }
     }
 
     /// Claim and route every Will whose deadline has passed.
@@ -9290,6 +9321,7 @@ const ClientTask = struct {
     connect: runtime.OwnedConnect,
     result: *?anyerror,
     listener_capacity: ?*ListenerCapacity = null,
+    managed_keep_alive: bool = false,
 
     fn run(task: ClientTask) std.Io.Cancelable!void {
         var connect = task.connect;
@@ -9299,6 +9331,18 @@ const ClientTask = struct {
         // OwnedConnect releases the packet or replacement identity.
         defer connect.deinit(task.broker.allocator);
         const connection = slot.connection.?;
+        if (task.managed_keep_alive) {
+            // Serialize first installation with the driver's slot scan and
+            // generation snapshot. Later packet activity only extends an
+            // existing deadline, so stale earlier wakes are harmless.
+            task.broker.state_mutex.lockUncancelable(task.broker.io);
+            const deadline_installed =
+                connection.startManagedKeepAlive() != null;
+            task.broker.state_mutex.unlock(task.broker.io);
+            if (deadline_installed) {
+                task.broker.deadline_driver.notify(task.broker.io);
+            }
+        }
         defer @import("broker/session_writer/retirement.zig").settle(struct {
             pub fn unregister(value: ClientTask) Error!?anyerror {
                 return value.broker.unregister(value.slot_index, value.subscriber_id, value.listener_capacity);
@@ -9307,7 +9351,11 @@ const ClientTask = struct {
         }, task);
 
         var read_error: ?anyerror = null;
-        task.runLoop(slot, connection, connect.connect) catch |err| {
+        const loop_result = if (task.managed_keep_alive)
+            task.runLoopMode(true, slot, connection, connect.connect)
+        else
+            task.runLoopMode(false, slot, connection, connect.connect);
+        loop_result catch |err| {
             if (!ungracefulTransportClose(err)) read_error = err;
         };
         const writer_error = task.broker.stopDeliveryWriter(slot);
@@ -9352,8 +9400,30 @@ const ClientTask = struct {
         return true;
     }
 
-    fn runLoop(
+    fn readNextBrokerEvent(
+        comptime managed_keep_alive: bool,
+        connection: *runtime.Connection,
+        storage: []u8,
+        out: *runtime.BrokerEvent,
+    ) Error!void {
+        if (managed_keep_alive) {
+            return connection
+                .readBrokerEventWithManagedKeepAliveIntoPrefixedOut(
+                storage,
+                @sizeOf(Publication),
+                out,
+            );
+        }
+        return connection.readBrokerEventWithKeepAliveIntoPrefixedOut(
+            storage,
+            @sizeOf(Publication),
+            out,
+        );
+    }
+
+    fn runLoopMode(
         task: ClientTask,
+        comptime managed_keep_alive: bool,
         slot: *ClientSlot,
         connection: *runtime.Connection,
         connect: mqtt.Connect,
@@ -9365,9 +9435,10 @@ const ClientTask = struct {
         var packet_storage: [packet_storage_capacity]u8 = undefined;
         while (true) {
             var event: runtime.BrokerEvent = undefined;
-            connection.readBrokerEventWithKeepAliveIntoPrefixedOut(
+            readNextBrokerEvent(
+                managed_keep_alive,
+                connection,
                 &packet_storage,
-                @sizeOf(Publication),
                 &event,
             ) catch |err| {
                 if (try task.disconnectForProtocolViolation(
@@ -9876,6 +9947,7 @@ const ListenerAcceptTask = struct {
         };
         slot_claimed = false;
         client_task.listener_capacity = task.capacity;
+        client_task.managed_keep_alive = true;
         capacity_claimed = false;
         return client_task;
     }
@@ -10042,6 +10114,7 @@ const ListenerSupervisorAcceptTask = struct {
             };
             slot_claimed = false;
             client_task.listener_capacity = task.capacity;
+            client_task.managed_keep_alive = true;
             capacity_claimed = false;
             ClientTask.run(client_task) catch |err| {
                 connection_error = err;

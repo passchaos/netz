@@ -34,9 +34,9 @@ pub fn cursor(comptime Reader: type, comptime State: type, comptime PacketError:
         var source: Source = .{ .io = threaded.io(), .bytes = bytes, .cut = 7, .fault = fault };
         var transport = struct { connection: *Source, packet_state: State = .{} }{ .connection = &source };
         defer transport.packet_state.deinit(std.testing.allocator);
-        try std.testing.expectError(fault, Reader.read(std.testing.allocator, &transport, 64, null, null, 0));
+        try std.testing.expectError(fault, Reader.read(std.testing.allocator, &transport, 64, null, null, null, 0));
         try std.testing.expectEqual(source.cut, transport.packet_state.packet_read);
-        var packet = try Reader.read(std.testing.allocator, &transport, 64, null, null, 0);
+        var packet = try Reader.read(std.testing.allocator, &transport, 64, null, null, null, 0);
         defer packet.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(bytes, packet.bytes);
     }
@@ -45,10 +45,10 @@ pub fn cursor(comptime Reader: type, comptime State: type, comptime PacketError:
         var transport = struct { connection: *Source, packet_state: State = .{} }{ .connection = &source };
         defer transport.packet_state.deinit(std.testing.allocator);
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-        try std.testing.expectError(error.OutOfMemory, Reader.read(failing.allocator(), &transport, 64, null, null, prefix_len));
+        try std.testing.expectError(error.OutOfMemory, Reader.read(failing.allocator(), &transport, 64, null, null, null, prefix_len));
         try std.testing.expectEqual(@as(usize, 2), source.offset);
         try std.testing.expectEqual(@as(usize, 2), transport.packet_state.header_len);
-        var packet = try Reader.read(std.testing.allocator, &transport, 64, null, null, prefix_len);
+        var packet = try Reader.read(std.testing.allocator, &transport, 64, null, null, null, prefix_len);
         defer packet.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(bytes, packet.bytes);
         try std.testing.expectEqual(prefix_len, packet.prefix_len);

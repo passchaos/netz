@@ -33,6 +33,18 @@ pub const Error = mqtt.Error || websocket_runtime.Error ||
 } || net.Stream.Reader.Error || net.Stream.Writer.Error ||
     keep_alive_reader.Error;
 
+/// Broker-owned inactivity scheduling can renew one external deadline without
+/// arming a separate I/O timer for every packet read. The callback must be
+/// allocation-free and safe on the connection reader's executor.
+pub const InactivityObserver = struct {
+    context: *anyopaque,
+    renew_fn: *const fn (context: *anyopaque) void,
+
+    pub fn renew(self: InactivityObserver) void {
+        self.renew_fn(self.context);
+    }
+};
+
 const WebSocketTransport = struct {
     connection: websocket_runtime.Connection,
     input: std.ArrayList(u8) = .empty,
@@ -608,6 +620,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 null,
                 null,
+                null,
                 storage,
                 0,
             ),
@@ -648,6 +661,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 null,
                 null,
+                null,
                 storage,
                 prefix_len,
             ),
@@ -655,6 +669,7 @@ pub const Transport = union(enum) {
                 allocator,
                 transport,
                 max_packet_size,
+                null,
                 null,
                 null,
                 prefix_len,
@@ -665,6 +680,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 null,
                 null,
+                null,
                 prefix_len,
             ),
             .tls_server => |*transport| readStreamPacketWithPolicy(
@@ -673,12 +689,14 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 null,
                 null,
+                null,
                 prefix_len,
             ),
             .websocket => |ws| readWebSocketPacketWithPolicy(
                 allocator,
                 ws,
                 max_packet_size,
+                null,
                 null,
                 null,
                 prefix_len,
@@ -749,6 +767,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
                 null,
+                null,
                 storage,
                 0,
             ),
@@ -776,6 +795,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
                 null,
+                null,
                 storage,
                 prefix_len,
             ),
@@ -785,6 +805,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
                 null,
+                null,
                 prefix_len,
             ),
             .tls_vail => |*transport| readStreamPacketWithPolicy(
@@ -792,6 +813,7 @@ pub const Transport = union(enum) {
                 transport,
                 max_packet_size,
                 timeout,
+                null,
                 null,
                 prefix_len,
             ),
@@ -801,6 +823,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
                 null,
+                null,
                 prefix_len,
             ),
             .websocket => |ws| readWebSocketPacketWithPolicy(
@@ -809,6 +832,68 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
                 null,
+                null,
+                prefix_len,
+            ),
+        };
+    }
+
+    /// Read with an externally managed inactivity deadline. Ordinary reads do
+    /// not arm a per-operation timer; large-packet progress invokes `observer`
+    /// under the same >1000-byte policy as timed Keep Alive reads.
+    pub fn readPacketWithInactivityObserverIntoWithPrefix(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        observer: InactivityObserver,
+        storage: []u8,
+        prefix_len: usize,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |*tcp| readTcpPacketWithPolicy(
+                allocator,
+                tcp,
+                max_packet_size,
+                null,
+                null,
+                observer,
+                storage,
+                prefix_len,
+            ),
+            .tls => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                observer,
+                prefix_len,
+            ),
+            .tls_vail => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                observer,
+                prefix_len,
+            ),
+            .tls_server => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                observer,
+                prefix_len,
+            ),
+            .websocket => |ws| readWebSocketPacketWithPolicy(
+                allocator,
+                ws,
+                max_packet_size,
+                null,
+                null,
+                observer,
                 prefix_len,
             ),
         };
@@ -869,6 +954,7 @@ fn readStreamPacket(
         max_packet_size,
         null,
         null,
+        null,
         0,
     );
 }
@@ -886,6 +972,7 @@ fn readStreamPacketWithInactivityTimeout(
         max_packet_size,
         timeout,
         null,
+        null,
         0,
     );
 }
@@ -902,6 +989,7 @@ fn readStreamPacketWithDeadline(
         max_packet_size,
         null,
         deadline,
+        null,
         0,
     );
 }
@@ -912,6 +1000,7 @@ const StreamPacketReader = @import("transport/stream_receive.zig").Reader(struct
     pub const allocate = allocatePacketBytes;
     pub const free = freePacketBytes;
     pub const fromInactivity = inactivityDeadline;
+    pub const InactivityObserverType = InactivityObserver;
 });
 const readStreamPacketWithPolicy = StreamPacketReader.read;
 
@@ -1093,6 +1182,7 @@ fn readTcpPacket(
         null,
         null,
         null,
+        null,
         0,
     );
 }
@@ -1109,6 +1199,7 @@ fn readTcpPacketWithInactivityTimeout(
         tcp,
         max_packet_size,
         timeout,
+        null,
         null,
         null,
         0,
@@ -1128,6 +1219,7 @@ fn readTcpPacketWithDeadline(
         null,
         deadline,
         null,
+        null,
         0,
     );
 }
@@ -1138,6 +1230,7 @@ fn readTcpPacketWithPolicy(
     max_packet_size: usize,
     inactivity_timeout: ?std.Io.Clock.Duration,
     absolute_deadline: ?std.Io.Clock.Timestamp,
+    inactivity_observer: ?InactivityObserver,
     caller_storage: ?[]u8,
     owned_prefix_len: usize,
 ) Error!OwnedPacket {
@@ -1216,6 +1309,12 @@ fn readTcpPacketWithPolicy(
                 // inactivity window.
                 deadline = inactivityDeadline(tcp.io, timeout);
             }
+        } else if (inactivity_observer) |observer| {
+            if (frame.fixed.remaining_len > keep_alive_reader.progress_threshold and
+                copy_len < packet_len)
+            {
+                observer.renew();
+            }
         }
     }
 
@@ -1226,6 +1325,12 @@ fn readTcpPacketWithPolicy(
                 keep_alive_reader.progress_threshold)
             {
                 deadline = inactivityDeadline(tcp.io, timeout);
+            }
+        } else if (inactivity_observer) |observer| {
+            if (packet.len - tcp.packet_read >
+                keep_alive_reader.progress_threshold)
+            {
+                observer.renew();
             }
         }
         const count = try readTcpSomeWithDeadline(
@@ -1341,6 +1446,7 @@ fn readWebSocketPacket(
         max_packet_size,
         null,
         null,
+        null,
         0,
     );
 }
@@ -1358,6 +1464,7 @@ fn readWebSocketPacketWithInactivityTimeout(
         max_packet_size,
         timeout,
         null,
+        null,
         0,
     );
 }
@@ -1374,6 +1481,7 @@ fn readWebSocketPacketWithDeadline(
         max_packet_size,
         null,
         deadline,
+        null,
         0,
     );
 }
@@ -1386,6 +1494,7 @@ const WebSocketPacketReader = @import("transport/websocket_receive.zig").Reader(
     pub const parse = parsePacketFraming;
     pub const discard = discardPacketPrefix;
     pub const fromInactivity = inactivityDeadline;
+    pub const InactivityObserverType = InactivityObserver;
 });
 const readWebSocketPacketWithPolicy = WebSocketPacketReader.read;
 
@@ -1705,6 +1814,55 @@ test "TCP packet receive resumes after a split initial header timeout" {
     );
     defer packet.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &.{ 0xc0, 0x00 }, packet.bytes);
+}
+
+test "TCP externally managed inactivity renews for large packet progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    var transport = Transport.initTcp(io, receiver);
+    defer transport.close(allocator);
+
+    var encoded: [1500]u8 = @splat(0x5a);
+    encoded[0] = 0x30;
+    const remaining_len = encoded.len - 3;
+    encoded[1] = @as(u8, @truncate(remaining_len)) | 0x80;
+    encoded[2] = @intCast(remaining_len >> 7);
+    try writeAll(io, sender, &encoded);
+
+    const Counter = struct {
+        value: usize = 0,
+
+        fn renew(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.value += 1;
+        }
+    };
+    var counter: Counter = .{};
+    var storage: [128]u8 = undefined;
+    var packet = try transport
+        .readPacketWithInactivityObserverIntoWithPrefix(
+        allocator,
+        encoded.len,
+        .{ .context = &counter, .renew_fn = Counter.renew },
+        &storage,
+        32,
+    );
+    defer packet.deinit(allocator);
+    try std.testing.expect(counter.value != 0);
+    try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
 }
 
 test "TCP packet receive retains a coalesced following packet" {

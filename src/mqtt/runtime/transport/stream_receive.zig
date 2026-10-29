@@ -7,7 +7,7 @@ pub fn Reader(comptime Context: type) type {
     return struct {
         const Error = Context.ErrorType;
 
-        pub fn read(allocator: std.mem.Allocator, transport: anytype, max_packet_size: usize, inactivity_timeout: ?std.Io.Clock.Duration, absolute_deadline: ?std.Io.Clock.Timestamp, owned_prefix_len: usize) Error!Context.PacketType {
+        pub fn read(allocator: std.mem.Allocator, transport: anytype, max_packet_size: usize, inactivity_timeout: ?std.Io.Clock.Duration, absolute_deadline: ?std.Io.Clock.Timestamp, inactivity_observer: ?Context.InactivityObserverType, owned_prefix_len: usize) Error!Context.PacketType {
             const connection = transport.connection;
             var deadline = if (inactivity_timeout) |timeout| Context.fromInactivity(connection.io, timeout) else absolute_deadline;
             const state = &transport.packet_state;
@@ -33,6 +33,8 @@ pub fn Reader(comptime Context: type) type {
             while (state.packet_read < packet.len) {
                 if (inactivity_timeout) |timeout| {
                     if (packet.len - state.packet_read > progress_threshold) deadline = Context.fromInactivity(connection.io, timeout);
+                } else if (inactivity_observer) |observer| {
+                    if (packet.len - state.packet_read > progress_threshold) observer.renew();
                 }
                 // Commit each returned plaintext prefix before another read
                 // can fail. Propagate interruption with this cursor intact.

@@ -1,0 +1,139 @@
+{
+  "baseline_revision": "7d00137c3e8c16d31a5f069f014a8ec95a7f07c3",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Move production MQTT Broker Keep Alive enforcement from per-read timers to the shared lifecycle deadline driver",
+  "reference": {
+    "root": "/nav_env/Work/mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source": "src/keepalive.c",
+    "principle": "packet activity updates connection expiry state while the event loop performs centralized timeout checks"
+  },
+  "implementation": {
+    "production_broker": "one atomic awake-clock deadline per active Connection plus the existing Broker deadline driver",
+    "standalone_runtime": "existing per-read timed Keep Alive APIs unchanged",
+    "first_installation": "serialized with Broker state mutex and deadline-driver generation snapshot",
+    "complete_packet_renewal": "one allocation-free atomic update",
+    "large_packet_renewal": "observer callback only while more than 1000 bytes remain",
+    "expiry_race": "compare-and-exchange against the exact observed deadline",
+    "transports": ["TCP", "TLS", "WebSocket", "WSS"],
+    "connection_bytes_before": 824,
+    "connection_bytes_after": 832,
+    "client_slot_bytes": 96
+  },
+  "diagnostic_profile": {
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "warmup": 5000,
+      "publishes": 100000,
+      "deliveries": 100000,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "client_cpu": 0,
+      "server_cpu": 1
+    },
+    "baseline": {
+      "samples": 4435,
+      "lost_samples": 0,
+      "event_count_approx": 1449629420,
+      "kernel_clock_gettime_self_percent": 16.50,
+      "timed_wait_self_percent": 3.00,
+      "loop_set_timer_self_percent": 2.52,
+      "report_sha256": "a59e0e821ed518bfd39d344fb06f69453f2085fd78bf9cb75ac781501f0c8853",
+      "perf_data_sha256": "d09d7228ee092c6ea64f36dc9f32f3364c618cf88792506438f07ff4f6d13d3e"
+    },
+    "candidate": {
+      "samples": 4351,
+      "lost_samples": 0,
+      "event_count_approx": 1273349254,
+      "kernel_clock_gettime_self_percent": 12.59,
+      "target_symbols_above_0_5_percent": [],
+      "report_sha256": "5e49e1a5d343ff77db20ec9a55a6b01a1c4e43d8bbd439ec7c61a1d19793ee2f",
+      "perf_data_sha256": "f2811976d8ea6081b7f3606216ab570d3492f4354f20a97c9b11aa9495ed8f5f"
+    },
+    "profile_percentages_are_explanatory": true
+  },
+  "fixed_binary_abba": {
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline", "candidate", "candidate", "baseline",
+      "baseline", "candidate", "candidate", "baseline",
+      "baseline", "candidate", "candidate", "baseline",
+      "baseline", "candidate", "candidate", "baseline"
+    ],
+    "client_cpu": 0,
+    "server_cpu": 1,
+    "warmup": 1000,
+    "publishes": 10000,
+    "deliveries": 10000,
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "publisher_window": 1,
+    "payload_bytes": 256,
+    "checksum_per_arm": 2695000,
+    "baseline_broker_sha256": "9559493e4eab6da55d2f99f9ebb383bdb674da6a5bf3ac78409c31e6170cf9c4",
+    "candidate_broker_sha256": "34b50eeb85b9602898cd96d89653fde35e310f59aa2bfacf4c14d27c3ab34f6d",
+    "fixed_driver_sha256": "e87cfaf79149cadbf1ef8f5cc4b9b7a6aadde705a60131d975df06702caeeee1",
+    "baseline_instructions": [272885485, 272884452, 272933368, 272920784, 272931906, 272921508, 272945578, 273011018],
+    "candidate_instructions": [258311705, 256632571, 257912790, 256435399, 256882824, 257768604, 258020714, 257895331],
+    "baseline_cycles": [154031063, 152620831, 150665475, 151615799, 150433631, 152052127, 158750901, 151631403],
+    "candidate_cycles": [136898899, 136297946, 134986423, 133406266, 134521349, 136975750, 148419831, 136418491],
+    "instruction_baseline_over_candidate_paired_median": 1.0586983109,
+    "instruction_reduction_percent": 5.5443850521,
+    "instruction_wins": 8,
+    "cycle_baseline_over_candidate_paired_median": 1.1172204806,
+    "cycle_reduction_percent": 10.4921528557,
+    "cycle_wins": 8,
+    "timing_claim": "none; throughput and latency remained load-sensitive"
+  },
+  "same_client_mosquitto": {
+    "reference_revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "netz_publishes_per_second": 22091,
+    "mosquitto_publishes_per_second": 31651,
+    "publishes": 10000,
+    "deliveries": 10000,
+    "checksum": 2695000,
+    "conclusion": "interop passes; the broader durable serial QoS2 gap remains active"
+  },
+  "verification": {
+    "keep_alive_and_broker_tests": {"passed": 221, "total": 221},
+    "tls_wss_composition_tests": {"passed": 131, "total": 131},
+    "package_tests": {"passed": 22, "total": 22},
+    "live_broker_fuzz": {"passed": 3, "total": 3},
+    "allocator_matrix": {"build_steps_passed": 9, "build_steps_total": 9, "broker_runs": 5},
+    "mosquitto_selected_vectors": {"passed": 294, "total": 294},
+    "mosquitto_source_locked_sequences": {"passed": 1825, "total": 1825}
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='Keep Alive' -Dtest-filter='MQTT broker' --summary all",
+    "zig build test-lib -Dtest-filter='broker shares mounted WSS and global TCP listener namespaces' -Dtest-filter='MQTT TLS server enforces Keep Alive' -Dtest-filter='MQTT WebSocket Keep Alive' --summary all",
+    "zig build test-package --summary all",
+    "zig build fuzz-mqtt-live-broker -Doptimize=ReleaseFast --summary all",
+    "MQTT_ALLOCATOR_MATRIX_SAMPLES=1 MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast --summary all",
+    "MQTT_STATS=true MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 MQTT_CLIENT_CPU=0 MQTT_SERVER_CPU=1 MQTT_SAMPLER_CPU=2 PUBLISHERS=1 SUBSCRIBERS=1 WARMUP_MESSAGES=1000 MESSAGES=10000 PUBLISHER_WINDOW=1 PAYLOAD_BYTES=256 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast --summary all",
+    "zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast --summary all",
+    "zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "perf": "6.8.12",
+    "perf_package": "linux-tools-6.8.0-1021-nvidia-tegra 6.8.0-1021.21 arm64",
+    "kernel": "6.8.12-1021-rt-tegra",
+    "host": "tegra",
+    "arch": "aarch64"
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "cd051f63d759dd82385aa3a25641b01e029aac0431f9540a01fecff103bc7cc2",
+    "src/mqtt/broker/protocol_tests.zig": "58b8606ad10c4ca2b232846e9ef1a6c5ff40f6a7eb9d6316778d2700c1ca256e",
+    "src/mqtt/runtime.zig": "8874bcfa8a9cba6256cc86cf7e35120793ab2ffb7f4e5347319495b9e02749e6",
+    "src/mqtt/runtime/broker_keep_alive.zig": "2277473a363663987140ee7fcd0d3c493ddca1e0f0bcd3e290312a8ed7d00eb1",
+    "src/mqtt/runtime/packet_transport.zig": "259aee84669572b94761d0586205fac747685de64fdaf95d47c6dc5a703a7693",
+    "src/mqtt/runtime/receive/events.zig": "39d72855bce0524ac8f572af04c06366341477ea7da10b3034d355fcc9eaca34",
+    "src/mqtt/runtime/transport/stream_receive.zig": "5342b22d733277de54775fa9e69c5b292e0ab293d5000f75042f3435290f770d",
+    "src/mqtt/runtime/transport/stream_receive_tests.zig": "77362e406a8d1e4f7cfb168b301bc3db788bcdab76a39d910dbd115d2cd0e230",
+    "src/mqtt/runtime/transport/websocket_receive.zig": "b6045634a55e2c1a665680de0a0cb2e7e5ef8d7f4bf24a752c21fb731633f71c"
+  }
+}
