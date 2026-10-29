@@ -1856,3 +1856,37 @@ refcounted `SliceBuffer` segments through both boundaries. Debug and
 ReleaseFast gRPC filters pass 390/390, package tests pass 22/22, and the pinned
 grpc-cpp h2c/TLS matrix passes. Full evidence is recorded in
 `docs/evidence/grpc_shared_outbound_ownership/2026-10-30.json`.
+
+## SharedChannel owned write messages
+
+Shared stream writers now expose `allocMessage`, `writeOwnedMessage` and
+`writeFinalOwnedMessage` with options and absolute-deadline forms. The
+allocation reserves the gRPC prefix and exposes only its writable payload.
+Submission consumes the value on every return path, while its nullable storage
+makes a deferred `deinit` safe. This lets protobuf or another serializer write
+directly into transport-owned storage instead of first creating a separate
+caller buffer that the background command must clone.
+
+```zig
+var message = try writer.allocMessage(encoded_len);
+defer message.deinit();
+try serializer.encodeInto(message.payload());
+try writer.writeOwnedMessage(&message);
+```
+
+Identity and compression fallback preserve the allocation pointer through
+`PendingMessage`; successful compression releases the input only after owning
+the compressed frame. Invalid deadlines consume before publication, allocator
+mismatch is transactional, and OOM coverage visits message plus command
+allocation boundaries. A deterministic comparison reduces the complete
+caller-payload/command path from three allocations to two and removes exactly
+one payload-length allocation. Real h2c tests cover gzip, identity and final
+owned messages.
+
+The existing borrowed methods and official grpc-cpp benchmark remain
+unchanged. An attempted universal exact-allocation replacement was rejected
+because 256-KiB per-call cycles regressed in 7/8 fixed-binary pairs despite a
+small throughput improvement. Debug and ReleaseFast gRPC filters pass 394/394,
+package tests pass 22/22, and grpc-cpp h2c/TLS passes. Full accepted/rejected
+evidence is recorded in
+`docs/evidence/grpc_shared_owned_write/2026-10-30.json`.

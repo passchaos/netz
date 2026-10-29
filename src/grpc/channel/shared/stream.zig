@@ -8,6 +8,7 @@ const writing = @import("stream/write.zig");
 const types = @import("stream/call.zig");
 pub const Event = types.Event;
 pub const Message = types.Message;
+pub const OwnedWriteMessage = types.OwnedWriteMessage;
 
 pub const Writer = struct {
     call: *State.StreamCall,
@@ -18,6 +19,12 @@ pub const Writer = struct {
     pub fn deinit(self: *Writer) void {
         self.call.release();
         self.* = undefined;
+    }
+    pub fn allocMessage(self: Writer, payload_len: usize) Error!OwnedWriteMessage {
+        if (payload_len > self.call.options.requestMessageLimit()) {
+            return error.GrpcMessageTooLarge;
+        }
+        return OwnedWriteMessage.init(self.call.parent.allocator, payload_len);
     }
     pub fn writeMessage(self: Writer, payload: []const u8) Error!void {
         return self.writeMessageWithOptions(payload, .{});
@@ -35,6 +42,27 @@ pub const Writer = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.writeMessageWithDeadline(payload, .fromNow(self.call.parent.io, .{ .clock = .awake, .raw = timeout }));
     }
+    /// Consume `message` on success or error. It is safe to keep a deferred
+    /// `message.deinit()`; consumed storage is represented by a null value.
+    pub fn writeOwnedMessage(self: Writer, message: *OwnedWriteMessage) Error!void {
+        return self.writeOwnedMessageWithOptions(message, .{});
+    }
+    pub fn writeOwnedMessageWithOptions(self: Writer, message: *OwnedWriteMessage, options: codec.MessageOptions) Error!void {
+        return writing.submitOwned(self.call, message, .{ .options = options });
+    }
+    pub fn writeOwnedMessageWithDeadline(self: Writer, message: *OwnedWriteMessage, deadline: std.Io.Clock.Timestamp) Error!void {
+        return writing.submitOwned(self.call, message, .{ .deadline = deadline });
+    }
+    pub fn writeOwnedMessageWithOptionsAndDeadline(self: Writer, message: *OwnedWriteMessage, options: codec.MessageOptions, deadline: std.Io.Clock.Timestamp) Error!void {
+        return writing.submitOwned(self.call, message, .{ .options = options, .deadline = deadline });
+    }
+    pub fn writeOwnedMessageWithTimeout(self: Writer, message: *OwnedWriteMessage, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) {
+            message.deinit();
+            return error.Timeout;
+        }
+        return self.writeOwnedMessageWithDeadline(message, .fromNow(self.call.parent.io, .{ .clock = .awake, .raw = timeout }));
+    }
     pub fn writeFinalMessage(self: Writer, payload: []const u8) Error!void {
         return writing.submit(self.call, .{ .payload = payload, .final = true });
     }
@@ -43,6 +71,15 @@ pub const Writer = struct {
     }
     pub fn writeFinalMessageWithDeadline(self: Writer, payload: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
         return writing.submit(self.call, .{ .payload = payload, .final = true, .deadline = deadline });
+    }
+    pub fn writeFinalOwnedMessage(self: Writer, message: *OwnedWriteMessage) Error!void {
+        return self.writeFinalOwnedMessageWithOptions(message, .{});
+    }
+    pub fn writeFinalOwnedMessageWithOptions(self: Writer, message: *OwnedWriteMessage, options: codec.MessageOptions) Error!void {
+        return writing.submitOwned(self.call, message, .{ .options = options, .final = true });
+    }
+    pub fn writeFinalOwnedMessageWithDeadline(self: Writer, message: *OwnedWriteMessage, deadline: std.Io.Clock.Timestamp) Error!void {
+        return writing.submitOwned(self.call, message, .{ .final = true, .deadline = deadline });
     }
     pub fn finishRequest(self: Writer) Error!void {
         return writing.submit(self.call, .{ .finish_only = true });

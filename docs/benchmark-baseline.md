@@ -8813,10 +8813,12 @@ packetization. Eight fixed-binary pairs improve persistent and per-call
 improve 0.56%. Seven clean CPU-1 samples refresh the official grpc-cpp
 comparison to 2.079x and 1.846x for those large-message modes. Small-message
 native times remain lower in this fixture, but broad gRPC performance
-completion is still open: the borrowed public Writer still clones its caller
-payload, the synchronous server response path still stages a contiguous
-message, first cross-DATA reassembly remains, and grpc-core retains more
-general segmented `SliceBuffer` ownership.
+completion is still open: the default borrowed Writer still clones its caller
+payload, while the new owned-write API closes that boundary only for callers
+that serialize directly into its prefix-reserved storage. The synchronous
+server response path still stages a contiguous message, first cross-DATA
+reassembly remains, and grpc-core retains more general segmented `SliceBuffer`
+ownership.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP

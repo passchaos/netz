@@ -67,11 +67,30 @@ test "gRPC shared duplex ping pong permits independent reads writes and request 
     const wrong_clock: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .real };
     try std.testing.expectError(error.Timeout, reader.nextWithDeadline(wrong_clock));
     try std.testing.expectError(error.Timeout, writer.writeMessageWithDeadline("invalid-clock", wrong_clock));
+    var invalid_owned = try writer.allocMessage("invalid-owned".len);
+    defer invalid_owned.deinit();
+    @memcpy(invalid_owned.payload(), "invalid-owned");
+    try std.testing.expectError(
+        error.Timeout,
+        writer.writeOwnedMessageWithDeadline(&invalid_owned, wrong_clock),
+    );
+    try std.testing.expect(!invalid_owned.hasValue());
     try std.testing.expectError(error.Timeout, writer.finishRequestWithDeadline(wrong_clock));
     try std.testing.expectError(error.Timeout, reader.nextWithTimeout(.fromMilliseconds(10)));
-    try writer.writeMessage(first_message);
+    var first_owned = try writer.allocMessage(first_message.len);
+    defer first_owned.deinit();
+    @memcpy(first_owned.payload(), first_message);
+    try writer.writeOwnedMessage(&first_owned);
+    try std.testing.expect(!first_owned.hasValue());
     try readOne(reader, first_message, true);
-    try writer.writeMessageWithOptions("identity", .{ .disable_compression = true });
+    var identity_owned = try writer.allocMessage("identity".len);
+    defer identity_owned.deinit();
+    @memcpy(identity_owned.payload(), "identity");
+    try writer.writeOwnedMessageWithOptions(
+        &identity_owned,
+        .{ .disable_compression = true },
+    );
+    try std.testing.expect(!identity_owned.hasValue());
     try readOne(reader, "identity", false);
     try writer.finishRequest();
     var terminal = try reader.nextWithTimeout(.fromSeconds(5));

@@ -56,7 +56,11 @@ test "gRPC shared duplex supports client and server streaming RPC shapes" {
     defer ur.deinit();
     try uw.writeMessage("one");
     try uw.writeMessage("two");
-    try uw.writeFinalMessage("three");
+    var final_owned = try uw.allocMessage("three".len);
+    defer final_owned.deinit();
+    @memcpy(final_owned.payload(), "three");
+    try uw.writeFinalOwnedMessage(&final_owned);
+    try std.testing.expect(!final_owned.hasValue());
     try @import("../testing.zig").readReply(ur, "uploaded");
     var download = try sender.startDuplex(options);
     defer download.deinit();

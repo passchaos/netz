@@ -5,14 +5,54 @@ const deadline_policy = @import("../../../../internal/deadline.zig");
 
 pub fn submit(call: anytype, input: call_module.WriteInput) @TypeOf(call.parent.*).Failure!void {
     const state = call.parent;
-    call.retain();
-    defer call.release();
     if (input.payload.len > call.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
     if (input.deadline) |until| _ = try deadline_policy.usableAwake(state.io, until);
     var owned = input;
     owned.deadline = deadline_policy.earlier(call.deadline, input.deadline);
     if (owned.deadline) |until| _ = try deadline_policy.usableAwake(state.io, until);
     const command = try call_module.Write.create(state.allocator, owned);
+    return submitCommand(call, command);
+}
+
+/// Consumes `message` on every return path. A caller may safely keep a
+/// deferred `message.deinit()` because successful consumption clears it.
+pub fn submitOwned(
+    call: anytype,
+    message: *call_module.OwnedWriteMessage,
+    input: call_module.WriteInput,
+) @TypeOf(call.parent.*).Failure!void {
+    defer message.deinit();
+    const state = call.parent;
+    const payload_len = if (message.storage) |storage| blk: {
+        if (storage.len < 5) return error.InvalidStreamState;
+        break :blk storage.len - 5;
+    } else return error.InvalidStreamState;
+    if (payload_len > call.options.requestMessageLimit()) {
+        return error.GrpcMessageTooLarge;
+    }
+    if (input.deadline) |until| {
+        _ = try deadline_policy.usableAwake(state.io, until);
+    }
+    var owned = input;
+    owned.deadline = deadline_policy.earlier(call.deadline, input.deadline);
+    if (owned.deadline) |until| {
+        _ = try deadline_policy.usableAwake(state.io, until);
+    }
+    const command = try call_module.Write.createOwned(
+        state.allocator,
+        message,
+        owned,
+    );
+    return submitCommand(call, command);
+}
+
+fn submitCommand(
+    call: anytype,
+    command: *call_module.Write,
+) @TypeOf(call.parent.*).Failure!void {
+    const state = call.parent;
+    call.retain();
+    defer call.release();
     defer command.release();
     // No endpoint can observe the command before this lock succeeds. Keep an
     // admission timeout/cancellation retryable instead of retiring the RPC.

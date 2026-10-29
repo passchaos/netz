@@ -217,3 +217,98 @@ test "gRPC shared write command transfers prefix-reserved storage exactly once" 
     command.release();
     allocator.free(transferred);
 }
+
+test "gRPC shared write command takes owned message storage without copying" {
+    const allocator = std.testing.allocator;
+    var message = try call_module.OwnedWriteMessage.init(
+        allocator,
+        "owned-command".len,
+    );
+    defer message.deinit();
+    @memcpy(message.payload(), "owned-command");
+    const storage = message.storage.?;
+    const command = try call_module.Write.createOwned(
+        allocator,
+        &message,
+        .{},
+    );
+    try std.testing.expect(!message.hasValue());
+    try std.testing.expectEqual(storage.ptr, command.messageStorage().ptr);
+    try std.testing.expectEqualStrings("owned-command", command.payload());
+    command.release();
+}
+
+test "gRPC shared write command rejects foreign owned storage transactionally" {
+    var backing: [64]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var message = try call_module.OwnedWriteMessage.init(
+        fixed.allocator(),
+        8,
+    );
+    defer message.deinit();
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        call_module.Write.createOwned(
+            std.testing.allocator,
+            &message,
+            .{},
+        ),
+    );
+    try std.testing.expect(message.hasValue());
+}
+
+test "gRPC shared owned write command releases every allocation failure" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var message = try call_module.OwnedWriteMessage.init(
+                allocator,
+                64,
+            );
+            defer message.deinit();
+            const command = try call_module.Write.createOwned(
+                allocator,
+                &message,
+                .{},
+            );
+            defer command.release();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Scenario.run,
+        .{},
+    );
+}
+
+test "gRPC shared owned write removes the serialized-payload clone" {
+    const backing = std.testing.allocator;
+    const payload = "caller-serialized-payload";
+
+    var owned_counting = std.testing.FailingAllocator.init(backing, .{});
+    var message = try call_module.OwnedWriteMessage.init(
+        owned_counting.allocator(),
+        payload.len,
+    );
+    @memcpy(message.payload(), payload);
+    const owned_command = try call_module.Write.createOwned(
+        owned_counting.allocator(),
+        &message,
+        .{},
+    );
+    owned_command.release();
+    try std.testing.expectEqual(@as(usize, 2), owned_counting.allocations);
+
+    var borrowed_counting = std.testing.FailingAllocator.init(backing, .{});
+    const caller_payload = try borrowed_counting.allocator().dupe(u8, payload);
+    defer borrowed_counting.allocator().free(caller_payload);
+    const borrowed_command = try call_module.Write.create(
+        borrowed_counting.allocator(),
+        .{ .payload = caller_payload },
+    );
+    borrowed_command.release();
+    try std.testing.expectEqual(@as(usize, 3), borrowed_counting.allocations);
+    try std.testing.expectEqual(
+        owned_counting.allocated_bytes + payload.len,
+        borrowed_counting.allocated_bytes,
+    );
+}

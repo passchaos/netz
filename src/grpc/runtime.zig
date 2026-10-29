@@ -27,6 +27,7 @@ pub const SharedChannelKeepAliveOptions = @import("channel/shared.zig").KeepAliv
 pub const SharedChannelKeepAliveStats = @import("channel/shared.zig").KeepAliveStats;
 pub const SharedClientDuplex = @import("channel/shared.zig").Duplex;
 pub const SharedStreamWriter = @import("channel/shared.zig").StreamWriter;
+pub const SharedStreamOwnedWriteMessage = @import("channel/shared.zig").StreamOwnedWriteMessage;
 pub const SharedStreamReader = @import("channel/shared.zig").StreamReader;
 pub const SharedStreamEvent = @import("channel/shared.zig").StreamEvent;
 pub const ChannelTarget = channel.Target;

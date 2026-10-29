@@ -8,6 +8,7 @@ const State = state_module.State;
 const streaming = @import("../stream/runtime.zig");
 pub const Duplex = @import("shared/stream.zig").Duplex;
 pub const StreamWriter = @import("shared/stream.zig").Writer;
+pub const StreamOwnedWriteMessage = @import("shared/stream.zig").OwnedWriteMessage;
 pub const StreamReader = @import("shared/stream.zig").Reader;
 pub const StreamEvent = @import("shared/stream.zig").Event;
 pub const Error = state_module.Error;

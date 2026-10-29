@@ -614,3 +614,38 @@ pass 22/22, and the pinned grpc-cpp h2c/TLS matrix passes across compression,
 large messages, slow consumers, cancellation, deadlines and soak. Full raw
 rows, identities and failure contracts are in
 [the outbound-ownership evidence](evidence/grpc_shared_outbound_ownership/2026-10-30.json).
+
+## Explicit owned SharedChannel writes
+
+The ordinary `SharedStreamWriter` methods intentionally accept borrowed
+payloads, so a queued background owner must clone caller bytes before the
+method returns. Applications that already allocate a serialization output can
+now avoid that boundary. `Writer.allocMessage(payload_len)` returns a
+`SharedStreamOwnedWriteMessage` whose writable payload follows five reserved
+gRPC prefix bytes in the SharedChannel allocator. `writeOwnedMessage` and
+`writeFinalOwnedMessage`, including options/deadline variants, consume that
+value on success or error. A caller can therefore keep `defer message.deinit()`;
+successful transfer clears the optional storage and makes cleanup a no-op.
+
+The endpoint owner uses the same prefix-reserved staging path measured above.
+Identity and compression fallback transfer the exact pointer into
+`PendingMessage`; actually compressed output frees the input only after the
+separate compressed frame is owned. Invalid deadlines consume locally before
+publication, foreign allocator storage is rejected transactionally, and every
+command-allocation failure retains a single cleanup owner.
+
+A deterministic allocator test models an application-owned serialized
+payload. Borrowed submission uses three allocations: caller payload, command,
+and queued clone. Direct serialization into `OwnedWriteMessage.payload()` uses
+two: prefix-reserved payload and command. It removes exactly one allocation and
+`payload.len` requested bytes, and a pointer-identity test proves the queued
+command owns the same allocation. Real shared duplex tests cover owned gzip,
+identity, final message, deadline failure and channel cleanup.
+
+The official grpc-cpp table above remains the borrowed-API workload and is not
+relabeled as an owned-input result. A separate attempt to replace every
+borrowed duplex staging buffer with one exact allocation was rejected: although
+persistent 256-KiB throughput improved about 0.5%, per-call cycles regressed in
+7/8 pairs by a 0.31% median. The opt-in API adds the zero-copy construction
+contract without taxing existing callers. Evidence is recorded in
+[the owned-write evidence](evidence/grpc_shared_owned_write/2026-10-30.json).
