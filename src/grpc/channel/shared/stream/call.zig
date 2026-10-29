@@ -7,15 +7,7 @@ const http2 = @import("../../../../http2/mod.zig");
 const inputs = @import("../request_inputs.zig");
 const Wake = @import("../wake.zig").Wake;
 
-pub const Message = struct {
-    allocator: std.mem.Allocator,
-    payload: []u8,
-    was_compressed: bool,
-    pub fn deinit(self: *Message) void {
-        self.allocator.free(self.payload);
-        self.* = undefined;
-    }
-};
+pub const Message = codec.OwnedDecodedMessage;
 
 pub const Event = union(enum) {
     informational: http2.runtime.DuplexResponseHead,

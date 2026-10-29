@@ -8802,18 +8802,18 @@ The shared gRPC TCP baseline is recorded separately in
 [grpc_shared_performance.md](grpc_shared_performance.md), with complete sample
 records and the official grpc-cpp fixture boundaries. Its initial 256 KiB
 persistent and per-call workloads took 2.61x and 2.28x the reference wall time.
-Later fixed-window A/B samples show response-credit batching improving native
-large-message time by 7% and 5%, with larger small-message improvements. The
-refreshed clean cc134032 external comparison still records 2.41x and 2.17x
-reference wall time for large messages. Further deadline/output-task and
-copying analysis is required before a gRPC performance completion claim. The
-subsequent retained-frame change removes one independently measured layer: ten
-256-KiB roundtrips fall from 875 to 210 explicit allocations and remove
-5,250,085 allocated bytes, while eight fixed-binary pairs improve persistent
-large-message instructions/cycles/throughput by 6.19%/5.12%/3.09% and per-call
-by 5.49%/3.13%/1.38%. This is causal native A/B evidence; the official
-grpc-cpp comparison has not yet been refreshed against that final binary, so
-message reassembly/staging and the broad cross-stack gap remain open.
+Response-credit batching, native timed writes, retained HTTP/2 read-ahead
+frames, and decoded-message ownership have since removed measured scheduling
+and copy layers without weakening deadlines, validation or ownership. The
+latest ownership change removes one 262,148-byte response recopy per
+roundtrip; eight fixed-binary pairs improve persistent and per-call 256-KiB
+throughput by 9.10% and 8.85%, while zero-byte instructions remain neutral.
+Seven clean CPU-1 samples refresh the official grpc-cpp comparison to 2.343x
+and 1.989x for those large-message modes. Small-message native times remain
+lower in this fixture, but broad gRPC performance completion is still open:
+outbound caller-input cloning, encoded-message staging, first cross-DATA
+reassembly, and grpc-core's segmented `SliceBuffer` ownership remain material
+differences.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP

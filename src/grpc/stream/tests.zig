@@ -181,6 +181,161 @@ test "gRPC stream decoder handles every split and several messages per feed" {
     }
 }
 
+test "gRPC stream owned decoder transfers assembled allocation without recopy" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try wire.writeMessage(&encoded, allocator, "owned-across-data", false);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var decoder = try codec.Decoder.init(
+        failing.allocator(),
+        64,
+        null,
+        .{},
+    );
+    defer decoder.deinit();
+    const Collector = struct {
+        message: ?codec.OwnedDecodedMessage = null,
+        fn consumeBorrowed(_: *@This(), _: codec.DecodedMessage) !void {
+            return error.ExpectedOwnedMessage;
+        }
+        fn consumeOwned(self: *@This(), message: codec.OwnedDecodedMessage) !void {
+            self.message = message;
+        }
+    };
+    var collector: Collector = .{};
+    const first = try decoder.feedLimitedAssembledOwned(
+        encoded.items[0..6],
+        1,
+        &collector,
+        Collector.consumeBorrowed,
+        Collector.consumeOwned,
+    );
+    try std.testing.expectEqual(@as(usize, 0), first.messages);
+    const assembled = decoder.payload.?.ptr;
+    const second = try decoder.feedLimitedAssembledOwned(
+        encoded.items[6..],
+        1,
+        &collector,
+        Collector.consumeBorrowed,
+        Collector.consumeOwned,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second.messages);
+    try std.testing.expect(!failing.has_induced_failure);
+    var message = collector.message.?;
+    collector.message = null;
+    defer message.deinit();
+    try std.testing.expectEqual(assembled, message.payload.ptr);
+    try std.testing.expectEqualStrings("owned-across-data", message.payload);
+    try std.testing.expect(!message.was_compressed);
+    try decoder.finish();
+
+    var direct = try codec.Decoder.init(allocator, 64, null, .{});
+    defer direct.deinit();
+    const DirectCollector = struct {
+        seen: bool = false,
+        fn consumeBorrowed(self: *@This(), value: codec.DecodedMessage) !void {
+            self.seen = true;
+            try std.testing.expectEqualStrings("owned-across-data", value.payload);
+        }
+        fn consumeOwned(_: *@This(), value: codec.OwnedDecodedMessage) !void {
+            var owned = value;
+            owned.deinit();
+            return error.ExpectedBorrowedMessage;
+        }
+    };
+    var direct_collector: DirectCollector = .{};
+    _ = try direct.feedLimitedAssembledOwned(
+        encoded.items,
+        1,
+        &direct_collector,
+        DirectCollector.consumeBorrowed,
+        DirectCollector.consumeOwned,
+    );
+    try std.testing.expect(direct_collector.seen);
+    try direct.finish();
+}
+
+test "gRPC stream owned decoder frees transferred payload on callback failure" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try wire.writeMessage(&encoded, allocator, "callback-failure", false);
+    var decoder = try codec.Decoder.init(allocator, 64, null, .{});
+    defer decoder.deinit();
+    const Consumer = struct {
+        fn consume(_: void, _: codec.OwnedDecodedMessage) error{Rejected}!void {
+            return error.Rejected;
+        }
+    };
+    _ = try decoder.feedLimitedOwned(
+        encoded.items[0..6],
+        1,
+        {},
+        Consumer.consume,
+    );
+    try std.testing.expectError(
+        error.Rejected,
+        decoder.feedLimitedOwned(
+            encoded.items[6..],
+            1,
+            {},
+            Consumer.consume,
+        ),
+    );
+    try std.testing.expect(decoder.payload == null);
+}
+
+test "gRPC stream owned decoder transfers decompressed output" {
+    const allocator = std.testing.allocator;
+    const expected = "owned-compressed-message-" ** 64;
+    var compressed = try compression.compressAlloc(
+        allocator,
+        .gzip,
+        expected,
+        1,
+    );
+    defer compressed.deinit(allocator);
+    try std.testing.expect(compressed.compressed);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try wire.writeMessage(
+        &encoded,
+        allocator,
+        compressed.bytes,
+        true,
+    );
+    var decoder = try codec.Decoder.init(
+        allocator,
+        expected.len,
+        "gzip",
+        .{ .gzip = true },
+    );
+    defer decoder.deinit();
+    const Collector = struct {
+        message: ?codec.OwnedDecodedMessage = null,
+        fn consume(self: *@This(), message: codec.OwnedDecodedMessage) !void {
+            self.message = message;
+        }
+    };
+    var collector: Collector = .{};
+    for (encoded.items, 0..) |_, index| {
+        _ = try decoder.feedLimitedOwned(
+            encoded.items[index .. index + 1],
+            1,
+            &collector,
+            Collector.consume,
+        );
+    }
+    var message = collector.message.?;
+    collector.message = null;
+    defer message.deinit();
+    try std.testing.expectEqualStrings(expected, message.payload);
+    try std.testing.expect(message.was_compressed);
+    try decoder.finish();
+}
+
 test "gRPC stream decoder applies compression per message" {
     const allocator = std.testing.allocator;
     const compressible = "stream-compressed-" ** 64;

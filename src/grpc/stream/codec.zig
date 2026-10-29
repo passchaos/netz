@@ -20,6 +20,20 @@ pub const DecodedMessage = struct {
     was_compressed: bool,
 };
 
+/// Ownership transfers to a successful decoder callback. This lets consumers
+/// keep a message that already crossed DATA boundaries without copying the
+/// decoder's exact reassembly allocation a second time.
+pub const OwnedDecodedMessage = struct {
+    allocator: std.mem.Allocator,
+    payload: []u8,
+    was_compressed: bool,
+
+    pub fn deinit(self: *OwnedDecodedMessage) void {
+        self.allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
 pub const FeedProgress = struct {
     consumed: usize,
     messages: usize,
@@ -33,6 +47,8 @@ pub const MessageOptions = struct {
 };
 
 pub const Decoder = struct {
+    const DeliveryOwnership = enum { borrowed, owned, assembled_owned };
+
     allocator: std.mem.Allocator,
     max_message_size: usize,
     encoding: compression.Algorithm,
@@ -93,6 +109,67 @@ pub const Decoder = struct {
         context: anytype,
         comptime consume: anytype,
     ) !FeedProgress {
+        return self.feedLimitedMode(
+            bytes,
+            max_messages,
+            context,
+            consume,
+            consume,
+            .borrowed,
+        );
+    }
+
+    /// Owned variant of feedLimited. A successful callback owns each message
+    /// and must eventually deinit it. Messages assembled across calls transfer
+    /// the decoder's exact allocation; direct messages and decompression output
+    /// receive one owned allocation.
+    pub fn feedLimitedOwned(
+        self: *Decoder,
+        bytes: []const u8,
+        max_messages: usize,
+        context: anytype,
+        comptime consume: anytype,
+    ) !FeedProgress {
+        return self.feedLimitedMode(
+            bytes,
+            max_messages,
+            context,
+            consume,
+            consume,
+            .owned,
+        );
+    }
+
+    /// Direct messages retain the existing borrowed callback. Only a message
+    /// that already owns cross-call reassembly storage transfers ownership to
+    /// `consume_owned`, avoiding any new runtime branch in the direct path.
+    pub fn feedLimitedAssembledOwned(
+        self: *Decoder,
+        bytes: []const u8,
+        max_messages: usize,
+        context: anytype,
+        comptime consume_borrowed: anytype,
+        comptime consume_owned: anytype,
+    ) !FeedProgress {
+        return self.feedLimitedMode(
+            bytes,
+            max_messages,
+            context,
+            consume_borrowed,
+            consume_owned,
+            .assembled_owned,
+        );
+    }
+
+    fn feedLimitedMode(
+        self: *Decoder,
+        bytes: []const u8,
+        max_messages: usize,
+        context: anytype,
+        comptime consume: anytype,
+        comptime consume_owned: anytype,
+        comptime ownership: DeliveryOwnership,
+    ) !FeedProgress {
         if (self.finished) return error.InvalidStreamState;
         if (max_messages == 0) return error.InvalidStreamState;
         var offset: usize = 0;
@@ -114,7 +191,14 @@ pub const Decoder = struct {
             }
 
             if (self.payload_len == 0) {
-                try self.deliver(&.{}, context, consume);
+                try self.deliverMode(
+                    ownership,
+                    &.{},
+                    false,
+                    context,
+                    consume,
+                    consume_owned,
+                );
                 self.resetMessage();
                 delivered += 1;
                 continue;
@@ -125,7 +209,14 @@ pub const Decoder = struct {
             {
                 const payload = bytes[offset..][0..self.payload_len];
                 offset += self.payload_len;
-                try self.deliver(payload, context, consume);
+                try self.deliverMode(
+                    ownership,
+                    payload,
+                    false,
+                    context,
+                    consume,
+                    consume_owned,
+                );
                 self.resetMessage();
                 delivered += 1;
                 continue;
@@ -153,11 +244,22 @@ pub const Decoder = struct {
             // Remove ownership from parser state before invoking application
             // code so callback failure cannot leave a completed message stuck.
             self.payload = null;
-            self.deliver(payload, context, consume) catch |err| {
+            if (comptime ownership == .borrowed) {
+                self.deliver(payload, context, consume) catch |err| {
+                    self.allocator.free(payload);
+                    return err;
+                };
                 self.allocator.free(payload);
-                return err;
-            };
-            self.allocator.free(payload);
+            } else {
+                try self.deliverMode(
+                    ownership,
+                    payload,
+                    true,
+                    context,
+                    consume,
+                    consume_owned,
+                );
+            }
             self.resetMessage();
             delivered += 1;
         }
@@ -220,6 +322,77 @@ pub const Decoder = struct {
             .payload = decoded.bytes,
             .was_compressed = true,
         });
+    }
+
+    fn deliverMode(
+        self: Decoder,
+        comptime ownership: DeliveryOwnership,
+        payload: []const u8,
+        comptime input_owned: bool,
+        context: anytype,
+        comptime consume: anytype,
+        comptime consume_owned: anytype,
+    ) !void {
+        if (comptime ownership == .borrowed or
+            (ownership == .assembled_owned and !input_owned))
+        {
+            std.debug.assert(!input_owned);
+            return self.deliver(payload, context, consume);
+        }
+        return self.deliverOwned(
+            payload,
+            input_owned,
+            context,
+            consume_owned,
+        );
+    }
+
+    fn deliverOwned(
+        self: Decoder,
+        payload: []const u8,
+        input_owned: bool,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        const was_compressed = self.prefix[0] == 1;
+        if (!was_compressed) {
+            const bytes = if (input_owned)
+                @constCast(payload)
+            else
+                try self.allocator.dupe(u8, payload);
+            var message = OwnedDecodedMessage{
+                .allocator = self.allocator,
+                .payload = bytes,
+                .was_compressed = false,
+            };
+            consume(context, message) catch |err| {
+                message.deinit();
+                return err;
+            };
+            return;
+        }
+
+        var decoded = compression.decompressAlloc(
+            self.allocator,
+            self.encoding,
+            payload,
+            self.max_message_size,
+        ) catch |err| {
+            if (input_owned) self.allocator.free(@constCast(payload));
+            return err;
+        };
+        if (input_owned) self.allocator.free(@constCast(payload));
+        const bytes = decoded.owned orelse unreachable;
+        decoded.owned = null;
+        var message = OwnedDecodedMessage{
+            .allocator = self.allocator,
+            .payload = bytes,
+            .was_compressed = true,
+        };
+        consume(context, message) catch |err| {
+            message.deinit();
+            return err;
+        };
     }
 
     fn resetMessage(self: *Decoder) void {

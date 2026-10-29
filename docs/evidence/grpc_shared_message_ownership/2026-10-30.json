@@ -1,0 +1,1552 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "SharedChannel decoded-message ownership transfer",
+  "decision": "accepted",
+  "scope": {
+    "baseline_commit": "a597be329745f9a3d5009982f4e742f965016f26",
+    "native_ab": {
+      "cpu": 10,
+      "schedule": "eight alternating AB/BA pairs per workload",
+      "warmup": 100,
+      "iterations": 2000,
+      "stream_window": 65535,
+      "connection_window": 65535,
+      "validation": "full bytes plus peer completion"
+    },
+    "allocation_telemetry": "three alternating pairs, warmup 100, measured iterations 10; telemetry timings excluded",
+    "external_comparison": {
+      "cpu": 1,
+      "samples": 7,
+      "schedule": "alternating implementations",
+      "warmup": 100,
+      "native_iterations": 2000,
+      "grpc_cpp_min_time": "0.2s per kernel"
+    }
+  },
+  "design": {
+    "references": [
+      "/nav_env/Work/grpc/src/core/ext/transport/chttp2/transport/frame_data.cc",
+      "/nav_env/Work/grpc/src/core/call/message.h"
+    ],
+    "description": "Decoder callbacks can take OwnedDecodedMessage. A message already assembled across DATA calls transfers its exact reassembly allocation to a successful callback. SharedChannel also reuses a direct, uncompressed, nonempty input chunk when the decoded payload reaches the chunk end: it moves the payload to the allocation start and shrinks in place, falling back to an exact duplicate if resize is unavailable.",
+    "small_message_boundary": "Direct decoder callbacks remain borrowed. Empty and compressed direct messages retain the previous copy path, and Message keeps the original allocator/slice/bool layout.",
+    "failure_contract": "Decoder state relinquishes a completed allocation before callback entry, frees it on callback failure, frees compressed input after bounded decompression, and transfers decompressed output only on callback success. SharedChannel resize failure falls back to duplicate-and-free; duplicate failure retires the call.",
+    "tests": [
+      "assembled allocation pointer is transferred without a second allocation",
+      "owned callback failure frees the transferred payload",
+      "gzip output ownership transfers after bounded decompression",
+      "direct messages retain the borrowed callback path"
+    ],
+    "rejected_variants": [
+      "All messages owned by the decoder: improved 256 KiB but regressed zero-byte work.",
+      "A larger Message storage representation: improved large messages but regressed zero-byte cycles.",
+      "A packed storage representation: corrected after a truncation bug, then removed because the original Message layout performs better.",
+      "An external runtime pending-payload branch: small-message PMU work moved slightly backward."
+    ]
+  },
+  "identity": {
+    "baseline_sha256": "1a3b89484a0b1fd16e07bd1a963179478cd1eed220a795a55daf5ecf583d9d97",
+    "candidate_sha256": "7f6bf174013c3cb1d2fd05f69ddcd83d235550229f25c5ceba3fb447ae1f27b7",
+    "grpc_cpp_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+    "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "perf_data_sha256": "cdc644e382e71c872049f0dc49c7fc9762361b8ababbc8a09ea449515b938490",
+    "source_sha256": {
+      "src/grpc/stream/codec.zig": "16c7e6efcba0804d3d21022bb83d362afa92d0cdf8fc73205a5240c8ac306496",
+      "src/grpc/stream/tests.zig": "eeadbb9f924da51150578cc5f52ef2262e98d6830adbe0aca141cdc5ba60c4b3",
+      "src/grpc/channel/shared/stream/call.zig": "ea170855c1ca4317ec403f44bbde93ba73fa63052e08bcb15309937852068088",
+      "src/grpc/channel/shared/stream/read.zig": "568e843948dbbc6a6d84a81b41a0a241d3773140dcb4bef08fb5c6c010e34ae5"
+    }
+  },
+  "paired_improvement": {
+    "persistent_0": {
+      "cycles": {
+        "max": 1.0037401482454094,
+        "median": 1.000107109700589,
+        "min": 0.9979405798891676,
+        "pairs": [
+          0.9997892398488624,
+          1.0033778981712649,
+          0.9988151639783122,
+          1.000872352795705,
+          0.9997814508927576,
+          1.0037401482454094,
+          1.0004249795523157,
+          0.9979405798891676
+        ],
+        "wins": 4
+      },
+      "instructions": {
+        "max": 0.9999149582029132,
+        "median": 0.9999015248605604,
+        "min": 0.9998594364606752,
+        "pairs": [
+          0.999914125329068,
+          0.9998790816379716,
+          0.9999149582029132,
+          0.9999083614206568,
+          0.9998975801401426,
+          0.999905469580978,
+          0.99987978609287,
+          0.9998594364606752
+        ],
+        "wins": 0
+      },
+      "p50": {
+        "max": 1.0079782621263802,
+        "median": 1.003787002775208,
+        "min": 0.9983838383838384,
+        "pairs": [
+          0.9983838383838384,
+          1.0079782621263802,
+          1.0059034610487323,
+          1.0048566142460684,
+          0.9984414684830292,
+          1.002717391304348,
+          1.0064788569445249,
+          1.001097314467225
+        ],
+        "wins": 6
+      },
+      "p99": {
+        "max": 1.0209098615428087,
+        "median": 1.0044302971285242,
+        "min": 0.978113830079736,
+        "pairs": [
+          0.990079476917874,
+          1.0209098615428087,
+          0.997913376945635,
+          0.978113830079736,
+          1.0073355151788737,
+          1.0177361048350655,
+          1.0162367051369088,
+          1.0015250790781745
+        ],
+        "wins": 5
+      },
+      "throughput": {
+        "max": 1.008114506414127,
+        "median": 1.0042186633252197,
+        "min": 0.9981086590922283,
+        "pairs": [
+          0.999540260920694,
+          1.008114506414127,
+          1.0051826298112636,
+          1.0052141645416055,
+          0.9981086590922283,
+          1.0032546968391751,
+          1.0067870716598917,
+          1.000680886226651
+        ],
+        "wins": 6
+      }
+    },
+    "calls_262144": {
+      "cycles": {
+        "max": 1.0400842958982377,
+        "median": 1.03634879507884,
+        "min": 1.0314008243547688,
+        "pairs": [
+          1.0332920290057253,
+          1.0349743878191244,
+          1.035924669927568,
+          1.0368099762543528,
+          1.0367729202301124,
+          1.0400842958982377,
+          1.0375221050560717,
+          1.0314008243547688
+        ],
+        "wins": 8
+      },
+      "instructions": {
+        "max": 1.025116452679735,
+        "median": 1.0245192754025667,
+        "min": 1.023694462270943,
+        "pairs": [
+          1.0240965560262445,
+          1.0242067863669089,
+          1.025116452679735,
+          1.0244759252667066,
+          1.0250825563810015,
+          1.024562625538427,
+          1.023694462270943,
+          1.0247063876330662
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0863495309858544,
+        "median": 1.084193200788218,
+        "min": 1.0789908121207976,
+        "pairs": [
+          1.0837397881996975,
+          1.0839245833396636,
+          1.0825805241065405,
+          1.0863495309858544,
+          1.0854145268384998,
+          1.0849502650845746,
+          1.084461818236773,
+          1.0789908121207976
+        ],
+        "wins": 8
+      },
+      "p99": {
+        "max": 1.0934610911406215,
+        "median": 1.0870442127308626,
+        "min": 1.035865940025288,
+        "pairs": [
+          1.0876003641820022,
+          1.086488061279723,
+          1.0934610911406215,
+          1.0440711728317846,
+          1.035865940025288,
+          1.0746817214679836,
+          1.088469396708407,
+          1.0885258622321197
+        ],
+        "wins": 8
+      },
+      "throughput": {
+        "max": 1.0926191652214976,
+        "median": 1.0884637620555493,
+        "min": 1.0823763396897663,
+        "pairs": [
+          1.0866054197432504,
+          1.0900270510457175,
+          1.0892942126588068,
+          1.0876784623095257,
+          1.0876397455557838,
+          1.0892490618015729,
+          1.0926191652214976,
+          1.0823763396897663
+        ],
+        "wins": 8
+      }
+    },
+    "persistent_262144": {
+      "cycles": {
+        "max": 1.049118693928871,
+        "median": 1.0371230033488403,
+        "min": 1.01445792207662,
+        "pairs": [
+          1.0376902689999348,
+          1.049118693928871,
+          1.01445792207662,
+          1.0269379764005742,
+          1.0421812999244875,
+          1.0355050589104309,
+          1.0424783306192136,
+          1.036555737697746
+        ],
+        "wins": 8
+      },
+      "instructions": {
+        "max": 1.0271930210668463,
+        "median": 1.0271171950673414,
+        "min": 1.0270733897079614,
+        "pairs": [
+          1.027112632950723,
+          1.0270733897079614,
+          1.0271930210668463,
+          1.0270813210612075,
+          1.0271122888116564,
+          1.0271739010010328,
+          1.02712175718396,
+          1.0271421033596215
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0990132109084731,
+        "median": 1.088225072916317,
+        "min": 0.9986977828380752,
+        "pairs": [
+          1.0912346385940184,
+          1.0990132109084731,
+          0.9986977828380752,
+          1.0814642415316964,
+          1.0943739081346682,
+          1.080598750731038,
+          1.0913797342860383,
+          1.0852155072386154
+        ],
+        "wins": 7
+      },
+      "p99": {
+        "max": 1.146220920099873,
+        "median": 1.0867243364664927,
+        "min": 1.0338333929138366,
+        "pairs": [
+          1.1054085851452944,
+          1.099903593724225,
+          1.0491219725146026,
+          1.0587805654928348,
+          1.0954383058302712,
+          1.0338333929138366,
+          1.078010367102714,
+          1.146220920099873
+        ],
+        "wins": 8
+      },
+      "throughput": {
+        "max": 1.1235345373474492,
+        "median": 1.0909841292678624,
+        "min": 1.0268316102667785,
+        "pairs": [
+          1.0922825648791117,
+          1.1235345373474492,
+          1.0268316102667785,
+          1.0764063918730962,
+          1.0987836144560688,
+          1.0764600640439324,
+          1.0924236991849363,
+          1.0896856936566128
+        ],
+        "wins": 8
+      }
+    },
+    "persistent_4096": {
+      "cycles": {
+        "max": 1.0074193130028464,
+        "median": 1.0021919640345005,
+        "min": 0.9911920479191668,
+        "pairs": [
+          1.0074193130028464,
+          0.9992498318761036,
+          1.003776437677824,
+          1.0058559340574376,
+          1.0009190880604653,
+          1.002651134887637,
+          1.0017327931813638,
+          0.9911920479191668
+        ],
+        "wins": 6
+      },
+      "instructions": {
+        "max": 1.0009580598878545,
+        "median": 1.0009400409753142,
+        "min": 1.0009201591648456,
+        "pairs": [
+          1.0009580598878545,
+          1.0009506011546434,
+          1.0009413415153368,
+          1.0009230000105651,
+          1.0009477953249135,
+          1.0009387404352916,
+          1.000924089297528,
+          1.0009201591648456
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0094177215189872,
+        "median": 1.001564933301294,
+        "min": 0.9971948103992386,
+        "pairs": [
+          1.0094177215189872,
+          1.0018184573420217,
+          1.000959305261032,
+          1.0093538274850844,
+          1,
+          1.0033324917950013,
+          1.0013114092605668,
+          0.9971948103992386
+        ],
+        "wins": 6
+      },
+      "p99": {
+        "max": 1.0097572375916566,
+        "median": 1.0026864234187602,
+        "min": 0.993092378686692,
+        "pairs": [
+          1.0075578511190872,
+          0.995412977210045,
+          1.0032443807909277,
+          1.0097572375916566,
+          0.9975587072773774,
+          1.0061829211385909,
+          1.002128466046593,
+          0.993092378686692
+        ],
+        "wins": 5
+      },
+      "throughput": {
+        "max": 1.008997302365205,
+        "median": 1.001938238404391,
+        "min": 0.9963077212325502,
+        "pairs": [
+          1.008997302365205,
+          1.0011827304302476,
+          1.0016344992238664,
+          1.008325471694915,
+          0.9993433505689652,
+          1.0035841438861135,
+          1.0022419775849156,
+          0.9963077212325502
+        ],
+        "wins": 6
+      }
+    }
+  },
+  "paired_rows": [
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58774814,
+      "elapsed": 34886360,
+      "instructions": 75778353,
+      "p50": 17297,
+      "p99": 17565,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58787204,
+      "elapsed": 34902406,
+      "instructions": 75784861,
+      "p50": 17325,
+      "p99": 17741,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58638831,
+      "elapsed": 34906621,
+      "instructions": 75786670,
+      "p50": 17297,
+      "p99": 17695,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58836907,
+      "elapsed": 35189871,
+      "instructions": 75777506,
+      "p50": 17435,
+      "p99": 18065,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58595993,
+      "elapsed": 35066176,
+      "instructions": 75779818,
+      "p50": 17380,
+      "p99": 17695,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58665502,
+      "elapsed": 34885378,
+      "instructions": 75786263,
+      "p50": 17278,
+      "p99": 17732,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58689558,
+      "elapsed": 34880564,
+      "instructions": 75786858,
+      "p50": 17296,
+      "p99": 18185,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58740756,
+      "elapsed": 35062437,
+      "instructions": 75779913,
+      "p50": 17380,
+      "p99": 17787,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58601019,
+      "elapsed": 34903231,
+      "instructions": 75778321,
+      "p50": 17297,
+      "p99": 17852,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58613829,
+      "elapsed": 34969370,
+      "instructions": 75786083,
+      "p50": 17324,
+      "p99": 17722,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58448218,
+      "elapsed": 34886813,
+      "instructions": 75785129,
+      "p50": 17296,
+      "p99": 17704,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58666823,
+      "elapsed": 35000359,
+      "instructions": 75777965,
+      "p50": 17343,
+      "p99": 18018,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58648911,
+      "elapsed": 35101742,
+      "instructions": 75780789,
+      "p50": 17399,
+      "p99": 17963,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58623997,
+      "elapsed": 34865110,
+      "instructions": 75789900,
+      "p50": 17287,
+      "p99": 17676,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "candidate",
+      "cycles": 58692250,
+      "elapsed": 34935352,
+      "instructions": 75787790,
+      "p50": 17315,
+      "p99": 17704,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_0",
+      "arm": "baseline",
+      "cycles": 58571378,
+      "elapsed": 34959139,
+      "instructions": 75777137,
+      "p50": 17334,
+      "p99": 17731,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 1,
+      "arm": "baseline",
+      "instructions": 98815967,
+      "cycles": 70889238,
+      "elapsed_ns": 44616211,
+      "p50_ns": 19936,
+      "p99_ns": 34528
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 1,
+      "arm": "candidate",
+      "instructions": 98721386,
+      "cycles": 70367162,
+      "elapsed_ns": 44218365,
+      "p50_ns": 19750,
+      "p99_ns": 34269
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 2,
+      "arm": "candidate",
+      "instructions": 98720688,
+      "cycles": 70526857,
+      "elapsed_ns": 44327937,
+      "p50_ns": 19797,
+      "p99_ns": 34445
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 2,
+      "arm": "baseline",
+      "instructions": 98814532,
+      "cycles": 70473950,
+      "elapsed_ns": 44380365,
+      "p50_ns": 19833,
+      "p99_ns": 34287
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 3,
+      "arm": "baseline",
+      "instructions": 98812680,
+      "cycles": 70557890,
+      "elapsed_ns": 44349541,
+      "p50_ns": 19825,
+      "p99_ns": 34324
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 3,
+      "arm": "candidate",
+      "instructions": 98719751,
+      "cycles": 70292435,
+      "elapsed_ns": 44277170,
+      "p50_ns": 19806,
+      "p99_ns": 34213
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 4,
+      "arm": "candidate",
+      "instructions": 98721559,
+      "cycles": 70267697,
+      "elapsed_ns": 44246502,
+      "p50_ns": 19778,
+      "p99_ns": 34231
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 4,
+      "arm": "baseline",
+      "instructions": 98812679,
+      "cycles": 70679180,
+      "elapsed_ns": 44614875,
+      "p50_ns": 19963,
+      "p99_ns": 34565
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 5,
+      "arm": "baseline",
+      "instructions": 98813192,
+      "cycles": 70552045,
+      "elapsed_ns": 44416144,
+      "p50_ns": 19870,
+      "p99_ns": 34324
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 5,
+      "arm": "candidate",
+      "instructions": 98719626,
+      "cycles": 70487261,
+      "elapsed_ns": 44445329,
+      "p50_ns": 19870,
+      "p99_ns": 34408
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 6,
+      "arm": "candidate",
+      "instructions": 98721645,
+      "cycles": 70349872,
+      "elapsed_ns": 44307931,
+      "p50_ns": 19805,
+      "p99_ns": 34288
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 6,
+      "arm": "baseline",
+      "instructions": 98814319,
+      "cycles": 70536379,
+      "elapsed_ns": 44466737,
+      "p50_ns": 19871,
+      "p99_ns": 34500
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 7,
+      "arm": "baseline",
+      "instructions": 98813289,
+      "cycles": 70427966,
+      "elapsed_ns": 44434364,
+      "p50_ns": 19852,
+      "p99_ns": 34370
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 7,
+      "arm": "candidate",
+      "instructions": 98722061,
+      "cycles": 70306140,
+      "elapsed_ns": 44334966,
+      "p50_ns": 19826,
+      "p99_ns": 34297
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 8,
+      "arm": "candidate",
+      "instructions": 98722051,
+      "cycles": 71328953,
+      "elapsed_ns": 44678100,
+      "p50_ns": 19963,
+      "p99_ns": 34889
+    },
+    {
+      "workload": "persistent_4096",
+      "pair": 8,
+      "arm": "baseline",
+      "instructions": 98812891,
+      "cycles": 70700691,
+      "elapsed_ns": 44513136,
+      "p50_ns": 19907,
+      "p99_ns": 34648
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 1,
+      "arm": "baseline",
+      "instructions": 2294652169,
+      "cycles": 1672053225,
+      "elapsed_ns": 2011641392,
+      "p50_ns": 990972,
+      "p99_ns": 1293789
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 1,
+      "arm": "candidate",
+      "instructions": 2234080368,
+      "cycles": 1611322063,
+      "elapsed_ns": 1841685894,
+      "p50_ns": 908120,
+      "p99_ns": 1170417
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 2,
+      "arm": "candidate",
+      "instructions": 2234053351,
+      "cycles": 1630919322,
+      "elapsed_ns": 1864776199,
+      "p50_ns": 918332,
+      "p99_ns": 1206353
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 2,
+      "arm": "baseline",
+      "instructions": 2294536748,
+      "cycles": 1711027949,
+      "elapsed_ns": 2095140464,
+      "p50_ns": 1009259,
+      "p99_ns": 1326872
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 3,
+      "arm": "baseline",
+      "instructions": 2294651145,
+      "cycles": 1709438943,
+      "elapsed_ns": 2086298910,
+      "p50_ns": 1000832,
+      "p99_ns": 1340994
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 3,
+      "arm": "candidate",
+      "instructions": 2233904532,
+      "cycles": 1685076242,
+      "elapsed_ns": 2031782903,
+      "p50_ns": 1002137,
+      "p99_ns": 1278206
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 4,
+      "arm": "candidate",
+      "instructions": 2234078015,
+      "cycles": 1619465670,
+      "elapsed_ns": 1860645013,
+      "p50_ns": 912609,
+      "p99_ns": 1221271
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 4,
+      "arm": "baseline",
+      "instructions": 2294579799,
+      "cycles": 1663090798,
+      "elapsed_ns": 2002810185,
+      "p50_ns": 986954,
+      "p99_ns": 1293058
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 5,
+      "arm": "baseline",
+      "instructions": 2294677079,
+      "cycles": 1655178590,
+      "elapsed_ns": 2002069054,
+      "p50_ns": 982878,
+      "p99_ns": 1314446
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 5,
+      "arm": "candidate",
+      "instructions": 2234105369,
+      "cycles": 1588186806,
+      "elapsed_ns": 1822077639,
+      "p50_ns": 898119,
+      "p99_ns": 1199927
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 6,
+      "arm": "candidate",
+      "instructions": 2233946094,
+      "cycles": 1586676145,
+      "elapsed_ns": 1826502773,
+      "p50_ns": 899406,
+      "p99_ns": 1200057
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 6,
+      "arm": "baseline",
+      "instructions": 2294651124,
+      "cycles": 1643011175,
+      "elapsed_ns": 1966157292,
+      "p50_ns": 971897,
+      "p99_ns": 1240659
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 7,
+      "arm": "baseline",
+      "instructions": 2294635922,
+      "cycles": 1635275134,
+      "elapsed_ns": 1960344161,
+      "p50_ns": 972045,
+      "p99_ns": 1165658
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 7,
+      "arm": "candidate",
+      "instructions": 2234044704,
+      "cycles": 1568641847,
+      "elapsed_ns": 1794490693,
+      "p50_ns": 890657,
+      "p99_ns": 1081305
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 8,
+      "arm": "candidate",
+      "instructions": 2233980624,
+      "cycles": 1577618498,
+      "elapsed_ns": 1807028372,
+      "p50_ns": 896304,
+      "p99_ns": 1090186
+    },
+    {
+      "workload": "persistent_262144",
+      "pair": 8,
+      "arm": "baseline",
+      "instructions": 2294615557,
+      "cycles": 1635289506,
+      "elapsed_ns": 1969092965,
+      "p50_ns": 972683,
+      "p99_ns": 1249594
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 1,
+      "arm": "baseline",
+      "instructions": 2560281507,
+      "cycles": 1831872344,
+      "elapsed_ns": 2144535668,
+      "p50_ns": 1074528,
+      "p99_ns": 1371364
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 1,
+      "arm": "candidate",
+      "instructions": 2500039173,
+      "cycles": 1772850552,
+      "elapsed_ns": 1973610318,
+      "p50_ns": 991500,
+      "p99_ns": 1260908
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 2,
+      "arm": "candidate",
+      "instructions": 2500999847,
+      "cycles": 1766787265,
+      "elapsed_ns": 1960445099,
+      "p50_ns": 987315,
+      "p99_ns": 1232251
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 2,
+      "arm": "baseline",
+      "instructions": 2561541016,
+      "cycles": 1828579568,
+      "elapsed_ns": 2136938190,
+      "p50_ns": 1070175,
+      "p99_ns": 1338826
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 3,
+      "arm": "baseline",
+      "instructions": 2562561603,
+      "cycles": 1834865031,
+      "elapsed_ns": 2142772656,
+      "p50_ns": 1073148,
+      "p99_ns": 1367021
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 3,
+      "arm": "candidate",
+      "instructions": 2499776095,
+      "cycles": 1771234033,
+      "elapsed_ns": 1967120206,
+      "p50_ns": 991287,
+      "p99_ns": 1250178
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 4,
+      "arm": "candidate",
+      "instructions": 2500081175,
+      "cycles": 1766741482,
+      "elapsed_ns": 1966449952,
+      "p50_ns": 989629,
+      "p99_ns": 1271103
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 4,
+      "arm": "baseline",
+      "instructions": 2561272975,
+      "cycles": 1831775194,
+      "elapsed_ns": 2138865260,
+      "p50_ns": 1075083,
+      "p99_ns": 1327122
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 5,
+      "arm": "baseline",
+      "instructions": 2561721711,
+      "cycles": 1829213701,
+      "elapsed_ns": 2133703682,
+      "p50_ns": 1073666,
+      "p99_ns": 1275585
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 5,
+      "arm": "candidate",
+      "instructions": 2499039414,
+      "cycles": 1764333988,
+      "elapsed_ns": 1961774283,
+      "p50_ns": 989176,
+      "p99_ns": 1231419
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 6,
+      "arm": "candidate",
+      "instructions": 2499362208,
+      "cycles": 1768141548,
+      "elapsed_ns": 1971897625,
+      "p50_ns": 990250,
+      "p99_ns": 1282603
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 6,
+      "arm": "baseline",
+      "instructions": 2560753106,
+      "cycles": 1839016257,
+      "elapsed_ns": 2147887638,
+      "p50_ns": 1074372,
+      "p99_ns": 1378390
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 7,
+      "arm": "baseline",
+      "instructions": 2561499884,
+      "cycles": 1843737345,
+      "elapsed_ns": 2155309657,
+      "p50_ns": 1076388,
+      "p99_ns": 1389392
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 7,
+      "arm": "candidate",
+      "instructions": 2502211332,
+      "cycles": 1777058374,
+      "elapsed_ns": 1972608321,
+      "p50_ns": 992555,
+      "p99_ns": 1276464
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 8,
+      "arm": "candidate",
+      "instructions": 2499140219,
+      "cycles": 1776926216,
+      "elapsed_ns": 1974975152,
+      "p50_ns": 994027,
+      "p99_ns": 1268104
+    },
+    {
+      "workload": "calls_262144",
+      "pair": 8,
+      "arm": "baseline",
+      "instructions": 2560884946,
+      "cycles": 1832723164,
+      "elapsed_ns": 2137666376,
+      "p50_ns": 1072546,
+      "p99_ns": 1380364
+    }
+  ],
+  "allocation_telemetry": {
+    "samples": [
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 1,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "candidate",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 1,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "candidate",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 2,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 2,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 3,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "candidate",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 3,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 249820,
+        "arm": "baseline",
+        "freed_bytes": 249820,
+        "live_bytes": 219545,
+        "pair": 1,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "candidate",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 1,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "candidate",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 2,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 249820,
+        "arm": "baseline",
+        "freed_bytes": 249820,
+        "live_bytes": 219545,
+        "pair": 2,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 249820,
+        "arm": "baseline",
+        "freed_bytes": 249820,
+        "live_bytes": 219545,
+        "pair": 3,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "candidate",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 3,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 210,
+        "allocated_bytes": 20975710,
+        "arm": "baseline",
+        "freed_bytes": 20975710,
+        "live_bytes": 215441,
+        "pair": 1,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "candidate",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 1,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "candidate",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 2,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 210,
+        "allocated_bytes": 20975710,
+        "arm": "baseline",
+        "freed_bytes": 20975710,
+        "live_bytes": 215441,
+        "pair": 2,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 210,
+        "allocated_bytes": 20975710,
+        "arm": "baseline",
+        "freed_bytes": 20975710,
+        "live_bytes": 215441,
+        "pair": 3,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "candidate",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 3,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 389,
+        "allocated_bytes": 21685948,
+        "arm": "baseline",
+        "freed_bytes": 21679292,
+        "live_bytes": 171720,
+        "pair": 1,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 379,
+        "allocated_bytes": 19064468,
+        "arm": "candidate",
+        "freed_bytes": 19057812,
+        "live_bytes": 171720,
+        "pair": 1,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 381,
+        "allocated_bytes": 19064468,
+        "arm": "candidate",
+        "freed_bytes": 19057812,
+        "live_bytes": 171819,
+        "pair": 2,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 389,
+        "allocated_bytes": 21685948,
+        "arm": "baseline",
+        "freed_bytes": 21679292,
+        "live_bytes": 171720,
+        "pair": 2,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 389,
+        "allocated_bytes": 21685948,
+        "arm": "baseline",
+        "freed_bytes": 21679292,
+        "live_bytes": 171720,
+        "pair": 3,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 379,
+        "allocated_bytes": 19064468,
+        "arm": "candidate",
+        "freed_bytes": 19057812,
+        "live_bytes": 171720,
+        "pair": 3,
+        "workload": "calls_262144"
+      }
+    ],
+    "per_ten_roundtrips": {
+      "persistent_0": {
+        "baseline_alloc_count": 60,
+        "candidate_alloc_count": 60,
+        "baseline_allocated_bytes": 3970,
+        "candidate_allocated_bytes": 3970,
+        "baseline_live_bytes": 215446,
+        "candidate_live_bytes": 215446
+      },
+      "persistent_4096": {
+        "baseline_alloc_count": 60,
+        "candidate_alloc_count": 50,
+        "baseline_allocated_bytes": 249820,
+        "candidate_allocated_bytes": 208830,
+        "baseline_live_bytes": 219545,
+        "candidate_live_bytes": 219545
+      },
+      "persistent_262144": {
+        "baseline_alloc_count": 210,
+        "candidate_alloc_count": 200,
+        "baseline_allocated_bytes": 20975710,
+        "candidate_allocated_bytes": 18354230,
+        "removed_allocated_bytes": 2621480,
+        "baseline_live_bytes": 215441,
+        "candidate_live_bytes": 215441
+      },
+      "calls_262144": {
+        "baseline_alloc_count": 389,
+        "candidate_alloc_count_median": 379,
+        "baseline_allocated_bytes": 21685948,
+        "candidate_allocated_bytes": 19064468,
+        "removed_allocated_bytes": 2621480,
+        "baseline_live_bytes": 171720,
+        "candidate_live_bytes_median": 171720
+      }
+    }
+  },
+  "profile": {
+    "workload": "persistent 256 KiB, warmup 100, iterations 10000, 199 Hz user cycles, DWARF",
+    "samples": "1K",
+    "lost_samples": 0,
+    "mem_eql_self_percent": 16.23,
+    "clock_gettime_self_percent": 16.16,
+    "memcpy_fast_self_percent": 2.89,
+    "removed_hotspot": "Shared reader Collector.consume -> allocator.dupe no longer appears as a principal whole-message copy.",
+    "remaining_copy_boundaries": [
+      "outbound Write.create caller-input clone",
+      "encodeMessageAlloc/writeMessageInto staging",
+      "the decoder's first cross-DATA reassembly copy",
+      "benchmark full-byte request and response validation"
+    ]
+  },
+  "grpc_cpp_comparison": {
+    "previous_retained_frame": {
+      "persistent_262144_ratio": 2.5113726080759506,
+      "calls_262144_ratio": 2.1598440342011536
+    },
+    "context": {
+      "cpu": 1,
+      "samples": 7,
+      "schedule": "alternating",
+      "netz_build_mode": "ReleaseFast",
+      "netz_revision": "a597be329745f9a3d5009982f4e742f965016f26",
+      "netz_dirty": true,
+      "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "arch": "aarch64",
+      "netz_sha256": "7f6bf174013c3cb1d2fd05f69ddcd83d235550229f25c5ceba3fb447ae1f27b7",
+      "grpc_cpp_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+      "cpp_time_basis": "real_time",
+      "netz_validation": "full-bytes",
+      "netz_protobuf_scope": "preencoded",
+      "grpc_cpp_protobuf_scope": "serialize+parse"
+    },
+    "results": [
+      {
+        "mode": "persistent",
+        "payload_bytes": 0,
+        "netz_median_ns": 17637,
+        "grpc_cpp_median_ns": 43774.51612842012,
+        "netz_over_grpc_cpp": 0.40290565287480984,
+        "netz_samples_ns": [
+          17646,
+          17518,
+          17758,
+          17606,
+          17640,
+          17515,
+          17637
+        ],
+        "grpc_cpp_samples_ns": [
+          43595.89489550544,
+          44267.802292253626,
+          43774.51612842012,
+          43786.9047114459,
+          43766.52205518901,
+          43887.956367135404,
+          43640.29835846464
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 512,
+        "netz_median_ns": 18081,
+        "grpc_cpp_median_ns": 44978.84085262063,
+        "netz_over_grpc_cpp": 0.40198901655213587,
+        "netz_samples_ns": [
+          18620,
+          18001,
+          18081,
+          18091,
+          18000,
+          18017,
+          18176
+        ],
+        "grpc_cpp_samples_ns": [
+          45297.168959736635,
+          44689.16714166817,
+          44412.924415461806,
+          44905.022598299845,
+          44978.84085262063,
+          45142.237405038184,
+          44996.60342855954
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 4096,
+        "netz_median_ns": 22157,
+        "grpc_cpp_median_ns": 49542.264585141784,
+        "netz_over_grpc_cpp": 0.44723429955289334,
+        "netz_samples_ns": [
+          22467,
+          22157,
+          22150,
+          22116,
+          22138,
+          22368,
+          22172
+        ],
+        "grpc_cpp_samples_ns": [
+          49071.95229263007,
+          49273.64642976555,
+          49542.264585141784,
+          49601.89581560381,
+          49586.01952386074,
+          49438.31769325196,
+          49889.63206104363
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 262144,
+        "netz_median_ns": 908913,
+        "grpc_cpp_median_ns": 387996.39075061784,
+        "netz_over_grpc_cpp": 2.3425810694826743,
+        "netz_samples_ns": [
+          906001,
+          913817,
+          907191,
+          906820,
+          909260,
+          912195,
+          908913
+        ],
+        "grpc_cpp_samples_ns": [
+          385288.6124890368,
+          384030.0918284042,
+          396163.9180367823,
+          392910.9499122096,
+          383149.9285547644,
+          388043.1954289826,
+          387996.39075061784
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 0,
+        "netz_median_ns": 64204,
+        "grpc_cpp_median_ns": 124337.11488749036,
+        "netz_over_grpc_cpp": 0.5163703537603928,
+        "netz_samples_ns": [
+          63833,
+          64204,
+          63655,
+          64611,
+          64928,
+          64248,
+          63877
+        ],
+        "grpc_cpp_samples_ns": [
+          125059.47538632274,
+          123778.58532086713,
+          122997.84488758953,
+          125381.07239741343,
+          124337.11488749036,
+          125496.16421939043,
+          124327.16029212697
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 512,
+        "netz_median_ns": 64882,
+        "grpc_cpp_median_ns": 124778.02989606137,
+        "netz_over_grpc_cpp": 0.5199793589788678,
+        "netz_samples_ns": [
+          64811,
+          65813,
+          64882,
+          63978,
+          64899,
+          64768,
+          66018
+        ],
+        "grpc_cpp_samples_ns": [
+          123878.34390958532,
+          124253.21047423316,
+          124357.27249744741,
+          125431.25243011209,
+          125898.03850551415,
+          125845.3214865531,
+          124778.02989606137
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 4096,
+        "netz_median_ns": 70046,
+        "grpc_cpp_median_ns": 130026.25714326676,
+        "netz_over_grpc_cpp": 0.5387065777246918,
+        "netz_samples_ns": [
+          69439,
+          70674,
+          69774,
+          70897,
+          69937,
+          70046,
+          70936
+        ],
+        "grpc_cpp_samples_ns": [
+          131027.30766671603,
+          129176.04321747823,
+          129426.8536444155,
+          131370.8844570477,
+          130026.25714326676,
+          129903.18826623201,
+          130182.51434574282
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 262144,
+        "netz_median_ns": 983617,
+        "grpc_cpp_median_ns": 494586.14199896686,
+        "netz_over_grpc_cpp": 1.9887678130740158,
+        "netz_samples_ns": [
+          980728,
+          983707,
+          984040,
+          980513,
+          980433,
+          988708,
+          983617
+        ],
+        "grpc_cpp_samples_ns": [
+          497363.89233579993,
+          493581.3509413307,
+          494586.14199896686,
+          497338.1757736206,
+          503158.6130023439,
+          477688.4800897222,
+          491952.1681225027
+        ]
+      }
+    ],
+    "conclusion": "Small-message native times remain below the independent grpc-cpp fixture. The 256 KiB ratios fall to 2.3426x persistent and 1.9888x per-call, but broad large-message performance parity remains open."
+  },
+  "verification": {
+    "debug_grpc": {
+      "passed": 386,
+      "total": 386
+    },
+    "release_fast_grpc": {
+      "passed": 386,
+      "total": 386
+    },
+    "package": {
+      "passed": 22,
+      "total": 22
+    },
+    "grpc_cpp_forward": {
+      "h2c": "passed",
+      "tls": "passed",
+      "coverage": "multiplexed unary/duplex, bounded slow consumer, compression, large messages, cancellation/reuse, deadlines, metadata, connectivity, keepalive, and 100-call RPC/channel soak"
+    }
+  },
+  "remaining_gap": {
+    "performance": "grpc-core retains segmented SliceBuffer message ownership and avoids Netz's contiguous outbound clone/staging plus first reassembly copy. The official 256 KiB wall-time ratios remain 2.3426x and 1.9888x.",
+    "comparison_boundary": "The native fixture uses preencoded protobuf payloads with full-byte validation; grpc-cpp serializes/parses protobuf in its official CompletionQueue fixture. The result is a local cross-stack indicator, not equal-cost microarchitecture proof."
+  }
+}

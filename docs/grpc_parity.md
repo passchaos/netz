@@ -134,8 +134,12 @@ existing HTTP/2 runtime:
 - bounded incremental reassembly when the five-byte gRPC prefix or payload
   crosses any callback, while several messages in one callback are delivered
   immediately,
-- a zero-copy path for complete uncompressed messages and one exact-size
-  allocation only when a message spans callbacks,
+- a zero-copy callback path for complete uncompressed messages and one
+  exact-size allocation only when a message spans callbacks. SharedChannel
+  owned events now preserve that reassembly allocation; direct uncompressed
+  messages ending at the input-chunk boundary reuse the shrunken chunk
+  allocation, while empty, compressed-direct and resize-fallback cases retain
+  exact owned-copy semantics,
 - independent gzip/deflate context per streamed message, terminal
   `grpc-status`/trailer parsing, and HTTP/2 stream reset for a truncated request
   message at END_STREAM,
@@ -1796,3 +1800,31 @@ tests, and grpc-cpp h2c/TLS matrix pass. The accepted change removes the prior
 reassembly and staging remain separate large-message optimization boundaries.
 Evidence is recorded in
 `docs/evidence/grpc_shared_retained_frames/2026-10-30.json`.
+
+## SharedChannel decoded-message ownership
+
+The stream decoder now has an owned delivery contract in addition to its
+borrowed callback contract. Cross-DATA reassembly storage and bounded
+decompression output transfer directly to a successful consumer; callback
+failure frees detached storage. SharedChannel selects the owned callback only
+for assembled messages, preserving the direct decoder fast path. For a direct,
+uncompressed, nonempty message at the end of a consumer chunk, it moves the
+payload to the allocation start and shrinks in place, with duplicate-and-free
+fallback when resize is unavailable. The event `Message` keeps its original
+layout.
+
+Eight fixed-binary pairs show neutral zero-byte instructions (0.9999x) while
+persistent 256-KiB instructions/cycles/throughput/p50 improve by 2.71%/3.71%/
+9.10%/8.82%; per-call 256-KiB improves by 2.45%/3.63%/8.85%/8.42%. Ten
+roundtrips remove one 262,148-byte response recopy each, reducing allocated
+bytes by 2,621,480 with unchanged median live storage. Debug and ReleaseFast
+gRPC filters pass 386/386, package tests pass 22/22, and the pinned grpc-cpp
+h2c/TLS matrix passes.
+
+Seven clean CPU-1 samples refresh the official comparison. Netz remains faster
+for 0/512/4096-byte shapes, but the 256-KiB persistent and per-call wall times
+are still 2.343x and 1.989x grpc-cpp. Outbound caller-input cloning, encoded
+message staging, first cross-DATA reassembly, and grpc-core's more general
+segmented `SliceBuffer` ownership remain open performance boundaries. Full
+evidence is recorded in
+`docs/evidence/grpc_shared_message_ownership/2026-10-30.json`.

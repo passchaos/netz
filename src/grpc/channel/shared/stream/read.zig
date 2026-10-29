@@ -23,10 +23,32 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
     defer call.read_busy.store(false, .release);
     const deadline = deadline_policy.earlier(call.deadline, requested);
     const Collector = struct {
+        const Result = union(enum) {
+            none,
+            message: call_module.Message,
+            borrowed: codec.DecodedMessage,
+        };
         allocator: std.mem.Allocator,
-        message: ?call_module.Message = null,
-        fn consume(self: *@This(), message: codec.DecodedMessage) @TypeOf(state.*).Failure!void {
-            self.message = .{ .allocator = self.allocator, .payload = try self.allocator.dupe(u8, message.payload), .was_compressed = message.was_compressed };
+        result: Result = .none,
+        fn consumeBorrowed(self: *@This(), message: codec.DecodedMessage) @TypeOf(state.*).Failure!void {
+            std.debug.assert(self.result == .none);
+            if (message.was_compressed or message.payload.len == 0) {
+                self.result = .{ .message = .{
+                    .allocator = self.allocator,
+                    .payload = try self.allocator.dupe(u8, message.payload),
+                    .was_compressed = message.was_compressed,
+                } };
+            } else {
+                self.result = .{ .borrowed = message };
+            }
+        }
+        fn consumeOwned(self: *@This(), message: codec.OwnedDecodedMessage) @TypeOf(state.*).Failure!void {
+            std.debug.assert(self.result == .none);
+            self.result = .{ .message = .{
+                .allocator = message.allocator,
+                .payload = message.payload,
+                .was_compressed = message.was_compressed,
+            } };
         }
     };
     while (true) {
@@ -83,21 +105,63 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
         }
         if (call.chunk) |bytes| {
             state.unlock();
-            var collector = Collector{ .allocator = state.allocator };
             const decoder = if (call.decoder) |*value| value else {
                 fail(call, error.InvalidStreamState);
                 return error.InvalidStreamState;
             };
-            const progress = decoder.feedLimited(bytes[call.chunk_offset..], 1, &collector, Collector.consume) catch |err| {
+            var collector = Collector{ .allocator = state.allocator };
+            const progress = decoder.feedLimitedAssembledOwned(
+                bytes[call.chunk_offset..],
+                1,
+                &collector,
+                Collector.consumeBorrowed,
+                Collector.consumeOwned,
+            ) catch |err| {
                 fail(call, err);
                 return @errorCast(err);
             };
             call.chunk_offset += progress.consumed;
-            if (call.chunk_offset == bytes.len) {
+            if (collector.result == .borrowed) {
+                const borrowed = collector.result.borrowed;
+                var payload = borrowed.payload;
+                if (borrowed.payload.len != 0 and
+                    call.chunk_offset == bytes.len)
+                {
+                    @memmove(
+                        bytes[0..borrowed.payload.len],
+                        borrowed.payload,
+                    );
+                    payload = bytes[0..borrowed.payload.len];
+                    if (state.allocator.resize(bytes, borrowed.payload.len)) {
+                        call.chunk = null;
+                        collector.result = .{ .message = .{
+                            .allocator = state.allocator,
+                            .payload = bytes[0..borrowed.payload.len],
+                            .was_compressed = false,
+                        } };
+                    }
+                }
+                if (collector.result == .borrowed) {
+                    collector.result = .{ .message = .{
+                        .allocator = state.allocator,
+                        .payload = state.allocator.dupe(
+                            u8,
+                            payload,
+                        ) catch |err| {
+                            fail(call, err);
+                            return err;
+                        },
+                        .was_compressed = false,
+                    } };
+                }
+            }
+            if (call.chunk_offset == bytes.len and call.chunk != null) {
                 state.allocator.free(bytes);
                 call.chunk = null;
             }
-            if (collector.message) |message| return .{ .message = message };
+            if (collector.result == .message) {
+                return .{ .message = collector.result.message };
+            }
             continue;
         }
         if (call.terminal) |response| {
