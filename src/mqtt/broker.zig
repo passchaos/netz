@@ -750,8 +750,9 @@ const ClientSlot = struct {
     /// two-byte UTF-8 length bounds the compact descriptor.
     username_ptr: ?[*]const u8 = null,
     writer_mutex: std.Io.Mutex = .init,
-    /// A lazily started connection-lifetime writer waits here for routed
-    /// deliveries. Pure publishers therefore pay no extra coroutine cost.
+    /// A connection-lifetime writer starts only after a multi-destination
+    /// route first selects asynchronous delivery. Pure publishers, idle
+    /// subscribers, and single-destination subscribers pay no coroutine cost.
     delivery_ready: std.Io.Event = .unset,
     /// Queue, route, Session-write and transient-QoS storage is allocated as
     /// one descriptor only when the connection first needs any of it.
@@ -1248,6 +1249,33 @@ test "MQTT broker allocates client buffers on demand" {
     try std.testing.expect(slot.buffers == null);
 }
 
+test "MQTT broker starts transient delivery writers on demand" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+    });
+    defer broker.deinit();
+
+    const slot = &broker.slots[0];
+    slot.state.active = true;
+    _ = try slot.ensureBuffers(allocator);
+    try std.testing.expect(slot.buffers.?.delivery_writer == null);
+
+    broker.state_mutex.lockUncancelable(io);
+    try std.testing.expect(broker.ensureDeliveryWriterLocked(0, slot));
+    const writer = slot.buffers.?.delivery_writer.?;
+    try std.testing.expect(broker.ensureDeliveryWriterLocked(0, slot));
+    try std.testing.expect(slot.buffers.?.delivery_writer.? == writer);
+    broker.state_mutex.unlock(io);
+
+    try std.testing.expect(broker.stopDeliveryWriter(slot) == null);
+    try std.testing.expect(slot.buffers.?.delivery_writer == null);
+    slot.state.active = false;
+}
+
 test "MQTT broker allocates assigned client identifiers on demand" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1641,17 +1669,6 @@ fn networkDeliveryMode(
         .asynchronous;
 }
 
-fn subscriptionsNeedDeliveryWriter(
-    local_maximum_qos: mqtt.QoS,
-    subscriptions: []const mqtt.Subscription,
-) bool {
-    if (local_maximum_qos == .at_most_once) return false;
-    for (subscriptions) |subscription| {
-        if (subscription.qos != .at_most_once) return true;
-    }
-    return false;
-}
-
 test "MQTT transient delivery scheduling respects persistence and watermark" {
     const limit = transient_delivery_async_high_watermark;
     try std.testing.expect(shouldScheduleTransientDelivery(
@@ -1770,23 +1787,6 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
         NetworkDeliveryMode.asynchronous,
         networkDeliveryMode(true, .at_most_once),
     );
-
-    const subscriptions = [_]mqtt.Subscription{
-        .{ .topic_filter = "qos/0", .qos = .at_most_once },
-        .{ .topic_filter = "qos/1", .qos = .at_least_once },
-    };
-    try std.testing.expect(!subscriptionsNeedDeliveryWriter(
-        .at_most_once,
-        &subscriptions,
-    ));
-    try std.testing.expect(subscriptionsNeedDeliveryWriter(
-        .at_least_once,
-        &subscriptions,
-    ));
-    try std.testing.expect(!subscriptionsNeedDeliveryWriter(
-        .exactly_once,
-        subscriptions[0..1],
-    ));
 }
 
 test "MQTT live overlap merge uses the current queue tail" {
@@ -7006,6 +7006,9 @@ pub const Broker = struct {
                     async_high_watermark,
                     publisher_id != null and
                         matches[delivery_index].subscriber_id == publisher_id.?,
+                ) and self.ensureDeliveryWriterLocked(
+                    destination_index,
+                    destination,
                 )) {
                     continue;
                 }
@@ -7519,6 +7522,61 @@ pub const Broker = struct {
         try self.scheduleSessionMatches(plan.session_deliveries);
         try self.flushMatches(plan.synchronous_deliveries);
         try self.flushMatches(plan.synchronous_session_targets);
+    }
+
+    /// Start one transient destination writer while `state_mutex` keeps the
+    /// slot generation and buffer owner stable. Scheduling-resource failure
+    /// is not a delivery failure: the route classifier keeps this destination
+    /// on its synchronous path instead.
+    fn ensureDeliveryWriterLocked(
+        self: *Broker,
+        slot_index: usize,
+        slot: *ClientSlot,
+    ) bool {
+        const buffers = slot.buffers orelse return false;
+        if (buffers.delivery_writer != null) return true;
+        if (slot.state.session_persistent) return false;
+
+        const writer = self.allocator.create(DeliveryWriter) catch
+            return false;
+        writer.* = .{ .future = undefined };
+        writer.future = std.Io.concurrent(
+            self.io,
+            DeliveryWriterTask.run,
+            .{ self, slot_index, &writer.stop },
+        ) catch {
+            self.allocator.destroy(writer);
+            return false;
+        };
+        buffers.delivery_writer = writer;
+        return true;
+    }
+
+    fn stopDeliveryWriter(
+        self: *Broker,
+        slot: *ClientSlot,
+    ) ?anyerror {
+        self.state_mutex.lockUncancelable(self.io);
+        const buffers = slot.buffers orelse {
+            self.state_mutex.unlock(self.io);
+            return null;
+        };
+        const writer = buffers.delivery_writer orelse {
+            self.state_mutex.unlock(self.io);
+            return null;
+        };
+        buffers.delivery_writer = null;
+        self.state_mutex.unlock(self.io);
+        defer self.allocator.destroy(writer);
+        writer.stop.store(true, .release);
+        slot.delivery_ready.set(self.io);
+        const writer_error = writer.future.cancel(self.io);
+        slot.delivery_ready.reset();
+        if (writer_error) |err| return switch (err) {
+            error.Canceled => null,
+            else => err,
+        };
+        return null;
     }
 
     fn scheduleMatches(
@@ -9252,72 +9310,13 @@ const ClientTask = struct {
         task.runLoop(slot, connection, connect.connect) catch |err| {
             if (!ungracefulTransportClose(err)) read_error = err;
         };
-        const writer_error = task.stopDeliveryWriter(slot);
+        const writer_error = task.broker.stopDeliveryWriter(slot);
         if (read_error) |err| task.result.* = err;
         if (writer_error) |err| {
             if (!ungracefulTransportClose(err) and task.result.* == null) {
                 task.result.* = err;
             }
         }
-    }
-
-    fn ensureDeliveryWriter(
-        task: ClientTask,
-        slot: *ClientSlot,
-    ) (std.mem.Allocator.Error || std.Io.ConcurrentError)!void {
-        if (slot.buffers) |buffers| {
-            if (buffers.delivery_writer != null) return;
-        }
-        task.broker.state_mutex.lockUncancelable(task.broker.io);
-        const session_persistent = slot.state.session_persistent;
-        task.broker.state_mutex.unlock(task.broker.io);
-        if (session_persistent) return;
-
-        const buffers = try slot.ensureBuffers(task.broker.allocator);
-        const writer = try task.broker.allocator.create(DeliveryWriter);
-        errdefer task.broker.allocator.destroy(writer);
-        writer.* = .{
-            .future = undefined,
-        };
-        writer.future = try std.Io.concurrent(
-            task.broker.io,
-            DeliveryWriterTask.run,
-            .{
-                task.broker,
-                task.slot_index,
-                &writer.stop,
-            },
-        );
-        task.broker.state_mutex.lockUncancelable(task.broker.io);
-        buffers.delivery_writer = writer;
-        task.broker.state_mutex.unlock(task.broker.io);
-    }
-
-    fn stopDeliveryWriter(
-        task: ClientTask,
-        slot: *ClientSlot,
-    ) ?anyerror {
-        task.broker.state_mutex.lockUncancelable(task.broker.io);
-        const buffers = slot.buffers orelse {
-            task.broker.state_mutex.unlock(task.broker.io);
-            return null;
-        };
-        const writer = buffers.delivery_writer orelse {
-            task.broker.state_mutex.unlock(task.broker.io);
-            return null;
-        };
-        buffers.delivery_writer = null;
-        task.broker.state_mutex.unlock(task.broker.io);
-        defer task.broker.allocator.destroy(writer);
-        writer.stop.store(true, .release);
-        slot.delivery_ready.set(task.broker.io);
-        const writer_error = writer.future.cancel(task.broker.io);
-        slot.delivery_ready.reset();
-        if (writer_error) |err| return switch (err) {
-            error.Canceled => null,
-            else => err,
-        };
-        return null;
     }
 
     /// Finish one acknowledgement while retaining the connection's writer
@@ -9417,12 +9416,6 @@ const ClientTask = struct {
                         )) return;
                         return err;
                     };
-                    if (subscriptionsNeedDeliveryWriter(
-                        connection.localMaximumQoS(),
-                        owned.subscribe.subscriptions,
-                    )) {
-                        try task.ensureDeliveryWriter(slot);
-                    }
                 },
                 .unsubscribe => |*owned| {
                     task.broker.handleUnsubscribe(

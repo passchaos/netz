@@ -5725,6 +5725,34 @@ proxy evidence for the entire suite.
    instructions, by 0.75-2.21% median. Timing/cycles were noisy and mixed, so
    no latency or throughput claim is made. Exhaustive type mapping, reserved
    precedence and all packet-sequence gates preserve exact wire behavior.
+   Transient delivery writers now follow the same demand-driven lifecycle as
+   their queues. Accepting a QoS 1/2 subscription no longer starts a parked
+   connection-lifetime coroutine. The first multi-destination route that
+   actually selects asynchronous delivery starts that destination's writer
+   while its generation is stable; an allocation or scheduler-capacity failure
+   leaves the delivery on the existing synchronous path. Once fanout exists,
+   every destination still has its independent writer, bounded queue, writer
+   mutex, and transport-error isolation, so a slow peer cannot occupy a shared
+   worker needed by a healthy peer. One-sample fixed-shape stack telemetry moved
+   serial from 4 to 3 peak active stacks and publishers-32 from 35 to 34, while
+   fanout-32, balanced-32x32, and 4-KiB fanout stayed at 66, 97, and 13. Broker
+   allocation calls likewise fell by exactly one in the two single-destination
+   shapes and stayed unchanged in the three actual-fanout shapes. A four-sample
+   ABBA serial process capture measured 3,984 versus 3,980 KiB median RSS; that
+   is only sampler granularity, and timing moved in both directions, so this is
+   a deterministic coroutine-lifecycle result rather than an RSS, latency, or
+   throughput claim. A preceding attempt to lower zio's initial stack commit
+   from 256 to 64 KiB was rejected: its matched four-sample 2x2 capture regressed
+   median netz RSS from 4,070 to 4,256 KiB, consistent with Linux charging
+   anonymous pages when touched rather than when made writable. The 8-MiB
+   virtual ceiling and 256-KiB default remain unchanged. Allocator-matrix
+   identity copies are now stripped before capture, reducing one current
+   artifact from 269,472,865 to 9,180,207 bytes without changing the executed
+   loadable code; exact post-strip hashes remain recorded. Focused delivery and
+   fanout tests pass 142/142, the production live-broker fuzz gate passes 3/3,
+   package tests pass 22/22, and the Mosquitto `5cd25465` same-client gate
+   preserves all 4,000 expected deliveries. Full records are in
+   [the lazy delivery-writer evidence](evidence/mqtt_lazy_delivery_writer/2026-10-29.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

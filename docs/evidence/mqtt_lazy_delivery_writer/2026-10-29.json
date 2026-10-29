@@ -1,0 +1,190 @@
+{
+  "baseline_revision": "5cf9bee58d6b837dfd7064e56634215b716d6446",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Start transient MQTT delivery writers only when a multi-destination route first selects asynchronous delivery",
+  "reference": {
+    "root": "/nav_env/Work/mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "relevant_source": "src/context.c",
+    "principle": "per-client output state is demand-driven and no parked writer thread is created when a subscription is accepted"
+  },
+  "semantics": {
+    "single_destination": "delivery stays on the existing synchronous path and creates no transient writer coroutine",
+    "idle_subscription": "accepting QoS 1 or QoS 2 creates queue capacity but no transient writer coroutine",
+    "multi_destination": "the first asynchronous route starts one independent writer per destination",
+    "writer_start_failure": "the destination remains on the synchronous route path",
+    "slow_consumer_isolation": "unchanged once multi-destination asynchronous fanout is selected",
+    "durable_sessions": "unchanged shared durable Session writer pool"
+  },
+  "fixed_shape_stack_matrix": {
+    "writer_baseline_capture": {
+      "broker_sha256": "eb4139f8634751d7964024db96ff28ac72693ea284d4c4ea210bd06ec4aec506",
+      "configured_initial_committed_bytes": 65536,
+      "note": "This rejected stack-commit candidate retains the original eager writer lifecycle. Initial commit does not affect active stack count."
+    },
+    "candidate_capture": {
+      "broker_sha256": "9559493e4eab6da55d2f99f9ebb383bdb674da6a5bf3ac78409c31e6170cf9c4",
+      "driver_sha256": "e87cfaf79149cadbf1ef8f5cc4b9b7a6aadde705a60131d975df06702caeeee1",
+      "configured_initial_committed_bytes": 262144,
+      "configured_maximum_bytes": 8388608
+    },
+    "shapes": [
+      {
+        "shape": "serial",
+        "publishers": 1,
+        "subscribers": 1,
+        "baseline_peak_active_stacks": 4,
+        "candidate_peak_active_stacks": 3,
+        "baseline_broker_allocations": 694,
+        "candidate_broker_allocations": 693
+      },
+      {
+        "shape": "publishers-32",
+        "publishers": 32,
+        "subscribers": 1,
+        "baseline_peak_active_stacks": 35,
+        "candidate_peak_active_stacks": 34,
+        "baseline_broker_allocations": 4753,
+        "candidate_broker_allocations": 4752
+      },
+      {
+        "shape": "fanout-32",
+        "publishers": 1,
+        "subscribers": 32,
+        "baseline_peak_active_stacks": 66,
+        "candidate_peak_active_stacks": 66,
+        "baseline_broker_allocations": 3077,
+        "candidate_broker_allocations": 3077
+      },
+      {
+        "shape": "balanced-32x32",
+        "publishers": 32,
+        "subscribers": 32,
+        "baseline_peak_active_stacks": 97,
+        "candidate_peak_active_stacks": 97,
+        "baseline_broker_allocations": 4572,
+        "candidate_broker_allocations": 4572
+      },
+      {
+        "shape": "large-payload",
+        "publishers": 4,
+        "subscribers": 4,
+        "baseline_peak_active_stacks": 13,
+        "candidate_peak_active_stacks": 13,
+        "baseline_broker_allocations": 2342,
+        "candidate_broker_allocations": 2342
+      }
+    ],
+    "all_runs_complete": true,
+    "all_live_bytes_after_teardown": 0
+  },
+  "serial_abba": {
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "client_cpu": 0,
+    "server_cpu": 1,
+    "sampler_cpu": 2,
+    "publishers": 1,
+    "subscribers": 1,
+    "warmup": 128,
+    "publishes": 512,
+    "deliveries": 512,
+    "publisher_window": 1,
+    "payload_bytes": 256,
+    "baseline_broker_sha256": "0a221abaabfe9aaae038e478d5dad72a5fcb02b9ac56655a86f084c93f13c70e",
+    "candidate_broker_sha256": "9559493e4eab6da55d2f99f9ebb383bdb674da6a5bf3ac78409c31e6170cf9c4",
+    "driver_sha256": "e87cfaf79149cadbf1ef8f5cc4b9b7a6aadde705a60131d975df06702caeeee1",
+    "baseline_peak_rss_kib": [3988, 3988, 3980, 3976],
+    "candidate_peak_rss_kib": [3980, 3980, 3980, 3976],
+    "baseline_median_peak_rss_kib": 3984,
+    "candidate_median_peak_rss_kib": 3980,
+    "baseline_publishes_per_second": [61095, 26826, 59863, 61930],
+    "candidate_publishes_per_second": [61577, 37441, 61673, 61812],
+    "baseline_median_publishes_per_second": 60479,
+    "candidate_median_publishes_per_second": 61625,
+    "baseline_median_p50_ns": 8606,
+    "candidate_median_p50_ns": 8764,
+    "conclusion": "RSS differs only at sampler granularity and timing is mixed; no RSS, latency, or throughput claim"
+  },
+  "rejected_initial_stack_commit_candidate": {
+    "change": "lower zio initial committed stack extent from 262144 to 65536 bytes",
+    "maximum_bytes_unchanged": 8388608,
+    "publishers": 2,
+    "subscribers": 2,
+    "baseline_broker_sha256": "0a221abaabfe9aaae038e478d5dad72a5fcb02b9ac56655a86f084c93f13c70e",
+    "candidate_broker_sha256": "eb4139f8634751d7964024db96ff28ac72693ea284d4c4ea210bd06ec4aec506",
+    "driver_sha256": "0b18ae0f6029a573f59622680b20c3e60ae206d243a9ca117cdadb4bc834c4aa",
+    "baseline_peak_rss_kib": [4132, 4068, 4064, 4072],
+    "candidate_peak_rss_kib": [4232, 4284, 4280, 4204],
+    "baseline_median_peak_rss_kib": 4070,
+    "candidate_median_peak_rss_kib": 4256,
+    "median_regression_percent": 4.57,
+    "conclusion": "rejected and fully removed"
+  },
+  "allocator_matrix_artifact_fix": {
+    "failure": "unstripped ReleaseFast identity exceeded the 128 MiB complete-matrix bound before validation",
+    "before_total_bytes": 269483900,
+    "before_identity_bytes": 269472865,
+    "after_total_bytes": 9197855,
+    "after_identity_bytes": 9180207,
+    "execution_identity": "the stripped copies are the exact binaries executed by the matrix",
+    "hashes_recorded_after_strip": true,
+    "matrix_passed": true
+  },
+  "verification": {
+    "focused_delivery_and_fanout_tests": {
+      "passed": 142,
+      "total": 142
+    },
+    "live_broker_fuzz": {
+      "passed": 3,
+      "total": 3
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "allocator_matrix": {
+      "build_steps_passed": 9,
+      "build_steps_total": 9,
+      "broker_runs": 5
+    },
+    "mosquitto_same_client": {
+      "build_steps_passed": 9,
+      "build_steps_total": 9,
+      "publishes": 2000,
+      "deliveries": 4000,
+      "checksum": 1029000,
+      "complete": true
+    }
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='delivery writer' -Dtest-filter='transient delivery' -Dtest-filter='delivery queue' -Dtest-filter='MQTT fanout' -Dtest-filter='broker writes self-delivery' --summary all",
+    "zig build fuzz-mqtt-live-broker -Doptimize=ReleaseFast --summary all",
+    "zig build test-package --summary all",
+    "MQTT_ALLOCATOR_MATRIX_SAMPLES=1 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast --summary all",
+    "MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "python": "3.12.3",
+    "host": "tegra",
+    "arch": "aarch64",
+    "kernel": "6.8.12-1021-rt-tegra"
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "865a12754582a81b40483e6262e753df405fabf5990d2656e918bebb5f591316",
+    "examples/mqtt_broker.zig": "1fb1bcdf9a989f222d7ba6d72a9778f9d479c8cca46b0220115713b4fe21af01",
+    "tools/interop/mqtt_broker_allocator_matrix.sh": "e1dcb431146d4375817c6ce714fafe155a2cad205a4438d12d99e082622998f2",
+    "tools/interop/mqtt_broker_allocator_matrix_check.py": "69adfa1c66613cf2e0c07a813042e1e2ec79bb3257689422b72878df9031ce49"
+  }
+}

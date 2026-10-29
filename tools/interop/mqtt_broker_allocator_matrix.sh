@@ -57,8 +57,12 @@ fi
 client_cpu=${cpus[0]}
 server_cpu=${cpus[1]}
 
-install -m 0755 "$broker" "$root/identity/netz-broker"
-install -m 0755 "$driver" "$root/identity/mqtt-driver"
+# ReleaseFast binaries retain debug sections and the broker can exceed the
+# complete matrix's bounded artifact budget even though those sections are
+# never used by the captured workload. Archive and execute a stripped identity
+# copy; its exact hash remains recorded below for reproducibility.
+install -s -m 0755 "$broker" "$root/identity/netz-broker"
+install -s -m 0755 "$driver" "$root/identity/mqtt-driver"
 install -m 0755 "$repo_root/tools/interop/mqtt_broker_allocator_matrix.sh" \
   "$root/identity/mqtt_broker_allocator_matrix.sh"
 install -m 0755 "$repo_root/tools/interop/mqtt_broker_allocator_matrix_check.py" \

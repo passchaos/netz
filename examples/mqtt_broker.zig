@@ -426,6 +426,24 @@ pub fn main(init: std.process.Init) !void {
     }
     broker.deinit();
     if (config.allocator_stats) {
+        const stack_metrics = backend.stackMetrics();
+        std.debug.print(
+            "record=runtime-stack implementation=netz endpoint_role=server " ++
+                "configured_maximum_bytes={d} " ++
+                "configured_initial_committed_bytes={d} active_stacks={d} " ++
+                "retained_stacks={d} peak_active_stacks={d} " ++
+                "peak_committed_bytes_per_stack={d} " ++
+                "reserved_virtual_bytes={d} complete=true\n",
+            .{
+                stack_metrics.configured_maximum_bytes,
+                stack_metrics.configured_initial_committed_bytes,
+                stack_metrics.active_stacks,
+                stack_metrics.retained_stacks,
+                stack_metrics.peak_active_stacks,
+                stack_metrics.peak_committed_bytes_per_stack,
+                stack_metrics.reserved_virtual_bytes,
+            },
+        );
         const snapshot = counting.snapshot();
         if (snapshot.current_bytes != 0) return error.MemoryLeak;
         std.debug.print(
