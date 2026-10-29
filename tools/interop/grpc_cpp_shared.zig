@@ -67,6 +67,27 @@ fn runDuplex(allocator: std.mem.Allocator, io: std.Io, sender: netz.grpc.SharedC
     try ra.await(io);
 }
 
+fn runCancellation(allocator: std.mem.Allocator, sender: netz.grpc.SharedChannelSender) !void {
+    var stream = try sender.startDuplex(.{
+        .path = "/grpc.testing.TestService/FullDuplexCall",
+        .wait_for_ready = true,
+        .timeout = .{ .value = 10, .unit = .second },
+    });
+    defer stream.deinit();
+    stream.requestCancel();
+    try stream.cancelWithTimeout(.fromSeconds(10));
+
+    const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+        .response_size = 33,
+        .request_body_size = 17,
+    });
+    defer allocator.free(request);
+    var response = try call(sender, request);
+    defer response.deinit();
+    if (response.status != .ok) return error.InvalidSharedCancelReuseStatus;
+    try messages.validateStreamingOutputCallResponse(response.message.?.payload, 33);
+}
+
 fn resolve(_: *anyopaque, allocator: std.mem.Allocator, _: std.Io, host: []const u8, port: u16, _: ?std.Io.Clock.Timestamp) netz.grpc.ChannelAddressResolver.ResolveError![]std.Io.net.IpAddress {
     if (!std.mem.eql(u8, host, "localhost") and !std.mem.eql(u8, host, "foo.test.google.fr")) return error.NameServerFailure;
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
@@ -106,4 +127,5 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     try messages.validateStreamingOutputCallResponse(response_b.message.?.payload, 131101);
     if (channel.endpointCount() != 1 or try channel.refreshNameResolutionWithTimeout(.fromSeconds(10)) != 1) return error.InvalidSharedAddressMembership;
     try runDuplex(allocator, io, sender);
+    try runCancellation(allocator, sender);
 }

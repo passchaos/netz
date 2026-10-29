@@ -13,8 +13,9 @@ pub fn submit(call: anytype, input: Write) @TypeOf(call.parent.*).Failure!void {
     command.deadline = deadline_policy.earlier(call.deadline, input.deadline);
     if (command.deadline) |until| _ = try deadline_policy.usableAwake(state.io, until);
     state.lock();
-    if (state.closed or call.retired or call.cancel_requested.load(.acquire) or call.request_finished) {
-        const failure = call.failure orelse (if (state.closed) error.SharedChannelClosed else error.ConnectionClosed);
+    const canceled = call.cancel_requested.load(.acquire);
+    if (state.closed or call.retired or canceled or call.request_finished) {
+        const failure = call.failure orelse (if (state.closed) error.SharedChannelClosed else if (canceled) error.Canceled else error.ConnectionClosed);
         state.unlock();
         return @errorCast(failure);
     }

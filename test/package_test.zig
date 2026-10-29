@@ -373,7 +373,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannelSender, "startDuplex"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "writer"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "reader"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "requestCancel"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "cancel"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "cancelWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "cancelWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeFinalMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "finishRequest"));

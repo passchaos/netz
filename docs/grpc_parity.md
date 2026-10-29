@@ -1485,3 +1485,37 @@ delivers an unexpected HEADERS frame to each API and requires
 package surface and pinned grpc-cpp h2c/TLS matrix pass after the change.
 Evidence is recorded in
 `docs/evidence/grpc_shared_retirement/2026-10-29.json`.
+
+## Shared active-stream cancellation
+
+An admitted `SharedClientDuplex` now exposes cancellation separately from
+transport retirement. `requestCancel()` atomically publishes cancellation and
+wakes the one endpoint owner without acquiring the shared state mutex or
+waiting for an HTTP/2 reset. The call retains that endpoint wake object, so the
+notification remains valid if resolver churn retires the worker concurrently.
+This follows gRPC Core's active-call pattern: surface cancellation sets an
+atomic once and schedules the transport cancel batch asynchronously while call
+references keep its state alive.
+
+The existing `cancel()` remains the compatibility join with no deadline.
+`cancelWithDeadline()` and `cancelWithTimeout()` request the same cancellation
+but bound the optional join with one caller-owned awake timestamp; a timeout
+does not revoke the already published cancellation. `deinit()` is now
+non-blocking: it requests cancellation and releases only the user's reference,
+while the endpoint reference owns HTTP/2 cleanup and final destruction.
+Writer and reader capabilities can outlive that owning handle and observe the
+terminal cancellation. A write attempted after the atomic publication returns
+`Canceled` immediately rather than the less precise `ConnectionClosed`.
+
+The synthetic regression holds the state mutex, withholds endpoint retirement,
+and verifies request cancellation, a 1 ms bounded join, and destruction perform
+zero mutex or unbounded retirement waits while wake/call/State references stay
+valid. A real TCP regression requests cancellation and immediately starts a
+unary call on the same channel; the single endpoint owner still sends
+RST_STREAM(CANCEL) first, the peer observes the exact code, and the following
+RPC succeeds on that connection. The pinned grpc-cpp h2c and verified-TLS
+matrix independently performs `requestCancel()`, a bounded retirement join and
+unary reuse through the same SharedChannel, and binds this case into its exact
+terminal record. The legacy joining cancellation regression continues to pass.
+Evidence is recorded in
+`docs/evidence/grpc_shared_stream_cancel/2026-10-29.json`.

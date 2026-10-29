@@ -1,0 +1,102 @@
+{
+  "baseline_revision": "d4f443293ab59df30e07a7d27ebe9303cfccccc7",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Add non-blocking active shared-stream cancellation, deadline-bounded retirement joins, and asynchronous owning-handle destruction",
+  "reference": {
+    "root": "/home/passchaos/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source": "src/core/client_channel/subchannel_stream_client.cc",
+    "observed_contract": "CallState::Cancel atomically publishes cancellation once and schedules a transport cancel batch through the call combiner while references own asynchronous completion"
+  },
+  "before": {
+    "public_cancel": "acquired the shared State mutex without a deadline and then waited unconditionally for retired_event",
+    "owning_deinit": "called the same unbounded cancel-and-join path",
+    "risk": "a surface cancellation or destructor could remain blocked behind unrelated state ownership or a stalled endpoint cleanup"
+  },
+  "after": {
+    "focused_tests": {
+      "passed": 133,
+      "total": 133
+    },
+    "grpc_tests": {
+      "passed": 368,
+      "total": 368
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "public_api": {
+      "requestCancel": "atomic publication plus endpoint wake, with no State mutex or retirement wait",
+      "cancel": "compatibility unbounded join",
+      "cancelWithDeadline": "one caller-owned awake deadline bounds the optional retirement join",
+      "cancelWithTimeout": "relative timeout converted once before the same bounded join",
+      "deinit": "requests cancellation and releases the user reference without joining"
+    },
+    "ownership": {
+      "call_retains_endpoint_wake": true,
+      "worker_and_user_references_keep_call_alive": true,
+      "timeout_does_not_revoke_published_cancellation": true,
+      "writer_after_publication_returns_Canceled": true,
+      "reader_and_writer_capabilities_may_outlive_owner": true,
+      "endpoint_remains_single_http2_transport_owner": true
+    },
+    "blocked_state_fixture": {
+      "state_mutex_held": true,
+      "endpoint_retirement_withheld": true,
+      "bounded_join_ms": 1,
+      "uncancelable_mutex_waits": 0,
+      "uncancelable_retirement_waits": 0,
+      "result": "Timeout",
+      "state_reference_count_restored": true
+    },
+    "real_tcp_fixture": {
+      "request_cancel_returns_before_reset_observation": true,
+      "immediate_following_unary_queued": true,
+      "peer_first_observation": "RST_STREAM(CANCEL)",
+      "following_rpc": "successful on the same HTTP/2 connection"
+    }
+  },
+  "interop": {
+    "reference_root": "/home/passchaos/Work/grpc",
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "bazel_version": "8.7.0- (@non-git)",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "matrix": "multiplexed duplex cancellation isolation, shared duplex asynchronous cancellation plus bounded join and unary reuse, shared unary and duplex, health gating, metadata, compression, deadline and soak",
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared duplex request cancellation' -Dtest-filter='gRPC shared duplex asynchronous cancellation' -Dtest-filter='gRPC shared duplex cancellation joins transport' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc BAZEL=/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel JAVA_HOME=/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+async-cancel-reuse shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+async-cancel-reuse shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "3b3e735dd2311d52ff997c350222e72478caaa54595bde71cf3a3b7f0f25feb3",
+    "src/grpc/channel/shared/stream.zig": "bb45dde6efbfc5035706de498f7c5d84c8156895df1b1be91545e78081429461",
+    "src/grpc/channel/shared/stream/call.zig": "4f40d8e7a7e7381a57ac2a3462be45bbb1ce2475894ea4c1e79719a3d700f9e9",
+    "src/grpc/channel/shared/stream/owner.zig": "16a133e6c4b28b5e5fb8e26dab01e4ad5c4ff6e6975c3281a42fae50c7a2e3d1",
+    "src/grpc/channel/shared/stream/write.zig": "6ed2d7b895516bce3884e77d409d1a194b09a09db6dac6abd300ea432f0d12cb",
+    "src/grpc/channel/shared/stream/tests.zig": "bf7e174fe04eb9d4604774308b6cb597278d76f44da837090a8cab134d58b3fd",
+    "src/grpc/channel/shared/stream/tests/cancellation.zig": "bc10785f3909650fb7df305ee529aa1ea6388476bc2c78ec8286bd6a30b4c9bf",
+    "test/package_test.zig": "bd8b12ec48440ee1450a541d863a5c658405b36dd12c59f240a13b4f1bdf00f9",
+    "tools/interop/grpc_cpp_shared.zig": "10d682f7e2a5177eb9eef7ee48658a93443a3300f9cef9e653596643fdae3bc3",
+    "tools/interop/grpc_cpp_client.zig": "7f385d8bbb5e246763d55b8b18f149d2e0beeae2bf9d617c0e807c08a6fa2ce8",
+    "tools/interop/grpc_cpp.sh": "6b54da35c280772530f3502b3cb406b293e2d080000c80f3f274eac58ce8ea08"
+  }
+}

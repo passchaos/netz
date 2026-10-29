@@ -78,8 +78,8 @@ pub const Reader = struct {
     }
 };
 
-/// This owning value cancels/joins the RPC on destruction. Writer and Reader
-/// capabilities may outlive it and observe the completed cancellation.
+/// This owning value requests asynchronous cancellation on destruction. Writer
+/// and Reader capabilities may outlive it and observe completed cancellation.
 pub const Duplex = struct {
     call: *State.StreamCall,
     pub fn writer(self: Duplex) Writer {
@@ -90,11 +90,31 @@ pub const Duplex = struct {
         self.call.retain();
         return .{ .call = self.call };
     }
+    /// Publish cancellation and wake the endpoint owner without waiting for
+    /// shared state ownership or transport retirement.
+    pub fn requestCancel(self: Duplex) void {
+        self.call.requestCancel();
+    }
+    /// Compatibility join: request cancellation and wait without a deadline.
     pub fn cancel(self: Duplex) void {
         self.call.cancel();
     }
+    pub fn cancelWithDeadline(self: Duplex, deadline: std.Io.Clock.Timestamp) Error!void {
+        if (deadline.clock != .awake) {
+            self.call.requestCancel();
+            return error.Timeout;
+        }
+        try self.call.cancelBefore(deadline);
+    }
+    pub fn cancelWithTimeout(self: Duplex, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) {
+            self.call.requestCancel();
+            return error.Timeout;
+        }
+        return self.cancelWithDeadline(.fromNow(self.call.parent.io, .{ .clock = .awake, .raw = timeout }));
+    }
     pub fn deinit(self: *Duplex) void {
-        self.call.cancel();
+        self.call.requestCancel();
         self.call.release();
         self.* = undefined;
     }

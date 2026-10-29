@@ -31,6 +31,7 @@ pub fn Owner(comptime State: type) type {
             errdefer stream.deinit();
             try stream.transport.deferResponseStreamCredit();
             call.retain();
+            call.setOwnerWake(worker.wake);
             worker.streams.appendAssumeCapacity(.{ .call = call, .stream = stream });
             state.finish(job, null, null);
         }
