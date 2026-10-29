@@ -1,0 +1,94 @@
+{
+  "baseline_revision": "1b14534b92de654a291678ac818cf4f2b45e908e",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Bind shared name-resolution request admission and every refresh State reacquisition to cancellation or one absolute caller deadline",
+  "reference": {
+    "root": "/home/passchaos/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "sources": [
+      "src/core/client_channel/client_channel.cc",
+      "src/core/resolver/polling_resolver.cc",
+      "src/core/resolver/resolver.h"
+    ],
+    "observed_contract": "re-resolution is serialized channel work, may coalesce or defer behind result health/backoff, and retains no surface caller storage"
+  },
+  "before": {
+    "request": "requestNameResolution acquired State through the unbounded internal lock and could not return executor cancellation",
+    "refresh": "the public deadline bounded only resolution_changed Event waits; initial publication and post-wake State locks remained unbounded",
+    "risk": "the API could exceed its advertised deadline before submitting or after being notified, even though resolver work itself was independently owned"
+  },
+  "after": {
+    "focused_tests": {
+      "passed": 133,
+      "total": 133
+    },
+    "grpc_tests": {
+      "passed": 373,
+      "total": 373
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "admission": {
+      "request_without_deadline_is_executor_cancelable": true,
+      "refresh_initial_state_lock_uses_caller_deadline": true,
+      "pre_publication_failure_leaves_demand_unchanged": true,
+      "pre_publication_failure_leaves_resolution_event_unchanged": true,
+      "mutex_ownership_preserved": true,
+      "uncancelable_waits": 0
+    },
+    "post_wake": {
+      "resolution_changed_wakes_waiter": true,
+      "state_mutex_remains_held_by_fixture": true,
+      "reacquisition_uses_original_absolute_deadline": true,
+      "result": "Timeout",
+      "uncancelable_waits": 0
+    },
+    "ownership": {
+      "published_refresh_may_complete_after_caller_timeout": true,
+      "resolver_worker_owns_result_and_generation": true,
+      "caller_generation_buffer_is_not_shared": true,
+      "later_refresh_observes_published_generation": true
+    }
+  },
+  "interop": {
+    "reference_root": "/home/passchaos/Work/grpc",
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "bazel_version": "8.7.0- (@non-git)",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "held_state_admission": "unary, duplex startup and hostname refresh each return Timeout under a 10 ms budget without releasing the fixture's mutex",
+    "continuation": "after unlock the same SharedChannel completes real refresh, health admission, concurrent unary/duplex calls, cancellation reuse and soak",
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared name resolution admission' -Dtest-filter='gRPC shared name resolution refresh bounds' -Dtest-filter='gRPC shared hostname shutdown joins' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc BAZEL=/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel JAVA_HOME=/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "1e7cd529036d1881c90b14adc14818708482b3001f6e4097759036a4e304f8b8",
+    "src/grpc/channel/shared/resolution.zig": "72e1dbeaf236223fa027df1e9a49e2d896612cad27c5e6ea76c756520ade71a0",
+    "src/grpc/channel/shared/resolution/tests.zig": "802c60500ba759033e1b7354205124918296d320731adf4e0e6b7a0499b145bd",
+    "src/grpc/channel/shared/resolution/deadline_tests.zig": "2815030c906a7c4fa5eaba5131eed6debde121f5b554e6cb304dc875ba5c690c",
+    "tools/interop/grpc_cpp_shared.zig": "78cf1d401267aaa0981f2e97829ab2a105dddec9034f195705aa665040ded147",
+    "tools/interop/grpc_cpp_client.zig": "896f5b43f2cdb0e41dae80959ae646400ce44f762296ad64e82c8505224e698b",
+    "tools/interop/grpc_cpp.sh": "faea97ac5c13963bab6a759e577e5284bb28557d015af7fe3145f9c263e42d14"
+  }
+}

@@ -12,6 +12,7 @@ fn verifyAdmission(sender: netz.grpc.SharedChannelSender, io: std.Io) !void {
     defer sender.state.mutex.unlock(io);
     try std.testing.expectError(error.Timeout, sender.unary(.{ .path = "/grpc.testing.TestService/UnaryCall", .message = &.{}, .timeout = .{ .value = 10, .unit = .millisecond } }));
     try std.testing.expectError(error.Timeout, sender.startDuplex(.{ .path = "/grpc.testing.TestService/FullDuplexCall", .timeout = .{ .value = 10, .unit = .millisecond } }));
+    try std.testing.expectError(error.Timeout, sender.state.refreshNameResolution(.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(10) })));
     if (sender.state.mutex.tryLock()) return error.SharedAdmissionReleasedOwner;
     if (sender.state.head != null or sender.state.queued != 0) return error.SharedAdmissionQueuedExpiredCall;
 }

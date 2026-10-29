@@ -6,6 +6,7 @@ const allocator = support.allocator;
 
 test {
     _ = @import("allocation_failure_tests.zig");
+    _ = @import("deadline_tests.zig");
 }
 
 test "gRPC shared hostname expands unique addresses and retains connections across reorder" {

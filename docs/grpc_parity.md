@@ -1561,3 +1561,32 @@ retirement and unary reuse. Its terminal record is locked to
 `shared_duplex=2+bounded+operation-deadline+async-cancel-reuse`. Evidence is
 recorded in
 `docs/evidence/grpc_shared_stream_operations/2026-10-29.json`.
+
+## Shared name-resolution admission deadlines
+
+`requestNameResolution()` now uses cancelable State admission, so executor
+cancellation can end a refresh request before it mutates demand, source flags,
+generation tracking or wake state. `refreshNameResolutionWithDeadline()` and
+its timeout wrapper carry the one caller-owned absolute timestamp through the
+initial State snapshot/request and every State reacquisition after
+`resolution_changed`; the deadline no longer governs only the Event wait while
+an internal mutex remains unbounded.
+
+Once the request has been published, a caller timeout does not revoke it or
+borrow caller storage. Resolver workers retain their existing independent
+ownership and may publish a later generation for another watcher/call. A
+subsequent refresh compares the current generations and observes that result.
+State lock timeout/cancellation before request publication leaves demand,
+generation and notification state untouched.
+
+Focused fixtures hold State across initial refresh admission for Timeout and
+across no-deadline request admission for executor Canceled, proving neither
+path falls back to an uncancelable wait. A second fixture publishes a refresh,
+wakes `resolution_changed` while retaining State ownership, and requires the
+post-wake lock attempt to expire under the original absolute deadline. The
+pinned grpc-cpp h2c and verified-TLS matrix independently holds the live native
+State while unary, duplex startup and hostname refresh each exhaust a 10 ms
+admission budget, then releases it and completes real resolution, health,
+shared calls and soak. Its exact terminal record now contains
+`shared_admission=rpc+resolution-deadline`. Evidence is recorded in
+`docs/evidence/grpc_shared_resolution_deadline/2026-10-29.json`.

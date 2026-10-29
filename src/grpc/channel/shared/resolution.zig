@@ -17,7 +17,7 @@ pub fn Resolution(comptime State: type) type {
             state.wakeAllLocked();
         }
         pub fn request(state: *State) State.Failure!void {
-            state.lock();
+            try state.lockBefore(null);
             defer state.unlock();
             try requestLocked(state);
         }
@@ -25,7 +25,7 @@ pub fn Resolution(comptime State: type) type {
             _ = try @import("../../../internal/deadline.zig").usableAwake(state.io, deadline);
             const generations = try state.allocator.alloc(u64, state.sources.len);
             defer state.allocator.free(generations);
-            state.lock();
+            try state.lockBefore(deadline);
             for (state.sources, generations) |source, *generation| generation.* = source.generation;
             requestLocked(state) catch |err| {
                 state.unlock();
@@ -33,7 +33,7 @@ pub fn Resolution(comptime State: type) type {
             };
             state.unlock();
             while (true) {
-                state.lock();
+                try state.lockBefore(deadline);
                 if (state.closed) {
                     state.unlock();
                     return error.SharedChannelClosed;
