@@ -45,6 +45,7 @@ test {
     _ = @import("runtime/duplex/client_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
     _ = @import("runtime/ping_probe_tests.zig");
+    _ = @import("runtime/ping_enforcement_tests.zig");
     _ = @import("runtime/duplex/response_capacity_tests.zig");
     _ = @import("runtime/duplex/batched_credit_tests.zig");
 }
@@ -57,6 +58,7 @@ const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
 const bdp = @import("runtime/bdp.zig");
+const ping_policy = @import("runtime/ping_enforcement.zig");
 const data_frame_budget = @import("runtime/data_frame_budget.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -151,6 +153,8 @@ const writeFrameTransportWithDeadline = frame_io.writeTransportWithDeadline;
 
 /// Select automatic small-DATA-frame budgeting in `Limits.data_frame_budget`.
 pub const automatic_data_frame_budget: u32 = data_frame_budget.automatic;
+pub const PingEnforcementPolicy = ping_policy.Policy;
+pub const PingEnforcementStats = ping_policy.Stats;
 
 pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     uri_redirect.Error || error{
@@ -614,6 +618,9 @@ pub const Limits = struct {
     /// bounded by the inbound frame-size limits. Reaching this cap fails the
     /// probe without discarding any frame already removed from the transport.
     max_pending_ping_frames: usize = 256,
+    /// Optional server-side rate enforcement for non-ACK PING frames. Generic
+    /// HTTP/2 defaults to null; gRPC listeners opt into grpc-core policy.
+    ping_enforcement: ?PingEnforcementPolicy = null,
     /// Maximum recently locally-reset stream IDs retained so late DATA,
     /// HEADERS, and duplicate RST_STREAM frames can be discarded without
     /// terminating the connection. Zero disables this tolerance.
@@ -4000,6 +4007,7 @@ pub const Connection = struct {
     /// the owner separately supplies and enforces the liveness deadline.
     ping_probe_payload: ?[8]u8 = null,
     ping_probe_acknowledged: bool = false,
+    ping_enforcement: ping_policy.State = .{},
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -14098,6 +14106,10 @@ pub const Connection = struct {
         return self.ping_probe_payload != null;
     }
 
+    pub fn pingEnforcementStats(self: Connection) PingEnforcementStats {
+        return self.ping_enforcement.snapshot();
+    }
+
     /// Consume the completion edge for the current background probe. A stale
     /// or mismatched PING ACK never satisfies a later probe.
     pub fn takePingProbeAcknowledged(self: *Connection) bool {
@@ -14358,6 +14370,7 @@ pub const Connection = struct {
                     const ping_payload = try http2.PingPayload.parse(
                         borrowed.frame,
                     );
+                    try self.enforcePeerPingUntil(deadline);
                     try self.writeControlFrameUntil(
                         .ping,
                         flag_ack,
@@ -14452,6 +14465,7 @@ pub const Connection = struct {
                 try self.applyPingAck(ping_payload.data);
                 continue;
             }
+            try self.enforcePeerPingUntil(deadline);
             try self.writeControlFrameUntil(
                 .ping,
                 flag_ack,
@@ -14575,9 +14589,12 @@ pub const Connection = struct {
                 self.terminal_write_failed = true;
                 return err;
             };
+            if (frame_type == .window_update) {
+                self.resetPeerPingEnforcement();
+            }
             return;
         }
-        return writeFrameTransport(
+        writeFrameTransport(
             self.allocator,
             self.transportForIo(),
             frame_type,
@@ -14589,6 +14606,7 @@ pub const Connection = struct {
             self.terminal_write_failed = true;
             return err;
         };
+        if (frame_type == .window_update) self.resetPeerPingEnforcement();
     }
 
     fn writeEncodedControlUntil(
@@ -17194,6 +17212,7 @@ pub const Connection = struct {
             return err;
         };
         self.commitStagedHpackEncoder();
+        self.resetPeerPingEnforcement();
     }
 
     /// Emit HEADERS and the first DATA burst in one stream write when the
@@ -17248,6 +17267,7 @@ pub const Connection = struct {
                 return err;
             };
             self.commitStagedHpackEncoder();
+            self.resetPeerPingEnforcement();
             head_committed.* = true;
             try self.writeDataTrackedUntil(stream_id, data, end_stream, written, deadline);
             return;
@@ -17306,6 +17326,7 @@ pub const Connection = struct {
         burst_committed = true;
         written.* = first_data_len;
         self.commitStagedHpackEncoder();
+        self.resetPeerPingEnforcement();
         head_committed.* = true;
         if (first_data_len < data.len) {
             var suffix_written: usize = 0;
@@ -17478,6 +17499,7 @@ pub const Connection = struct {
             .ping => {
                 const ping_payload = try http2.PingPayload.parse(frame);
                 if ((frame.header.flags & flag_ack) == 0) {
+                    try self.enforcePeerPingUntil(deadline);
                     try self.writeControlFrameUntil(
                         .ping,
                         flag_ack,
@@ -17622,7 +17644,8 @@ pub const Connection = struct {
 
     fn writeHeaderBlock(self: *Connection, stream_id: u31, block: []const u8, end_stream: bool) Error!void {
         var submitted = false;
-        return header_output.writeBlock(self.allocator, self.transportForIo(), stream_id, block, end_stream, self.outboundFramePayloadLimit(), &self.write_batch, null, &submitted);
+        try header_output.writeBlock(self.allocator, self.transportForIo(), stream_id, block, end_stream, self.outboundFramePayloadLimit(), &self.write_batch, null, &submitted);
+        self.resetPeerPingEnforcement();
     }
 
     fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
@@ -17968,6 +17991,7 @@ pub const Connection = struct {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
+            self.resetPeerPingEnforcement();
             return;
         }
 
@@ -18077,6 +18101,7 @@ pub const Connection = struct {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
+            self.resetPeerPingEnforcement();
             return;
         }
 
@@ -18163,6 +18188,7 @@ pub const Connection = struct {
                 self.aggregate_timeout_unusable = true;
                 return err;
             };
+            self.resetPeerPingEnforcement();
             return;
         }
 
@@ -18294,6 +18320,7 @@ pub const Connection = struct {
             if (submitted) self.aggregate_timeout_unusable = true;
             return err;
         };
+        self.resetPeerPingEnforcement();
     }
 
     fn writeDataSlicesBurst(
@@ -18352,6 +18379,7 @@ pub const Connection = struct {
             if (submitted) self.aggregate_timeout_unusable = true;
             return err;
         };
+        self.resetPeerPingEnforcement();
     }
 
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
@@ -18423,6 +18451,33 @@ pub const Connection = struct {
                 self.ping_probe_payload = null;
                 self.ping_probe_acknowledged = true;
             }
+        }
+    }
+
+    fn enforcePeerPingUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.role != .server) return;
+        const policy = self.limits.ping_enforcement orelse return;
+        const excessive = self.ping_enforcement.receive(
+            policy,
+            std.Io.Clock.awake.now(self.io),
+            !self.hasActiveStreams(),
+        );
+        if (!excessive) return;
+        self.sendProtocolGoAway(
+            self.lastPeerProcessedStreamId(),
+            .enhance_your_calm,
+            "too_many_pings",
+            deadline,
+        );
+        return error.ConnectionGoAway;
+    }
+
+    fn resetPeerPingEnforcement(self: *Connection) void {
+        if (self.role == .server and self.limits.ping_enforcement != null) {
+            self.ping_enforcement.reset();
         }
     }
 
@@ -22738,6 +22793,7 @@ fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
     if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
     if (limits.max_pending_ping_frames == 0) return error.InvalidSetting;
+    if (limits.ping_enforcement) |policy| try policy.validate();
     if (limits.reset_stream_duration.nanoseconds < 0 or
         limits.terminal_cleanup_timeout.nanoseconds < 0)
     {

@@ -169,7 +169,18 @@ test "gRPC-Web fragmented text uploads preserve bounds and reject only the faili
     defer threaded.deinit();
     const io = threaded.io();
     const limits: http2.runtime.Limits = .{ .max_concurrent_streams = 1 };
-    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, limits, 4);
+    var server = try grpc.runtime.Server.listenWithOptions(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = limits,
+            .max_message_size = 4,
+            // This fixture deliberately emits several reset-admission PINGs
+            // in milliseconds to prove stream isolation, not abuse policy.
+            .keepalive_enforcement = null,
+        },
+    );
     defer server.deinit();
     const Case = struct { body: []const u8, err: ?anyerror, count: usize, accept: []const u8 = "application/grpc-web" };
     const cases = [_]Case{

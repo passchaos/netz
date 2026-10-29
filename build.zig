@@ -2220,6 +2220,16 @@ pub fn build(b: *std.Build) void {
         &grpc_cpp_client_interop.step,
     );
 
+    const grpc_h2_ping_abuse = b.addSystemCommand(
+        &.{"tools/interop/grpc_h2_ping_abuse.sh"},
+    );
+    grpc_h2_ping_abuse.addArtifactArg(grpc_cpp_server);
+    const grpc_h2_ping_abuse_step = b.step(
+        "interop-grpc-h2-ping-abuse",
+        "Verify gRPC server PING abuse GOAWAY with Rust h2",
+    );
+    grpc_h2_ping_abuse_step.dependOn(&grpc_h2_ping_abuse.step);
+
     const grpc_reflection_server = b.addExecutable(.{
         .name = "netz-grpc-reflection-server",
         .root_module = b.createModule(.{

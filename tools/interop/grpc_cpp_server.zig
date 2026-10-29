@@ -58,6 +58,7 @@ const Scenario = enum {
     channel_soak,
     client_streaming,
     server_streaming,
+    ping_abuse,
 
     fn parse(raw: []const u8) !Scenario {
         return std.meta.stringToEnum(Scenario, raw) orelse error.InvalidArgument;
@@ -86,6 +87,12 @@ pub fn main(init: std.process.Init) !void {
         .initial_connection_window_size = 2 * 1024 * 1024,
         .handshake_timeout = .fromSeconds(5),
     };
+    const keepalive_enforcement: ?netz.grpc.ServerKeepAliveEnforcementPolicy =
+        if (scenario == .ping_abuse) .{
+            .min_interval = .fromSeconds(1),
+            .idle_interval = .fromSeconds(1),
+            .max_strikes = 2,
+        } else .{};
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -110,23 +117,35 @@ pub fn main(init: std.process.Init) !void {
                     .limits = limits,
                 },
                 .max_message_size = message_limit,
+                .keepalive_enforcement = keepalive_enforcement,
             },
         );
     } else {
-        clear_server = try .listen(
+        clear_server = try .listenWithOptions(
             allocator,
             io,
             .{ .ip4 = .loopback(port) },
-            limits,
-            message_limit,
+            .{
+                .limits = limits,
+                .max_message_size = message_limit,
+                .keepalive_enforcement = keepalive_enforcement,
+            },
         );
     }
     defer if (tls_enabled) tls_server.deinit() else clear_server.deinit();
 
     std.debug.print(
         "netz grpc server ready: port={d} scenario={s} transport={s} " ++
-            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
-        .{ port, @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
+            "client_io={s} server_io=zio-std-io\n",
+        .{
+            port,
+            @tagName(scenario),
+            if (tls_enabled) "tls" else "h2c",
+            if (scenario == .ping_abuse)
+                "rust-h2-tokio"
+            else
+                "grpc-cpp-posix-event-engine",
+        },
     );
     if (scenario == .channel_soak) {
         try serveChannelSoak(
@@ -182,6 +201,31 @@ pub fn main(init: std.process.Init) !void {
         !std.mem.eql(u8, connection.negotiatedAlpn() orelse "", "h2"))
     {
         return error.InvalidAlpn;
+    }
+    if (scenario == .ping_abuse) {
+        for (0..3) |_| {
+            _ = try connection.connection.readPingWithTimeout(
+                .fromSeconds(2),
+            );
+        }
+        try std.testing.expectError(
+            error.ConnectionGoAway,
+            connection.connection.readPingWithTimeout(.fromSeconds(2)),
+        );
+        const stats = connection.connection.pingEnforcementStats();
+        if (stats.pings_received != 4 or stats.current_strikes != 3 or
+            stats.violations != 1)
+        {
+            return error.InvalidPingEnforcementStats;
+        }
+        std.debug.print(
+            "netz grpc server completed: scenario=ping_abuse transport={s} " ++
+                "pings=4 strikes=3 goaway=ENHANCE_YOUR_CALM " ++
+                "debug=too_many_pings client_io=rust-h2-tokio " ++
+                "server_io=zio-std-io\n",
+            .{if (tls_enabled) "tls" else "h2c"},
+        );
+        return;
     }
     switch (scenario) {
         .authenticated_empty_unary => try serveAuthenticatedEmptyUnary(
@@ -1088,6 +1132,7 @@ fn serveScenario(
         .slow_consumer => unreachable,
         .rpc_soak => unreachable,
         .channel_soak => unreachable,
+        .ping_abuse => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

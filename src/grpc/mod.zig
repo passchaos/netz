@@ -111,6 +111,9 @@ pub const ChannelAddressResolver = runtime.ChannelAddressResolver;
 pub const ChannelOptions = runtime.ChannelOptions;
 pub const ChannelBackoffPolicy = runtime.ChannelBackoffPolicy;
 pub const ChannelCustomConnector = runtime.ChannelCustomConnector;
+pub const CleartextServerOptions = runtime.CleartextServerOptions;
+pub const ServerKeepAliveEnforcementPolicy =
+    runtime.ServerKeepAliveEnforcementPolicy;
 pub const UnaryResponse = call.UnaryResponse;
 pub const UnaryResponseOptions = call.UnaryResponseOptions;
 pub const parseUnaryRequest = call.parseUnaryRequest;
@@ -139,6 +142,7 @@ test {
     _ = web;
     _ = @import("tests.zig");
     _ = @import("runtime_tests.zig");
+    _ = @import("server_ping_enforcement_tests.zig");
     _ = @import("call/output_deadline_tests.zig");
     _ = @import("call/early_response_tests.zig");
     _ = @import("call/refused_retry_tests.zig");

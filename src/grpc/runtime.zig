@@ -278,7 +278,26 @@ pub const Client = struct {
 pub const ServerOptions = struct {
     transport: http2.runtime.TlsListenOptions,
     max_message_size: usize = 16 * 1024 * 1024,
+    keepalive_enforcement: ?http2.runtime.PingEnforcementPolicy = .{},
 };
+
+pub const CleartextServerOptions = struct {
+    limits: http2.runtime.Limits = .{},
+    max_message_size: usize = 16 * 1024 * 1024,
+    keepalive_enforcement: ?http2.runtime.PingEnforcementPolicy = .{},
+};
+
+pub const ServerKeepAliveEnforcementPolicy =
+    http2.runtime.PingEnforcementPolicy;
+
+fn applyServerPingEnforcement(
+    limits: http2.runtime.Limits,
+    policy: ?ServerKeepAliveEnforcementPolicy,
+) http2.runtime.Limits {
+    var configured = limits;
+    configured.ping_enforcement = policy;
+    return configured;
+}
 
 /// Cleartext prior-knowledge gRPC listener. The accepted connection has the
 /// same unary and streaming surface as `TlsServer`; only transport setup
@@ -294,14 +313,29 @@ pub const Server = struct {
         limits: http2.runtime.Limits,
         max_message_size: usize,
     ) Error!Server {
+        return listenWithOptions(allocator, io, bind_address, .{
+            .limits = limits,
+            .max_message_size = max_message_size,
+        });
+    }
+
+    pub fn listenWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: CleartextServerOptions,
+    ) Error!Server {
         return .{
             .transport = try http2.runtime.Server.listen(
                 allocator,
                 io,
                 bind_address,
-                limits,
+                applyServerPingEnforcement(
+                    options.limits,
+                    options.keepalive_enforcement,
+                ),
             ),
-            .max_message_size = max_message_size,
+            .max_message_size = options.max_message_size,
         };
     }
 
@@ -356,12 +390,17 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: ServerOptions,
     ) Error!TlsServer {
+        var transport = options.transport;
+        transport.limits = applyServerPingEnforcement(
+            transport.limits,
+            options.keepalive_enforcement,
+        );
         return .{
             .transport = try http2.runtime.TlsServer.listen(
                 allocator,
                 io,
                 bind_address,
-                options.transport,
+                transport,
             ),
             .max_message_size = options.max_message_size,
         };

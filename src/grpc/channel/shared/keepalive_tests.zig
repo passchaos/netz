@@ -54,12 +54,11 @@ test "gRPC shared keepalive suppresses probes on an idle channel by default" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try grpc.runtime.Server.listen(
+    var server = try grpc.runtime.Server.listenWithOptions(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
-        4096,
+        .{ .max_message_size = 4096, .keepalive_enforcement = null },
     );
     defer server.deinit();
     const Peer = struct {
@@ -104,12 +103,11 @@ test "gRPC shared keepalive ACK does not delay an active RPC deadline" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try grpc.runtime.Server.listen(
+    var server = try grpc.runtime.Server.listenWithOptions(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
-        4096,
+        .{ .max_message_size = 4096, .keepalive_enforcement = null },
     );
     defer server.deinit();
     const Peer = struct {
@@ -173,12 +171,11 @@ test "gRPC shared keepalive timeout retires and reconnects the endpoint" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try grpc.runtime.Server.listen(
+    var server = try grpc.runtime.Server.listenWithOptions(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{},
-        4096,
+        .{ .max_message_size = 4096, .keepalive_enforcement = null },
     );
     defer server.deinit();
     const Peer = struct {

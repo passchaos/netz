@@ -1661,3 +1661,39 @@ returns the exact ACK over both h2c and certificate-verified TLS; each arm requi
 aggregate telemetry `sent=1, acknowledged=1, timeouts=0` before completing the
 existing shared-channel and soak matrix. Evidence is recorded in
 `docs/evidence/grpc_shared_keepalive/2026-10-29.json`.
+
+## gRPC server PING enforcement
+
+Cleartext and TLS gRPC listeners now enable grpc-core-compatible client PING
+enforcement by default. The first PING after connection setup or a qualifying
+output reset is accepted. Later PINGs require five minutes while RPC streams are
+active and two hours while the transport is idle. A third over-interval strike
+is still acknowledged; the next violation receives no ACK and terminates the
+connection with `GOAWAY(ENHANCE_YOUR_CALM, "too_many_pings")`. A zero
+`max_strikes` keeps telemetry but disables termination. Setting
+`permit_without_calls` applies the active interval to an idle transport.
+
+The generic HTTP/2 runtime keeps enforcement opt-in through
+`Limits.ping_enforcement`, so non-gRPC applications do not inherit gRPC policy.
+`ServerKeepAliveEnforcementPolicy` configures the gRPC defaults, and
+`Server.listenWithOptions` plus the existing TLS `ServerOptions` permit a
+custom policy or explicit null disablement. Negative intervals are rejected
+before listener creation. `Connection.pingEnforcementStats()` exposes received
+PINGs, current strikes and terminal violations to the single connection owner.
+
+Successful HEADERS, DATA and WINDOW_UPDATE output clears the last-PING clock and
+strikes exactly as grpc-core's serializer does. PING ACKs and RST_STREAM do not
+reset the policy. Tests that deliberately generate several reset-admission PINGs
+in milliseconds disable server enforcement explicitly rather than weakening
+the production default.
+
+Real TCP and TLS regressions require the first three back-to-back PINGs to be
+acknowledged, the fourth to remain unacknowledged, and the exact GOAWAY code and
+debug data. A response-HEADERS regression proves successful application output
+clears an existing strike. An independent Rust h2 0.4.15 process verifies the
+same h2c boundary while the netz peer checks `pings=4`, `strikes=3` and one
+violation. The pinned grpc-cpp client then completes all 46 existing h2c/TLS
+interop scenarios against the default-enforcing server, including slow-consumer,
+soak, streaming, compression, cancellation, deadlines, metadata and Bearer
+authentication. Evidence is recorded in
+`docs/evidence/grpc_server_ping_enforcement/2026-10-29.json`.

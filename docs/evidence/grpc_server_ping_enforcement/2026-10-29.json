@@ -1,0 +1,153 @@
+{
+  "baseline_revision": "55ecf58180b78b634ed5d0884eada330e03a8e83",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Add grpc-core-compatible server PING abuse enforcement with exact GOAWAY, output resets, telemetry and independent Rust h2 verification",
+  "reference": {
+    "root": "/nav_env/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "sources": [
+      "include/grpc/impl/channel_arg_names.h",
+      "src/core/ext/transport/chttp2/transport/ping_abuse_policy.cc",
+      "src/core/ext/transport/chttp2/transport/frame.cc",
+      "src/core/ext/transport/chttp2/transport/frame_ping.cc"
+    ],
+    "source_sha256": {
+      "include/grpc/impl/channel_arg_names.h": "88b097284b6985f7195f538c31081dcb8a088fdf4ede3d021ab72429c2415c43",
+      "src/core/ext/transport/chttp2/transport/ping_abuse_policy.cc": "bc063f13018e5e7321df62e107f36eafd3be7fe15ae858f7069e9646feb1ff77",
+      "src/core/ext/transport/chttp2/transport/frame.cc": "3e38d4b55b6484fdbbd67d2f1403608ab9228fc52df7984516b0da1f3c64a78e",
+      "src/core/ext/transport/chttp2/transport/frame_ping.cc": "5abe7e30ea2b83199b157b0a50dd3c27e0894c94623977fc0b6cff95197f87b4"
+    },
+    "defaults": {
+      "active_min_interval_ms": 300000,
+      "idle_min_interval_ms": 7200000,
+      "permit_without_calls": false,
+      "max_strikes": 2,
+      "terminal_code": "ENHANCE_YOUR_CALM",
+      "terminal_debug_data": "too_many_pings"
+    },
+    "observed_contract": "the first PING is allowed, every too-early PING increments strikes, output DATA HEADERS or WINDOW_UPDATE resets the clock and strikes, and a strike count greater than max_strikes sends terminal GOAWAY"
+  },
+  "scope": {
+    "generic_http2_default": "disabled",
+    "grpc_cleartext_default": "grpc-core policy",
+    "grpc_tls_default": "grpc-core policy",
+    "customization": [
+      "Server.listenWithOptions keepalive_enforcement",
+      "TLS ServerOptions.keepalive_enforcement",
+      "null disables enforcement",
+      "permit_without_calls applies the active interval while idle",
+      "max_strikes zero records without terminating"
+    ]
+  },
+  "wire_contract": {
+    "first_ping_acknowledged": true,
+    "second_too_early_ping_strike": 1,
+    "third_too_early_ping_strike": 2,
+    "fourth_too_early_ping_strike": 3,
+    "fourth_ping_acknowledged": false,
+    "goaway_code": "ENHANCE_YOUR_CALM",
+    "goaway_debug_data": "too_many_pings",
+    "connection_reusable_after_violation": false
+  },
+  "output_reset_contract": {
+    "HEADERS": true,
+    "CONTINUATION": true,
+    "DATA": true,
+    "WINDOW_UPDATE": true,
+    "PING_ACK": false,
+    "RST_STREAM": false,
+    "application_response_regression": "one strike before a response becomes zero after response HEADERS; two later PINGs leave one new strike and no violation"
+  },
+  "validation": {
+    "focused": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 133,
+      "tests_total": 133
+    },
+    "grpc_and_http2_ping": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 388,
+      "tests_total": 388
+    },
+    "package": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 22,
+      "tests_total": 22
+    },
+    "http2_connection_fuzz": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "tests_passed": 3,
+      "tests_total": 3
+    },
+    "local_wire_roles": [
+      "cleartext HTTP/2 server",
+      "gRPC TLS server with h2 ALPN"
+    ]
+  },
+  "independent_h2": {
+    "implementation": "Rust h2",
+    "version": "0.4.15",
+    "crate_checksum": "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155",
+    "cargo_lock_sha256": "19734b66757f53dbcfce9c137038df916c5403c4a1f26539df36be76639c28ef",
+    "protocol": "h2c",
+    "acknowledged_pings": 3,
+    "violating_ping_acknowledged": false,
+    "connection_error_reason": "ENHANCE_YOUR_CALM",
+    "netz_stats": {
+      "pings_received": 4,
+      "current_strikes": 3,
+      "violations": 1
+    },
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "record": "Rust h2 client observed netz gRPC PING enforcement: transport=h2c acknowledged=3 violating_ack=false goaway=ENHANCE_YOUR_CALM client_io=h2-tokio server_io=zio-std-io"
+  },
+  "grpc_cpp_regression": {
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "client_sha256": "f3c8f9677d96a97499685c1c39e01b7eff7b75412cd01352ef46767582d1c0a3",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "scenarios_per_protocol": 23,
+    "total_scenarios": 46,
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "record": "grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='PING enforcement' -Dtest-filter='too_many_pings' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' -Dtest-filter='HTTP/2 PING' --summary all",
+    "zig build test-package --summary all",
+    "zig build fuzz-http2-connection -Doptimize=ReleaseFast --summary all",
+    "zig build interop-grpc-h2-ping-abuse -Doptimize=ReleaseFast --summary all",
+    "BAZEL=/nav_env/Work/grpc/tools/bazel OVERRIDE_BAZEL_WRAPPER_DOWNLOAD_DIR=/nav_env/Temp/netz-grpc-bazel-bin TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp-client -Doptimize=ReleaseFast --summary all"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "rust_h2": "0.4.15",
+    "grpc_bazel": "8.7.0"
+  },
+  "source_sha256": {
+    "build.zig": "21358cbde81a31b4e89c2d139135793e01da166d7c1465349d922b59ecb75743",
+    "src/http2/runtime.zig": "2ea44c5ffaf62690bb80ae154cf16005abbeb208fb2c12956a4b405467d8d489",
+    "src/http2/runtime/ping_enforcement.zig": "e492bc65fc98278dc714cb15a050e2b6ca6071aaaf7087d0bf51b457cc7fb74c",
+    "src/http2/runtime/ping_enforcement_tests.zig": "c13beae06db176437bb52eb9a1c0a6addff072661ab7f743d49b2cfc59c057a5",
+    "src/grpc/runtime.zig": "fbd42a63c87976f656f1d50be9dd0e275543c1d152585866e5b26510a1970775",
+    "src/grpc/mod.zig": "7ff38845bf33f99aa86a8f167e772cbec6ad50df638291ca49c34419ecd25508",
+    "src/grpc/server_ping_enforcement_tests.zig": "9afea1962db5f2ff4e4c797e8646c9ff224f0460da63b0acc15b179bc113084b",
+    "src/grpc/channel/shared/keepalive_tests.zig": "77c89e9ab105162ae867a8d053c2e19bed1cb246568450bd6f2e46662d19a2ea",
+    "src/grpc/web/streaming_tests.zig": "06bd5223344b5827e24a08cec1cdea3350b8bc75bc798818f88c84d5c37152d7",
+    "test/package_test.zig": "68f58f8494955b3e28051f785a1fe48877956d450ba1564b685101edb352e977",
+    "tools/interop/grpc_cpp_server.zig": "6445cf045b774c46acac250d07e679c77e0659c5b5bda2e7dfd581999014f9e2",
+    "tools/interop/grpc_h2_ping_abuse.sh": "9d352705eba8eda4f45f69240f7b52d968a08b42717cace9d0e443b8f180a126",
+    "tools/hyper_http2_flow/Cargo.toml": "2caa9654fff1b307c9aafe06df5cb6cd0744479ea6ff505e4ff1a27ab85a4e0c",
+    "tools/hyper_http2_flow/Cargo.lock": "19734b66757f53dbcfce9c137038df916c5403c4a1f26539df36be76639c28ef",
+    "tools/hyper_http2_flow/src/bin/ping_abuse_client.rs": "d65153dae8ff86e5d1794fc1f2416929b47564398bf4906d70ffaf2d8325978e"
+  }
+}
