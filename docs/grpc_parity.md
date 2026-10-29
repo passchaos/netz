@@ -1440,5 +1440,48 @@ exchange over h2c and verified TLS. Evidence is recorded in
 `docs/evidence/grpc_shared_admission/2026-10-29.json`.
 
 This establishes pre-submission lock admission. Registered-job cancellation
-still joins endpoint retirement through the owning state before releasing a
-caller frame; those later cleanup waits remain a separate audit boundary.
+is covered separately below because it must preserve request ownership after
+the interrupted caller has already returned.
+
+## Shared RPC interruption and asynchronous retirement
+
+Queued and assigned SharedChannel jobs are now reference-counted objects rather
+than caller-stack records. Unary jobs deep-own their path, authority, scheme,
+ASCII and binary metadata, and request message. Streaming calls deep-own the
+same request description, while their admission job retains the stream call.
+The queue or endpoint holds an independent job reference until it publishes a
+result or destroys a late result whose caller has already departed. This is the
+same lifetime boundary used by gRPC Core's queued subchannel calls: the queue
+keeps a referenced call object and cancellation invalidates the queued entry
+without requiring the surface call to wait for transport cleanup.
+
+One atomic completion state arbitrates endpoint completion against caller
+Timeout/Canceled. If interruption wins, the caller marks the job abandoned,
+publishes deferred queue cleanup and returns without acquiring the shared state
+mutex or waiting for endpoint retirement. A best-effort lock handoff removes a
+queued job immediately when the mutex is free; otherwise the current or next
+mutex owner inherits cleanup. An assigned job retains its endpoint wake object,
+so it can notify the single connection owner safely even when resolver churn or
+channel shutdown retires that endpoint at the same time. The endpoint remains
+the sole HTTP/2 owner and therefore emits cancellation before admitting later
+work on that connection. If completion wins the race, its release store makes
+the response/error visible and transfers the result exactly once.
+
+Focused regressions hold the state mutex across both timeout and executor
+cancellation, for queued and assigned calls, and require the caller to return
+without an uncancelable mutex or retirement wait. Ownership tests mutate every
+caller input after departure, inject allocation failures at each clone point,
+destroy late successful responses, and verify parent, stream and wake
+references return to baseline. The existing real-TCP cancellation/reuse test
+passes ten consecutive runs, preserving RST_STREAM(CANCEL) before the next RPC
+on the same HTTP/2 connection.
+
+That narrower timing also exposed a pre-existing error-path bug in the HTTP/2
+GOAWAY, RST_STREAM and WINDOW_UPDATE owned-frame readers: an unexpected stream
+frame was freed manually and then again by `errdefer`. All three readers now
+leave error cleanup to the single owner, with a real-connection regression that
+delivers an unexpected HEADERS frame to each API and requires
+`UnexpectedFrame` without a leak or double free. The complete gRPC filter set,
+package surface and pinned grpc-cpp h2c/TLS matrix pass after the change.
+Evidence is recorded in
+`docs/evidence/grpc_shared_retirement/2026-10-29.json`.

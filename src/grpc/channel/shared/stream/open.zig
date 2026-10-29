@@ -21,18 +21,15 @@ pub fn open(state: anytype, options: streaming.RequestOptions, entered: std.Io.T
     try call.validateCustomBinaryMetadata(options.binary_metadata);
 
     const stream = try State.StreamCall.create(state, resolved.options, deadline);
-    errdefer stream.release();
-    var job: Job = .{ .options = .{ .path = options.path, .message = &.{} }, .deadline = deadline, .wait_for_ready = resolved.wait_for_ready, .previous_attempts = null, .stream = stream };
-    state.enqueue(&job) catch |err| {
-        stream.retireUnsubmitted(err);
-        return err;
-    };
-    state.awaitJob(&job) catch |err| {
-        state.lock();
-        if (job.phase == .queued) stream.retireLocked(err);
-        state.unlock();
-        stream.cancel();
-        return err;
-    };
+    var submitted = false;
+    errdefer |err| {
+        if (!submitted) stream.retireUnsubmitted(err);
+        stream.release();
+    }
+    const job = try Job.createStream(state, stream, deadline, resolved.wait_for_ready);
+    defer job.release();
+    try state.enqueue(job);
+    submitted = true;
+    try state.awaitJob(job);
     return stream;
 }

@@ -17,7 +17,7 @@ pub fn Owner(comptime State: type) type {
             const state = worker.parent;
             const call = job.stream.?;
             state.lock();
-            const canceled = job.cancel_requested or call.cancel_requested or state.closed;
+            const canceled = job.canceled() or call.cancel_requested.load(.acquire) or state.closed;
             state.unlock();
             if (canceled) return error.Canceled;
             try worker.streams.ensureUnusedCapacity(state.allocator, 1);
@@ -84,7 +84,7 @@ pub fn Owner(comptime State: type) type {
                 const active = &worker.streams.items[index];
                 const call = active.call;
                 state.lock();
-                const canceled = state.closed or call.cancel_requested;
+                const canceled = state.closed or call.cancel_requested.load(.acquire);
                 const write = call.write;
                 const credit = call.credit;
                 state.unlock();

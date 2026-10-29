@@ -1,0 +1,108 @@
+{
+  "baseline_revision": "899dde1e9670806f0c9a3a87b0927369fe180cfe",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Return interrupted shared gRPC callers without waiting for state-lock cleanup or endpoint retirement while preserving owned request inputs and serialized transport cancellation",
+  "reference": {
+    "root": "/home/passchaos/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "queued_call_source": "src/core/client_channel/subchannel.cc",
+    "observed_contract": "Subchannel::QueuedCall is reference counted; its queue entry can be invalidated on cancellation while the call object owns buffered work through asynchronous cleanup"
+  },
+  "previous_boundary": {
+    "evidence": "docs/evidence/grpc_shared_admission/2026-10-29.json",
+    "remaining_boundary": "registered stack Jobs joined endpoint retirement and cancellation cleanup reacquired the shared state mutex before returning",
+    "risk": "a caller deadline or executor cancellation could finish but remain blocked behind unrelated state ownership or transport retirement"
+  },
+  "after": {
+    "focused_tests": {
+      "passed": 136,
+      "total": 136
+    },
+    "grpc_tests": {
+      "passed": 366,
+      "total": 366
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "cancellation_reuse_repetitions": 10,
+    "interruption_cases": [
+      "queued timeout while the state mutex remains occupied",
+      "queued executor cancellation while the state mutex remains occupied",
+      "assigned timeout before endpoint retirement",
+      "assigned executor cancellation before endpoint retirement"
+    ],
+    "ownership": {
+      "job_is_heap_allocated_and_reference_counted": true,
+      "queue_or_endpoint_owns_job_after_caller_departure": true,
+      "unary_path_authority_scheme_metadata_and_message_are_deep_owned": true,
+      "stream_request_description_and_call_are_retained": true,
+      "completion_and_abandonment_have_one_atomic_winner": true,
+      "late_response_is_destroyed_by_endpoint_ownership": true,
+      "assigned_job_retains_endpoint_wake_storage": true,
+      "queued_cleanup_is_inherited_by_current_or_next_mutex_owner": true,
+      "caller_waits_for_neither_cleanup_mutex_nor_retirement_event": true,
+      "rst_cancel_precedes_reused_request_on_single_owner_connection": true
+    },
+    "allocation_failure_audit": "every unary request-input clone allocation returns State references to baseline and frees partial ownership",
+    "caller_mutation_audit": "path, request message, ASCII metadata and binary metadata remain byte-exact after the interrupted caller overwrites its original buffers"
+  },
+  "http2_error_path": {
+    "affected_readers": [
+      "readGoAwayUntil",
+      "readResetStreamUntil",
+      "readWindowUpdateUntil"
+    ],
+    "before": "an unexpected stream frame was manually freed before returning UnexpectedFrame and then freed again by errdefer",
+    "after": "errdefer is the sole owner on error; successful target frames still transfer ownership to the returned wrapper",
+    "real_connection_cases": 3,
+    "focused_filter": {
+      "passed": 128,
+      "total": 128
+    }
+  },
+  "interop": {
+    "reference_root": "/home/passchaos/Work/grpc",
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "bazel_version": "8.7.0- (@non-git)",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "matrix": "canonical unary/streaming compression, metadata, status, cancellation/channel reuse, health gating, ping-pong, slow-consumer and RPC/channel soak",
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC retired Job' -Dtest-filter='gRPC Job' -Dtest-filter='gRPC queued abandoned Job' -Dtest-filter='gRPC queued RPC interruption' -Dtest-filter='gRPC assigned RPC interruption' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/2 owned control readers release unexpected frames exactly once' --summary all",
+    "for run in {1..10}; do zig build test-lib -Dtest-filter='gRPC shared caller cancellation joins retirement and preserves channel reuse' --summary failures || exit 1; done",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc BAZEL=/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel JAVA_HOME=/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded shared_admission=deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "65bbb7248e08ed7b99a09a4f2e74ad0cc9daea742c89be6fac1da2933fde32ba",
+    "src/grpc/channel/shared.zig": "385cbc63a88c237c72db15d1798b491343f67a2f604e3d510bf368796e13daef",
+    "src/grpc/channel/shared/job.zig": "c5f1c0527c59cab43cd5f9dc0c5e98a2cc328dfb8e2f8af12e554effb4a36321",
+    "src/grpc/channel/shared/job_tests.zig": "4ba1f3d0a18b577b852b136f4dad804605ceaae05f7666fdf96d8c4084b72bbe",
+    "src/grpc/channel/shared/request_inputs.zig": "f1dc95c2e6d1759caa5d4c28a72322a61c5e31f62e9e713d415437359d43fd64",
+    "src/grpc/channel/shared/retirement_tests.zig": "5daa87a5a660287ac791c677ec3b5c3c1e410c29ff24062d0e5f8c154b570a8c",
+    "src/grpc/channel/shared/state.zig": "12ad7199dcf9467d4f38569f44b0a8b569cfc94aec63df319735869187ffd06a",
+    "src/grpc/channel/shared/wake.zig": "238f2abcbbea8e29bff1894d2acaa58b56dd46a70c4e592305e6826b57c03b17",
+    "src/grpc/channel/shared/worker.zig": "16729b9f401ff459f93e45252d362e2e39bb275cac34b081d84157717b5005ee",
+    "src/http2/runtime.zig": "e410059c453445c648972c83ccf8d38b96e70db35dadd225cabe2af4a0f2bf09"
+  }
+}

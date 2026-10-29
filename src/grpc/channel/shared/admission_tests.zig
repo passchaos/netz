@@ -123,10 +123,12 @@ test "gRPC shared stream admission retires unsubmitted allocation without cleanu
             mutex: *std.Io.Mutex,
             base: std.Io,
             entered: bool = false,
+            allocated: usize = 0,
             freed: usize = 0,
             fn alloc(pointer: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
                 const self: *@This() = @ptrCast(@alignCast(pointer));
                 const memory = self.backing.rawAlloc(len, alignment, ret) orelse return null;
+                self.allocated += 1;
                 if (len == @sizeOf(State.StreamCall)) {
                     self.entered = true;
                     self.mutex.lockUncancelable(self.base);
@@ -163,7 +165,7 @@ test "gRPC shared stream admission retires unsubmitted allocation without cleanu
         try std.testing.expect(!state.mutex.tryLock());
         try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
         try std.testing.expectEqual(references, state.refs.load(.acquire));
-        try std.testing.expectEqual(@as(usize, 1), allocator.freed);
+        try std.testing.expectEqual(allocator.allocated, allocator.freed);
         try std.testing.expect(state.head == null and state.queued == 0);
     }
 }

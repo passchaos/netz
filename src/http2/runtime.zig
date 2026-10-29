@@ -14724,7 +14724,6 @@ pub const Connection = struct {
                     frame.deinit(self.allocator);
                     continue;
                 }
-                frame.deinit(self.allocator);
                 return error.UnexpectedFrame;
             }
             const goaway = try http2.GoAwayPayload.parse(frame.frame);
@@ -14915,7 +14914,6 @@ pub const Connection = struct {
                     frame.deinit(self.allocator);
                     continue;
                 }
-                frame.deinit(self.allocator);
                 return error.UnexpectedFrame;
             }
             const reset = try http2.ResetStreamPayload.parse(frame.frame);
@@ -15974,7 +15972,6 @@ pub const Connection = struct {
                     frame.deinit(self.allocator);
                     continue;
                 }
-                frame.deinit(self.allocator);
                 return error.UnexpectedFrame;
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
@@ -26619,6 +26616,62 @@ test "HTTP/2 graceful shutdown ignores streams above final boundary" {
     }
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 owned control readers release unexpected frames exactly once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            for ([_]u31{ 1, 3, 5 }) |stream_id| {
+                try writeFrame(
+                    self.server.allocator,
+                    self.server.io,
+                    connection.stream,
+                    .headers,
+                    flag_end_headers | flag_end_stream,
+                    stream_id,
+                    &.{},
+                );
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+
+    try std.testing.expectError(error.UnexpectedFrame, client.readResetStream());
+    try std.testing.expectError(error.UnexpectedFrame, client.readGoAway());
+    try std.testing.expectError(error.UnexpectedFrame, client.readWindowUpdate());
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 

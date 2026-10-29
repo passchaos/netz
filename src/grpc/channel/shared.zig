@@ -96,6 +96,8 @@ pub const SharedChannel = struct {
 test {
     _ = @import("shared/tests.zig");
     _ = @import("shared/admission_tests.zig");
+    _ = @import("shared/retirement_tests.zig");
+    _ = @import("shared/job_tests.zig");
     _ = @import("shared/resolution/tests.zig");
     _ = @import("shared/stream/tests.zig");
 }

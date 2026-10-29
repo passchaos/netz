@@ -2,6 +2,7 @@
 const std = @import("std");
 const channel = @import("../../channel.zig");
 const connectivity = @import("../connectivity.zig");
+const Wake = @import("wake.zig").Wake;
 
 pub fn Membership(comptime State: type) type {
     return struct {
@@ -20,7 +21,9 @@ pub fn Membership(comptime State: type) type {
             errdefer owner.deinit();
             const tracker = try connectivity.Tracker.create(allocator, state.io);
             errdefer tracker.release();
-            worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker };
+            const wake = try Wake.create(allocator);
+            errdefer wake.release();
+            worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker, .wake = wake };
             try state.group.concurrent(state.io, State.Worker.run, .{worker});
             state.workers.appendAssumeCapacity(worker);
             return worker;

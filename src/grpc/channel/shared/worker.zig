@@ -7,6 +7,7 @@ const streaming = @import("../../stream/runtime.zig");
 const health = @import("../../health.zig");
 const connectivity = @import("../connectivity.zig");
 const Active = @import("active.zig").Active;
+const Wake = @import("wake.zig").Wake;
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -17,7 +18,7 @@ pub fn Worker(comptime State: type) type {
         retired: bool = false,
         owner: channel.Channel,
         tracker: *connectivity.Tracker,
-        wake: std.Io.Event = .unset,
+        wake: *Wake,
         published: connectivity.State = .idle,
         capacity: usize = 0,
         local_state: connectivity.State = .idle,
@@ -44,6 +45,7 @@ pub fn Worker(comptime State: type) type {
                 self.owner.deinit();
                 parent.workerStopped(self);
                 self.tracker.release();
+                self.wake.release();
                 parent.allocator.destroy(self);
             }
             while (!self.parent.shouldStop(self, self.active.items.len == 0 and self.streams.items.len == 0)) {
@@ -241,6 +243,7 @@ pub fn Worker(comptime State: type) type {
                     self.parent.finish(job, null, err);
                     continue;
                 };
+                job.releaseMessage();
                 self.active.appendAssumeCapacity(.{ .job = job, .stream = stream });
                 self.publish();
             }
@@ -253,7 +256,7 @@ pub fn Worker(comptime State: type) type {
                 if (item.call.write) |write| until = minimum(until, write.deadline);
                 self.parent.unlock();
             }
-            _ = connection.pumpClientUntilOrWake(until, self.parent.options.operation_timeout, &self.wake) catch |err| {
+            _ = connection.pumpClientUntilOrWake(until, self.parent.options.operation_timeout, &self.wake.event) catch |err| {
                 if (err == error.Timeout and !connection.aggregate_timeout_unusable) return;
                 return err;
             };

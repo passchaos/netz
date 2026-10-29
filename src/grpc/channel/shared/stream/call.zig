@@ -4,6 +4,7 @@ const streaming = @import("../../../stream/runtime.zig");
 const duplex = @import("../../../stream/duplex.zig");
 const codec = @import("../../../stream/codec.zig");
 const http2 = @import("../../../../http2/mod.zig");
+const inputs = @import("../request_inputs.zig");
 
 pub const Message = struct {
     allocator: std.mem.Allocator,
@@ -45,9 +46,10 @@ pub fn Call(comptime State: type) type {
     return struct {
         parent: *State,
         options: streaming.RequestOptions,
+        owned_inputs: inputs.Inputs,
         deadline: ?std.Io.Clock.Timestamp,
         refs: std.atomic.Value(usize) = .init(1),
-        cancel_requested: bool = false,
+        cancel_requested: std.atomic.Value(bool) = .init(false),
         retired: bool = false,
         retired_event: std.Io.Event = .unset,
         changed: std.Io.Event = .unset,
@@ -71,8 +73,10 @@ pub fn Call(comptime State: type) type {
         const Self = @This();
         pub fn create(parent: *State, options: streaming.RequestOptions, deadline: ?std.Io.Clock.Timestamp) State.Failure!*Self {
             const call = try parent.allocator.create(Self);
+            errdefer parent.allocator.destroy(call);
+            const owned = try inputs.clone(parent.allocator, options);
             parent.retain();
-            call.* = .{ .parent = parent, .options = options, .deadline = deadline };
+            call.* = .{ .parent = parent, .options = owned.options, .owned_inputs = owned.inputs, .deadline = deadline };
             return call;
         }
         pub fn retain(self: *Self) void {
@@ -89,6 +93,7 @@ pub fn Call(comptime State: type) type {
             if (self.decoder) |*decoder| decoder.deinit();
             if (self.chunk) |chunk| allocator.free(chunk);
             allocator.free(self.bytes);
+            self.owned_inputs.deinit();
             const parent = self.parent;
             allocator.destroy(self);
             parent.release();
@@ -96,7 +101,7 @@ pub fn Call(comptime State: type) type {
         pub fn cancel(self: *Self) void {
             self.parent.lock();
             if (!self.retired) {
-                self.cancel_requested = true;
+                self.cancel_requested.store(true, .release);
                 self.parent.wakeAllLocked();
             }
             self.parent.unlock();

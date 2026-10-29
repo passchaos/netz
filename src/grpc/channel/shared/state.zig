@@ -28,6 +28,7 @@ pub const State = struct {
     head: ?*Job = null,
     tail: ?*Job = null,
     queued: usize = 0,
+    abandoned_pending: std.atomic.Value(bool) = .init(false),
     demand: bool = false,
     closed: bool = false,
     selected: ?*Worker = null,
@@ -59,9 +60,28 @@ pub const State = struct {
 
     pub fn lock(self: *State) void {
         self.mutex.lockUncancelable(self.io);
+        self.pruneAbandonedLocked();
     }
     pub fn unlock(self: *State) void {
-        self.mutex.unlock(self.io);
+        // A departure can race the owner's last notification. Check once
+        // under ownership and again after unlock; a new owner inherits work.
+        while (true) {
+            self.pruneAbandonedLocked();
+            self.mutex.unlock(self.io);
+            if (!self.abandoned_pending.load(.acquire) or !self.mutex.tryLock()) return;
+        }
+    }
+    fn pruneAbandonedLocked(self: *State) void {
+        if (!self.abandoned_pending.swap(false, .acq_rel)) return;
+        var current = self.head;
+        while (current) |job| {
+            current = job.next;
+            if (job.canceled()) {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, error.Canceled);
+            }
+        }
+        self.wakeAllLocked();
     }
     pub fn lockBefore(self: *State, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (deadline != null) {
@@ -69,6 +89,7 @@ pub const State = struct {
         } else {
             try self.mutex.lock(self.io);
         }
+        self.pruneAbandonedLocked();
     }
 
     pub fn endpointCountLocked(self: *State) usize {
@@ -138,8 +159,15 @@ pub const State = struct {
         job.result = result;
         job.err = if (self.closed and err != null) error.SharedChannelClosed else err;
         if (job.stream) |stream| if (job.err) |failure| stream.retireLocked(failure);
-        job.phase = .completed;
-        job.done.set(self.io);
+        if (job.completion.cmpxchgStrong(.waiting, .completed, .release, .acquire) == null) {
+            // Retain list/worker ownership through notification even when
+            // the caller immediately takes its result and drops its ref.
+            job.done.set(self.io);
+        } else {
+            if (job.result) |*owned| owned.deinit();
+            job.result = null;
+        }
+        job.release();
     }
     pub fn finish(self: *State, job: *Job, result: ?call.UnaryResponse, err: ?anyerror) void {
         self.lock();
@@ -240,7 +268,7 @@ pub const State = struct {
     pub fn canceled(self: *State, job: *Job) bool {
         self.lock();
         defer self.unlock();
-        return job.cancel_requested or self.closed;
+        return job.canceled() or self.closed;
     }
     pub fn nextQueuedDeadline(self: *State) ?std.Io.Clock.Timestamp {
         self.lock();
@@ -299,7 +327,7 @@ pub const State = struct {
         if (picked != worker) return null;
         const job = self.head.?;
         self.removeQueuedLocked(job);
-        job.phase = .assigned;
+        job.setOwnerWake(worker.wake);
         worker.capacity -= 1;
         self.selected = picked;
         var count: usize = 0;
@@ -328,6 +356,8 @@ pub const State = struct {
             self.unlock();
             return error.ConnectionUnavailable;
         }
+        std.debug.assert(job.parent != null);
+        job.retain();
         if (self.tail) |tail| tail.next = job else self.head = job;
         self.tail = job;
         self.queued += 1;
@@ -337,31 +367,26 @@ pub const State = struct {
         self.unlock();
     }
     pub fn awaitJob(self: *State, job: *Job) Error!void {
-        const waited = self.waitForJob(job, job.deadline);
-        waited catch |err| {
-            self.lock();
-            if (job.phase == .queued) {
-                self.removeQueuedLocked(job);
-                self.unlock();
-                return err;
+        std.debug.assert(job.parent != null);
+        self.waitForJob(job, job.deadline) catch |err| {
+            if (!job.abandon()) {
+                if (job.err) |failure| return @errorCast(failure);
+                return;
             }
-            if (job.phase != .completed) {
-                job.cancel_requested = true;
-                if (job.stream) |stream| stream.cancel_requested = true;
-                self.wakeAllLocked();
-            }
-            self.unlock();
-            job.done.waitUncancelable(self.io);
-            if (job.result) |*result| result.deinit();
+            if (job.stream) |stream| stream.cancel_requested.store(true, .release);
+            self.abandoned_pending.store(true, .release);
+            if (job.owner_wake.load(.acquire)) |wake| wake.set(self.io);
+            if (self.mutex.tryLock()) self.unlock();
             return err;
         };
         if (job.err) |err| return @errorCast(err);
     }
     pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, _: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
-        var job: Job = .{ .options = options, .deadline = deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous };
-        try self.enqueue(&job);
-        try self.awaitJob(&job);
-        return job.result.?;
+        const job = try Job.create(self, options, deadline, previous);
+        defer job.release();
+        try self.enqueue(job);
+        try self.awaitJob(job);
+        return job.takeResult();
     }
     fn waitForJob(self: *State, job: *Job, deadline: ?std.Io.Clock.Timestamp) std.Io.Event.WaitTimeoutError!void {
         const until = deadline orelse return job.done.wait(self.io);
