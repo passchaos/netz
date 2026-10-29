@@ -5,7 +5,9 @@ const http2 = @import("../../mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const receive = @import("receive.zig");
 const credit = @import("credit.zig");
-const OwnedFrame = @import("../frame/io.zig").OwnedFrame;
+const frame_io = @import("../frame/io.zig");
+const OwnedFrame = frame_io.OwnedFrame;
+const RetainedFrame = frame_io.RetainedFrame;
 const flag_end_headers: u8 = 0x4;
 const flag_end_stream: u8 = 0x1;
 
@@ -58,7 +60,7 @@ pub fn Lifecycle(comptime hooks: anytype) type {
                 var frame_owned = true;
                 defer if (frame_owned) self.allocator.free(bytes);
                 const frame = OwnedFrame{ .bytes = bytes, .frame = http2.Frame.parse(bytes) catch unreachable };
-                try hooks.queueSibling(self, frame);
+                try hooks.queueSibling(self, RetainedFrame.fromOwned(frame));
                 frame_owned = false;
             }
         }

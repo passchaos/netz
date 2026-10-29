@@ -8806,7 +8806,14 @@ Later fixed-window A/B samples show response-credit batching improving native
 large-message time by 7% and 5%, with larger small-message improvements. The
 refreshed clean cc134032 external comparison still records 2.41x and 2.17x
 reference wall time for large messages. Further deadline/output-task and
-copying analysis is required before a gRPC performance completion claim.
+copying analysis is required before a gRPC performance completion claim. The
+subsequent retained-frame change removes one independently measured layer: ten
+256-KiB roundtrips fall from 875 to 210 explicit allocations and remove
+5,250,085 allocated bytes, while eight fixed-binary pairs improve persistent
+large-message instructions/cycles/throughput by 6.19%/5.12%/3.09% and per-call
+by 5.49%/3.13%/1.38%. This is causal native A/B evidence; the official
+grpc-cpp comparison has not yet been refreshed against that final binary, so
+message reassembly/staging and the broad cross-stack gap remain open.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP

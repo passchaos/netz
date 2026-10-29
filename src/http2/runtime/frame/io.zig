@@ -13,12 +13,86 @@ pub const BorrowedFrame = struct {
     frame: http2.Frame,
 };
 
+/// Immutable ownership for one read-ahead allocation. The Reader keeps one
+/// reference while it may return more frames from the allocation; every owned
+/// frame retains another reference to its exact subspan. A subsequent socket
+/// read reuses the allocation only when the Reader is its sole owner.
+const SharedReadBuffer = struct {
+    references: std.atomic.Value(usize) = .init(1),
+    allocation: []u8,
+
+    fn retain(self: *SharedReadBuffer) void {
+        const previous = self.references.fetchAdd(1, .monotonic);
+        std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
+    }
+
+    fn isUnique(self: *const SharedReadBuffer) bool {
+        return self.references.load(.acquire) == 1;
+    }
+
+    fn release(self: *SharedReadBuffer, allocator: std.mem.Allocator) void {
+        const previous = self.references.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+        if (previous != 1) return;
+        // Pair with releases from any other thread only for the final owner;
+        // ordinary frame retirement does not need an acquire barrier.
+        _ = self.references.load(.acquire);
+        allocator.free(self.allocation);
+        allocator.destroy(self);
+    }
+};
+
 pub const OwnedFrame = struct {
     bytes: []u8,
     frame: http2.Frame,
 
     pub fn deinit(self: *OwnedFrame, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+/// Internal duplex/read-pump ownership. Exact frames can move into the ordinary
+/// OwnedFrame queues without allocation; read-ahead-backed frames retain their
+/// immutable block and copy only if they cross into an ordinary owning queue.
+pub const RetainedFrame = struct {
+    bytes: []u8,
+    frame: http2.Frame,
+    shared_read_buffer: ?*SharedReadBuffer = null,
+
+    pub fn fromOwned(owned: OwnedFrame) RetainedFrame {
+        return .{ .bytes = owned.bytes, .frame = owned.frame };
+    }
+
+    /// Prepare an ordinary owner without consuming this frame. Shared storage
+    /// is copied; exact storage is only aliased until commitPreparedOwned.
+    pub fn prepareOwned(self: RetainedFrame, allocator: std.mem.Allocator) std.mem.Allocator.Error!OwnedFrame {
+        if (self.shared_read_buffer == null) {
+            return .{ .bytes = self.bytes, .frame = self.frame };
+        }
+        const bytes = try allocator.dupe(u8, self.bytes);
+        return .{
+            .bytes = bytes,
+            .frame = http2.Frame.parse(bytes) catch unreachable,
+        };
+    }
+
+    /// Complete a successful prepareOwned transfer after all fallible queue or
+    /// HPACK work. The caller then owns only the returned OwnedFrame.
+    pub fn commitPreparedOwned(self: *RetainedFrame, allocator: std.mem.Allocator) void {
+        if (self.shared_read_buffer != null) {
+            self.deinit(allocator);
+        } else {
+            self.* = undefined;
+        }
+    }
+
+    pub fn deinit(self: *RetainedFrame, allocator: std.mem.Allocator) void {
+        if (self.shared_read_buffer) |shared| {
+            shared.release(allocator);
+        } else {
+            allocator.free(self.bytes);
+        }
         self.* = undefined;
     }
 };
@@ -266,6 +340,7 @@ fn readExactWithDeadline(
 /// memmoving until another socket read is required.
 pub const Reader = struct {
     buffer: std.ArrayList(u8) = .empty,
+    shared_buffer: ?*SharedReadBuffer = null,
     start: usize = 0,
     last_envelope_violation: ?wire.EnvelopeViolation = null,
     retry_len: usize = 0,
@@ -274,9 +349,9 @@ pub const Reader = struct {
     /// Copy the latest borrow into independent ownership. Failed allocation
     /// keeps that complete frame ahead of every following buffered frame.
     pub fn copyOwned(self: *Reader, allocator: std.mem.Allocator, borrowed: BorrowedFrame) std.mem.Allocator.Error!OwnedFrame {
+        std.debug.assert(self.start >= borrowed.bytes.len);
+        std.debug.assert(borrowed.bytes.ptr == self.buffer.items[self.start - borrowed.bytes.len ..].ptr);
         const bytes = allocator.dupe(u8, borrowed.bytes) catch |err| {
-            std.debug.assert(self.start >= borrowed.bytes.len);
-            std.debug.assert(borrowed.bytes.ptr == self.buffer.items[self.start - borrowed.bytes.len ..].ptr);
             self.retry_len = borrowed.bytes.len;
             return err;
         };
@@ -284,9 +359,80 @@ pub const Reader = struct {
         return .{ .bytes = bytes, .frame = http2.Frame.parse(bytes) catch unreachable };
     }
 
+    /// Retain the latest frame as an immutable subspan of this Reader's
+    /// read-ahead block. Failed first-owner allocation preserves retry order.
+    pub fn retainOwned(self: *Reader, allocator: std.mem.Allocator, borrowed: BorrowedFrame) std.mem.Allocator.Error!RetainedFrame {
+        std.debug.assert(self.start >= borrowed.bytes.len);
+        std.debug.assert(borrowed.bytes.ptr == self.buffer.items[self.start - borrowed.bytes.len ..].ptr);
+        const shared = self.ensureSharedBuffer(allocator) catch |err| {
+            self.retry_len = borrowed.bytes.len;
+            return err;
+        };
+        shared.retain();
+        self.retry_len = 0;
+        return .{
+            .bytes = @constCast(borrowed.bytes),
+            .frame = borrowed.frame,
+            .shared_read_buffer = shared,
+        };
+    }
+
     pub fn deinit(self: *Reader, allocator: std.mem.Allocator) void {
-        self.buffer.deinit(allocator);
+        if (self.shared_buffer) |shared| {
+            shared.release(allocator);
+        } else {
+            self.buffer.deinit(allocator);
+        }
         self.* = undefined;
+    }
+
+    fn ensureSharedBuffer(self: *Reader, allocator: std.mem.Allocator) std.mem.Allocator.Error!*SharedReadBuffer {
+        if (self.shared_buffer) |shared| return shared;
+        const shared = try allocator.create(SharedReadBuffer);
+        shared.* = .{ .allocation = self.buffer.allocatedSlice() };
+        self.shared_buffer = shared;
+        return shared;
+    }
+
+    /// Make the read-ahead storage writable for a socket read. An outstanding
+    /// OwnedFrame makes the current allocation immutable, so move only the
+    /// incomplete suffix into a new block. Allocation failure leaves the old
+    /// cursor and every retained frame unchanged for retry.
+    fn prepareReadStorage(self: *Reader, allocator: std.mem.Allocator, target_read_size: usize) std.mem.Allocator.Error!void {
+        const remaining = self.buffer.items[self.start..];
+        if (self.shared_buffer) |shared| {
+            if (!shared.isUnique()) {
+                const next_shared = try allocator.create(SharedReadBuffer);
+                errdefer allocator.destroy(next_shared);
+                var next: std.ArrayList(u8) = .empty;
+                errdefer next.deinit(allocator);
+                try next.ensureTotalCapacityPrecise(allocator, target_read_size);
+                next.appendSliceAssumeCapacity(remaining);
+                next_shared.* = .{ .allocation = next.allocatedSlice() };
+
+                self.buffer = next;
+                self.start = 0;
+                self.shared_buffer = next_shared;
+                shared.release(allocator);
+                return;
+            }
+        }
+
+        if (self.start != 0) {
+            if (remaining.len != 0) {
+                @memmove(
+                    self.buffer.items[0..remaining.len],
+                    remaining,
+                );
+            }
+            self.buffer.items.len = remaining.len;
+            self.start = 0;
+        }
+        try self.buffer.ensureTotalCapacityPrecise(allocator, target_read_size);
+        if (self.shared_buffer) |shared| {
+            std.debug.assert(shared.isUnique());
+            shared.allocation = self.buffer.allocatedSlice();
+        }
     }
 
     pub fn read(
@@ -399,25 +545,10 @@ pub const Reader = struct {
                 target_read_size = @max(total_len, default_read_size);
             }
 
-            // The caller's previous borrow expires on entry to this method, so
-            // compaction is safe here and retains only an incomplete frame.
-            if (self.start != 0) {
-                const remaining = self.buffer.items[self.start..];
-                if (remaining.len != 0) {
-                    @memmove(
-                        self.buffer.items[0..remaining.len],
-                        remaining,
-                    );
-                }
-                self.buffer.items.len = remaining.len;
-                self.start = 0;
-            }
-
+            // A plain borrow expires on entry. Owned frames keep their block
+            // immutable, so a shared block rolls over before compaction/read.
+            try self.prepareReadStorage(allocator, target_read_size);
             const old_len = self.buffer.items.len;
-            try self.buffer.ensureTotalCapacityPrecise(
-                allocator,
-                target_read_size,
-            );
             self.buffer.items.len = target_read_size;
             const destination = self.buffer.items[old_len..];
             const count = source.read(destination) catch |err| {

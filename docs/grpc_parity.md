@@ -1765,3 +1765,34 @@ throughput improved by paired medians of 1.23% and 1.09%, each with 8/8 wins;
 large-message timing stayed neutral while PMU work fell 0.7-1.2%. The focused
 Debug/ReleaseFast and grpc-cpp h2c/TLS gates pass. Evidence is recorded in
 `docs/evidence/grpc_shared_validated_poll/2026-10-29.json`.
+
+## Shared duplex retained read-ahead frames
+
+HTTP/2 duplex owners now retain immutable frame subspans from one refcounted
+64-KiB read-ahead block instead of allocating and copying every DATA, control,
+and header frame. The reader reuses a block only as its sole owner; an event or
+sibling queue that outlives the current turn causes the incomplete input suffix
+to move transactionally into a new block before another socket read. Public and
+ordinary `OwnedFrame` remains a 48-byte exact-allocation owner. If an ordinary
+reader consumes a shared duplex queue entry, exact materialization occurs before
+the queue cursor advances, and a predecoded HEADERS payload key is updated
+before the old block is released so HPACK cannot run twice.
+
+The measured 256-KiB roundtrip previously copied 64 HTTP/2 frames. Three exact
+telemetry pairs over ten measured roundtrips reduced allocations from 875 to
+210 and allocated bytes from 26,225,795 to 20,975,710. Eight fixed-binary pairs
+improved instructions in all 32 workload comparisons. Persistent 256-KiB
+instructions/cycles/throughput/p50 improved by paired medians of 6.19%, 5.12%,
+3.09%, and 2.66%, each 8/8; per-call 256-KiB improved 5.49%, 3.13%, 1.38%, and
+1.57%, also 8/8. Zero-byte instructions improved 0.76% in 8/8 without the
+small-message regression of two rejected ownership variants.
+
+Retention tests cover first-owner and rollover OOM, no socket progress on
+failed rollover, multiple frames sharing one allocation, Reader destruction,
+ordinary-queue transactional copying, and payload-identity rekeying. The
+complete Debug HTTP/2 filter, Debug/ReleaseFast duplex and gRPC filters, package
+tests, and grpc-cpp h2c/TLS matrix pass. The accepted change removes the prior
+`readOwnedFrameForDuplexWithDeadline` memcpy profile child; gRPC message
+reassembly and staging remain separate large-message optimization boundaries.
+Evidence is recorded in
+`docs/evidence/grpc_shared_retained_frames/2026-10-30.json`.

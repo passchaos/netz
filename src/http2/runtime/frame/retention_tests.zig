@@ -169,3 +169,107 @@ test "HTTP/2 frame retention direct copy retry commits the retained span once" {
     const next = try reader.read(allocator, undefined, undefined, 1024);
     try std.testing.expectEqualStrings("next", next.frame.payload);
 }
+
+test "HTTP/2 frame retention shares one read ahead allocation across owned frames" {
+    const Reader = @import("io.zig").Reader;
+    var reader: Reader = .{};
+    defer reader.deinit(allocator);
+    try (http2.Frame{ .header = .{ .length = 1024, .frame_type = .data, .flags = 0, .stream_id = 1 }, .payload = "a" ** 1024 }).write(&reader.buffer, allocator);
+    try (http2.Frame{ .header = .{ .length = 1024, .frame_type = .data, .flags = 0, .stream_id = 1 }, .payload = "b" ** 1024 }).write(&reader.buffer, allocator);
+
+    const first_borrowed = try reader.read(allocator, undefined, undefined, 1024);
+    var first = try reader.retainOwned(allocator, first_borrowed);
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(first_borrowed.bytes.ptr, first.bytes.ptr);
+
+    const second_borrowed = try reader.read(allocator, undefined, undefined, 1024);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var second = try reader.retainOwned(failing.allocator(), second_borrowed);
+    defer second.deinit(allocator);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(second_borrowed.bytes.ptr, second.bytes.ptr);
+    try std.testing.expectEqualStrings("a" ** 1024, first.frame.payload);
+    try std.testing.expectEqualStrings("b" ** 1024, second.frame.payload);
+}
+
+test "HTTP/2 frame retention shared rollover preserves owners and retries before read" {
+    const Reader = @import("io.zig").Reader;
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+        reads: usize = 0,
+
+        pub fn read(self: *@This(), destination: []u8) !usize {
+            self.reads += 1;
+            const count = @min(destination.len, self.bytes.len - self.offset);
+            @memcpy(destination[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+
+    var reader: Reader = .{};
+    defer reader.deinit(allocator);
+    try (http2.Frame{ .header = .{ .length = 1024, .frame_type = .data, .flags = 0, .stream_id = 1 }, .payload = "a" ** 1024 }).write(&reader.buffer, allocator);
+    try (http2.Frame{ .header = .{ .length = 4, .frame_type = .data, .flags = 0, .stream_id = 1 }, .payload = "next" }).write(&reader.buffer, allocator);
+    var incoming: std.ArrayList(u8) = .empty;
+    defer incoming.deinit(allocator);
+    try (http2.Frame{ .header = .{ .length = 5, .frame_type = .data, .flags = 1, .stream_id = 1 }, .payload = "third" }).write(&incoming, allocator);
+
+    var source = Source{ .bytes = incoming.items };
+    const first_borrowed = try reader.readFrom(allocator, &source, 1024);
+    var first = try reader.retainOwned(allocator, first_borrowed);
+    defer first.deinit(allocator);
+    const second = try reader.readFrom(allocator, &source, 1024);
+    try std.testing.expectEqualStrings("next", second.frame.payload);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, reader.readFrom(failing.allocator(), &source, 1024));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), source.reads);
+    try std.testing.expectEqualStrings("a" ** 1024, first.frame.payload);
+
+    const third = try reader.readFrom(allocator, &source, 1024);
+    try std.testing.expectEqual(@as(usize, 1), source.reads);
+    try std.testing.expectEqualStrings("third", third.frame.payload);
+    try std.testing.expectEqualStrings("a" ** 1024, first.frame.payload);
+}
+
+test "HTTP/2 frame retention owned block outlives its reader" {
+    const Reader = @import("io.zig").Reader;
+    var reader: Reader = .{};
+    var reader_live = true;
+    defer if (reader_live) reader.deinit(allocator);
+    try (http2.Frame{ .header = .{ .length = 1024, .frame_type = .data, .flags = 1, .stream_id = 1 }, .payload = "a" ** 1024 }).write(&reader.buffer, allocator);
+    const borrowed = try reader.read(allocator, undefined, undefined, 1024);
+    var owned = try reader.retainOwned(allocator, borrowed);
+    reader.deinit(allocator);
+    reader_live = false;
+    try std.testing.expectEqualStrings("a" ** 1024, owned.frame.payload);
+    owned.deinit(allocator);
+}
+
+test "HTTP/2 frame retention duplex queue copies transactionally for ordinary readers" {
+    var connection = runtime.Connection{ .io = undefined, .allocator = allocator, .stream = undefined, .role = .server };
+    defer connection.frame_reader.deinit(allocator);
+    defer runtime.testing.deinitPendingApplicationFrames(&connection);
+    try (http2.Frame{ .header = .{ .length = 1024, .frame_type = .data, .flags = 1, .stream_id = 1 }, .payload = "a" ** 1024 }).write(&connection.frame_reader.buffer, allocator);
+    const borrowed = try connection.frame_reader.read(allocator, undefined, undefined, 2048);
+    const retained = try connection.frame_reader.retainOwned(allocator, borrowed);
+    try connection.pending_application_frames.append(allocator, retained);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    defer connection.allocator = allocator;
+    connection.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, runtime.testing.readOwnedFrame(&connection));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_application_frame_head);
+    try std.testing.expectEqual(@as(usize, 1), connection.pending_application_frames.items.len);
+    try std.testing.expectEqualStrings("a" ** 1024, connection.pending_application_frames.items[0].frame.payload);
+
+    connection.allocator = allocator;
+    var owned = try runtime.testing.readOwnedFrame(&connection);
+    defer owned.deinit(allocator);
+    try std.testing.expectEqualStrings("a" ** 1024, owned.frame.payload);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_application_frames.items.len);
+}

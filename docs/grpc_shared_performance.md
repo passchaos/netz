@@ -394,3 +394,57 @@ Debug and ReleaseFast HTTP/2 duplex/gRPC shared-streaming gates pass 200/200,
 the focused strict/internal contract passes 132/132, and the pinned grpc-cpp
 h2c/TLS matrix passes. Full evidence is recorded in
 [the validated-poll evidence](evidence/grpc_shared_validated_poll/2026-10-29.json).
+
+## Retained HTTP/2 read-ahead frames
+
+Duplex receive ownership now retains immutable subspans of the HTTP/2 reader's
+64-KiB read-ahead allocation instead of duplicating every complete wire frame.
+The reader keeps one atomic block reference and reuses the allocation only when
+it is the sole owner. If an application event, sibling queue, or interrupted
+read still retains that block, the next socket read transactionally moves only
+the incomplete suffix into a new block. This follows grpc-core's refcounted
+`Slice`/`SliceBuffer` ownership boundary without changing public `OwnedFrame`:
+ordinary readers still receive one exact allocation, and crossing from a shared
+duplex queue to that API copies before advancing the queue.
+
+The original 256-KiB trace copied 64 frames per roundtrip: 35 DATA frames, 25
+WINDOW_UPDATE frames, three HEADERS frames, and one SETTINGS frame. Twenty-six
+of the DATA copies were 16,393 wire bytes. In three deterministic allocation
+pairs over ten measured roundtrips, explicit protocol allocations fell from
+875 to 210 and allocated bytes from 26,225,795 to 20,975,710. That removes 665
+allocations and 5,250,085 bytes per ten roundtrips; live protocol storage grew
+by 88 bytes because the connection retains block ownership metadata.
+
+Eight final-source, fixed-binary AB/BA pairs pinned the whole client/server
+process to CPU 10. Each arm used the same fixed windows, 100 warmups, 2,000
+measured roundtrips, full-byte checks and peer completion as the earlier shared
+channel experiments. Ratios greater than one favor retained frames:
+
+| Workload | Instructions | Cycles | Throughput | P50 |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent, 0 bytes | 1.0076x (8/8) | 1.0026x (7/8) | 1.0031x (7/8) | 1.0035x (6/8) |
+| Persistent, 4 KiB | 1.0270x (8/8) | 1.0135x (8/8) | 1.0097x (7/8) | 1.0093x (7/8) |
+| Persistent, 256 KiB | 1.0619x (8/8) | 1.0512x (8/8) | 1.0309x (8/8) | 1.0266x (8/8) |
+| RPC per roundtrip, 256 KiB | 1.0549x (8/8) | 1.0313x (8/8) | 1.0138x (8/8) | 1.0157x (8/8) |
+
+The first global-owner candidate was not retained because enlarging every
+`OwnedFrame` made zero-byte cycles/timing neutral-to-negative. A large-frame-
+only variant was rejected more decisively: instructions, cycles, throughput,
+p50 and p99 all regressed in 8/8 zero-byte pairs. The accepted split restores
+the public 48-byte `OwnedFrame`, keeps the 56-byte retained owner inside duplex
+paths, and permits the shared duplex queue to preserve blocks in both endpoint
+directions. Predecoded HPACK state is rekeyed transactionally if an ordinary
+reader later materializes a queued frame at a new address.
+
+A matched 10,000-roundtrip candidate profile captured about 2,000 user-cycle
+samples with zero losses. `memcpyFast` self samples were 3.46%, down from the
+previous profile's 5.66%; the former 2.91% memcpy child below
+`readOwnedFrameForDuplexWithDeadline` disappeared. Remaining copies belong to
+gRPC message staging/reassembly and benchmark validation rather than frame
+ownership. Debug and ReleaseFast cross-module gates pass 191/191, the complete
+Debug HTTP/2 filter passes 921/921, package tests pass 22/22, and the pinned
+grpc-cpp h2c/TLS forward matrix passes. This closes the per-frame read-ahead
+copy hotspot but does not by itself replace the independent grpc-cpp
+large-message comparison. Full sample rows, allocation records, identities,
+failure contracts, and profile metadata are in
+[the retained-frame evidence](evidence/grpc_shared_retained_frames/2026-10-30.json).

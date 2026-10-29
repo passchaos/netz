@@ -3795,41 +3795,46 @@ pub const PromisedRequest = push.PromisedRequest;
 
 pub const AlternativeService = peer_metadata.AlternativeService;
 
-const OwnedFrameSlot = struct {
-    value: frame_io.OwnedFrame = .{
-        .bytes = &.{},
-        .frame = undefined,
-    },
+fn FrameSlot(comptime Frame: type) type {
+    return struct {
+        value: Frame = .{
+            .bytes = &.{},
+            .frame = undefined,
+        },
 
-    fn hasValue(self: *const OwnedFrameSlot) bool {
-        return self.value.bytes.len != 0;
-    }
+        fn hasValue(self: *const @This()) bool {
+            return self.value.bytes.len != 0;
+        }
 
-    fn getPtr(self: *OwnedFrameSlot) ?*frame_io.OwnedFrame {
-        return if (self.hasValue()) &self.value else null;
-    }
+        fn getPtr(self: *@This()) ?*Frame {
+            return if (self.hasValue()) &self.value else null;
+        }
 
-    fn put(self: *OwnedFrameSlot, value: frame_io.OwnedFrame) void {
-        std.debug.assert(!self.hasValue());
-        // Production owned frames include the nine-byte wire header. Tests and
-        // internal recovery helpers may use a shorter synthetic backing slice,
-        // but an owned frame can never use the empty sentinel.
-        std.debug.assert(value.bytes.len != 0);
-        self.value = value;
-    }
+        fn put(self: *@This(), value: Frame) void {
+            std.debug.assert(!self.hasValue());
+            // Production retained frames include the nine-byte wire header.
+            // Tests and recovery helpers may use a shorter synthetic backing
+            // slice, but a retained frame can never use the empty sentinel.
+            std.debug.assert(value.bytes.len != 0);
+            self.value = value;
+        }
 
-    fn take(self: *OwnedFrameSlot) ?frame_io.OwnedFrame {
-        if (!self.hasValue()) return null;
-        const value = self.value;
-        self.* = .{};
-        return value;
-    }
+        fn take(self: *@This()) ?Frame {
+            if (!self.hasValue()) return null;
+            const value = self.value;
+            self.* = .{};
+            return value;
+        }
 
-    fn deinit(self: *OwnedFrameSlot, allocator: std.mem.Allocator) void {
-        var value = self.take() orelse return;
-        value.deinit(allocator);
-    }
-};
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            var value = self.take() orelse return;
+            value.deinit(allocator);
+        }
+    };
+}
+
+const OwnedFrameSlot = FrameSlot(OwnedFrame);
+const RetainedFrameSlot = FrameSlot(RetainedFrame);
 
 const ReceivedDataPayload = struct {
     data: []const u8,
@@ -3954,7 +3959,7 @@ pub const Connection = struct {
     /// The cursor avoids shifting on every pop, while compaction reuses storage
     /// after a burst. Frames stay in exact wire order so HPACK CONTINUATION and
     /// DATA semantics remain owned by the eventual request/response reader.
-    pending_application_frames: std.ArrayList(OwnedFrame) = .empty,
+    pending_application_frames: std.ArrayList(RetainedFrame) = .empty,
     pending_application_frame_head: usize = 0,
     /// Sibling header blocks encountered by a duplex frame pump are decoded in
     /// wire order. Their raw frames remain in the ordinary pending queue; the
@@ -3981,7 +3986,7 @@ pub const Connection = struct {
     /// Emergency ownership slot used when queue growth or its configured cap
     /// makes a PING wait fail after consuming one more frame from the wire. It
     /// follows the queued prefix and keeps the next application read lossless.
-    pending_application_overflow: OwnedFrameSlot = .{},
+    pending_application_overflow: RetainedFrameSlot = .{},
     /// Duplex handles are driven serially by one connection owner. Ordinary
     /// aggregate readers remain excluded while any duplex handle is active.
     duplex_reader_active: bool = false,
@@ -3994,7 +3999,7 @@ pub const Connection = struct {
     /// One active-stream frame captured by a flow-control wait. It is separate
     /// from sibling frames so the duplex reader can consume it first without
     /// repeatedly cycling an unrelated queued frame.
-    duplex_pending_frame: OwnedFrameSlot = .{},
+    duplex_pending_frame: RetainedFrameSlot = .{},
     /// A bounded duplex accept retains an incomplete HEADERS/CONTINUATION
     /// sequence here so timeout never discards connection-wide HPACK input.
     pending_duplex_request_head: DuplexHeaderBlockSlot = .{},
@@ -11429,7 +11434,7 @@ pub const Connection = struct {
         // A scratch borrow lasts until the next read. Release the owning frame
         // retained for the previous borrow before replacing its storage.
         self.borrowed_pending_frame.deinit(self.allocator);
-        if (self.popQueuedApplicationFrame()) |frame| {
+        if (try self.popQueuedApplicationFrame()) |frame| {
             self.borrowed_pending_frame.put(frame);
             const pending = self.borrowed_pending_frame.getPtr().?;
             return .{
@@ -11581,10 +11586,10 @@ pub const Connection = struct {
     fn readOwnedFrameForDuplexWithDeadline(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!OwnedFrame {
+    ) Error!RetainedFrame {
         if (self.duplex_pending_frame.take()) |frame| return frame;
         while (true) {
-            var frame = try self.readOwnedTransportFrameWithDeadline(deadline);
+            var frame = try self.readRetainedTransportFrameWithDeadline(deadline);
             if (try self.discardFrameAboveGracefulBoundaryUntil(
                 frame.frame,
                 deadline,
@@ -11600,13 +11605,13 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!OwnedFrame {
+    ) Error!RetainedFrame {
         return client_duplex_owner.read(self, stream_id, deadline, client_duplex_hooks);
     }
 
     const client_duplex_hooks = .{
         .Error = Error,
-        .Frame = OwnedFrame,
+        .Frame = RetainedFrame,
         .peek = peekQueuedFrameForStream,
         .pop = popQueuedFrameForStream,
         .readWire = readClientDuplexWireFrame,
@@ -11623,7 +11628,7 @@ pub const Connection = struct {
         try self.recordPeerGoAway(try http2.GoAwayPayload.parse(frame));
     }
 
-    fn pollOwnedClientDuplexFrame(self: *Connection, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) Error!?OwnedFrame {
+    fn pollOwnedClientDuplexFrame(self: *Connection, stream_id: u31, deadline: ?std.Io.Clock.Timestamp) Error!?RetainedFrame {
         return client_duplex_owner.poll(self, stream_id, deadline, client_duplex_hooks);
     }
 
@@ -11646,7 +11651,7 @@ pub const Connection = struct {
     pub fn pumpClientDuplexWithDeadlineOrWake(self: *Connection, deadline: std.Io.Clock.Timestamp, wake: *std.Io.Event) Error!ClientDuplexPumpEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.checkClientDuplexPump();
-        const result = duplex_wake.read(self, deadline, wake, OwnedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
+        const result = duplex_wake.read(self, deadline, wake, RetainedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
         return switch (result) {
             .frame => |frame| try client_duplex_owner.ingest(self, frame, deadline, client_duplex_hooks),
             .wake => .wake,
@@ -11661,7 +11666,7 @@ pub const Connection = struct {
         if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client or self.callback_reader_active) return error.UnexpectedFrame;
-        const result = duplex_wake.read(self, read_until, wake, OwnedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
+        const result = duplex_wake.read(self, read_until, wake, RetainedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
         return switch (result) {
             .wake => .wake,
             .frame => |frame| try client_duplex_owner.ingest(self, frame, .fromNow(self.io, .{ .raw = output_timeout, .clock = .awake }), client_duplex_hooks),
@@ -11678,12 +11683,12 @@ pub const Connection = struct {
         if (self.role != .client or self.client_duplex_owners.count() == 0 or self.callback_reader_active) return error.UnexpectedFrame;
     }
 
-    fn retainInterruptedClientDuplexFrame(self: *Connection, frame: OwnedFrame) void {
+    fn retainInterruptedClientDuplexFrame(self: *Connection, frame: RetainedFrame) void {
         std.debug.assert(!self.duplex_pending_frame.hasValue());
         self.duplex_pending_frame.put(frame);
     }
 
-    fn readClientDuplexWireFrame(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!OwnedFrame {
+    fn readClientDuplexWireFrame(self: *Connection, deadline: ?std.Io.Clock.Timestamp) Error!RetainedFrame {
         const prior = self.push_ingress_headers_active;
         self.push_ingress_headers_active = prior or self.pending_duplex_sibling_header.hasValue();
         defer self.push_ingress_headers_active = prior;
@@ -11700,7 +11705,7 @@ pub const Connection = struct {
         return error.UnexpectedFrame;
     }
 
-    fn queueClientDuplexHeader(self: *Connection, frame: OwnedFrame) Error!bool {
+    fn queueClientDuplexHeader(self: *Connection, frame: RetainedFrame) Error!bool {
         const keep_frame = frame.frame.header.frame_type == .headers;
         if (keep_frame) {
             self.ensurePendingApplicationFrameCapacity() catch |err| {
@@ -11708,12 +11713,19 @@ pub const Connection = struct {
                 return err;
             };
         }
+        if (!keep_frame) {
+            self.predecodeSiblingFrameRetained(frame.frame, false) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+            return false;
+        }
         self.predecodeSiblingFrameRetained(frame.frame, false) catch |err| {
             self.aggregate_timeout_unusable = true;
             return err;
         };
-        if (keep_frame) self.pending_application_frames.appendAssumeCapacity(frame);
-        return keep_frame;
+        self.pending_application_frames.appendAssumeCapacity(frame);
+        return true;
     }
 
     fn peekQueuedFrameForStream(self: *Connection, stream_id: u31) ?http2.Frame {
@@ -11726,7 +11738,7 @@ pub const Connection = struct {
         return null;
     }
 
-    fn popQueuedFrameForStream(self: *Connection, stream_id: u31) ?OwnedFrame {
+    fn popQueuedFrameForStream(self: *Connection, stream_id: u31) ?RetainedFrame {
         if (client_duplex_owner.queuedIndex(self.pending_application_frames.items, self.pending_application_frame_head, stream_id)) |index| {
             const frame = self.pending_application_frames.orderedRemove(index);
             self.compactPendingApplicationFramesIfSparse();
@@ -11787,6 +11799,16 @@ pub const Connection = struct {
         return self.copyBorrowedFrame(borrowed);
     }
 
+    fn readRetainedTransportFrameWithDeadline(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!RetainedFrame {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
+        self.borrowed_pending_frame.deinit(self.allocator);
+        const borrowed = try self.readTransportFrameWithDeadline(deadline);
+        return self.frame_reader.retainOwned(self.allocator, borrowed);
+    }
+
     fn copyBorrowedFrame(self: *Connection, borrowed: frame_io.BorrowedFrame) Error!OwnedFrame {
         if (self.borrowed_pending_frame.getPtr()) |pending| {
             if (pending.bytes.ptr == borrowed.bytes.ptr and pending.bytes.len == borrowed.bytes.len) {
@@ -11804,31 +11826,33 @@ pub const Connection = struct {
     ) Error!OwnedFrame {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         self.borrowed_pending_frame.deinit(self.allocator);
-        if (self.popQueuedApplicationFrame()) |frame| return frame;
+        if (try self.popQueuedApplicationFrame()) |frame| return frame;
         const borrowed = try self.readTransportFrameWithDeadline(deadline);
         return self.copyBorrowedFrame(borrowed);
     }
 
-    fn popQueuedApplicationFrame(self: *Connection) ?OwnedFrame {
+    fn popQueuedApplicationFrame(self: *Connection) Error!?OwnedFrame {
         if (self.pending_application_frame_head <
             self.pending_application_frames.items.len)
         {
-            const pending = self.pending_application_frames.items[
+            const pending = &self.pending_application_frames.items[
                 self.pending_application_frame_head
             ];
+            const owned = try pending.prepareOwned(self.allocator);
+            self.rekeyDeferredFrame(pending.frame, owned.frame);
+            pending.commitPreparedOwned(self.allocator);
             self.pending_application_frame_head += 1;
             self.compactPendingApplicationFramesIfSparse();
-            return pending;
+            return owned;
         }
-        if (self.pending_application_overflow.take()) |frame| return frame;
+        if (self.pending_application_overflow.getPtr()) |pending| {
+            const owned = try pending.prepareOwned(self.allocator);
+            self.rekeyDeferredFrame(pending.frame, owned.frame);
+            var retained = self.pending_application_overflow.take().?;
+            retained.commitPreparedOwned(self.allocator);
+            return owned;
+        }
         return null;
-    }
-
-    fn queueDuplexSiblingFrame(
-        self: *Connection,
-        frame: OwnedFrame,
-    ) Error!void {
-        return self.queueApplicationFrameRaw(frame);
     }
 
     fn takeDeferredHeaderBlock(
@@ -11873,13 +11897,24 @@ pub const Connection = struct {
 
     /// Queue ownership transfers only on success. Reserve both raw-frame and
     /// deferred-header storage before changing connection-wide HPACK state.
-    fn queueDuplexSiblingFrameUntil(self: *Connection, frame: OwnedFrame) Error!void {
+    fn queueDuplexSiblingFrameUntil(self: *Connection, frame: RetainedFrame) Error!void {
         try self.ensurePendingApplicationFrameCapacity();
         self.predecodeSiblingFrame(frame.frame) catch |err| {
             self.aggregate_timeout_unusable = true;
             return err;
         };
         self.pending_application_frames.appendAssumeCapacity(frame);
+    }
+
+    fn queueOwnedDuplexSiblingFrameUntil(self: *Connection, frame: OwnedFrame) Error!void {
+        try self.ensurePendingApplicationFrameCapacity();
+        self.predecodeSiblingFrame(frame.frame) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.pending_application_frames.appendAssumeCapacity(
+            RetainedFrame.fromOwned(frame),
+        );
     }
 
     fn predecodeSiblingFrame(self: *Connection, frame: http2.Frame) Error!void {
@@ -11952,6 +11987,22 @@ pub const Connection = struct {
         return false;
     }
 
+    /// Completed/predecoded header metadata identifies its queued wire frame by
+    /// payload address. Ordinary readers may copy a shared retained frame into
+    /// exact ownership; update that stable key before releasing the old block so
+    /// HPACK state is never decoded twice.
+    fn rekeyDeferredFrame(self: *Connection, old: http2.Frame, new: http2.Frame) void {
+        const old_key = @intFromPtr(old.payload.ptr);
+        const new_key = @intFromPtr(new.payload.ptr);
+        if (old_key == new_key) return;
+        if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+            if (pending.payload_key == old_key) pending.payload_key = new_key;
+        }
+        for (self.duplex_sibling_headers.items) |*entry| {
+            if (entry.payload_key == old_key) entry.payload_key = new_key;
+        }
+    }
+
     fn compactPendingApplicationFramesIfSparse(self: *Connection) void {
         if (self.pending_application_frame_head == 0) return;
         if (self.pending_application_frame_head ==
@@ -11987,7 +12038,7 @@ pub const Connection = struct {
         self: *Connection,
         frame: OwnedFrame,
     ) Error!void {
-        if (self.role == .client and self.limits.enable_push) return self.queueDuplexSiblingFrameUntil(frame);
+        if (self.role == .client and self.limits.enable_push) return self.queueOwnedDuplexSiblingFrameUntil(frame);
         return self.queueApplicationFrameRaw(frame);
     }
 
@@ -12003,7 +12054,10 @@ pub const Connection = struct {
         {
             self.compactPendingApplicationFrames();
         }
-        try self.pending_application_frames.append(self.allocator, frame);
+        try self.pending_application_frames.append(
+            self.allocator,
+            RetainedFrame.fromOwned(frame),
+        );
     }
 
     fn ensurePendingApplicationFrameCapacity(
@@ -12030,7 +12084,7 @@ pub const Connection = struct {
         self: *Connection,
         frame: OwnedFrame,
     ) void {
-        self.pending_application_overflow.put(frame);
+        self.pending_application_overflow.put(RetainedFrame.fromOwned(frame));
     }
 
     const PeerRequestAdmission = enum {
@@ -14425,7 +14479,9 @@ pub const Connection = struct {
             }
             // Capacity was secured before mutating stream admission, so this
             // append cannot strand a preadmitted stream on allocation error.
-            self.pending_application_frames.appendAssumeCapacity(frame);
+            self.pending_application_frames.appendAssumeCapacity(
+                RetainedFrame.fromOwned(frame),
+            );
             frame_owned = false;
         }
     }
@@ -17749,7 +17805,7 @@ pub const Connection = struct {
             if (self.pending_duplex_sibling_header.getPtr()) |pending| {
                 if (pending.payload_key == @intFromPtr(first.payload.ptr)) {
                     for (0..pending.queued_continuation_count) |_| {
-                        var continuation = self.popQueuedApplicationFrame() orelse return error.UnexpectedFrame;
+                        var continuation = (try self.popQueuedApplicationFrame()) orelse return error.UnexpectedFrame;
                         defer continuation.deinit(self.allocator);
                         if (continuation.frame.header.frame_type != .continuation or continuation.frame.header.stream_id != first.header.stream_id) return error.UnexpectedFrame;
                     }
@@ -17802,12 +17858,12 @@ pub const Connection = struct {
                 // Duplex/push owners already selected this block from the
                 // transport. Older queued sibling frames cannot precede its
                 // CONTINUATION, and the ordinary reader rejects duplex use.
-                var frame = if (self.duplex_reader_active or header_mode)
+                var frame: RetainedFrame = if (self.duplex_reader_active or header_mode)
                     try self.readOwnedFrameForDuplexWithDeadline(deadline)
                 else if (raw_continuations)
-                    try self.readOwnedFrameRawWithDeadline(deadline)
+                    RetainedFrame.fromOwned(try self.readOwnedFrameRawWithDeadline(deadline))
                 else
-                    try self.readOwnedFrameWithDeadline(deadline);
+                    RetainedFrame.fromOwned(try self.readOwnedFrameWithDeadline(deadline));
                 defer frame.deinit(self.allocator);
                 if (frame.frame.header.frame_type != .continuation or
                     frame.frame.header.stream_id != first.header.stream_id)
@@ -20080,7 +20136,7 @@ pub const DuplexResponseHead = struct {
 };
 
 pub const DuplexData = struct {
-    frame: OwnedFrame,
+    frame: RetainedFrame,
     data: []const u8,
 
     pub fn deinit(self: *DuplexData, allocator: std.mem.Allocator) void {
@@ -20794,7 +20850,7 @@ pub const ClientDuplexStream = struct {
         );
     }
 
-    fn nextResponseFrame(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp, buffered: bool) Error!?OwnedFrame {
+    fn nextResponseFrame(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp, buffered: bool) Error!?RetainedFrame {
         if (buffered) return self.connection.pollOwnedClientDuplexFrame(self.stream_id, deadline);
         return try self.connection.readOwnedClientDuplexFrameWithDeadline(self.stream_id, deadline);
     }
@@ -22153,7 +22209,7 @@ pub const AcceptedConnectIp = struct {
 };
 
 pub const OwnedTunnelData = struct {
-    frame: OwnedFrame,
+    frame: RetainedFrame,
     data: []const u8,
     end_stream: bool,
 
@@ -22740,6 +22796,7 @@ pub const OwnedWindowUpdate = struct {
 };
 
 pub const OwnedFrame = frame_io.OwnedFrame;
+pub const RetainedFrame = frame_io.RetainedFrame;
 
 fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!OwnedFrame {
     return frame_io.readOwned(
@@ -23377,11 +23434,12 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
         const connection_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 1_872,
-            .ReleaseFast, .ReleaseSmall => 1_792,
+            .Debug, .ReleaseSafe => 2_032,
+            .ReleaseFast, .ReleaseSmall => 1_952,
         };
         try std.testing.expectEqual(connection_size, @sizeOf(Connection));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
+        try std.testing.expectEqual(@as(usize, 56), @sizeOf(RetainedFrameSlot));
         try std.testing.expectEqual(
             @as(usize, 40),
             @sizeOf(DuplexHeaderBlockSlot),
