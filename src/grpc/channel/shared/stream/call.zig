@@ -32,15 +32,69 @@ pub const Event = union(enum) {
     }
 };
 
-pub const Write = struct {
+pub const WriteInput = struct {
     payload: []const u8 = &.{},
     options: codec.MessageOptions = .{},
     final: bool = false,
     finish_only: bool = false,
     deadline: ?std.Io.Clock.Timestamp = null,
+};
+
+pub const Write = struct {
+    const Completion = enum(u32) { waiting, completed, abandoned };
+    allocator: std.mem.Allocator,
+    refs: std.atomic.Value(usize) = .init(1),
+    completion: std.atomic.Value(Completion) = .init(.waiting),
+    payload: []u8,
+    payload_released: bool = false,
+    options: codec.MessageOptions,
+    final: bool,
+    finish_only: bool,
+    deadline: ?std.Io.Clock.Timestamp,
     staged: bool = false,
     done: std.Io.Event = .unset,
     err: ?anyerror = null,
+
+    pub fn create(allocator: std.mem.Allocator, input: WriteInput) std.mem.Allocator.Error!*Write {
+        const command = try allocator.create(Write);
+        errdefer allocator.destroy(command);
+        const payload = try allocator.dupe(u8, input.payload);
+        command.* = .{
+            .allocator = allocator,
+            .payload = payload,
+            .options = input.options,
+            .final = input.final,
+            .finish_only = input.finish_only,
+            .deadline = input.deadline,
+        };
+        return command;
+    }
+    pub fn retain(self: *Write) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+    pub fn release(self: *Write) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (!self.payload_released) self.allocator.free(self.payload);
+        self.allocator.destroy(self);
+    }
+    /// The transport staging buffer owns the encoded message after this point.
+    pub fn releasePayload(self: *Write) void {
+        std.debug.assert(!self.payload_released);
+        self.allocator.free(self.payload);
+        self.payload = &.{};
+        self.payload_released = true;
+    }
+    pub fn abandon(self: *Write) bool {
+        return self.completion.cmpxchgStrong(.waiting, .abandoned, .acq_rel, .acquire) == null;
+    }
+    pub fn complete(self: *Write, io: std.Io, err: ?anyerror) void {
+        self.err = err;
+        const previous = self.completion.cmpxchgStrong(.waiting, .completed, .release, .acquire);
+        if (previous == null) {
+            self.done.set(io);
+        } else std.debug.assert(previous.? == .abandoned);
+        self.release();
+    }
 };
 
 pub fn Call(comptime State: type) type {
@@ -55,10 +109,10 @@ pub fn Call(comptime State: type) type {
         retired: bool = false,
         retired_event: std.Io.Event = .unset,
         changed: std.Io.Event = .unset,
-        failure: ?anyerror = null,
+        failure_code: std.atomic.Value(std.meta.Int(.unsigned, @bitSizeOf(anyerror))) = .init(0),
         write: ?*Write = null,
         request_finished: bool = false,
-        read_busy: bool = false,
+        read_busy: std.atomic.Value(bool) = .init(false),
         parse_body: bool = false,
         initial: ?http2.runtime.DuplexResponseHead = null,
         information: std.ArrayList(http2.runtime.DuplexResponseHead) = .empty,
@@ -109,6 +163,14 @@ pub fn Call(comptime State: type) type {
             self.cancel_requested.store(true, .release);
             if (self.owner_wake.load(.acquire)) |wake| wake.set(self.parent.io);
         }
+        pub fn fail(self: *Self, err: anyerror) void {
+            const ErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+            _ = self.failure_code.cmpxchgStrong(0, @as(ErrorInt, @intFromError(err)), .acq_rel, .acquire);
+        }
+        pub fn failureValue(self: *const Self) ?anyerror {
+            const code = self.failure_code.load(.acquire);
+            return if (code == 0) null else @errorFromInt(code);
+        }
         pub fn cancel(self: *Self) void {
             self.requestCancel();
             self.retired_event.waitUncancelable(self.parent.io);
@@ -137,9 +199,8 @@ pub fn Call(comptime State: type) type {
         }
         pub fn finishWriteLocked(self: *Self, err: ?anyerror) void {
             const write = self.write orelse return;
-            write.err = err;
             self.write = null;
-            write.done.set(self.parent.io);
+            write.complete(self.parent.io, err);
         }
         /// The opening caller owns the sole reference until enqueue succeeds.
         /// No endpoint owner or capability can observe this unpublished call.
@@ -150,10 +211,8 @@ pub fn Call(comptime State: type) type {
 
         pub fn retireLocked(self: *Self, err: ?anyerror) void {
             if (self.retired) return;
-            if (err) |value| if (self.failure == null) {
-                self.failure = value;
-            };
-            self.finishWriteLocked(if (self.failure) |failure| failure else error.ConnectionClosed);
+            if (err) |value| self.fail(value);
+            self.finishWriteLocked(self.failureValue() orelse error.ConnectionClosed);
             self.retired = true;
             self.changed.set(self.parent.io);
             self.retired_event.set(self.parent.io);

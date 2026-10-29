@@ -6,10 +6,12 @@ const metadata = @import("../../../call.zig");
 const deadline_policy = @import("../../../../internal/deadline.zig");
 
 fn fail(call: anytype, err: anyerror) void {
-    call.parent.lock();
-    if (call.failure == null) call.failure = err;
-    call.parent.unlock();
-    call.cancel();
+    call.fail(err);
+    call.requestCancel();
+}
+
+fn interrupted(call: anytype, err: anyerror, rpc_expired: bool) void {
+    if (err == error.Canceled or rpc_expired) fail(call, err);
 }
 
 pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.parent.*).Failure!call_module.Event {
@@ -17,18 +19,8 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
     const state = call.parent;
     call.retain();
     defer call.release();
-    state.lock();
-    if (call.read_busy) {
-        state.unlock();
-        return error.InvalidStreamState;
-    }
-    call.read_busy = true;
-    state.unlock();
-    defer {
-        state.lock();
-        call.read_busy = false;
-        state.unlock();
-    }
+    if (call.read_busy.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return error.InvalidStreamState;
+    defer call.read_busy.store(false, .release);
     const deadline = deadline_policy.earlier(call.deadline, requested);
     const Collector = struct {
         allocator: std.mem.Allocator,
@@ -38,8 +30,16 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
         }
     };
     while (true) {
-        state.lock();
-        if (call.failure) |failure| {
+        // DATA/metadata/terminal committed before the RPC deadline remains
+        // consumable afterwards. A caller-selected read deadline still bounds
+        // mutex admission; otherwise only an empty receive waits on the RPC.
+        const locally_ready = call.changed.isSet();
+        const admission_deadline = if (locally_ready) requested else deadline;
+        // Before admission no cursor or buffered ownership has moved. A local
+        // lock timeout/cancellation is retryable; the endpoint independently
+        // enforces the RPC deadline once it regains State ownership.
+        try state.lockBefore(admission_deadline);
+        if (call.failureValue()) |failure| {
             state.unlock();
             return @errorCast(failure);
         }
@@ -102,8 +102,9 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
         }
         if (call.terminal) |response| {
             if (call.decoder) |*decoder| decoder.finish() catch |err| {
-                if (call.failure == null) call.failure = err;
+                call.fail(err);
                 state.unlock();
+                call.requestCancel();
                 return err;
             };
             call.terminal = null;
@@ -117,7 +118,8 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
             const waited = if (deadline) |until| call.changed.waitTimeout(state.io, .{ .deadline = until }) else call.changed.wait(state.io);
             waited catch |err| {
                 if (err == error.Timeout and deadline.?.durationFromNow(state.io).raw.nanoseconds > 0) continue;
-                if (err == error.Canceled or (call.deadline != null and call.deadline.?.durationFromNow(state.io).raw.nanoseconds <= 0)) call.cancel();
+                const rpc_expired = call.deadline != null and call.deadline.?.durationFromNow(state.io).raw.nanoseconds <= 0;
+                interrupted(call, err, rpc_expired);
                 return err;
             };
             break;

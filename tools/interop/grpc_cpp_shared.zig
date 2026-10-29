@@ -67,7 +67,39 @@ fn runDuplex(allocator: std.mem.Allocator, io: std.Io, sender: netz.grpc.SharedC
     try ra.await(io);
 }
 
-fn runCancellation(allocator: std.mem.Allocator, sender: netz.grpc.SharedChannelSender) !void {
+fn runOperationDeadlinesAndCancellation(allocator: std.mem.Allocator, io: std.Io, sender: netz.grpc.SharedChannelSender) !void {
+    const request = try messages.encodeStreamingOutputCallRequestAlloc(allocator, .{
+        .response_size = 33,
+        .request_body_size = 17,
+    });
+    defer allocator.free(request);
+    {
+        var operation = try sender.startDuplex(.{
+            .path = "/grpc.testing.TestService/FullDuplexCall",
+            .wait_for_ready = true,
+            .timeout = .{ .value = 10, .unit = .second },
+        });
+        defer operation.deinit();
+        var writer = operation.writer();
+        defer writer.deinit();
+        var reader = operation.reader();
+        defer reader.deinit();
+        {
+            sender.state.mutex.lockUncancelable(io);
+            defer sender.state.mutex.unlock(io);
+            try std.testing.expectError(error.Timeout, writer.writeMessageWithTimeout(request, .fromMilliseconds(10)));
+            if (sender.state.mutex.tryLock()) return error.SharedWriteAdmissionReleasedOwner;
+        }
+        try writer.writeFinalMessage(request);
+        {
+            sender.state.mutex.lockUncancelable(io);
+            defer sender.state.mutex.unlock(io);
+            try std.testing.expectError(error.Timeout, reader.nextWithTimeout(.fromMilliseconds(10)));
+            if (sender.state.mutex.tryLock()) return error.SharedReadAdmissionReleasedOwner;
+        }
+        try readShared(reader, 33, allocator);
+    }
+
     var stream = try sender.startDuplex(.{
         .path = "/grpc.testing.TestService/FullDuplexCall",
         .wait_for_ready = true,
@@ -77,12 +109,12 @@ fn runCancellation(allocator: std.mem.Allocator, sender: netz.grpc.SharedChannel
     stream.requestCancel();
     try stream.cancelWithTimeout(.fromSeconds(10));
 
-    const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+    const unary_request = try messages.encodeSimpleRequestAlloc(allocator, .{
         .response_size = 33,
         .request_body_size = 17,
     });
-    defer allocator.free(request);
-    var response = try call(sender, request);
+    defer allocator.free(unary_request);
+    var response = try call(sender, unary_request);
     defer response.deinit();
     if (response.status != .ok) return error.InvalidSharedCancelReuseStatus;
     try messages.validateStreamingOutputCallResponse(response.message.?.payload, 33);
@@ -127,5 +159,5 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     try messages.validateStreamingOutputCallResponse(response_b.message.?.payload, 131101);
     if (channel.endpointCount() != 1 or try channel.refreshNameResolutionWithTimeout(.fromSeconds(10)) != 1) return error.InvalidSharedAddressMembership;
     try runDuplex(allocator, io, sender);
-    try runCancellation(allocator, sender);
+    try runOperationDeadlinesAndCancellation(allocator, io, sender);
 }

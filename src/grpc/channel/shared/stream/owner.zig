@@ -203,6 +203,7 @@ pub fn Owner(comptime State: type) type {
                                 continue;
                             };
                             command.staged = true;
+                            command.releasePayload();
                             progress = true;
                         }
                         const before = active.stream.transport.requestCommittedBytes();

@@ -91,12 +91,12 @@ fn run(comptime truncated: bool) !void {
         }
     }
     try std.testing.expect(call.len != 0);
-    try std.testing.expectEqual(@as(?anyerror, null), call.failure);
+    try std.testing.expectEqual(@as(?anyerror, null), call.failureValue());
     try std.Io.sleep(io, .fromMilliseconds(550), .awake);
     try std.testing.expect(deadline.durationFromNow(io).raw.nanoseconds <= 0);
     const operation = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
     _ = try Owner.tick(&worker, operation);
-    try std.testing.expectEqual(@as(?anyerror, null), call.failure);
+    try std.testing.expectEqual(@as(?anyerror, null), call.failureValue());
     const reader = stream.Reader{ .call = call };
     var initial = try reader.next();
     defer initial.deinit(allocator);

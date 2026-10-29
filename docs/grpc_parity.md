@@ -1519,3 +1519,45 @@ unary reuse through the same SharedChannel, and binds this case into its exact
 terminal record. The legacy joining cancellation regression continues to pass.
 Evidence is recorded in
 `docs/evidence/grpc_shared_stream_cancel/2026-10-29.json`.
+
+## Shared stream operation deadlines and ownership
+
+Shared reader and writer operations now carry their deadline through state-lock
+admission instead of entering the unbounded internal lock path. An admission
+Timeout or executor Canceled result occurs before any cursor, payload or
+endpoint-visible command changes ownership, so it remains retryable on the same
+RPC. For reads, one atomic busy flag rejects concurrent consumers without a
+cleanup lock. The first terminal failure is also published atomically, allowing
+decoder/allocation failures and operation interruption to retain their precise
+cause without reacquiring State before returning.
+
+Once a write is published, its command is heap-owned and reference-counted. It
+deep-copies the request payload and keeps independent caller/endpoint
+references, so a timed or canceled caller can atomically abandon the command,
+publish the first failure, wake the endpoint and return immediately. The
+endpoint may still stage or finish the exact owned bytes, but its late
+completion only drops endpoint ownership; it cannot signal or access the
+departed caller's stack. Completion that wins the race publishes its result
+once and remains visible to the caller. Allocation failure before publication
+releases every partial command/payload allocation and leaves the RPC unchanged.
+
+Read lock admission distinguishes an empty wait from already committed local
+evidence. Metadata, DATA and terminal status committed before the RPC deadline
+remain consumable afterwards, preserving the existing terminal-deadline
+contract. A caller-selected read deadline still bounds mutex admission even
+when buffered work exists. Once an admitted reader is waiting, executor
+cancellation or RPC-deadline expiry atomically fails and wakes the stream; a
+shorter read-only timeout keeps the cursor and RPC resumable.
+
+Synthetic regressions hold State across read/write admission for both Timeout
+and Canceled, then interrupt already-published read/write operations while the
+same mutex remains occupied. They require zero unbounded cleanup waits, exact
+first errors, reset atomic read ownership, byte-exact payload retention after
+the caller overwrites its buffer, and complete State/call/command reclamation.
+The pinned grpc-cpp h2c and verified-TLS gate independently times out write and
+read admission under the held State, retries the complete request and response
+on that same duplex, then verifies asynchronous cancellation, bounded
+retirement and unary reuse. Its terminal record is locked to
+`shared_duplex=2+bounded+operation-deadline+async-cancel-reuse`. Evidence is
+recorded in
+`docs/evidence/grpc_shared_stream_operations/2026-10-29.json`.
