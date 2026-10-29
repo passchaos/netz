@@ -499,9 +499,10 @@ protocol storage. A 10,000-roundtrip, 199-Hz DWARF profile lost zero samples.
 Benchmark full-byte validation and `clock_gettime` account for 16.23% and
 16.16% self; `memcpyFast` is 2.89% self. The former Shared reader
 `Collector.consume` whole-message duplicate is no longer a principal copy.
-Remaining production copy boundaries include the outbound `Write.create`
-caller-input clone, encoded-message staging, and the decoder's first
-cross-DATA reassembly copy.
+At this checkpoint, remaining production copy boundaries included the
+outbound `Write.create` caller-input clone, encoded-message staging, and the
+decoder's first cross-DATA reassembly copy. The following section removes the
+second outbound copy without changing the borrowed Writer contract.
 
 The clean CPU-1 official comparison then ran seven alternating samples against
 grpc-cpp `03d65cc67c`:
@@ -521,9 +522,95 @@ The earlier retained-frame snapshot recorded 2.511x and 2.160x for the two
 256-KiB modes. The new result preserves the small-message advantage and narrows
 the large-message gap, but does not close it: grpc-core retains segmented
 `SliceBuffer` message ownership while the native path still materializes
-contiguous outbound and first-reassembly buffers. Debug and ReleaseFast gRPC
+contiguous outbound and first-reassembly buffers. The following outbound
+ownership change removes that contiguous request staging layer. Debug and ReleaseFast gRPC
 filters each pass 386/386, package tests pass 22/22, and the pinned grpc-cpp
 h2c/TLS matrix passes, including large/streaming/compressed messages,
 cancellation/reuse, deadlines, slow consumers and soak. Full raw rows,
 identities and failure contracts are in
 [the message-ownership evidence](evidence/grpc_shared_message_ownership/2026-10-30.json).
+
+## Shared outbound prefix-reserved ownership
+
+The SharedChannel writer previously cloned the caller payload into its queued
+command, then `ClientDuplex.stageMessage` grew another `5 + payload` buffer,
+copied the entire request into it, and immediately released the command copy.
+grpc-core instead appends a tiny five-byte header slice and retains references
+to the message's `SliceBuffer` payload.
+
+The queued command now owns one allocation with five bytes reserved before the
+borrowed caller payload. Identity messages and gzip/deflate attempts that fall
+back to identity write their prefix into that allocation and transfer it
+directly to `PendingMessage`. Successfully compressed messages retain the old
+separate compressed-output path and free the command input only after staging
+succeeds. `PendingMessage` is still one contiguous slice, so HTTP/2 DATA
+packetization, flow-control progress, response interruption and final-message
+semantics do not change. Finish-only commands allocate no unused prefix.
+The encoding and its adjacent ownership/OOM tests live in the focused
+`stream/duplex/outbound_ownership.zig` module rather than enlarging the duplex
+state-machine root.
+
+Ownership transfers only after successful staging. Compression or framed-
+output OOM leaves the original buffer with the command, and the command detaches
+transferred storage exactly once. Tests cover an identity transfer under an
+allocator that rejects every allocation, strict gzip roundtrip, every
+compressed staging OOM boundary, interrupted command ownership and the exact
+single transfer.
+
+Eight fixed-binary AB/BA pairs used CPU 10, fixed 65,535-byte windows, 100
+warmups, 2,000 measured roundtrips, full-byte validation and peer completion.
+Ratios greater than one favor prefix-reserved ownership:
+
+| Workload | Instructions | Cycles | Throughput | P50 | P99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Persistent, 0 bytes (10,000 rounds) | 1.0056x (8/8) | 1.0011x (6/8) | 1.0007x (4/8) | 1.0011x (4/8) | 1.0013x (5/8) |
+| Persistent, 4 KiB | 1.0139x (8/8) | 1.0091x (8/8) | 1.0070x (8/8) | 1.0068x (7/8) | 1.0063x (7/8) |
+| Persistent, 256 KiB | 1.0276x (8/8) | 1.0376x (8/8) | 1.1033x (8/8) | 1.1036x (8/8) | 1.1063x (8/8) |
+| RPC per roundtrip, 256 KiB | 1.0362x (8/8) | 1.0462x (8/8) | 1.0733x (8/8) | 1.0515x (8/8) | 1.0519x (8/8) |
+
+The zero-byte arm uses 10,000 measured rounds because its initial 2,000-round
+timing pairs moved with scheduler noise despite deterministic instruction
+improvement. Its final timing ratios remain neutral, so only the 0.56%
+instruction reduction is claimed. The command and pending-message layouts do
+not grow. Three telemetry pairs over ten measured roundtrips show unchanged
+live protocol storage:
+
+| Workload | Allocations before / after | Allocated bytes before / after | Live bytes before / after |
+| --- | ---: | ---: | ---: |
+| Persistent, 0 bytes | 60 / 50 | 3,970 / 2,620 | 215,446 / 215,446 |
+| Persistent, 4 KiB | 50 / 40 | 208,830 / 146,040 | 219,545 / 219,545 |
+| Persistent, 256 KiB | 200 / 190 | 18,354,230 / 14,420,710 | 215,441 / 215,441 |
+| RPC per roundtrip, 256 KiB | 379 / 339 median | 19,064,468 / 15,130,948 | 171,720 / 171,720 median |
+
+The 256-KiB shapes remove 3,933,520 requested bytes per ten roundtrips. This is
+larger than ten payloads because the previous `ArrayList` staging capacity grew
+beyond the exact message length. A 10,000-roundtrip 199-Hz DWARF profile
+captured 1,689 samples with zero losses. The former Shared client
+`stageMessage -> encodeMessageAlloc` whole-request copy no longer appears as a
+recognizable memcpy caller. A residual 0.06% `encodeMessageAlloc` child belongs
+to the synchronous server response path.
+
+The clean CPU-1 official comparison then ran seven alternating samples against
+grpc-cpp `03d65cc67c`:
+
+| Native mode | String bytes | Native median us/roundtrip | grpc-cpp median us/roundtrip | Native / grpc-cpp |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent RPC | 0 | 17.533 | 43.517 | 0.403 |
+| Persistent RPC | 512 | 18.011 | 44.754 | 0.402 |
+| Persistent RPC | 4096 | 22.097 | 49.419 | 0.447 |
+| Persistent RPC | 262144 | 821.688 | 395.266 | 2.079 |
+| RPC per roundtrip | 0 | 64.427 | 123.887 | 0.520 |
+| RPC per roundtrip | 512 | 65.763 | 125.037 | 0.526 |
+| RPC per roundtrip | 4096 | 70.780 | 130.828 | 0.541 |
+| RPC per roundtrip | 262144 | 915.920 | 496.145 | 1.846 |
+
+The preceding decoded-message snapshot recorded 2.343x and 1.989x for the two
+256-KiB modes. This change narrows both while preserving the small-message
+advantage, but does not close large-message parity. The borrowed public Writer
+API still requires one caller-payload clone; the synchronous server response
+still stages a framed buffer, and first cross-DATA receive reassembly remains
+contiguous. Debug and ReleaseFast gRPC filters each pass 390/390, package tests
+pass 22/22, and the pinned grpc-cpp h2c/TLS matrix passes across compression,
+large messages, slow consumers, cancellation, deadlines and soak. Full raw
+rows, identities and failure contracts are in
+[the outbound-ownership evidence](evidence/grpc_shared_outbound_ownership/2026-10-30.json).

@@ -164,7 +164,10 @@ fn exerciseInterrupted(operation: Operation) !void {
             try std.testing.expect(probe.entered);
             try std.testing.expect(call.write != null);
             @memset(&payload, 'x');
-            try std.testing.expectEqualStrings("original", call.write.?.payload);
+            try std.testing.expectEqualStrings(
+                "original",
+                call.write.?.payload(),
+            );
         },
         .read => {
             const reader = stream.Reader{ .call = call };
@@ -194,8 +197,23 @@ test "gRPC shared write command allocation failures release partial ownership" {
     const Scenario = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const command = try call_module.Write.create(allocator, .{ .payload = "owned-payload" });
+            try std.testing.expectEqualStrings("owned-payload", command.payload());
             command.release();
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "gRPC shared write command transfers prefix-reserved storage exactly once" {
+    const allocator = std.testing.allocator;
+    const command = try call_module.Write.create(allocator, .{
+        .payload = "transfer-payload",
+    });
+    const storage = command.messageStorage();
+    try std.testing.expectEqual(@as(usize, 5 + "transfer-payload".len), storage.len);
+    try std.testing.expectEqualStrings("transfer-payload", command.payload());
+    const transferred = command.transferPayload();
+    try std.testing.expectEqual(storage.ptr, transferred.ptr);
+    command.release();
+    allocator.free(transferred);
 }

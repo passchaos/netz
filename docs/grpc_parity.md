@@ -1823,8 +1823,36 @@ h2c/TLS matrix passes.
 
 Seven clean CPU-1 samples refresh the official comparison. Netz remains faster
 for 0/512/4096-byte shapes, but the 256-KiB persistent and per-call wall times
-are still 2.343x and 1.989x grpc-cpp. Outbound caller-input cloning, encoded
-message staging, first cross-DATA reassembly, and grpc-core's more general
-segmented `SliceBuffer` ownership remain open performance boundaries. Full
+were still 2.343x and 1.989x grpc-cpp. At that checkpoint, outbound caller-
+input cloning, encoded-message staging, first cross-DATA reassembly, and
+grpc-core's more general segmented `SliceBuffer` ownership remained open. The
+following outbound ownership change removes the staging layer. Full
 evidence is recorded in
 `docs/evidence/grpc_shared_message_ownership/2026-10-30.json`.
+
+## SharedChannel outbound message ownership
+
+Queued SharedChannel writes now reserve the five-byte gRPC prefix in the same
+allocation that clones the borrowed caller payload. Identity and compression-
+fallback messages write the prefix in place and transfer that exact allocation
+to `ClientDuplex.PendingMessage`; actually compressed output retains its
+separate allocation. The pending representation and HTTP/2 DATA packetization
+do not change. OOM before successful staging leaves storage with the command,
+and successful transfer detaches it exactly once.
+
+Eight fixed-binary pairs improve 0-byte instructions by 0.56% with 8/8 wins;
+10,000-round timing is neutral. Persistent 256-KiB instructions/cycles/
+throughput/p50 improve by 2.76%/3.76%/10.33%/10.36%, all 8/8; per-call 256-KiB
+improves by 3.62%/4.62%/7.33%/5.15%, also all 8/8. Ten large persistent
+roundtrips fall from 200 median to 190 protocol
+allocations and from 18,354,230 to 14,420,710 requested bytes with unchanged
+live storage.
+
+Seven clean CPU-1 samples refresh the official 256-KiB comparison from
+2.343x/1.989x to 2.079x/1.846x grpc-cpp for persistent/per-call modes. The
+remaining send-side difference is the one clone required by the borrowed
+Writer API plus synchronous server response staging; grpc-core can retain
+refcounted `SliceBuffer` segments through both boundaries. Debug and
+ReleaseFast gRPC filters pass 390/390, package tests pass 22/22, and the pinned
+grpc-cpp h2c/TLS matrix passes. Full evidence is recorded in
+`docs/evidence/grpc_shared_outbound_ownership/2026-10-30.json`.

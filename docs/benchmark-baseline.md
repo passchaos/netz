@@ -8805,15 +8805,18 @@ persistent and per-call workloads took 2.61x and 2.28x the reference wall time.
 Response-credit batching, native timed writes, retained HTTP/2 read-ahead
 frames, and decoded-message ownership have since removed measured scheduling
 and copy layers without weakening deadlines, validation or ownership. The
-latest ownership change removes one 262,148-byte response recopy per
-roundtrip; eight fixed-binary pairs improve persistent and per-call 256-KiB
-throughput by 9.10% and 8.85%, while zero-byte instructions remain neutral.
-Seven clean CPU-1 samples refresh the official grpc-cpp comparison to 2.343x
-and 1.989x for those large-message modes. Small-message native times remain
-lower in this fixture, but broad gRPC performance completion is still open:
-outbound caller-input cloning, encoded-message staging, first cross-DATA
-reassembly, and grpc-core's segmented `SliceBuffer` ownership remain material
-differences.
+decoded-message ownership change removes one 262,148-byte response recopy per
+roundtrip. Prefix-reserved outbound ownership then removes the second request
+staging buffer without changing the borrowed Writer contract or HTTP/2
+packetization. Eight fixed-binary pairs improve persistent and per-call
+256-KiB throughput by a further 10.33% and 7.33%, while zero-byte instructions
+improve 0.56%. Seven clean CPU-1 samples refresh the official grpc-cpp
+comparison to 2.079x and 1.846x for those large-message modes. Small-message
+native times remain lower in this fixture, but broad gRPC performance
+completion is still open: the borrowed public Writer still clones its caller
+payload, the synchronous server response path still stages a contiguous
+message, first cross-DATA reassembly remains, and grpc-core retains more
+general segmented `SliceBuffer` ownership.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP

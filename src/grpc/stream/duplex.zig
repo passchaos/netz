@@ -17,6 +17,7 @@ const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
 const codec = @import("codec.zig");
 const client_receive = @import("duplex/client_receive.zig");
+const outbound_ownership = @import("duplex/outbound_ownership.zig");
 const sequential = @import("runtime.zig");
 
 pub const Error = sequential.Error;
@@ -257,6 +258,32 @@ pub const ClientDuplex = struct {
     /// Retain an ordinary message for a background owner without socket IO.
     pub fn stageMessage(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions) Error!void {
         try self.stageMessageWithEndStream(payload, options, false);
+    }
+
+    /// Retain a prefix-reserved allocation made by `self.allocator` for a
+    /// background owner. On a `true` result, ownership transfers to this
+    /// stream. A `false` result means compression produced a separate
+    /// allocation and the caller still owns `storage`. On error ownership
+    /// always remains with the caller.
+    pub fn stageOwnedMessageStorage(
+        self: *ClientDuplex,
+        storage: []u8,
+        options: codec.MessageOptions,
+        end_stream: bool,
+    ) Error!bool {
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        const encoded = try outbound_ownership.encode(
+            self.allocator,
+            self.encoder,
+            storage,
+            options,
+        );
+        self.pending_message = .{
+            .bytes = encoded.bytes,
+            .end_stream = end_stream,
+        };
+        return encoded.input_transferred;
     }
 
     fn stageMessageWithEndStream(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions, end_stream: bool) Error!void {

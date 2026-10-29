@@ -3,6 +3,7 @@ const std = @import("std");
 const streaming = @import("../../../stream/runtime.zig");
 const duplex = @import("../../../stream/duplex.zig");
 const codec = @import("../../../stream/codec.zig");
+const wire = @import("../../../wire.zig");
 const http2 = @import("../../../../http2/mod.zig");
 const inputs = @import("../request_inputs.zig");
 const Wake = @import("../wake.zig").Wake;
@@ -37,7 +38,7 @@ pub const Write = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
     completion: std.atomic.Value(Completion) = .init(.waiting),
-    payload: []u8,
+    storage: []u8,
     payload_released: bool = false,
     options: codec.MessageOptions,
     final: bool,
@@ -47,13 +48,22 @@ pub const Write = struct {
     done: std.Io.Event = .unset,
     err: ?anyerror = null,
 
-    pub fn create(allocator: std.mem.Allocator, input: WriteInput) std.mem.Allocator.Error!*Write {
+    pub fn create(
+        allocator: std.mem.Allocator,
+        input: WriteInput,
+    ) (std.mem.Allocator.Error || error{GrpcMessageTooLarge})!*Write {
         const command = try allocator.create(Write);
         errdefer allocator.destroy(command);
-        const payload = try allocator.dupe(u8, input.payload);
+        const encoded_len = if (input.finish_only)
+            0
+        else
+            wire.encodedMessageLen(input.payload.len) catch
+                return error.GrpcMessageTooLarge;
+        const storage = try allocator.alloc(u8, encoded_len);
+        if (!input.finish_only) @memcpy(storage[5..], input.payload);
         command.* = .{
             .allocator = allocator,
-            .payload = payload,
+            .storage = storage,
             .options = input.options,
             .final = input.final,
             .finish_only = input.finish_only,
@@ -66,15 +76,32 @@ pub const Write = struct {
     }
     pub fn release(self: *Write) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        if (!self.payload_released) self.allocator.free(self.payload);
+        if (!self.payload_released) self.allocator.free(self.storage);
         self.allocator.destroy(self);
+    }
+    pub fn payload(self: *const Write) []const u8 {
+        std.debug.assert(!self.payload_released and !self.finish_only);
+        return self.storage[5..];
+    }
+    pub fn messageStorage(self: *Write) []u8 {
+        std.debug.assert(!self.payload_released and !self.finish_only);
+        return self.storage;
     }
     /// The transport staging buffer owns the encoded message after this point.
     pub fn releasePayload(self: *Write) void {
         std.debug.assert(!self.payload_released);
-        self.allocator.free(self.payload);
-        self.payload = &.{};
+        self.allocator.free(self.storage);
+        self.storage = &.{};
         self.payload_released = true;
+    }
+    /// Transfer the prefix-reserved allocation to the transport staging
+    /// buffer after it has accepted ownership.
+    pub fn transferPayload(self: *Write) []u8 {
+        std.debug.assert(!self.payload_released);
+        const storage = self.storage;
+        self.storage = &.{};
+        self.payload_released = true;
+        return storage;
     }
     pub fn abandon(self: *Write) bool {
         return self.completion.cmpxchgStrong(.waiting, .abandoned, .acq_rel, .acquire) == null;

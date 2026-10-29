@@ -1,0 +1,1630 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "SharedChannel prefix-reserved outbound message ownership",
+  "decision": "accepted",
+  "scope": {
+    "baseline_commit": "3eaaea18cf4fc0f58881de4689eb98b942144792",
+    "native_ab": {
+      "cpu": 10,
+      "schedule": "eight alternating AB/BA pairs per workload",
+      "warmup": 100,
+      "iterations": {
+        "persistent_0": 10000,
+        "persistent_4096": 2000,
+        "persistent_262144": 2000,
+        "calls_262144": 2000
+      },
+      "stream_window": 65535,
+      "connection_window": 65535,
+      "validation": "full bytes plus peer completion"
+    },
+    "allocation_telemetry": "three alternating pairs, warmup 100, measured iterations 10; telemetry timings excluded",
+    "external_comparison": {
+      "cpu": 1,
+      "samples": 7,
+      "schedule": "alternating implementations",
+      "warmup": 100,
+      "native_iterations": 2000,
+      "grpc_cpp_min_time": "0.2s per kernel"
+    }
+  },
+  "measured_problem": {
+    "path": "Shared stream Writer.submit -> Write.create -> ClientDuplex.stageMessage -> encodeMessageAlloc",
+    "before": "Write.create cloned the caller payload into one command allocation. stageMessage then grew another 5+payload framed buffer, copied the full payload again, and immediately freed the command allocation.",
+    "grpc_core_reference": "grpc-core adds a tiny five-byte header slice and references the Message SliceBuffer payload from grpc_chttp2 send_message_locked without flattening it."
+  },
+  "design": {
+    "module": "src/grpc/stream/duplex/outbound_ownership.zig",
+    "references": [
+      "/nav_env/Work/grpc/src/core/call/message.h",
+      "/nav_env/Work/grpc/src/core/ext/transport/chttp2/transport/chttp2_transport.cc"
+    ],
+    "description": "Write.create now allocates one 5+payload command buffer, leaves five prefix bytes reserved, and clones the borrowed caller payload directly behind them. ClientDuplex.stageOwnedMessageStorage validates the wire length, writes the prefix in place, and transfers that exact allocation into PendingMessage for identity or compression fallback.",
+    "compressed_path": "When gzip/deflate actually reduces the payload, the compressor and framed compressed output retain the previous separate-allocation path; after successful staging the command frees its original input allocation.",
+    "packetization": "PendingMessage remains one contiguous slice, so HTTP/2 DATA frame boundaries and write/flow-control behavior do not change.",
+    "finish_only": "Finish-only commands retain an empty allocation and do not reserve unused prefix storage.",
+    "failure_contract": "Before successful staging the command retains storage. Length validation, compression, or framed-output OOM leaves it owned by the command. On an input_transferred=true result the command detaches storage exactly once; otherwise it frees the input after the stream owns the compressed output.",
+    "tests": [
+      "identity storage prepends the prefix under an allocator that rejects every allocation",
+      "compressed output keeps caller input ownership and round-trips through strict gzip",
+      "every compressed staging allocation-failure boundary is leak-free",
+      "shared write command transfers prefix-reserved storage exactly once",
+      "interrupted operation retains the original command payload"
+    ]
+  },
+  "identity": {
+    "baseline_sha256": "7f6bf174013c3cb1d2fd05f69ddcd83d235550229f25c5ceba3fb447ae1f27b7",
+    "candidate_sha256": "0de5c869c0d2be68ef68808e844512a6368fb455c2e834cb4d9f316bec2efbf7",
+    "grpc_cpp_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+    "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "perf_data_sha256": "7fa7d31f454b9ab1e0189fb7c003b9e65a5057fa0e9d1ebc54273d8b6cacd870",
+    "source_sha256": {
+      "src/grpc/channel/shared/stream/call.zig": "1b17abede58cb0d2174004d515ab96d8aec8ded5c7656c9ef7ba2b1e47aa1482",
+      "src/grpc/channel/shared/stream/owner.zig": "31d8905cc1587c67bd4e74a08526ba7574b3d6fc8724ba85e5837f6704016d2c",
+      "src/grpc/channel/shared/stream/tests/operation_deadlines.zig": "5f01ca50fc8de4d7403ed0d4bc2331286f63d9648b7471a51c96bd5a9d0eaca2",
+      "src/grpc/stream/duplex.zig": "d50f01b318ef25e391a5424e72ecd50c88e555706848fe5d5c1c38aac2849bfc",
+      "src/grpc/stream/duplex/outbound_ownership.zig": "0bde674af91ab0ababd0e5c85474600e490bba3f5ea4a82ba8ef62e238d90d24"
+    }
+  },
+  "paired_improvement": {
+    "persistent_0": {
+      "cycles": {
+        "max": 1.0074564153266825,
+        "median": 1.001136224451785,
+        "min": 0.9976289023383192,
+        "pairs": [
+          1.0018181919786897,
+          1.0011835392080226,
+          0.9991157364957198,
+          1.0074564153266825,
+          1.001246115972518,
+          1.000936797992493,
+          1.001088909695547,
+          0.9976289023383192
+        ],
+        "wins": 6
+      },
+      "instructions": {
+        "max": 1.005854892225623,
+        "median": 1.0056313892965028,
+        "min": 1.0054107866562656,
+        "pairs": [
+          1.005854892225623,
+          1.005667967125699,
+          1.005635626702065,
+          1.0056428055163953,
+          1.0054388442711146,
+          1.0056271518909403,
+          1.0054107866562656,
+          1.00558674281847
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0076025767512042,
+        "median": 1.0010701683345866,
+        "min": 0.9973532796317608,
+        "pairs": [
+          1.0042968296365111,
+          0.9983279520295204,
+          1,
+          1.0076025767512042,
+          1.0027202222479454,
+          1.0021403366691737,
+          0.9994236975564776,
+          0.9973532796317608
+        ],
+        "wins": 4
+      },
+      "p99": {
+        "max": 1.0079094116308185,
+        "median": 1.00130131989063,
+        "min": 0.9938157081014224,
+        "pairs": [
+          1.004272287097693,
+          1.0015816528272043,
+          0.9952429493713896,
+          1.0079094116308185,
+          1.0010209869540556,
+          1.001589103291714,
+          0.9979090138457192,
+          0.9938157081014224
+        ],
+        "wins": 5
+      },
+      "throughput": {
+        "max": 1.007766549438572,
+        "median": 1.0006935630124358,
+        "min": 0.997274481865753,
+        "pairs": [
+          1.003863596213671,
+          0.9983478642985972,
+          0.9998458907212564,
+          1.007766549438572,
+          1.0024664136177914,
+          1.0015412353036155,
+          0.9988512902185948,
+          0.997274481865753
+        ],
+        "wins": 4
+      }
+    },
+    "persistent_4096": {
+      "cycles": {
+        "max": 1.0192580686622874,
+        "median": 1.0090516227088848,
+        "min": 1.0031644725733433,
+        "pairs": [
+          1.0192580686622874,
+          1.0113044956417214,
+          1.0078141401108274,
+          1.010289105306942,
+          1.0127189768242937,
+          1.0055112301140408,
+          1.0031644725733433,
+          1.0068063014152286
+        ],
+        "wins": 8
+      },
+      "instructions": {
+        "max": 1.013969732713111,
+        "median": 1.0139472155877427,
+        "min": 1.0139181209032109,
+        "pairs": [
+          1.0139518480853222,
+          1.013922784800987,
+          1.0139425830901634,
+          1.013957117601242,
+          1.0139565980240903,
+          1.0139285558354738,
+          1.0139181209032109,
+          1.013969732713111
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0201953403194628,
+        "median": 1.0068178836524768,
+        "min": 0.999544511361911,
+        "pairs": [
+          1.0201953403194628,
+          1.008444399226778,
+          1.005191368078176,
+          1.009812894041082,
+          1.0094488188976378,
+          0.999544511361911,
+          1.004653750821994,
+          1.0051816103632207
+        ],
+        "wins": 7
+      },
+      "p99": {
+        "max": 1.019774755009507,
+        "median": 1.0062659319034777,
+        "min": 0.9994741608483538,
+        "pairs": [
+          1.019774755009507,
+          1.0059836330038423,
+          1.0065482308031126,
+          1.0103011093502376,
+          1.0122742622228749,
+          0.9994741608483538,
+          1.0035121608569673,
+          1.0051328679533056
+        ],
+        "wins": 7
+      },
+      "throughput": {
+        "max": 1.021080659437088,
+        "median": 1.0070188301659886,
+        "min": 1.0001622176802378,
+        "pairs": [
+          1.021080659437088,
+          1.0087672323142924,
+          1.0052255725344086,
+          1.0089571477445105,
+          1.0111937342010353,
+          1.0001622176802378,
+          1.0037521703272387,
+          1.0052704280176847
+        ],
+        "wins": 8
+      }
+    },
+    "persistent_262144": {
+      "cycles": {
+        "max": 1.046359271605277,
+        "median": 1.037581053716394,
+        "min": 1.0343468057392882,
+        "pairs": [
+          1.0405940725714105,
+          1.0387936412002496,
+          1.0363684662325383,
+          1.046359271605277,
+          1.0406780533010351,
+          1.0362303499932088,
+          1.034860251822902,
+          1.0343468057392882
+        ],
+        "wins": 8
+      },
+      "instructions": {
+        "max": 1.0276452818827793,
+        "median": 1.027592728905169,
+        "min": 1.027548794789287,
+        "pairs": [
+          1.0276452818827793,
+          1.027563957637012,
+          1.0275659491194828,
+          1.0276210060611295,
+          1.027548794789287,
+          1.0275960140170943,
+          1.0276031318316312,
+          1.0275894437932436
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.112016680953133,
+        "median": 1.103621495836034,
+        "min": 1.0977959492319551,
+        "pairs": [
+          1.1044462259496792,
+          1.1027967657223887,
+          1.1056843000922607,
+          1.112016680953133,
+          1.105616071108828,
+          1.0997238174780914,
+          1.100756264259388,
+          1.0977959492319551
+        ],
+        "wins": 8
+      },
+      "p99": {
+        "max": 1.1400003048764995,
+        "median": 1.106274203167464,
+        "min": 1.0514437356275703,
+        "pairs": [
+          1.1289500796291871,
+          1.1224016876852585,
+          1.0514437356275703,
+          1.1400003048764995,
+          1.106192345575639,
+          1.0804982445724118,
+          1.0961923666241775,
+          1.1063560607592888
+        ],
+        "wins": 8
+      },
+      "throughput": {
+        "max": 1.1149821549250236,
+        "median": 1.1033151222289377,
+        "min": 1.0990111363276749,
+        "pairs": [
+          1.1115674623175154,
+          1.103620081846501,
+          1.1030101626113744,
+          1.1149821549250236,
+          1.108812108493909,
+          1.0996644647019058,
+          1.1011265803528365,
+          1.0990111363276749
+        ],
+        "wins": 8
+      }
+    },
+    "calls_262144": {
+      "cycles": {
+        "max": 1.0503144976738483,
+        "median": 1.0461577713499342,
+        "min": 1.0414865086063374,
+        "pairs": [
+          1.0503144976738483,
+          1.0500006024672823,
+          1.0453107097293048,
+          1.0440177137409652,
+          1.0426138016338076,
+          1.0414865086063374,
+          1.0470048329705637,
+          1.047406940153519
+        ],
+        "wins": 8
+      },
+      "instructions": {
+        "max": 1.036313637060053,
+        "median": 1.0362167699927043,
+        "min": 1.0360230923537024,
+        "pairs": [
+          1.0360230923537024,
+          1.0362936987099003,
+          1.0362365949135115,
+          1.0362608542285627,
+          1.0361329381656788,
+          1.036313637060053,
+          1.0361969450718973,
+          1.0361217844699024
+        ],
+        "wins": 8
+      },
+      "p50": {
+        "max": 1.0573931087112167,
+        "median": 1.051470397264059,
+        "min": 1.0463410719050408,
+        "pairs": [
+          1.0490985811510327,
+          1.0573931087112167,
+          1.051768790214998,
+          1.0463410719050408,
+          1.0543933994430352,
+          1.0495536765492883,
+          1.0511720043131207,
+          1.0520817416855883
+        ],
+        "wins": 8
+      },
+      "p99": {
+        "max": 1.0658959475108918,
+        "median": 1.0519340221169646,
+        "min": 1.031021541821849,
+        "pairs": [
+          1.0517892204679733,
+          1.0587734173235115,
+          1.04370994538594,
+          1.031021541821849,
+          1.0568004122696255,
+          1.031335314656806,
+          1.052078823765956,
+          1.0658959475108918
+        ],
+        "wins": 8
+      },
+      "throughput": {
+        "max": 1.079889481794997,
+        "median": 1.0732740903632227,
+        "min": 1.0696648157210784,
+        "pairs": [
+          1.069960728052207,
+          1.079889481794997,
+          1.073929457659328,
+          1.0696648157210784,
+          1.0756999878884546,
+          1.0705683947651428,
+          1.0726187230671171,
+          1.0751896668080818
+        ],
+        "wins": 8
+      }
+    }
+  },
+  "paired_rows": [
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277332732,
+      "elapsed": 174008477,
+      "instructions": 362006538,
+      "p50": 17296,
+      "p99": 17630,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 276829403,
+      "elapsed": 173338766,
+      "instructions": 359899366,
+      "p50": 17222,
+      "p99": 17555,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 277014059,
+      "elapsed": 174583722,
+      "instructions": 359902405,
+      "p50": 17344,
+      "p99": 17703,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277341916,
+      "elapsed": 174295286,
+      "instructions": 361942320,
+      "p50": 17315,
+      "p99": 17731,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277455598,
+      "elapsed": 173966603,
+      "instructions": 361928610,
+      "p50": 17287,
+      "p99": 17574,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 277701159,
+      "elapsed": 173993417,
+      "instructions": 359900346,
+      "p50": 17287,
+      "p99": 17658,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 276333722,
+      "elapsed": 173384205,
+      "instructions": 359899875,
+      "p50": 17231,
+      "p99": 17574,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 278394181,
+      "elapsed": 174730802,
+      "instructions": 361930720,
+      "p50": 17362,
+      "p99": 17713,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277429441,
+      "elapsed": 174370640,
+      "instructions": 361937106,
+      "p50": 17325,
+      "p99": 17648,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 277084162,
+      "elapsed": 173941628,
+      "instructions": 359979235,
+      "p50": 17278,
+      "p99": 17630,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 277395983,
+      "elapsed": 174019502,
+      "instructions": 359910491,
+      "p50": 17287,
+      "p99": 17620,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277655847,
+      "elapsed": 174287707,
+      "instructions": 361935762,
+      "p50": 17324,
+      "p99": 17648,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277590317,
+      "elapsed": 174494452,
+      "instructions": 361932424,
+      "p50": 17342,
+      "p99": 17658,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 277288375,
+      "elapsed": 174695126,
+      "instructions": 359984624,
+      "p50": 17352,
+      "p99": 17695,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "candidate",
+      "cycles": 278599659,
+      "elapsed": 174946552,
+      "instructions": 359917588,
+      "p50": 17380,
+      "p99": 17787,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_0",
+      "iterations": 10000,
+      "arm": "baseline",
+      "cycles": 277939072,
+      "elapsed": 174469732,
+      "instructions": 361928355,
+      "p50": 17334,
+      "p99": 17677,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70791661,
+      "elapsed": 44883277,
+      "instructions": 98720828,
+      "p50": 20055,
+      "p99": 34861,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69454109,
+      "elapsed": 43956642,
+      "instructions": 97362442,
+      "p50": 19658,
+      "p99": 34185,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69493149,
+      "elapsed": 43970661,
+      "instructions": 97366297,
+      "p50": 19658,
+      "p99": 34093,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70278734,
+      "elapsed": 44356162,
+      "instructions": 98721907,
+      "p50": 19824,
+      "p99": 34297,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 69978630,
+      "elapsed": 44189299,
+      "instructions": 98721894,
+      "p50": 19750,
+      "p99": 34278,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69436047,
+      "elapsed": 43959585,
+      "instructions": 97364383,
+      "p50": 19648,
+      "p99": 34055,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69668351,
+      "elapsed": 44014346,
+      "instructions": 97364516,
+      "p50": 19668,
+      "p99": 34074,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70385176,
+      "elapsed": 44408589,
+      "instructions": 98723444,
+      "p50": 19861,
+      "p99": 34425,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70369566,
+      "elapsed": 44501440,
+      "instructions": 98722637,
+      "p50": 19871,
+      "p99": 34473,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69485778,
+      "elapsed": 44008817,
+      "instructions": 97363770,
+      "p50": 19685,
+      "p99": 34055,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69847020,
+      "elapsed": 44181374,
+      "instructions": 97364509,
+      "p50": 19759,
+      "p99": 34231,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70231963,
+      "elapsed": 44188541,
+      "instructions": 98720656,
+      "p50": 19750,
+      "p99": 34213,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70271258,
+      "elapsed": 44375228,
+      "instructions": 98718401,
+      "p50": 19861,
+      "p99": 34287,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 70049588,
+      "elapsed": 44209347,
+      "instructions": 97363287,
+      "p50": 19769,
+      "p99": 34167,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 69601825,
+      "elapsed": 44038928,
+      "instructions": 97363137,
+      "p50": 19685,
+      "p99": 34094,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_4096",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 70075556,
+      "elapsed": 44271032,
+      "instructions": 98723274,
+      "p50": 19787,
+      "p99": 34269,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1587288251,
+      "elapsed": 1815543210,
+      "instructions": 2234080219,
+      "p50": 895485,
+      "p99": 1124283,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1525367377,
+      "elapsed": 1633318059,
+      "instructions": 2173979931,
+      "p50": 810800,
+      "p99": 995866,
+      "pair": 1
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1520866827,
+      "elapsed": 1632605408,
+      "instructions": 2174055148,
+      "p50": 809578,
+      "p99": 1011089,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1579866789,
+      "elapsed": 1801776114,
+      "instructions": 2233980712,
+      "p50": 892800,
+      "p99": 1134848,
+      "pair": 2
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1575034126,
+      "elapsed": 1801627775,
+      "instructions": 2233941294,
+      "p50": 894032,
+      "p99": 1113358,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1519762688,
+      "elapsed": 1633373686,
+      "instructions": 2174012574,
+      "p50": 808578,
+      "p99": 1058885,
+      "pair": 3
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1511981025,
+      "elapsed": 1616970791,
+      "instructions": 2174008393,
+      "p50": 803791,
+      "p99": 984005,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1582075364,
+      "elapsed": 1802893577,
+      "instructions": 2234056692,
+      "p50": 893829,
+      "p99": 1121766,
+      "pair": 4
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1580407238,
+      "elapsed": 1807273311,
+      "instructions": 2233937000,
+      "p50": 895329,
+      "p99": 1093876,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1518632235,
+      "elapsed": 1629918448,
+      "instructions": 2174044689,
+      "p50": 809801,
+      "p99": 988866,
+      "pair": 5
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1518358890,
+      "elapsed": 1634960921,
+      "instructions": 2174015746,
+      "p50": 811782,
+      "p99": 990357,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1573369564,
+      "elapsed": 1797908426,
+      "instructions": 2234009915,
+      "p50": 892736,
+      "p99": 1070079,
+      "pair": 6
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1574533605,
+      "elapsed": 1798352178,
+      "instructions": 2234035469,
+      "p50": 892087,
+      "p99": 1089590,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1521493943,
+      "elapsed": 1633192959,
+      "instructions": 2174025555,
+      "p50": 810431,
+      "p99": 993977,
+      "pair": 7
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1518127898,
+      "elapsed": 1629169465,
+      "instructions": 2174010772,
+      "p50": 809328,
+      "p99": 988820,
+      "pair": 8
+    },
+    {
+      "workload": "persistent_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1570270742,
+      "elapsed": 1790475385,
+      "instructions": 2233990520,
+      "p50": 888477,
+      "p99": 1093987,
+      "pair": 8
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1782618973,
+      "elapsed": 1956736602,
+      "instructions": 2499981620,
+      "p50": 989023,
+      "p99": 1175284,
+      "pair": 1
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1697224000,
+      "elapsed": 1828792918,
+      "instructions": 2413055885,
+      "p50": 942736,
+      "p99": 1117414,
+      "pair": 1
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1679593282,
+      "elapsed": 1809388417,
+      "instructions": 2412584639,
+      "p50": 933004,
+      "p99": 1116321,
+      "pair": 2
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1763573958,
+      "elapsed": 1953939520,
+      "instructions": 2500146259,
+      "p50": 986552,
+      "p99": 1181931,
+      "pair": 2
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1756701268,
+      "elapsed": 1944836512,
+      "instructions": 2500464997,
+      "p50": 981579,
+      "p99": 1172247,
+      "pair": 3
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1680554166,
+      "elapsed": 1810953688,
+      "instructions": 2413025181,
+      "p50": 933265,
+      "p99": 1123154,
+      "pair": 3
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1682362865,
+      "elapsed": 1822560509,
+      "instructions": 2412991499,
+      "p50": 940699,
+      "p99": 1122607,
+      "pair": 4
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1756416632,
+      "elapsed": 1949528851,
+      "instructions": 2500488632,
+      "p50": 984292,
+      "p99": 1157432,
+      "pair": 4
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1758577746,
+      "elapsed": 1951422502,
+      "instructions": 2500834273,
+      "p50": 985551,
+      "p99": 1193506,
+      "pair": 5
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1686701004,
+      "elapsed": 1814095495,
+      "instructions": 2413622983,
+      "p50": 934709,
+      "p99": 1129358,
+      "pair": 5
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1680745412,
+      "elapsed": 1812182471,
+      "instructions": 2413223794,
+      "p50": 934300,
+      "p99": 1116089,
+      "pair": 6
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1750473671,
+      "elapsed": 1940065279,
+      "instructions": 2500856727,
+      "p50": 980598,
+      "p99": 1151062,
+      "pair": 6
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1766352322,
+      "elapsed": 1952524144,
+      "instructions": 2501096325,
+      "p50": 987533,
+      "p99": 1161636,
+      "pair": 7
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1687052692,
+      "elapsed": 1820333826,
+      "instructions": 2413726789,
+      "p50": 939459,
+      "p99": 1104134,
+      "pair": 7
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "candidate",
+      "cycles": 1680060530,
+      "elapsed": 1817454137,
+      "instructions": 2413647949,
+      "p50": 935875,
+      "p99": 1110478,
+      "pair": 8
+    },
+    {
+      "workload": "calls_262144",
+      "iterations": 2000,
+      "arm": "baseline",
+      "cycles": 1759707059,
+      "elapsed": 1954107908,
+      "instructions": 2500833220,
+      "p50": 984617,
+      "p99": 1183654,
+      "pair": 8
+    }
+  ],
+  "allocation_telemetry": {
+    "samples": [
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 1,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 2620,
+        "arm": "candidate",
+        "freed_bytes": 2620,
+        "live_bytes": 215446,
+        "pair": 1,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 2620,
+        "arm": "candidate",
+        "freed_bytes": 2620,
+        "live_bytes": 215446,
+        "pair": 2,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 2,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 60,
+        "allocated_bytes": 3970,
+        "arm": "baseline",
+        "freed_bytes": 3970,
+        "live_bytes": 215446,
+        "pair": 3,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 2620,
+        "arm": "candidate",
+        "freed_bytes": 2620,
+        "live_bytes": 215446,
+        "pair": 3,
+        "workload": "persistent_0"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "baseline",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 1,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 40,
+        "allocated_bytes": 146040,
+        "arm": "candidate",
+        "freed_bytes": 146040,
+        "live_bytes": 219545,
+        "pair": 1,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 40,
+        "allocated_bytes": 146040,
+        "arm": "candidate",
+        "freed_bytes": 146040,
+        "live_bytes": 219545,
+        "pair": 2,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "baseline",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 2,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 50,
+        "allocated_bytes": 208830,
+        "arm": "baseline",
+        "freed_bytes": 208830,
+        "live_bytes": 219545,
+        "pair": 3,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 40,
+        "allocated_bytes": 146040,
+        "arm": "candidate",
+        "freed_bytes": 146040,
+        "live_bytes": 219545,
+        "pair": 3,
+        "workload": "persistent_4096"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "baseline",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 1,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 190,
+        "allocated_bytes": 14420710,
+        "arm": "candidate",
+        "freed_bytes": 14420710,
+        "live_bytes": 215441,
+        "pair": 1,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 190,
+        "allocated_bytes": 14420710,
+        "arm": "candidate",
+        "freed_bytes": 14420710,
+        "live_bytes": 215441,
+        "pair": 2,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "baseline",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 2,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 200,
+        "allocated_bytes": 18354230,
+        "arm": "baseline",
+        "freed_bytes": 18354230,
+        "live_bytes": 215441,
+        "pair": 3,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 190,
+        "allocated_bytes": 14420710,
+        "arm": "candidate",
+        "freed_bytes": 14420710,
+        "live_bytes": 215441,
+        "pair": 3,
+        "workload": "persistent_262144"
+      },
+      {
+        "alloc_count": 379,
+        "allocated_bytes": 19064468,
+        "arm": "baseline",
+        "freed_bytes": 19057812,
+        "live_bytes": 171819,
+        "pair": 1,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 339,
+        "allocated_bytes": 15130948,
+        "arm": "candidate",
+        "freed_bytes": 15124292,
+        "live_bytes": 171720,
+        "pair": 1,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 339,
+        "allocated_bytes": 15130948,
+        "arm": "candidate",
+        "freed_bytes": 15124292,
+        "live_bytes": 171720,
+        "pair": 2,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 379,
+        "allocated_bytes": 19064468,
+        "arm": "baseline",
+        "freed_bytes": 19057812,
+        "live_bytes": 171720,
+        "pair": 2,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 379,
+        "allocated_bytes": 19064468,
+        "arm": "baseline",
+        "freed_bytes": 19057812,
+        "live_bytes": 171720,
+        "pair": 3,
+        "workload": "calls_262144"
+      },
+      {
+        "alloc_count": 339,
+        "allocated_bytes": 15130948,
+        "arm": "candidate",
+        "freed_bytes": 15124292,
+        "live_bytes": 171720,
+        "pair": 3,
+        "workload": "calls_262144"
+      }
+    ],
+    "per_ten_roundtrips": {
+      "persistent_0": {
+        "baseline_alloc_count_median": 60,
+        "candidate_alloc_count_median": 50,
+        "baseline_allocated_bytes": 3970,
+        "candidate_allocated_bytes": 2620,
+        "removed_allocated_bytes": 1350,
+        "baseline_live_bytes": 215446,
+        "candidate_live_bytes": 215446
+      },
+      "persistent_4096": {
+        "baseline_alloc_count_median": 50,
+        "candidate_alloc_count_median": 40,
+        "baseline_allocated_bytes": 208830,
+        "candidate_allocated_bytes": 146040,
+        "removed_allocated_bytes": 62790,
+        "baseline_live_bytes": 219545,
+        "candidate_live_bytes": 219545
+      },
+      "persistent_262144": {
+        "baseline_alloc_count_median": 200,
+        "candidate_alloc_count_median": 190,
+        "baseline_allocated_bytes": 18354230,
+        "candidate_allocated_bytes": 14420710,
+        "removed_allocated_bytes": 3933520,
+        "baseline_live_bytes": 215441,
+        "candidate_live_bytes": 215441
+      },
+      "calls_262144": {
+        "baseline_alloc_count_median": 379,
+        "candidate_alloc_count_median": 339,
+        "baseline_allocated_bytes": 19064468,
+        "candidate_allocated_bytes": 15130948,
+        "removed_allocated_bytes": 3933520,
+        "baseline_live_bytes_median": 171720,
+        "candidate_live_bytes_median": 171720
+      }
+    }
+  },
+  "profile": {
+    "workload": "persistent 256 KiB, warmup 100, iterations 10000, 199 Hz user cycles, DWARF",
+    "samples": 1689,
+    "lost_samples": 0,
+    "elapsed_ns": 8388798841,
+    "mem_eql_self_percent": 15.57,
+    "clock_gettime_self_percent": 16.35,
+    "memcpy_fast_self_percent": 3.85,
+    "server_encode_message_alloc_child_percent": 0.06,
+    "removed_hotspot": "The Shared client stageMessage -> encodeMessageAlloc whole-request staging path is absent from the recognizable memcpy call graph. The residual encodeMessageAlloc child belongs to the synchronous server response path.",
+    "remaining_copy_boundaries": [
+      "Write.create must still clone input supplied through the borrowed public Writer API",
+      "synchronous server duplex response encoding still materializes one contiguous framed message",
+      "the decoder's first cross-DATA reassembly copy",
+      "benchmark full-byte request and response validation"
+    ]
+  },
+  "grpc_cpp_comparison": {
+    "previous_message_ownership": {
+      "persistent_262144_ratio": 2.3425810694826743,
+      "calls_262144_ratio": 1.9887678130740158
+    },
+    "context": {
+      "cpu": 1,
+      "samples": 7,
+      "schedule": "alternating",
+      "netz_build_mode": "ReleaseFast",
+      "netz_revision": "3eaaea18cf4fc0f58881de4689eb98b942144792",
+      "netz_dirty": true,
+      "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "arch": "aarch64",
+      "netz_sha256": "0de5c869c0d2be68ef68808e844512a6368fb455c2e834cb4d9f316bec2efbf7",
+      "grpc_cpp_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+      "cpp_time_basis": "real_time",
+      "netz_validation": "full-bytes",
+      "netz_protobuf_scope": "preencoded",
+      "grpc_cpp_protobuf_scope": "serialize+parse"
+    },
+    "results": [
+      {
+        "mode": "persistent",
+        "payload_bytes": 0,
+        "netz_median_ns": 17533,
+        "grpc_cpp_median_ns": 43517.107866248305,
+        "netz_over_grpc_cpp": 0.4028990174137589,
+        "netz_samples_ns": [
+          17533,
+          17445,
+          17570,
+          17502,
+          17608,
+          17478,
+          17621
+        ],
+        "grpc_cpp_samples_ns": [
+          43517.107866248305,
+          43361.20111669005,
+          44030.47452408255,
+          43368.92964865562,
+          43742.31792282427,
+          43261.126860828816,
+          43529.57275571738
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 512,
+        "netz_median_ns": 18011,
+        "grpc_cpp_median_ns": 44754.12186311843,
+        "netz_over_grpc_cpp": 0.40244337840181693,
+        "netz_samples_ns": [
+          18291,
+          17949,
+          18169,
+          18011,
+          18018,
+          17993,
+          17989
+        ],
+        "grpc_cpp_samples_ns": [
+          44965.07686789152,
+          44754.12186311843,
+          44687.65678494121,
+          45045.13424466051,
+          44592.5518569211,
+          44533.91859064731,
+          44857.350767203796
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 4096,
+        "netz_median_ns": 22097,
+        "grpc_cpp_median_ns": 49418.65519562281,
+        "netz_over_grpc_cpp": 0.4471388367920868,
+        "netz_samples_ns": [
+          22336,
+          22037,
+          22218,
+          22039,
+          22102,
+          21959,
+          22097
+        ],
+        "grpc_cpp_samples_ns": [
+          49992.463483868385,
+          49418.65519562281,
+          49658.528080692995,
+          49607.258602701244,
+          49406.63866921941,
+          48885.822747479215,
+          49099.84105582262
+        ]
+      },
+      {
+        "mode": "persistent",
+        "payload_bytes": 262144,
+        "netz_median_ns": 821688,
+        "grpc_cpp_median_ns": 395266.0171487684,
+        "netz_over_grpc_cpp": 2.0788227784599473,
+        "netz_samples_ns": [
+          821688,
+          828128,
+          819376,
+          822901,
+          817747,
+          819856,
+          821733
+        ],
+        "grpc_cpp_samples_ns": [
+          396329.2952724492,
+          397859.54536077054,
+          393367.2776479207,
+          395266.0171487684,
+          386307.83516870067,
+          399117.70820617676,
+          389910.13511282497
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 0,
+        "netz_median_ns": 64427,
+        "grpc_cpp_median_ns": 123886.73909279052,
+        "netz_over_grpc_cpp": 0.5200475892076271,
+        "netz_samples_ns": [
+          64427,
+          64163,
+          64664,
+          64638,
+          63719,
+          64259,
+          64549
+        ],
+        "grpc_cpp_samples_ns": [
+          123886.73909279052,
+          123479.99162778999,
+          124229.35294020287,
+          123976.11273170837,
+          123794.12952429855,
+          123756.02817088715,
+          124818.14970254437
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 512,
+        "netz_median_ns": 65763,
+        "grpc_cpp_median_ns": 125036.73965083067,
+        "netz_over_grpc_cpp": 0.5259494144172777,
+        "netz_samples_ns": [
+          64983,
+          65546,
+          65763,
+          66126,
+          66233,
+          65706,
+          65931
+        ],
+        "grpc_cpp_samples_ns": [
+          125749.87110550916,
+          127500.75076190068,
+          123616.58811749588,
+          125036.73965083067,
+          123770.44803282846,
+          123027.87818810687,
+          126167.49502654768
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 4096,
+        "netz_median_ns": 70780,
+        "grpc_cpp_median_ns": 130827.72566395401,
+        "netz_over_grpc_cpp": 0.5410168191856101,
+        "netz_samples_ns": [
+          70563,
+          70278,
+          71969,
+          70780,
+          70851,
+          71125,
+          70368
+        ],
+        "grpc_cpp_samples_ns": [
+          130839.8443041933,
+          133090.50962407753,
+          133190.8057900002,
+          130425.34595886827,
+          129339.51301350752,
+          130827.72566395401,
+          130117.692528887
+        ]
+      },
+      {
+        "mode": "calls",
+        "payload_bytes": 262144,
+        "netz_median_ns": 915920,
+        "grpc_cpp_median_ns": 496144.88032826205,
+        "netz_over_grpc_cpp": 1.8460736698401565,
+        "netz_samples_ns": [
+          909800,
+          914410,
+          919757,
+          913852,
+          916991,
+          916057,
+          915920
+        ],
+        "grpc_cpp_samples_ns": [
+          490954.85521399457,
+          502547.45186919376,
+          496144.88032826205,
+          502365.95546738786,
+          502145.75140515744,
+          495627.02618736576,
+          495160.0979199303
+        ]
+      }
+    ],
+    "conclusion": "Small-message native times remain below the independent grpc-cpp fixture. The 256 KiB ratios fall to 2.0788x persistent and 1.8461x per-call; broad large-message parity remains open."
+  },
+  "verification": {
+    "debug_grpc": {
+      "passed": 390,
+      "total": 390
+    },
+    "release_fast_grpc": {
+      "passed": 390,
+      "total": 390
+    },
+    "package": {
+      "passed": 22,
+      "total": 22
+    },
+    "grpc_cpp_forward": {
+      "h2c": "passed",
+      "tls": "passed",
+      "coverage": "multiplexed unary/duplex, bounded slow consumer, compression and fallback, large messages, cancellation/reuse, deadlines, metadata, connectivity, keepalive, and 100-call RPC/channel soak"
+    }
+  },
+  "remaining_gap": {
+    "performance": "The borrowed Writer API still requires one caller-payload clone, and the synchronous server response path still stages a contiguous framed buffer. grpc-core can retain refcounted SliceBuffer segments through both boundaries.",
+    "external_ratio": "Official 256 KiB wall-time remains 2.0788x persistent and 1.8461x per-call.",
+    "comparison_boundary": "The native fixture uses preencoded protobuf payloads with full-byte validation; grpc-cpp serializes/parses protobuf in its official CompletionQueue fixture. The result is a local cross-stack indicator, not equal-cost microarchitecture proof."
+  }
+}
