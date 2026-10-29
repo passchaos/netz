@@ -106,3 +106,43 @@ test "gRPC connectivity watch cancellation preserves cursor through mutex conten
     try exercise(false, true, .snapshot);
     for (std.enums.values(Cleanup)) |cleanup| try exercise(true, true, cleanup);
 }
+
+test "gRPC connectivity snapshot watch initialization and exit-idle obey lock deadlines" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const base = threaded.io();
+    const tracker = try connectivity.Tracker.create(allocator, base);
+    defer tracker.release();
+    const references = tracker.references.load(.acquire);
+    const Probe = struct {
+        base: std.Io,
+        mutex: *std.Io.Mutex,
+        unbounded_waits: usize = 0,
+        var active: ?*@This() = null;
+        fn waitUncancelable(userdata: ?*anyopaque, pointer: *const u32, expected: u32) void {
+            const self = active.?;
+            const mutex: *const u32 = @ptrCast(&self.mutex.state.raw);
+            if (pointer == mutex) {
+                self.unbounded_waits += 1;
+                self.mutex.state.store(.unlocked, .release);
+            } else self.base.vtable.futexWaitUncancelable(userdata, pointer, expected);
+        }
+    };
+    var probe = Probe{ .base = base, .mutex = &tracker.mutex };
+    var table = base.vtable.*;
+    table.futexWaitUncancelable = Probe.waitUncancelable;
+    Probe.active = &probe;
+    tracker.io = .{ .userdata = base.userdata, .vtable = &table };
+    tracker.mutex.lockUncancelable(base);
+
+    try std.testing.expectError(error.Timeout, tracker.snapshotWithTimeout(.fromMilliseconds(1)));
+    try std.testing.expectError(error.Timeout, connectivity.Watch.initWithTimeout(tracker, .fromMilliseconds(1)));
+    try std.testing.expectError(error.Timeout, tracker.exitIdleWithDeadline(.fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(1) })));
+    try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
+    try std.testing.expectEqual(references, tracker.references.load(.acquire));
+    try std.testing.expect(!tracker.mutex.tryLock());
+
+    tracker.io = base;
+    Probe.active = null;
+    tracker.mutex.unlock(base);
+}

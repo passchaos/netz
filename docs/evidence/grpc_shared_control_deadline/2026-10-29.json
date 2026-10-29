@@ -1,0 +1,112 @@
+{
+  "baseline_revision": "c2f818233155f635f181bf88999594ed121c2bbd",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Add deadline-bounded SharedChannel control-plane admission across State and connectivity Tracker locks",
+  "reference": {
+    "root": "/home/passchaos/Work/grpc",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "sources": [
+      "src/core/client_channel/client_channel.cc",
+      "src/core/client_channel/client_channel_filter.cc"
+    ],
+    "observed_contract": "channel control-plane updates are serialized through WorkSerializer ownership, shutdown suppresses later updates, and surface observers retain independent references"
+  },
+  "before": {
+    "state_control": "connect, endpoint count and endpoint watch initialization only exposed unbounded State admission",
+    "tracker_control": "connectivity snapshot and Watch initialization only exposed unbounded Tracker admission",
+    "nested_connect": "connect separately snapshotted and updated aggregate connectivity, permitting a second unbounded Tracker lock after State admission",
+    "risk": "a control-plane caller could exceed its budget before receiving a cursor or publishing demand"
+  },
+  "after": {
+    "focused_tests": {
+      "passed": 134,
+      "total": 134
+    },
+    "grpc_tests": {
+      "passed": 375,
+      "total": 375
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "public_api": [
+      "connectWithDeadline",
+      "connectWithTimeout",
+      "endpointCountWithDeadline",
+      "endpointCountWithTimeout",
+      "connectivityStateWithDeadline",
+      "connectivityStateWithTimeout",
+      "watchConnectivityWithDeadline",
+      "watchConnectivityWithTimeout",
+      "watchEndpointConnectivityWithDeadline",
+      "watchEndpointConnectivityWithTimeout"
+    ],
+    "state_lock_cases": [
+      "connect",
+      "endpoint count",
+      "endpoint watch lookup and initialization"
+    ],
+    "tracker_lock_cases": [
+      "nested connect idle transition",
+      "connectivity snapshot",
+      "connectivity Watch initialization",
+      "direct Tracker snapshot",
+      "direct Tracker Watch initialization",
+      "direct Tracker exit-idle"
+    ],
+    "invariants": {
+      "single_absolute_deadline_crosses_nested_state_and_tracker_locks": true,
+      "connect_timeout_leaves_demand_false": true,
+      "watch_init_timeout_retains_no_tracker_reference": true,
+      "endpoint_lookup_is_protected_until_tracker_retain": true,
+      "idle_to_connecting_test_and_transition_are_atomic": true,
+      "shutdown_remains_terminal": true,
+      "compatibility_methods_remain_available": true,
+      "uncancelable_waits_in_bounded_cases": 0
+    }
+  },
+  "interop": {
+    "reference_root": "/home/passchaos/Work/grpc",
+    "reference_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "bazel_version": "8.7.0- (@non-git)",
+    "protocols": [
+      "h2c",
+      "certificate-verified TLS"
+    ],
+    "held_state": "unary, duplex startup, resolution refresh, connect, endpoint count and endpoint watch each exhaust a 10 ms deadline without releasing the fixture mutex",
+    "held_tracker": "nested connect, connectivity snapshot and Watch initialization each exhaust a 10 ms deadline without releasing the fixture mutex",
+    "continuation": "after unlock the same channel completes resolution, health, shared calls, operation deadlines, cancellation reuse and soak",
+    "build_steps_passed": 8,
+    "build_steps_total": 8,
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared control-plane admission' -Dtest-filter='gRPC connectivity snapshot watch initialization' -Dtest-filter='gRPC connectivity watch deadline' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_ROOT=/home/passchaos/Work/grpc BAZEL=/home/passchaos/.pixi/.pixi/envs/bazel/bin/bazel JAVA_HOME=/home/passchaos/.pixi/.pixi/envs/bazel/lib/jvm TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "interop_records": [
+    "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine"
+  ],
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "50fbdec8029dfc822cd276a0e8b90ab852195ba2c9e5a918c18cd8ab49dba58c",
+    "src/grpc/channel/connectivity.zig": "9e943336ff41298355d2a6792358719ea635b40a613c08a634afbf6a8c3d4e4f",
+    "src/grpc/channel/connectivity/deadline_tests.zig": "eb187ae2eae720e4b595cdb47777cf7078911714ef853fe914f97b6a068575fe",
+    "src/grpc/channel/shared.zig": "e5f79612a53c8c77cda9466a08f2eee5cab3b9837a6a86fa8df63cf3ed3f8b87",
+    "src/grpc/channel/shared/state.zig": "b76bd7191354e5055358a9aa3448cebfc4a94ec1f67bf2d67e8c7e31501b5484",
+    "src/grpc/channel/shared/control_deadline_tests.zig": "f8d68feec631df87adeb484179323ba9383c6d7996ac56e3d05a2a06db3229d8",
+    "test/package_test.zig": "1bbd45c1a59c2666f165e7d1d6dee28796420d90d6f30bc0b09a429a2ed332d3",
+    "tools/interop/grpc_cpp_shared.zig": "93f1beca63d61fad7eb21dec302522e0836cb99bd601290fd7216e16c37d84bc",
+    "tools/interop/grpc_cpp_client.zig": "6e0f1913b5c72e2b7648c0b01edb3d45a6790598f7500034b75344754bccfc2c",
+    "tools/interop/grpc_cpp.sh": "2a64af29ca67cda1994bc5ed97dae0b3ba5fc48740b7ce1d069f1e820c09c968"
+  }
+}

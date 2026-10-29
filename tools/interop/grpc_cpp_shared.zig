@@ -7,14 +7,27 @@ fn call(sender: netz.grpc.SharedChannelSender, request: []const u8) !netz.grpc.U
     return sender.unary(.{ .path = "/grpc.testing.TestService/UnaryCall", .message = request, .timeout = .{ .value = 10, .unit = .second }, .wait_for_ready = true });
 }
 
-fn verifyAdmission(sender: netz.grpc.SharedChannelSender, io: std.Io) !void {
-    sender.state.mutex.lockUncancelable(io);
-    defer sender.state.mutex.unlock(io);
-    try std.testing.expectError(error.Timeout, sender.unary(.{ .path = "/grpc.testing.TestService/UnaryCall", .message = &.{}, .timeout = .{ .value = 10, .unit = .millisecond } }));
-    try std.testing.expectError(error.Timeout, sender.startDuplex(.{ .path = "/grpc.testing.TestService/FullDuplexCall", .timeout = .{ .value = 10, .unit = .millisecond } }));
-    try std.testing.expectError(error.Timeout, sender.state.refreshNameResolution(.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(10) })));
-    if (sender.state.mutex.tryLock()) return error.SharedAdmissionReleasedOwner;
-    if (sender.state.head != null or sender.state.queued != 0) return error.SharedAdmissionQueuedExpiredCall;
+fn verifyAdmission(channel: *netz.grpc.SharedChannel, sender: netz.grpc.SharedChannelSender, io: std.Io) !void {
+    {
+        sender.state.mutex.lockUncancelable(io);
+        defer sender.state.mutex.unlock(io);
+        try std.testing.expectError(error.Timeout, sender.unary(.{ .path = "/grpc.testing.TestService/UnaryCall", .message = &.{}, .timeout = .{ .value = 10, .unit = .millisecond } }));
+        try std.testing.expectError(error.Timeout, sender.startDuplex(.{ .path = "/grpc.testing.TestService/FullDuplexCall", .timeout = .{ .value = 10, .unit = .millisecond } }));
+        try std.testing.expectError(error.Timeout, sender.state.refreshNameResolution(.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(10) })));
+        try std.testing.expectError(error.Timeout, channel.connectWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expectError(error.Timeout, channel.endpointCountWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expectError(error.Timeout, channel.watchEndpointConnectivityWithTimeout(0, .fromMilliseconds(10)));
+        if (sender.state.mutex.tryLock()) return error.SharedAdmissionReleasedOwner;
+        if (sender.state.head != null or sender.state.queued != 0) return error.SharedAdmissionQueuedExpiredCall;
+    }
+    {
+        sender.state.tracker.mutex.lockUncancelable(io);
+        defer sender.state.tracker.mutex.unlock(io);
+        try std.testing.expectError(error.Timeout, channel.connectWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expectError(error.Timeout, channel.connectivityStateWithTimeout(.fromMilliseconds(10)));
+        try std.testing.expectError(error.Timeout, channel.watchConnectivityWithTimeout(.fromMilliseconds(10)));
+        if (sender.state.tracker.mutex.tryLock()) return error.SharedTrackerAdmissionReleasedOwner;
+    }
 }
 
 fn readShared(reader: netz.grpc.SharedStreamReader, size: usize, allocator: std.mem.Allocator) !void {
@@ -142,7 +155,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     defer channel.deinit();
     var sender = channel.sender();
     defer sender.deinit();
-    try verifyAdmission(sender, io);
+    try verifyAdmission(&channel, sender, io);
     const request_a = try messages.encodeSimpleRequestAlloc(allocator, .{ .response_size = 65553, .request_body_size = 127 });
     defer allocator.free(request_a);
     const request_b = try messages.encodeSimpleRequestAlloc(allocator, .{ .response_size = 131101, .request_body_size = 257 });

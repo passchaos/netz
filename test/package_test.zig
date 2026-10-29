@@ -364,8 +364,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Channel"));
     try std.testing.expect(@hasDecl(netz.grpc, "SharedChannel"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "sender"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCount"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCountWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "endpointCountWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "watchEndpointConnectivity"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "watchEndpointConnectivityWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "watchEndpointConnectivityWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectivityStateWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "connectivityStateWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "watchConnectivityWithDeadline"));
+    try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "watchConnectivityWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "requestNameResolution"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "refreshNameResolutionWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "refreshNameResolutionWithTimeout"));

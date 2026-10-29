@@ -1590,3 +1590,39 @@ admission budget, then releases it and completes real resolution, health,
 shared calls and soak. Its exact terminal record now contains
 `shared_admission=rpc+resolution-deadline`. Evidence is recorded in
 `docs/evidence/grpc_shared_resolution_deadline/2026-10-29.json`.
+
+## Shared control-plane admission deadlines
+
+SharedChannel control-plane reads and activation now have bounded counterparts:
+`connectWithDeadline/Timeout`, `endpointCountWithDeadline/Timeout`,
+`connectivityStateWithDeadline/Timeout`,
+`watchConnectivityWithDeadline/Timeout`, and
+`watchEndpointConnectivityWithDeadline/Timeout`. Existing `connect`, snapshot
+and watch methods retain their compatibility behavior.
+
+State-backed operations use the caller's timestamp for initial admission.
+Endpoint watch creation keeps State ownership while initializing the selected
+endpoint tracker under the same absolute budget, so resolver reconciliation or
+worker removal cannot invalidate the tracker between lookup and retain.
+`connectWithDeadline` also carries that budget into the aggregate connectivity
+tracker; idle-to-connecting transition and waiter notification happen under one
+tracker lock before demand is published. A Tracker timeout therefore leaves
+demand and wake state unchanged.
+
+Connectivity trackers expose bounded snapshot and Watch initialization. A
+failed Watch initialization retains no tracker reference or cursor. The
+idle-to-connecting helper performs its state test and generation transition
+atomically instead of the former separate snapshot/set locks, while SHUTDOWN
+remains terminal.
+
+Focused regressions hold the Shared State mutex across connect, endpoint count
+and endpoint watch admission, then independently hold the aggregate Tracker
+mutex across connect, connectivity snapshot and Watch creation. Every 1 ms
+operation returns Timeout with zero unbounded waits, preserves both mutex
+owners, retains reference counts and leaves demand false. Successful bounded
+snapshot and Watch initialization are also checked after release. The pinned
+grpc-cpp h2c/TLS matrix repeats these held-lock probes on the live hostname
+channel before completing resolution, health, shared calls, cancellation and
+soak; its exact record is
+`shared_admission=rpc+resolution+control-deadline`. Evidence is recorded in
+`docs/evidence/grpc_shared_control_deadline/2026-10-29.json`.

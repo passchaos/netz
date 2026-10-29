@@ -53,26 +53,68 @@ pub const SharedChannel = struct {
         return .{ .state = self.state };
     }
     pub fn connect(self: SharedChannel) void {
-        self.state.lock();
+        self.connectUntil(null) catch unreachable;
+    }
+    pub fn connectWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!void {
+        return self.connectUntil(deadline);
+    }
+    pub fn connectWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.connectWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    fn connectUntil(self: SharedChannel, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        if (deadline) |until| {
+            try self.state.lockBefore(until);
+        } else self.state.lock();
         defer self.state.unlock();
         if (self.state.closed) return;
+        if (deadline) |until| {
+            try self.state.tracker.exitIdleWithDeadline(until);
+        } else self.state.tracker.exitIdle();
         self.state.demand = true;
-        if (self.state.tracker.snapshot().state == .idle) self.state.tracker.setState(.connecting);
         self.state.wakeAllLocked();
     }
     pub fn watchConnectivity(self: SharedChannel) connectivity.Watch {
         return .init(self.state.tracker);
     }
+    pub fn watchConnectivityWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!connectivity.Watch {
+        return try .initWithDeadline(self.state.tracker, deadline);
+    }
+    pub fn watchConnectivityWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!connectivity.Watch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.watchConnectivityWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
     pub fn connectivityState(self: SharedChannel) connectivity.State {
         return self.state.tracker.snapshot().state;
+    }
+    pub fn connectivityStateWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!connectivity.State {
+        return (try self.state.tracker.snapshotWithDeadline(deadline)).state;
+    }
+    pub fn connectivityStateWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!connectivity.State {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.connectivityStateWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
     }
     /// Latest resolver membership; retained cursors still identify their
     /// original endpoint when a later update changes this ordinal.
     pub fn watchEndpointConnectivity(self: SharedChannel, index: usize) ?connectivity.Watch {
         return self.state.watchEndpoint(index);
     }
+    pub fn watchEndpointConnectivityWithDeadline(self: SharedChannel, index: usize, deadline: std.Io.Clock.Timestamp) Error!?connectivity.Watch {
+        return self.state.watchEndpointWithDeadline(index, deadline);
+    }
+    pub fn watchEndpointConnectivityWithTimeout(self: SharedChannel, index: usize, timeout: std.Io.Duration) Error!?connectivity.Watch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.watchEndpointConnectivityWithDeadline(index, .fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
     pub fn endpointCount(self: SharedChannel) usize {
         return self.state.endpointCount();
+    }
+    pub fn endpointCountWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
+        return self.state.endpointCountWithDeadline(deadline);
+    }
+    pub fn endpointCountWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.endpointCountWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
     }
     pub fn requestNameResolution(self: SharedChannel) Error!void {
         return self.state.requestNameResolution();
@@ -98,6 +140,7 @@ test {
     _ = @import("shared/admission_tests.zig");
     _ = @import("shared/retirement_tests.zig");
     _ = @import("shared/job_tests.zig");
+    _ = @import("shared/control_deadline_tests.zig");
     _ = @import("shared/resolution/tests.zig");
     _ = @import("shared/stream/tests.zig");
 }

@@ -71,11 +71,39 @@ pub const Tracker = struct {
         return self.snapshotLocked();
     }
 
+    pub fn snapshotWithDeadline(self: *Tracker, deadline: std.Io.Clock.Timestamp) WaitError!Snapshot {
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
+        defer self.mutex.unlock(self.io);
+        self.pruneAbandonedLocked();
+        return self.snapshotLocked();
+    }
+
+    pub fn snapshotWithTimeout(self: *Tracker, timeout: std.Io.Duration) WaitError!Snapshot {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.snapshotWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
+
     pub fn setState(self: *Tracker, state: State) void {
         self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.setStateLocked(state);
+    }
+
+    pub fn exitIdle(self: *Tracker) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.state == .idle) self.setStateLocked(.connecting);
+    }
+
+    pub fn exitIdleWithDeadline(self: *Tracker, deadline: std.Io.Clock.Timestamp) WaitError!void {
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
+        defer self.mutex.unlock(self.io);
+        if (self.state == .idle) self.setStateLocked(.connecting);
+    }
+
+    fn setStateLocked(self: *Tracker, state: State) void {
         self.pruneAbandonedLocked();
         if (self.state == .shutdown or self.state == state) {
-            self.mutex.unlock(self.io);
             return;
         }
         self.state = state;
@@ -86,7 +114,6 @@ pub const Tracker = struct {
             waiter.notify(self.io, current_snapshot);
             waiter.release();
         }
-        self.mutex.unlock(self.io);
     }
 
     pub fn waitAfter(
@@ -170,6 +197,17 @@ pub const Watch = struct {
     pub fn init(tracker: *Tracker) Watch {
         tracker.retain();
         return .{ .tracker = tracker, .observed = tracker.snapshot() };
+    }
+
+    pub fn initWithDeadline(tracker: *Tracker, deadline: std.Io.Clock.Timestamp) WaitError!Watch {
+        const observed = try tracker.snapshotWithDeadline(deadline);
+        tracker.retain();
+        return .{ .tracker = tracker, .observed = observed };
+    }
+
+    pub fn initWithTimeout(tracker: *Tracker, timeout: std.Io.Duration) WaitError!Watch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return initWithDeadline(tracker, .fromNow(tracker.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     pub fn deinit(self: *Watch) void {

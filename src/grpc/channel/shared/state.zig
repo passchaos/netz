@@ -103,14 +103,29 @@ pub const State = struct {
         defer self.unlock();
         return self.endpointCountLocked();
     }
+    pub fn endpointCountWithDeadline(self: *State, deadline: std.Io.Clock.Timestamp) Error!usize {
+        try self.lockBefore(deadline);
+        defer self.unlock();
+        return self.endpointCountLocked();
+    }
     pub fn watchEndpoint(self: *State, index: usize) ?connectivity.Watch {
         self.lock();
         defer self.unlock();
+        const tracker = self.endpointTrackerLocked(index) orelse return null;
+        return .init(tracker);
+    }
+    pub fn watchEndpointWithDeadline(self: *State, index: usize, deadline: std.Io.Clock.Timestamp) Error!?connectivity.Watch {
+        try self.lockBefore(deadline);
+        defer self.unlock();
+        const tracker = self.endpointTrackerLocked(index) orelse return null;
+        return try .initWithDeadline(tracker, deadline);
+    }
+    fn endpointTrackerLocked(self: *State, index: usize) ?*connectivity.Tracker {
         if (self.closed) return null;
         var ordinal = index;
         for (self.sources) |*source| {
             const members = source.latest();
-            if (ordinal < members.len) return .init(members[ordinal].tracker);
+            if (ordinal < members.len) return members[ordinal].tracker;
             ordinal -= members.len;
         }
         return null;
