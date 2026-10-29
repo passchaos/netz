@@ -69,8 +69,20 @@ class ProcessSourceIdentityTests(unittest.TestCase):
                 "broker/16-config-includedir.py",
                 "broker/23-security-password-file-reload.py",
                 "broker/23-security-acl-file-reload.py",
+                "broker/01-connect-575314.py",
             },
         )
+
+    def test_connect_packet_encodes_large_mqtt5_property_length(self) -> None:
+        properties = b"\x26\x00\x01k\x00\x01v" * 5_001
+        packet = broker_config.connect_packet("client", properties=properties)
+        self.assertIn(properties, packet)
+        with self.assertRaisesRegex(ValueError, "require MQTT 5"):
+            broker_config.connect_packet(
+                "client",
+                proto_ver=4,
+                properties=properties,
+            )
 
     def test_accepts_exact_process_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

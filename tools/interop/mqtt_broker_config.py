@@ -146,6 +146,8 @@ MOSQUITTO_PROCESS_SOURCES = {
         "de0ae7ebf17db99700bed5e12adf777a44f330a70b45196e3ff16147b2b70d42",
     "broker/23-security-acl-file-reload.py":
         "a8df20a7bab7b87ae79b83d81d3a44de29de03ea51f797e4933efb4e9dcd13e0",
+    "broker/01-connect-575314.py":
+        "911b669a06577269c6cdea9327da6f140ae4e8e86718abac4b8bda01f448b732",
 }
 
 
@@ -190,6 +192,7 @@ def parse_args() -> argparse.Namespace:
         "--only-retained-source-persistence",
         action="store_true",
     )
+    selected.add_argument("--only-connect-property-linear", action="store_true")
     return parser.parse_args()
 
 
@@ -251,6 +254,7 @@ def connect_packet(
     will_payload: bytes = b"",
     will_retain: bool = False,
     clean_start: bool = True,
+    properties: bytes = b"",
 ) -> bytes:
     flags = 0x02 if clean_start else 0x00
     payload = utf8(client_id)
@@ -269,14 +273,136 @@ def connect_packet(
         flags |= 0x40
         encoded_password = password.encode()
         payload += len(encoded_password).to_bytes(2, "big") + encoded_password
+    if proto_ver != 5 and properties:
+        raise ValueError("CONNECT properties require MQTT 5")
     body = (
         utf8("MQIsdp" if proto_ver == 3 else "MQTT")
         + bytes((proto_ver, flags))
         + keep_alive.to_bytes(2, "big")
-        + (b"\x00" if proto_ver == 5 else b"")
+        + (
+            variable_integer(len(properties)) + properties
+            if proto_ver == 5
+            else b""
+        )
         + payload
     )
     return mqtt_packet(0x10, body)
+
+
+def process_cpu_ticks(process: subprocess.Popen[str]) -> int:
+    stat = Path(f"/proc/{process.pid}/stat").read_text()
+    fields = stat[stat.rfind(")") + 2:].split()
+    # fields starts at the kernel's field 3 (state); utime/stime are 14/15.
+    return int(fields[11]) + int(fields[12])
+
+
+def run_connect_property_linear_case(broker: Path, directory: Path) -> dict:
+    phase_connections = 500
+    phases = ("properties", "client-id", "client-id", "properties")
+    total_connections = phase_connections * len(phases)
+    user_property = b"\x26" + utf8("key") + utf8("value")
+    property_count = 5_001
+    slow = connect_packet(
+        "connect-user-property",
+        properties=user_property * property_count,
+    )
+    fast = connect_packet("a" * 65_000)
+    if abs(len(slow) - len(fast)) > 128:
+        raise AssertionError(
+            f"CONNECT comparison is not byte-balanced: {len(slow)} vs {len(fast)}"
+        )
+
+    port = free_port()
+    config = directory / "connect-property-linear.conf"
+    config.write_text(
+        f"listener {port} 127.0.0.1\n"
+        "listener_allow_anonymous true\n"
+        f"max_connections {total_connections}\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    expected = (
+        "netz MQTT 3.1/3.1.1/5 broker configured 1 listeners for "
+        f"{total_connections} clients server_io=zio-std-io"
+    )
+    if ready != expected:
+        process.kill()
+        process.wait()
+        raise RuntimeError(f"CONNECT property broker failed to start: {ready}")
+
+    samples: list[dict] = []
+    try:
+        for phase in phases:
+            packet = slow if phase == "properties" else fast
+            cpu_before = process_cpu_ticks(process)
+            wall_before = time.monotonic_ns()
+            for _ in range(phase_connections):
+                sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+                sock.settimeout(5)
+                try:
+                    sock.sendall(packet)
+                    if connack_reason(read_mqtt_packet(sock)) != 0:
+                        raise AssertionError(f"{phase} CONNECT was rejected")
+                    sock.sendall(b"\xe0\x00")
+                finally:
+                    sock.close()
+            samples.append(
+                {
+                    "phase": phase,
+                    "cpu_ticks": process_cpu_ticks(process) - cpu_before,
+                    "wall_ns": time.monotonic_ns() - wall_before,
+                }
+            )
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    try:
+        return_code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("CONNECT property broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"CONNECT property broker exited {return_code}: {process.stdout.read()}"
+        )
+    property_ticks = sum(
+        sample["cpu_ticks"] for sample in samples
+        if sample["phase"] == "properties"
+    )
+    client_id_ticks = sum(
+        sample["cpu_ticks"] for sample in samples
+        if sample["phase"] == "client-id"
+    )
+    if client_id_ticks <= 0:
+        raise AssertionError("CONNECT client-id CPU baseline was zero ticks")
+    ratio = property_ticks / client_id_ticks
+    if ratio >= 20.0:
+        raise AssertionError(
+            f"CONNECT User Property CPU ratio {ratio:.6f} exceeded 20x"
+        )
+    return {
+        "source": "broker/01-connect-575314.py",
+        "source_sha256": MOSQUITTO_PROCESS_SOURCES["broker/01-connect-575314.py"],
+        "broker_sha256": hashlib.sha256(broker.read_bytes()).hexdigest(),
+        "property_count": property_count,
+        "phase_connections": phase_connections,
+        "slow_packet_bytes": len(slow),
+        "fast_packet_bytes": len(fast),
+        "property_cpu_ticks": property_ticks,
+        "client_id_cpu_ticks": client_id_ticks,
+        "clock_ticks_per_second": os.sysconf("SC_CLK_TCK"),
+        "machine": os.uname().machine,
+        "cpu_ratio": ratio,
+        "samples": samples,
+    }
 
 
 def subscribe_packet(
@@ -7421,7 +7547,11 @@ def main() -> None:
     source_count = 0
     test_root = args.mosquitto_test_root
     if test_root is None and (
-        args.only_include_directory or args.only_will_lifecycle or args.only_will_delay or args.only_session_expiry_restart
+        args.only_include_directory
+        or args.only_will_lifecycle
+        or args.only_will_delay
+        or args.only_session_expiry_restart
+        or args.only_connect_property_linear
     ):
         test_root = Path.home() / "Work/mosquitto/test"
     if test_root is not None:
@@ -7431,6 +7561,19 @@ def main() -> None:
     os.environ[FINITE_TEST_ENV] = "1"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
+        if args.only_connect_property_linear:
+            result = run_connect_property_linear_case(args.broker, directory)
+            print(
+                "MQTT CONNECT property linearity result: "
+                + json.dumps(result, sort_keys=True)
+            )
+            print(
+                "MQTT CONNECT property linearity integration passed: "
+                "upstream=01-connect-575314 properties=5001 schedule=ABBA "
+                "cpu_ratio_lt_20=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
         if args.only_include_directory:
             run_include_directory_case(args.broker, directory)
             run_include_directory_reload_case(args.broker, directory)
@@ -7795,9 +7938,11 @@ def main() -> None:
         run_signed_crl_listener_case(args.broker, directory, "p384")
         run_signed_crl_listener_case(args.broker, directory, "ed25519")
         run_rsa_tls_identity_case(args.broker, directory)
+        run_connect_property_linear_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: missing-root exit=3, "
         "CRLF mqttv311+mqttv5, strict authentication, "
+        "source-locked linear CONNECT User Property processing, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "hard heap memory limit with live SIGHUP reload, "
         "locked crash-recoverable PID-file lifecycle, "

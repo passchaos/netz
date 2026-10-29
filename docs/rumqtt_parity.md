@@ -5806,8 +5806,23 @@ proxy evidence for the entire suite.
    queue recovery, five unacknowledged deliveries, expiry during downtime,
    Session Present, exact sibling and retained delivery, durable queue and
    subscription deletion, and replacement routing. The source catalog now
-   locks 37 process files; its packet oracle rejects late delivery and EOF
+   locks 38 process files; its packet oracle rejects late delivery and EOF
    instead of accepting either as evidence of an empty queue.
+
+   A dedicated production-process gate now source-locks Mosquitto issue
+   #575314 through `01-connect-575314.py`. It compares MQTT 5 CONNECT packets
+   carrying 5,001 repeated User Properties against a byte-balanced 65,000-byte
+   Client Identifier. Four 500-connection phases run A/B/B/A through the
+   ReleaseFast configured broker, validate every CONNACK, and measure broker
+   user+system CPU directly from `/proc` rather than client wall time. Both
+   arms therefore total the upstream test's 1,000 connections. On the recorded
+   AArch64 run, the packets were 65,053 and 65,017 bytes; repeated properties
+   consumed 22 CPU ticks versus 10 for the Client Identifier, a 2.2x ratio
+   under Mosquitto's source threshold of 20x. The implementation's repeatable
+   property duplicate check exits in O(1), while decode, value validation,
+   context validation and authentication-property checks remain sequential.
+   Evidence is recorded in
+   `docs/evidence/mqtt_connect_property_linear/2026-10-29.json`.
 
 3. **Prometheus exposition (new).** `mqtt.broker_prometheus.render(allocator, broker.stats())`
    emits deterministic Prometheus text exposition 0.0.4 from one coherent

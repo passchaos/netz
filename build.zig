@@ -1744,6 +1744,21 @@ pub fn build(b: *std.Build) void {
     mqtt_broker_config_step.dependOn(&mqtt_broker_config.step);
     test_step.dependOn(&mqtt_broker_config.step);
 
+    const mqtt_connect_property_linear = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_config.py",
+    });
+    mqtt_connect_property_linear.addArtifactArg(mqtt_vectors_broker);
+    mqtt_connect_property_linear.addArg("--only-connect-property-linear");
+    if (b.args) |args| mqtt_connect_property_linear.addArgs(args);
+    const mqtt_connect_property_linear_step = b.step(
+        "interop-mqtt-connect-property-linear",
+        "Verify source-locked linear MQTT CONNECT User Property processing",
+    );
+    mqtt_connect_property_linear_step.dependOn(
+        &mqtt_connect_property_linear.step,
+    );
+
     const mqtt_will_lifecycle = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_broker_config.py",

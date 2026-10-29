@@ -1,0 +1,108 @@
+{
+  "baseline_revision": "39085e60f6e3987142f7dceeca3bdc95a2587096",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Source-lock and independently verify linear production MQTT 5 CONNECT User Property processing against Mosquitto issue 575314",
+  "reference": {
+    "root": "/nav_env/Work/mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source": "test/broker/01-connect-575314.py",
+    "source_sha256": "911b669a06577269c6cdea9327da6f140ae4e8e86718abac4b8bda01f448b732",
+    "upstream_threshold": 20.0,
+    "intent": "repeated User Property processing must not regress to the historical greater-than-100x behavior"
+  },
+  "implementation_audit": {
+    "repeatable_user_property_duplicate_check": "O(1) early return",
+    "property_decode": "single forward cursor",
+    "property_value_validation": "single forward pass",
+    "packet_context_validation": "single forward pass",
+    "authentication_pair_validation": "single forward pass",
+    "runtime_change_required": false
+  },
+  "fixture": {
+    "broker_sha256": "4408a9a4c5c5d36551377507d24934b7da2d56c6c66a3cf940152f3ac2470ee8",
+    "build_mode": "ReleaseFast",
+    "machine": "aarch64",
+    "clock_ticks_per_second": 100,
+    "schedule": [
+      "properties",
+      "client-id",
+      "client-id",
+      "properties"
+    ],
+    "phase_connections": 500,
+    "connections_per_arm": 1000,
+    "property_count": 5001,
+    "property_packet_bytes": 65053,
+    "client_id_packet_bytes": 65017,
+    "every_connack_validated": true,
+    "every_connection_gracefully_disconnected": true
+  },
+  "samples": [
+    {
+      "phase": "properties",
+      "cpu_ticks": 11,
+      "wall_ns": 136385253
+    },
+    {
+      "phase": "client-id",
+      "cpu_ticks": 5,
+      "wall_ns": 53219118
+    },
+    {
+      "phase": "client-id",
+      "cpu_ticks": 5,
+      "wall_ns": 53348007
+    },
+    {
+      "phase": "properties",
+      "cpu_ticks": 11,
+      "wall_ns": 114556248
+    }
+  ],
+  "result": {
+    "property_cpu_ticks": 22,
+    "client_id_cpu_ticks": 10,
+    "cpu_ratio": 2.2,
+    "threshold": 20.0,
+    "passed": true
+  },
+  "verification": {
+    "source_lock_and_packet_helper_tests": {
+      "passed": 24,
+      "total": 24
+    },
+    "mqtt_property_connect_tests": {
+      "passed": 136,
+      "total": 136
+    },
+    "package_tests": {
+      "passed": 22,
+      "total": 22
+    },
+    "complete_broker_config_interop": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "mosquitto_process_sources": 38,
+      "client_io": "python-socket",
+      "server_io": "zio-std-io"
+    }
+  },
+  "verification_commands": [
+    "python3 -m unittest mqtt_mosquitto_packet_sequences_test.py (cwd=tools/interop)",
+    "zig build test-lib -Dtest-filter='MQTT v5 property' -Dtest-filter='MQTT CONNECT' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-mqtt-connect-property-linear -Doptimize=ReleaseFast --summary all",
+    "zig build interop-mqtt-broker-config -Doptimize=ReleaseFast --summary all -- --mosquitto-test-root /nav_env/Work/mosquitto/test"
+  ],
+  "toolchain": {
+    "zig": "0.16.0",
+    "python": "3.12.3"
+  },
+  "source_sha256": {
+    "build.zig": "79e34e61a7e5794c5515668aad6b6ca358c064a9ddf953ed9db4096f128ed8f2",
+    "docs/rumqtt_parity.md": "465c9932571f366c23393642a6461cb6b5274f52d95012aaf9f92cab7259f7f2",
+    "tools/interop/mqtt_broker_config.py": "75042a81c590371721092b106fdcda9fc40a11ccdec013ead7182473362bc8b4",
+    "tools/interop/mqtt_mosquitto_packet_sequences_test.py": "b38fafb0cf91f2eccdf9a38e9154d1ce2a4a4199e91bf04dd74e3a18cb43c010"
+  }
+}
