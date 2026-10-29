@@ -1,0 +1,118 @@
+{
+  "baseline_revision": "39fcbd8b3fbaf32de8ea7615875de6a7da508a2e",
+  "snapshot_date": "2026-10-29",
+  "snapshot_timezone": "Asia/Shanghai",
+  "change": "Add a reproducible multi-minute heterogeneous cross-stack WebTransport stream-churn gate",
+  "reference": {
+    "implementation": "wtransport",
+    "root": "/nav_env/Work/wtransport",
+    "revision": "d96cbb87c9127fcb453fb05bbb47ef93402daec2",
+    "integration": "the Rust peer uses the local wtransport checkout with the quinn backend"
+  },
+  "profiles": [
+    {
+      "name": "ceiling",
+      "runs_per_shape": 10,
+      "stream_counts": [256],
+      "bytes_per_stream": 65536,
+      "timeout_seconds_per_session": 90,
+      "base_seed": 81985529217486895,
+      "sessions": 40,
+      "purpose": "maximum-concurrency payload shape that previously exposed congestion-limited RESET_STREAM teardown"
+    },
+    {
+      "name": "heterogeneous",
+      "runs_per_shape": 5,
+      "stream_counts": [17, 63, 127, 191],
+      "bytes_per_stream": 32768,
+      "timeout_seconds_per_session": 75,
+      "base_seed": 81985529218486895,
+      "sessions": 80,
+      "purpose": "non-power-of-two stream populations crossing all reset-mask words"
+    },
+    {
+      "name": "large-stream",
+      "runs_per_shape": 10,
+      "stream_counts": [3, 7],
+      "bytes_per_stream": 1048576,
+      "timeout_seconds_per_session": 120,
+      "base_seed": 81985529219486895,
+      "sessions": 80,
+      "purpose": "long-lived streams forcing repeated flow-control, ACK, loss and PTO cycles"
+    }
+  ],
+  "matrix": {
+    "sessions": 200,
+    "session_formula": "sum(runs_per_shape * stream_count_shapes * 2 roles * 2 fault modes)",
+    "roles": [
+      "netz client to wtransport server",
+      "wtransport client to netz server"
+    ],
+    "fault_modes": [
+      "deterministic continuous 5 percent loss for the netz sender and phase-scoped single-shot loss for the wtransport sender",
+      "deterministic every-fifth pair reordering for the netz sender and phase-scoped single-shot pair reordering for the wtransport sender"
+    ],
+    "per_session_verification": [
+      "exact FIN and RESET_STREAM terminal counts",
+      "stable SplitMix64-selected network-order 256-bit reset mask",
+      "exact bytes and checksum",
+      "exact reset application-code sum",
+      "concurrent sibling survival",
+      "peer close completion",
+      "nonzero and matching sender or relay fault counters"
+    ],
+    "independent_verifier": "tools/interop/webtransport_churn_check.py"
+  },
+  "result": {
+    "passed_sessions": 200,
+    "total_sessions": 200,
+    "build_steps_passed": 9,
+    "build_steps_total": 9,
+    "runtime_change_required": false,
+    "runtime_failure_found": false,
+    "scope": "reproducible loopback lifecycle, recovery and teardown evidence; not a production-network distribution or throughput comparison"
+  },
+  "verification_commands": [
+    "bash -n tools/interop/webtransport_wtransport_churn.sh tools/interop/webtransport_wtransport_churn_long.sh",
+    "python3 -m unittest tools/interop/webtransport_churn_check_test.py",
+    "zig build test-lib -Dtest-filter='WebTransport churn' --summary all",
+    "zig build test-package --summary all",
+    "zig build fuzz-webtransport-endpoint -Doptimize=ReleaseFast --summary all",
+    "zig build interop-webtransport-wtransport-churn-long -Doptimize=ReleaseFast --summary all"
+  ],
+  "verification_result": {
+    "python_verifier_tests_passed": 16,
+    "python_verifier_tests_total": 16,
+    "focused_build_steps_passed": 8,
+    "focused_build_steps_total": 8,
+    "focused_tests_passed": 125,
+    "focused_tests_total": 125,
+    "package_build_steps_passed": 8,
+    "package_build_steps_total": 8,
+    "package_tests_passed": 22,
+    "package_tests_total": 22,
+    "endpoint_fuzz_build_steps_passed": 8,
+    "endpoint_fuzz_build_steps_total": 8,
+    "endpoint_fuzz_tests_passed": 3,
+    "endpoint_fuzz_tests_total": 3,
+    "long_run_build_steps_passed": 9,
+    "long_run_build_steps_total": 9,
+    "long_run_sessions_passed": 200,
+    "long_run_sessions_total": 200,
+    "long_run_reported_duration": "2m"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "rust_peer_io": "wtransport-quinn-tokio",
+    "netz_io": "zio-std-io"
+  },
+  "source_sha256": {
+    "build.zig": "ff872e9acdf75121a6233dcc11051af158bbd50a564e1e7eeb803b946670ef3c",
+    "tools/interop/webtransport_wtransport_churn_long.sh": "fb985a7374a073184de0049b85cab78416a0ce4010bb336105363baa459db98b",
+    "tools/interop/webtransport_wtransport_churn.sh": "50fe51ea6d709b9169ef9083552b8c3bc8dc6af72d97db2c0c8749418c5fd5f6",
+    "tools/interop/webtransport_churn_check.py": "a4333c437508d38c52580bf1bb82a78fd2c454ce860a10c35e3111cf87078e87",
+    "tools/interop/webtransport_churn_protocol.zig": "795e059a77c9d151d0c23551e1b9cf6a9932b84a44974397962537357ff44c82",
+    "tools/interop/webtransport_wtransport/Cargo.toml": "070fe759a5d54f25a0ed59a8afd6223e5116493a984fc99f4ef36a3185fb73c6",
+    "tools/interop/webtransport_wtransport/Cargo.lock": "3a2a1091c4b820269e560929349c7217cbdda19bc9e538feaeb98ac540d0a7d3"
+  }
+}

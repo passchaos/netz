@@ -127,6 +127,7 @@ zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-socks5 -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast
+zig build interop-webtransport-wtransport-churn-long -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
@@ -1984,7 +1985,7 @@ handle routing, both-session progress and payload isolation.
    reader `cancel()` path did not emit code 72 for either a consumed or unread
    payload, even after a following outbound DATAGRAM. Safari automation
    remains a separate gap.
-3. Extend the bounded stream-churn gate to larger long-run distributions;
+3. The bounded stream-churn gate now includes larger long-run distributions;
    concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The
@@ -2096,9 +2097,22 @@ handle routing, both-session progress and payload isolation.
    FIN paths. All twelve reruns passed. Each mixed run verified 128 resets, 128
    FINs and 8,454,144 bytes with its exact checksum; each all-FIN reorder run
    verified 256 FINs and 16,777,216 bytes. This closes the maximum-concurrency
-   repeatability shape at three repetitions; multi-minute and heterogeneous
-   network distributions remain evidence work rather than a basic progress
-   bug.
+   repeatability shape at three repetitions. The independent
+   `interop-webtransport-wtransport-churn-long` gate extends this to a
+   multi-minute, 200-session matrix across both implementation roles and both
+   loss/reorder fault modes. Its ceiling profile runs ten distinct seeds at 256
+   streams and 64 KiB per stream; its heterogeneous profile runs five seeds at
+   each of 17, 63, 127 and 191 streams with 32 KiB per stream; and its
+   large-stream profile runs ten seeds at both three and seven streams with 1
+   MiB per stream. Every session independently verifies the seeded 256-bit
+   reset mask, exact FIN/reset counts, bytes, checksum, application-code sum,
+   sibling survival, peer close and nonzero matching fault counters. The
+   ReleaseFast build completed all 9/9 steps and all 200 sessions on
+   2026-10-29. This closes the reproducible loopback multi-minute and
+   heterogeneous stream-distribution gap; it remains lifecycle/recovery
+   evidence, not a production-network distribution or throughput claim. The
+   pinned profile, reference revision and source hashes are recorded in
+   `evidence/webtransport_long_churn/2026-10-29.json`.
    The default `interop-webtransport-stream-churn` gate now appends a compact
    ceiling regression on every run: 256 streams, 512 bytes per stream, 128
    ordinary resets after a 256-byte prefix and deterministic 5% loss. It

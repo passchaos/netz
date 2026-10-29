@@ -3134,6 +3134,23 @@ pub fn build(b: *std.Build) void {
         &webtransport_wtransport_churn.step,
     );
 
+    const webtransport_wtransport_churn_long = b.addSystemCommand(&.{
+        "tools/interop/webtransport_wtransport_churn_long.sh",
+    });
+    webtransport_wtransport_churn_long.addArtifactArg(
+        webtransport_wtransport_client,
+    );
+    webtransport_wtransport_churn_long.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    const webtransport_wtransport_churn_long_step = b.step(
+        "interop-webtransport-wtransport-churn-long",
+        "Run multi-minute heterogeneous WebTransport churn with wtransport",
+    );
+    webtransport_wtransport_churn_long_step.dependOn(
+        &webtransport_wtransport_churn_long.step,
+    );
+
     const webtransport_chrome = b.addSystemCommand(&.{
         "tools/interop/webtransport_chrome.sh",
     });
