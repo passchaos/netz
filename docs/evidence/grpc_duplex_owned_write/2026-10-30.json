@@ -1,0 +1,626 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "Generic duplex owned outbound messages",
+  "decision": "accepted",
+  "scope": {
+    "baseline_commit": "e55e56a3bdb96a184bc854152e8984bef13be6ae",
+    "language_surface": "pure Zig",
+    "borrowed_api_changed": false
+  },
+  "design": {
+    "canonical_type": "grpc.DuplexOwnedMessage",
+    "shared_alias": "grpc.SharedStreamOwnedWriteMessage",
+    "storage_module": "src/grpc/stream/duplex/outbound_ownership.zig",
+    "description": "OwnedMessage reserves five prefix bytes and exposes a writable payload. Direct ClientDuplex, ServerDuplex, and SharedStreamWriter can allocate it in their transport allocator and consume it without a payload clone.",
+    "client_api": [
+      "ClientDuplex.allocMessage",
+      "ClientDuplex.writeOwnedMessage",
+      "ClientDuplex.writeOwnedMessageWithOptions",
+      "ClientDuplex.writeFinalOwnedMessage",
+      "ClientDuplex.writeFinalOwnedMessageWithOptions"
+    ],
+    "server_api": [
+      "ServerDuplex.allocMessage",
+      "ServerDuplex.writeOwnedMessage",
+      "ServerDuplex.writeOwnedMessageWithOptions"
+    ],
+    "shared_api": "The existing SharedStreamWriter owned methods retain source compatibility through an alias to the generic type.",
+    "consumption_contract": "Every write consumes the nullable message on success or error. Deferred deinit remains safe.",
+    "compression_contract": "Identity and compression fallback transfer the exact allocation into PendingMessage. Successful compression retains a separate framed allocation and frees the original input after ownership is secure.",
+    "failure_contract": "Message-size and writer-state validation occur before allocation or transfer where possible; allocator mismatch is transactional; transport failure discards pending ownership through the existing stream failure path."
+  },
+  "deterministic_allocation_evidence": {
+    "shared_background": {
+      "borrowed_allocations": 3,
+      "owned_allocations": 2,
+      "removed_allocations": 1,
+      "removed_bytes": "payload.len"
+    },
+    "direct_duplex_response": {
+      "borrowed_allocations": 2,
+      "owned_allocations": 1,
+      "removed_allocations": 1,
+      "removed_bytes": "payload.len plus growable-list slack"
+    },
+    "pointer_identity": "Identity OwnedMessage storage pointer equals PendingMessage/encoded storage pointer.",
+    "owned_identity_additional_allocations_after_message_init": 0
+  },
+  "tests": [
+    "generic owned identity transfer under fail-next-allocation",
+    "direct duplex response two-versus-one allocation comparison",
+    "direct client gzip and final identity owned messages",
+    "direct server gzip and identity owned responses",
+    "SharedChannel gzip, identity, final, deadline, allocator and OOM ownership tests",
+    "package-visible generic and shared type aliases plus client/server methods"
+  ],
+  "borrowed_path_guard": {
+    "baseline_sha256": "0de5c869c0d2be68ef68808e844512a6368fb455c2e834cb4d9f316bec2efbf7",
+    "candidate_sha256": "27e3615fe048e628a912bfde53cc4e15f7331369ff9ca1f3da8722165fa42ecb",
+    "scope": {
+      "cpu": 10,
+      "schedule": "eight alternating AB/BA pairs",
+      "warmup": 100,
+      "iterations": {
+        "persistent_0": 10000,
+        "persistent_262144": 2000
+      },
+      "validation": "full bytes plus peer completion"
+    },
+    "conclusion": "Existing borrowed workload is neutral: instruction ratios are 1.00002x and 0.999996x; throughput/p50 remain within scheduler noise.",
+    "paired_ratios": {
+      "persistent_0": {
+        "cycles": {
+          "max": 1.004515186613009,
+          "median": 1.002264329810542,
+          "min": 0.9995798672137542,
+          "pairs": [
+            0.9995798672137542,
+            1.0012819976611085,
+            1.0032466619599758,
+            1.0011874118128932,
+            1.0006700297613187,
+            1.0040745120471806,
+            1.004515186613009,
+            1.00377834781348
+          ],
+          "wins": 7
+        },
+        "instructions": {
+          "max": 1.0000785829022778,
+          "median": 1.0000224663546944,
+          "min": 0.9998111300144076,
+          "pairs": [
+            1.000054491995448,
+            1.0000405349052564,
+            0.9998111300144076,
+            1.0000785829022778,
+            1.0000114922818897,
+            1.0000277082087878,
+            1.000017224500601,
+            0.999857575861148
+          ],
+          "wins": 6
+        },
+        "p50": {
+          "max": 1.005405719600093,
+          "median": 1.0013337420306214,
+          "min": 0.9983794420650538,
+          "pairs": [
+            1.000521436848204,
+            0.999941971798294,
+            1.0021460472130388,
+            1.0021460472130388,
+            0.9983794420650538,
+            1.0037803885076189,
+            1.005405719600093,
+            0.9993637204997686
+          ],
+          "wins": 5
+        },
+        "p99": {
+          "max": 1.010486122983986,
+          "median": 1.0005468905135115,
+          "min": 0.9885373939427994,
+          "pairs": [
+            1.0016008232805442,
+            1.0089760448230518,
+            0.9968787242494752,
+            0.9994929577464788,
+            0.9963582565153069,
+            1.0036686729721984,
+            0.9885373939427994,
+            1.010486122983986
+          ],
+          "wins": 4
+        },
+        "throughput": {
+          "max": 1.0047872456841564,
+          "median": 1.00100710311935,
+          "min": 0.9981427919363774,
+          "pairs": [
+            1.0003343293836295,
+            1.0004715972529945,
+            1.0015956366583585,
+            1.0015426089857054,
+            0.9981427919363774,
+            1.0037620809702117,
+            1.0047872456841564,
+            0.999773693315212
+          ],
+          "wins": 6
+        }
+      },
+      "persistent_262144": {
+        "cycles": {
+          "max": 1.0087520913100716,
+          "median": 1.0019699580663932,
+          "min": 0.9974662022997328,
+          "pairs": [
+            1.0087520913100716,
+            0.9991331487784924,
+            1.001753966541728,
+            1.0021859495910588,
+            0.9974662022997328,
+            1.003498606902027,
+            1.0038124262587766,
+            0.999210980084404
+          ],
+          "wins": 5
+        },
+        "instructions": {
+          "max": 1.000027374071604,
+          "median": 0.9999959273197392,
+          "min": 0.9999590828447832,
+          "pairs": [
+            0.9999960363074132,
+            0.9999590828447832,
+            1.0000127110888726,
+            0.9999999563022356,
+            1.000027374071604,
+            0.9999958183320652,
+            0.9999922232026808,
+            0.9999766419056854
+          ],
+          "wins": 2
+        },
+        "p50": {
+          "max": 1.0066009850988529,
+          "median": 0.999690314118194,
+          "min": 0.9967674113335576,
+          "pairs": [
+            1.0036317018291816,
+            0.9967674113335576,
+            0.9996440018671232,
+            1.0066009850988529,
+            0.9985821794886144,
+            0.9988300072227884,
+            1.0021065549132662,
+            0.9997366263692646
+          ],
+          "wins": 3
+        },
+        "p99": {
+          "max": 1.0519959700355952,
+          "median": 1.006203123979481,
+          "min": 0.9610576346632296,
+          "pairs": [
+            1.0519959700355952,
+            0.9949557969055284,
+            1.0181218162502492,
+            1.005882778751444,
+            0.9871717079781156,
+            0.9610576346632296,
+            1.0065234692075185,
+            1.0104199256868898
+          ],
+          "wins": 5
+        },
+        "throughput": {
+          "max": 1.0126053352414264,
+          "median": 1.000324032933681,
+          "min": 0.9931627319255696,
+          "pairs": [
+            1.0126053352414264,
+            0.9931627319255696,
+            1.001547166442888,
+            1.0069561527349618,
+            0.9973436113729308,
+            0.997187325845738,
+            1.0025036751925156,
+            0.9991008994244746
+          ],
+          "wins": 4
+        }
+      }
+    },
+    "rows": [
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276593880,
+        "elapsed": 173790944,
+        "instructions": 359907331,
+        "p50": 17269,
+        "p99": 17519,
+        "pair": 1
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 276710135,
+        "elapsed": 173732860,
+        "instructions": 359887720,
+        "p50": 17260,
+        "p99": 17491,
+        "pair": 1
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 275748553,
+        "elapsed": 173470052,
+        "instructions": 359887359,
+        "p50": 17233,
+        "p99": 17491,
+        "pair": 2
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276102062,
+        "elapsed": 173551860,
+        "instructions": 359901947,
+        "p50": 17232,
+        "p99": 17648,
+        "pair": 2
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276785237,
+        "elapsed": 173906176,
+        "instructions": 359893920,
+        "p50": 17278,
+        "p99": 17566,
+        "pair": 3
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 275889517,
+        "elapsed": 173629127,
+        "instructions": 359961906,
+        "p50": 17241,
+        "p99": 17621,
+        "pair": 3
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 276220934,
+        "elapsed": 173623389,
+        "instructions": 359887446,
+        "p50": 17241,
+        "p99": 17750,
+        "pair": 4
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276548922,
+        "elapsed": 173891222,
+        "instructions": 359915727,
+        "p50": 17278,
+        "p99": 17741,
+        "pair": 4
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276747647,
+        "elapsed": 173542376,
+        "instructions": 359897849,
+        "p50": 17250,
+        "p99": 17510,
+        "pair": 5
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 276562342,
+        "elapsed": 173865280,
+        "instructions": 359893713,
+        "p50": 17278,
+        "p99": 17574,
+        "pair": 5
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 275624906,
+        "elapsed": 173012491,
+        "instructions": 359893347,
+        "p50": 17194,
+        "p99": 17445,
+        "pair": 6
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 276747943,
+        "elapsed": 173663378,
+        "instructions": 359903319,
+        "p50": 17259,
+        "p99": 17509,
+        "pair": 6
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 277180894,
+        "elapsed": 174089189,
+        "instructions": 359900523,
+        "p50": 17297,
+        "p99": 17593,
+        "pair": 7
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 275934996,
+        "elapsed": 173259752,
+        "instructions": 359894324,
+        "p50": 17204,
+        "p99": 17797,
+        "pair": 7
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "candidate",
+        "cycles": 276093428,
+        "elapsed": 174024908,
+        "instructions": 359960049,
+        "p50": 17288,
+        "p99": 17547,
+        "pair": 8
+      },
+      {
+        "workload": "persistent_0",
+        "iterations": 10000,
+        "arm": "baseline",
+        "cycles": 277136605,
+        "elapsed": 173985525,
+        "instructions": 359908782,
+        "p50": 17277,
+        "p99": 17731,
+        "pair": 8
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1525870073,
+        "elapsed": 1634592265,
+        "instructions": 2173974307,
+        "p50": 805569,
+        "p99": 1026423,
+        "pair": 1
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1512631385,
+        "elapsed": 1614244176,
+        "instructions": 2173982924,
+        "p50": 802654,
+        "p99": 975691,
+        "pair": 1
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1519256093,
+        "elapsed": 1625389831,
+        "instructions": 2174026995,
+        "p50": 805237,
+        "p99": 980135,
+        "pair": 2
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1517939124,
+        "elapsed": 1614276605,
+        "instructions": 2173938040,
+        "p50": 802634,
+        "p99": 975191,
+        "pair": 2
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1519660628,
+        "elapsed": 1618435505,
+        "instructions": 2174034934,
+        "p50": 803089,
+        "p99": 990940,
+        "pair": 3
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1516999861,
+        "elapsed": 1615935384,
+        "instructions": 2174007300,
+        "p50": 803375,
+        "p99": 973302,
+        "pair": 3
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1512999208,
+        "elapsed": 1614568775,
+        "instructions": 2174024261,
+        "p50": 802153,
+        "p99": 980829,
+        "pair": 4
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1516306548,
+        "elapsed": 1625799962,
+        "instructions": 2174024166,
+        "p50": 807448,
+        "p99": 986599,
+        "pair": 4
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1516438166,
+        "elapsed": 1616306542,
+        "instructions": 2174051048,
+        "p50": 802911,
+        "p99": 976145,
+        "pair": 5
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1520290274,
+        "elapsed": 1620611516,
+        "instructions": 2173991537,
+        "p50": 804051,
+        "p99": 988830,
+        "pair": 5
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1520476335,
+        "elapsed": 1632796317,
+        "instructions": 2174012892,
+        "p50": 808552,
+        "p99": 1067552,
+        "pair": 6
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1525795884,
+        "elapsed": 1628203793,
+        "instructions": 2174003801,
+        "p50": 807606,
+        "p99": 1025979,
+        "pair": 6
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1525573212,
+        "elapsed": 1626011245,
+        "instructions": 2174014292,
+        "p50": 806802,
+        "p99": 1014320,
+        "pair": 7
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1519779166,
+        "elapsed": 1621950408,
+        "instructions": 2174031199,
+        "p50": 805106,
+        "p99": 1007746,
+        "pair": 7
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "candidate",
+        "cycles": 1519125153,
+        "elapsed": 1630755268,
+        "instructions": 2174107156,
+        "p50": 808737,
+        "p99": 1006821,
+        "pair": 8
+      },
+      {
+        "workload": "persistent_262144",
+        "iterations": 2000,
+        "arm": "baseline",
+        "cycles": 1517926533,
+        "elapsed": 1629289055,
+        "instructions": 2174056373,
+        "p50": 808524,
+        "p99": 1017312,
+        "pair": 8
+      }
+    ]
+  },
+  "verification": {
+    "debug_grpc": {
+      "passed": 396,
+      "total": 396
+    },
+    "release_fast_grpc": {
+      "passed": 396,
+      "total": 396
+    },
+    "package": {
+      "passed": 22,
+      "total": 22
+    },
+    "grpc_cpp_forward": {
+      "h2c": "passed",
+      "tls": "passed",
+      "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd"
+    }
+  },
+  "related_evidence": {
+    "shared_owned_write": "docs/evidence/grpc_shared_owned_write/2026-10-30.json",
+    "prefix_reserved_transport": "docs/evidence/grpc_shared_outbound_ownership/2026-10-30.json"
+  },
+  "source_sha256": {
+    "src/grpc/stream/duplex/outbound_ownership.zig": "68d82707f141d0cb810af636071950372d2b803e972ebce199b71bdd887f8b1a",
+    "src/grpc/stream/duplex.zig": "643ca34090fc924ca71776199d7864c303ebcbe33245114dd718c1612ae0f96a",
+    "src/grpc/stream/tests.zig": "0f394af5fde0767a21427f1401ac463aa27e695e63a5155013d14e6070bc12fc",
+    "src/grpc/stream/mod.zig": "806790c07eaee53d7cd7af5f6b06b7c859d1b65d7c04bf57ab4ef4931c653c9c",
+    "src/grpc/mod.zig": "43545be9112fb321dd00572dc462cd72623c94c9eed74127a00dd583f0a5fee5",
+    "src/grpc/channel/shared/stream/call.zig": "0677baf7e3a3ebd4ad76ffc647c2b7dd71385331caae21faad7e3203d42d0513",
+    "src/grpc/channel/shared/stream/tests/streaming.zig": "60713e987a5b0936000e5a53cb49c0a86c6eaaefbf8dd6951098f6c4f6496738",
+    "test/package_test.zig": "a0e293dc1c0c4695b5c67e43205c0ea90313b51ec6bd65fa335129c911e09fc0"
+  },
+  "remaining_gap": "The ordinary borrowed APIs still copy by contract. First cross-DATA receive reassembly remains contiguous. No grpc-cpp ratio change is claimed because the official fixture intentionally exercises the unchanged borrowed API."
+}

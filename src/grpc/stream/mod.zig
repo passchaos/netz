@@ -24,6 +24,7 @@ pub const WriteResult = duplex.WriteResult;
 pub const MessageProgress = duplex.MessageProgress;
 pub const DuplexResponseHead = duplex.ResponseHead;
 pub const DuplexResponse = duplex.Response;
+pub const DuplexOwnedMessage = duplex.OwnedMessage;
 pub const ClientDuplexEvent = duplex.ClientEvent;
 pub const ClientDuplex = duplex.ClientDuplex;
 pub const startDuplex = duplex.startDuplex;

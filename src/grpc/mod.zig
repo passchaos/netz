@@ -70,6 +70,7 @@ pub const DuplexWriteResult = stream.WriteResult;
 pub const DuplexMessageProgress = stream.MessageProgress;
 pub const DuplexResponseHead = stream.DuplexResponseHead;
 pub const DuplexResponse = stream.DuplexResponse;
+pub const DuplexOwnedMessage = stream.DuplexOwnedMessage;
 pub const ClientDuplexEvent = stream.ClientDuplexEvent;
 pub const ClientDuplex = stream.ClientDuplex;
 pub const startDuplex = stream.startDuplex;

@@ -35,7 +35,18 @@ test "gRPC shared duplex ping pong permits independent reads writes and request 
                     if (event == .reset or event == .finished) return error.EarlyEnd;
                     if (self.count == before) continue;
                     if (before == 0) try rpc.startResponse(.{ .compression = .gzip, .request_accepted_encodings = rpc.accepted_encodings });
-                    try std.testing.expectEqual(grpc.stream.WriteResult.complete, try rpc.writeMessageWithOptions(if (before == 0) first_message else "identity", .{ .disable_compression = before != 0 }));
+                    const response = if (before == 0) first_message else "identity";
+                    var owned = try rpc.allocMessage(response.len);
+                    defer owned.deinit();
+                    @memcpy(owned.payload(), response);
+                    try std.testing.expectEqual(
+                        grpc.stream.WriteResult.complete,
+                        try rpc.writeOwnedMessageWithOptions(
+                            &owned,
+                            .{ .disable_compression = before != 0 },
+                        ),
+                    );
+                    try std.testing.expect(!owned.hasValue());
                 }
                 var finished = try rpc.readRequestEventWithTimeout(.fromSeconds(5), self, consume);
                 defer finished.deinit();

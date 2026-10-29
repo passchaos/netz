@@ -400,11 +400,17 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.SharedClientDuplex, "cancelWithTimeout"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeMessage"));
     try std.testing.expect(@hasDecl(netz.grpc, "SharedStreamOwnedWriteMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc, "DuplexOwnedMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "allocMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeOwnedMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeFinalOwnedMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "writeFinalMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamWriter, "finishRequest"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "allocMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "writeOwnedMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "writeFinalOwnedMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ServerDuplex, "allocMessage"));
+    try std.testing.expect(@hasDecl(netz.grpc.ServerDuplex, "writeOwnedMessage"));
     try std.testing.expect(@hasDecl(netz.grpc.SharedStreamReader, "nextWithDeadline"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelTarget"));
     try std.testing.expect(@hasDecl(netz.grpc, "ChannelEndpoint"));

@@ -20,6 +20,8 @@ const client_receive = @import("duplex/client_receive.zig");
 const outbound_ownership = @import("duplex/outbound_ownership.zig");
 const sequential = @import("runtime.zig");
 
+pub const OwnedMessage = outbound_ownership.OwnedMessage;
+
 pub const Error = sequential.Error;
 pub const RequestOptions = sequential.RequestOptions;
 pub const ResponseOptions = sequential.ResponseOptions;
@@ -231,6 +233,36 @@ pub const ClientDuplex = struct {
         return self.resumeMessage();
     }
 
+    pub fn allocMessage(
+        self: *ClientDuplex,
+        payload_len: usize,
+    ) Error!OwnedMessage {
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        if (payload_len > self.encoder.max_message_size) {
+            return error.GrpcMessageTooLarge;
+        }
+        return OwnedMessage.init(self.allocator, payload_len);
+    }
+
+    /// Consume `message` on success or error. A deferred `message.deinit()` is
+    /// safe because successful transfer clears its optional storage.
+    pub fn writeOwnedMessage(
+        self: *ClientDuplex,
+        message: *OwnedMessage,
+    ) Error!WriteResult {
+        return self.writeOwnedMessageWithOptions(message, .{});
+    }
+
+    pub fn writeOwnedMessageWithOptions(
+        self: *ClientDuplex,
+        message: *OwnedMessage,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
+        try self.stageOwnedMessageWithEndStream(message, options, false);
+        return self.resumeMessage();
+    }
+
     /// Encode one final request message and set END_STREAM on its last wire
     /// byte. If peer activity interrupts a flow-control wait, `resumeMessage`
     /// retains both the exact suffix and the final-message intent.
@@ -247,6 +279,22 @@ pub const ClientDuplex = struct {
         options: codec.MessageOptions,
     ) Error!WriteResult {
         try self.stageFinalMessage(payload, options);
+        return self.resumeMessage();
+    }
+
+    pub fn writeFinalOwnedMessage(
+        self: *ClientDuplex,
+        message: *OwnedMessage,
+    ) Error!WriteResult {
+        return self.writeFinalOwnedMessageWithOptions(message, .{});
+    }
+
+    pub fn writeFinalOwnedMessageWithOptions(
+        self: *ClientDuplex,
+        message: *OwnedMessage,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
+        try self.stageOwnedMessageWithEndStream(message, options, true);
         return self.resumeMessage();
     }
 
@@ -284,6 +332,26 @@ pub const ClientDuplex = struct {
             .end_stream = end_stream,
         };
         return encoded.input_transferred;
+    }
+
+    fn stageOwnedMessageWithEndStream(
+        self: *ClientDuplex,
+        message: *OwnedMessage,
+        options: codec.MessageOptions,
+        end_stream: bool,
+    ) Error!void {
+        defer message.deinit();
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        self.pending_message = .{
+            .bytes = try outbound_ownership.encodeMessage(
+                self.allocator,
+                self.encoder,
+                message,
+                options,
+            ),
+            .end_stream = end_stream,
+        };
     }
 
     fn stageMessageWithEndStream(self: *ClientDuplex, payload: []const u8, options: codec.MessageOptions, end_stream: bool) Error!void {
@@ -1137,6 +1205,52 @@ pub const ServerDuplex = struct {
                 self.allocator,
                 encoder,
                 payload,
+                options,
+            ),
+        };
+        return self.resumeMessage();
+    }
+
+    /// Allocate response payload storage with the gRPC prefix already
+    /// reserved. `startResponse` must have selected the response encoder.
+    pub fn allocMessage(
+        self: *ServerDuplex,
+        payload_len: usize,
+    ) Error!OwnedMessage {
+        try self.ensureResponseWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        const encoder = self.response_encoder orelse
+            return error.InvalidStreamState;
+        if (payload_len > encoder.max_message_size) {
+            return error.GrpcMessageTooLarge;
+        }
+        return OwnedMessage.init(self.allocator, payload_len);
+    }
+
+    /// Consume `message` on success or error. A deferred `message.deinit()` is
+    /// safe because successful transfer clears its optional storage.
+    pub fn writeOwnedMessage(
+        self: *ServerDuplex,
+        message: *OwnedMessage,
+    ) Error!WriteResult {
+        return self.writeOwnedMessageWithOptions(message, .{});
+    }
+
+    pub fn writeOwnedMessageWithOptions(
+        self: *ServerDuplex,
+        message: *OwnedMessage,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
+        defer message.deinit();
+        try self.ensureResponseWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        const encoder = self.response_encoder orelse
+            return error.InvalidStreamState;
+        self.pending_message = .{
+            .bytes = try outbound_ownership.encodeMessage(
+                self.allocator,
+                encoder,
+                message,
                 options,
             ),
         };

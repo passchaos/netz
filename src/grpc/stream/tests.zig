@@ -768,10 +768,16 @@ test "gRPC duplex interleaves a response before request FIN" {
                     .value = "interleaved",
                 }},
             });
+            var first_response = try stream.allocMessage(
+                fragmented_response.len,
+            );
+            defer first_response.deinit();
+            @memcpy(first_response.payload(), fragmented_response);
             try std.testing.expectEqual(
                 duplex.WriteResult.complete,
-                try stream.writeMessage(fragmented_response),
+                try stream.writeOwnedMessage(&first_response),
             );
+            try std.testing.expect(!first_response.hasValue());
 
             var request_ended = false;
             while (self.requests == 1) {
@@ -793,13 +799,17 @@ test "gRPC duplex interleaves a response before request FIN" {
                 @as(usize, 2),
                 finished.finished.message_count,
             );
+            var second_response = try stream.allocMessage("ack-two".len);
+            defer second_response.deinit();
+            @memcpy(second_response.payload(), "ack-two");
             try std.testing.expectEqual(
                 duplex.WriteResult.complete,
-                try stream.writeMessageWithOptions(
-                    "ack-two",
+                try stream.writeOwnedMessageWithOptions(
+                    &second_response,
                     .{ .disable_compression = true },
                 ),
             );
+            try std.testing.expect(!second_response.hasValue());
             try stream.finishOk();
         }
     };
@@ -843,10 +853,14 @@ test "gRPC duplex interleaves a response before request FIN" {
         },
     );
     defer stream.deinit();
+    var first_owned = try stream.allocMessage(first_request.len);
+    defer first_owned.deinit();
+    @memcpy(first_owned.payload(), first_request);
     try std.testing.expectEqual(
         duplex.WriteResult.complete,
-        try stream.writeMessage(first_request),
+        try stream.writeOwnedMessage(&first_owned),
     );
+    try std.testing.expect(!first_owned.hasValue());
 
     var collector: Collector = .{};
     var head = try stream.readResponseEvent(&collector, Collector.consume);
@@ -872,13 +886,17 @@ test "gRPC duplex interleaves a response before request FIN" {
     try std.testing.expect(saw_fragment_only_progress);
     try std.testing.expect(!stream.requestFinished());
 
+    var final_owned = try stream.allocMessage(second_request.len);
+    defer final_owned.deinit();
+    @memcpy(final_owned.payload(), second_request);
     try std.testing.expectEqual(
         duplex.WriteResult.complete,
-        try stream.writeFinalMessageWithOptions(
-            second_request,
+        try stream.writeFinalOwnedMessageWithOptions(
+            &final_owned,
             .{ .disable_compression = true },
         ),
     );
+    try std.testing.expect(!final_owned.hasValue());
     var second_reply = try stream.readResponseEvent(
         &collector,
         Collector.consume,

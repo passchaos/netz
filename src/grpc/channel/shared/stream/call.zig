@@ -2,6 +2,7 @@
 const std = @import("std");
 const streaming = @import("../../../stream/runtime.zig");
 const duplex = @import("../../../stream/duplex.zig");
+const outbound_ownership = @import("../../../stream/duplex/outbound_ownership.zig");
 const codec = @import("../../../stream/codec.zig");
 const wire = @import("../../../wire.zig");
 const http2 = @import("../../../../http2/mod.zig");
@@ -36,49 +37,7 @@ pub const WriteInput = struct {
 /// Prefix-reserved payload storage for zero-copy handoff into a queued shared
 /// write. Allocate it through `Writer.allocMessage`, serialize directly into
 /// `payload`, and either submit it or call `deinit`.
-pub const OwnedWriteMessage = struct {
-    allocator: std.mem.Allocator,
-    storage: ?[]u8,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        payload_len: usize,
-    ) (std.mem.Allocator.Error || error{GrpcMessageTooLarge})!OwnedWriteMessage {
-        const encoded_len = wire.encodedMessageLen(payload_len) catch
-            return error.GrpcMessageTooLarge;
-        return .{
-            .allocator = allocator,
-            .storage = try allocator.alloc(u8, encoded_len),
-        };
-    }
-
-    pub fn payload(self: *OwnedWriteMessage) []u8 {
-        return self.storage.?[5..];
-    }
-
-    pub fn hasValue(self: *const OwnedWriteMessage) bool {
-        return self.storage != null;
-    }
-
-    pub fn deinit(self: *OwnedWriteMessage) void {
-        if (self.storage) |storage| self.allocator.free(storage);
-        self.storage = null;
-    }
-
-    fn takeFor(
-        self: *OwnedWriteMessage,
-        allocator: std.mem.Allocator,
-    ) error{InvalidStreamState}![]u8 {
-        if (self.allocator.ptr != allocator.ptr or
-            self.allocator.vtable != allocator.vtable)
-        {
-            return error.InvalidStreamState;
-        }
-        const storage = self.storage orelse return error.InvalidStreamState;
-        self.storage = null;
-        return storage;
-    }
-};
+pub const OwnedWriteMessage = outbound_ownership.OwnedMessage;
 
 pub const Write = struct {
     const Completion = enum(u32) { waiting, completed, abandoned };
