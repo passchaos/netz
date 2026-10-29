@@ -360,3 +360,37 @@ This reduces scheduler-clock overhead across message sizes but does not close
 the independent grpc-cpp 256-KiB data-copy/window gap. Full identities,
 profiles, PMU summaries and verification records are in
 [the cached-clock evidence](evidence/grpc_shared_cached_clock/2026-10-29.json).
+
+## Owner-validated buffered response polls
+
+The endpoint owner now uses a dedicated internal poll path after it has already
+classified RPC and write expiry against the scan-cached awake timestamp. The
+ordinary public HTTP/2 and gRPC poll APIs still perform exact deadline
+validation; an explicit regression proves an expired public deadline returns
+`Timeout` before consuming an already buffered response. The internal path is
+socket-free. If DATA consumption emits WINDOW_UPDATE, the original absolute
+deadline continues into the ordinary bounded transport write and is validated
+there.
+
+Eight fixed-binary AB/BA pairs compared this change with the published
+scan-cached owner baseline. CPU, windows, warmup, iterations, pre-encoded input,
+full-byte validation and peer-completion requirements were unchanged.
+
+| Workload | Instructions | Cycles | Throughput | P50 |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent, 0 bytes | 1.0137x | 1.0232x | 1.0123x | 1.0130x |
+| Persistent, 4 KiB | 1.0109x | 1.0219x | 1.0109x | 1.0099x |
+| Persistent, 256 KiB | 1.0074x | 1.0118x | 1.0020x | 1.0020x |
+| RPC per roundtrip, 256 KiB | 1.0068x | 1.0070x | 1.0000x | 1.0030x |
+
+Instructions and cycles improved in all 32 paired comparisons. The two small-
+message shapes also improved throughput and p50 in every pair. The 256-KiB
+timing rows were mixed and are treated as neutral rather than promoted as a
+latency result. In the matched zero-loss profile, `clock_gettime` moved from
+15.41% to 13.81%, and the former 2.06% child under
+`pollRawResponseEventBatchedWithDeadline` disappeared from the clock stack.
+
+Debug and ReleaseFast HTTP/2 duplex/gRPC shared-streaming gates pass 200/200,
+the focused strict/internal contract passes 132/132, and the pinned grpc-cpp
+h2c/TLS matrix passes. Full evidence is recorded in
+[the validated-poll evidence](evidence/grpc_shared_validated_poll/2026-10-29.json).

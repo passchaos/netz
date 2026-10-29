@@ -20777,6 +20777,23 @@ pub const ClientDuplexStream = struct {
         return self.readResponseEventWithCreditUntil(deadline, true, policy);
     }
 
+    /// Single-owner coordinator path after the caller has already validated
+    /// this awake deadline for its current scheduler turn. Polling remains
+    /// socket-free; any resulting flow-control output still receives the same
+    /// absolute deadline and performs its ordinary transport checks.
+    pub fn pollResponseEventWithCreditPolicyAssumeUsableDeadline(
+        self: *ClientDuplexStream,
+        policy: ConnectionCreditPolicy,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?DuplexResponseEvent {
+        std.debug.assert(deadline.clock == .awake);
+        return self.readResponseEventWithCreditUntil(
+            deadline,
+            true,
+            policy,
+        );
+    }
+
     fn nextResponseFrame(self: *ClientDuplexStream, deadline: ?std.Io.Clock.Timestamp, buffered: bool) Error!?OwnedFrame {
         if (buffered) return self.connection.pollOwnedClientDuplexFrame(self.stream_id, deadline);
         return try self.connection.readOwnedClientDuplexFrameWithDeadline(self.stream_id, deadline);

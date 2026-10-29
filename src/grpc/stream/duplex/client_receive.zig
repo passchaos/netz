@@ -9,7 +9,7 @@ pub const PendingData = struct {
     end_stream: bool,
 };
 
-fn pending(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype) !?Hooks.Event {
+fn pending(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype, comptime deadline_validated: bool) !?Hooks.Event {
     if (max_messages == 0) return error.InvalidStreamState;
     if (self.pending_terminal) |response| {
         self.pending_terminal = null;
@@ -19,10 +19,17 @@ fn pending(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: 
     if (self.receive_state != .active) return error.ConnectionClosed;
     if (self.pending_data != null) {
         if (comptime Hooks.raw) return error.InvalidStreamState;
-        if (deadline) |until| _ = deadline_policy.usableAwake(self.transport.connection.io, until) catch |err| {
-            if (cancel_on_timeout) Hooks.fail(self, .cancel);
-            return err;
-        };
+        if (deadline) |until| {
+            if (comptime deadline_validated) {
+                std.debug.assert(until.clock == .awake);
+            } else _ = deadline_policy.usableAwake(
+                self.transport.connection.io,
+                until,
+            ) catch |err| {
+                if (cancel_on_timeout) Hooks.fail(self, .cancel);
+                return err;
+            };
+        }
         return try drain(self, deadline, max_messages, context, consume, Hooks);
     }
     return null;
@@ -33,11 +40,54 @@ pub fn poll(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout:
 }
 
 pub fn pollWithConnectionCredit(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy) !?Hooks.Event {
-    if (try pending(self, deadline, cancel_on_timeout, max_messages, context, consume, Hooks)) |event| return event;
-    const event = (if (deadline) |absolute|
-        self.transport.pollResponseEventWithCreditPolicyAndDeadline(policy, absolute)
+    return pollWithConnectionCreditMode(
+        self,
+        deadline,
+        cancel_on_timeout,
+        max_messages,
+        context,
+        consume,
+        Hooks,
+        policy,
+        false,
+    );
+}
+
+pub fn pollWithConnectionCreditValidatedDeadline(self: anytype, deadline: std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy) !?Hooks.Event {
+    return pollWithConnectionCreditMode(
+        self,
+        deadline,
+        cancel_on_timeout,
+        max_messages,
+        context,
+        consume,
+        Hooks,
+        policy,
+        true,
+    );
+}
+
+fn pollWithConnectionCreditMode(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy, comptime deadline_validated: bool) !?Hooks.Event {
+    if (try pending(
+        self,
+        deadline,
+        cancel_on_timeout,
+        max_messages,
+        context,
+        consume,
+        Hooks,
+        deadline_validated,
+    )) |event| return event;
+    const event = (if (deadline) |absolute| if (comptime deadline_validated)
+        self.transport.pollResponseEventWithCreditPolicyAssumeUsableDeadline(
+            policy,
+            absolute,
+        )
     else
-        self.transport.pollResponseEventWithCreditPolicy(policy)) catch |err| {
+        self.transport.pollResponseEventWithCreditPolicyAndDeadline(
+            policy,
+            absolute,
+        ) else self.transport.pollResponseEventWithCreditPolicy(policy)) catch |err| {
         if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
         return err;
     };
@@ -45,7 +95,16 @@ pub fn pollWithConnectionCredit(self: anytype, deadline: ?std.Io.Clock.Timestamp
 }
 
 pub fn read(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout: bool, context: anytype, comptime consume: anytype, comptime Hooks: anytype) !Hooks.Event {
-    if (try pending(self, deadline, cancel_on_timeout, std.math.maxInt(usize), context, consume, Hooks)) |event| return event;
+    if (try pending(
+        self,
+        deadline,
+        cancel_on_timeout,
+        std.math.maxInt(usize),
+        context,
+        consume,
+        Hooks,
+        false,
+    )) |event| return event;
     const event = Hooks.readTransport(&self.transport, deadline) catch |err| {
         if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
         return err;

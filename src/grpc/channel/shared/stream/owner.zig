@@ -120,7 +120,7 @@ pub fn Owner(comptime State: type) type {
                     state.unlock();
                     progress = granted != 0 or progress;
                 }
-                const ready = active.stream.pollRawResponseEventBatchedWithDeadline(deadline) catch |err| {
+                const ready = active.stream.pollRawResponseEventBatchedWithValidatedDeadline(deadline) catch |err| {
                     fail(worker, index, err);
                     progress = true;
                     continue;
@@ -168,7 +168,7 @@ pub fn Owner(comptime State: type) type {
                                 // status. Publish it with the copied bytes
                                 // before another owner turn can expire the RPC
                                 // or attempt credit output on the closed stream.
-                                const terminal = active.stream.pollRawResponseEventBatchedWithDeadline(deadline) catch |err| {
+                                const terminal = active.stream.pollRawResponseEventBatchedWithValidatedDeadline(deadline) catch |err| {
                                     event.deinit(state.allocator);
                                     fail(worker, index, err);
                                     progress = true;

@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "date": "2026-10-29",
+  "feature": "SharedChannel validated-deadline buffered poll",
+  "decision": "accepted",
+  "scope": {
+    "baseline_commit": "20f2099c51a139d57af8744cbaf7135e23699d09",
+    "cpu": 10,
+    "schedule": "eight alternating AB/BA pairs per workload",
+    "warmup": 100,
+    "iterations": 2000,
+    "stream_window": 65535,
+    "connection_window": 65535,
+    "validation": "full-bytes plus peer completion"
+  },
+  "design": {
+    "description": "The single SharedChannel endpoint owner classifies RPC/write expiry against its scan-cached awake timestamp, then uses an internal buffered-poll entry that does not repeat the public exact Clock.now preflight.",
+    "public_contract": "Public HTTP/2 and gRPC deadline poll APIs retain exact usableAwake validation. Wrong-clock and already-expired public calls still return Timeout before consuming buffered events.",
+    "io_contract": "The owner-only poll never reads the socket. Any WINDOW_UPDATE or other transport output retains the original absolute deadline and executes the ordinary downstream deadline checks."
+  },
+  "identity": {
+    "baseline_stripped_sha256": "886a6ef927a8f2864789ad30522e75b9dc4d750de8c39cc2d4656c83c369d963",
+    "candidate_stripped_sha256": "8af11ef68add17b1d074db2a3fb89097e2ced59bc23f2ad9a7633fa32e080704",
+    "baseline_static_bytes": 5610126,
+    "candidate_static_bytes": 5610118,
+    "src/http2/runtime.zig": "a363414dcd38604a10452f62e84daa9b3c4846d18b26919bdcc094baecb26d33",
+    "src/grpc/stream/duplex/client_receive.zig": "33822f684fa5779e5443e8b4e618715f3d4b14a728ac8d05ebc63b1bf51c51ff",
+    "src/grpc/stream/duplex.zig": "0db9337a4a17acb4b3929e3b7f7f58ed89a935e1b1603bd26113fc6a43d3c109",
+    "src/grpc/channel/shared/stream/owner.zig": "3c0d0ed61a5d8ff34110bd6ce493e20f2bcfe210aeab828856be14b1a0fc9e47",
+    "src/http2/runtime/duplex/batched_credit_tests.zig": "971507546f67d3e7254105353c0298ea3ba2022a6b6360f8be2923cfa36e1cd1"
+  },
+  "paired_improvement": {
+    "persistent_0": {
+      "instructions": {"median": 1.013664359, "wins": 8},
+      "cycles": {"median": 1.023221770, "wins": 8},
+      "throughput": {"median": 1.012316396, "wins": 8},
+      "p50": {"median": 1.013005698, "wins": 8},
+      "p99": {"median": 1.009617236, "wins": 8}
+    },
+    "persistent_4096": {
+      "instructions": {"median": 1.010904877, "wins": 8},
+      "cycles": {"median": 1.021949632, "wins": 8},
+      "throughput": {"median": 1.010884829, "wins": 8},
+      "p50": {"median": 1.009919652, "wins": 8},
+      "p99": {"median": 1.012341201, "wins": 7}
+    },
+    "persistent_262144": {
+      "instructions": {"median": 1.007435572, "wins": 8},
+      "cycles": {"median": 1.011834280, "wins": 8},
+      "throughput": {"median": 1.002003516, "wins": 5},
+      "p50": {"median": 1.001988793, "wins": 5},
+      "p99": {"median": 0.995874719, "wins": 2}
+    },
+    "calls_262144": {
+      "instructions": {"median": 1.006810974, "wins": 8},
+      "cycles": {"median": 1.007007416, "wins": 8},
+      "throughput": {"median": 1.000000000, "wins": 3},
+      "p50": {"median": 1.003009025, "wins": 6},
+      "p99": {"median": 1.001478841, "wins": 5}
+    }
+  },
+  "profiles": {
+    "baseline": {
+      "samples": 10000,
+      "lost_samples": 0,
+      "clock_gettime_self_percent": 15.41,
+      "buffered_poll_clock_child_percent": 2.06,
+      "report_sha256": "294604ebc666a77040021b8ab5093efcfae5087f6832897c057e2145cc5f7dee"
+    },
+    "candidate": {
+      "samples": 10000,
+      "lost_samples": 0,
+      "clock_gettime_self_percent": 13.81,
+      "buffered_poll_clock_child_percent": 0.0,
+      "report_sha256": "bf5c23c43d427293ae35cea33e31f341b648153574980e8fc01aaa0cbcb51158"
+    },
+    "interpretation": "Profile percentages are explanatory. The fixed-binary PMU pairs establish reduced work; 256-KiB timing is treated as neutral."
+  },
+  "verification": {
+    "debug_cross_module": {"passed": 200, "total": 200},
+    "release_fast_cross_module": {"passed": 200, "total": 200},
+    "focused_public_strict_and_owner_internal": {"passed": 132, "total": 132},
+    "grpc_cpp_forward": {
+      "h2c": "passed",
+      "tls": "passed",
+      "client_sha256": "2767ddc009f0e5749a99f5987ae38923122e1dfd473e396c15512c744ea9cb37",
+      "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd"
+    }
+  },
+  "artifacts": {
+    "ab": "zig-out/grpc-shared-validated-poll-ab/20261029T150903Z",
+    "baseline_profile": "zig-out/grpc-256k-cached-clock-profile/20261029T142325Z",
+    "candidate_profile": "zig-out/grpc-256k-validated-poll-profile/20261029T151054Z"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "perf": "6.8.12",
+    "kernel": "6.8.12-1021-rt-tegra",
+    "arch": "aarch64"
+  }
+}

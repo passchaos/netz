@@ -26,6 +26,16 @@ test "HTTP/2 batched deferred credit emits one connection and stream update per 
     try fixture.headers(&encoder, stream.streamId(), false, &.{.{ .name = ":status", .value = "200" }});
     try fixture.frame(.data, 0, stream.streamId(), "x" ** 16384);
     try fixture.frame(.data, 0, stream.streamId(), "y" ** 16384);
+    try std.testing.expectError(
+        error.Timeout,
+        stream.pollResponseEventWithCreditPolicyAndDeadline(
+            .low_watermark,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(-1),
+            }),
+        ),
+    );
     var head = try stream.readResponseEventWithTimeout(.fromSeconds(1));
     defer head.deinit(allocator);
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) });

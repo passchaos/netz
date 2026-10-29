@@ -531,21 +531,60 @@ pub const ClientDuplex = struct {
     /// Route encoded DATA to a consumer-owned decoder. Use one receive mode
     /// for the entire RPC; raw and decoded event reads cannot be mixed.
     pub fn pollRawResponseEventWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
-        return self.pollRawResponseEventWithCredit(deadline, .immediate);
+        return self.pollRawResponseEventWithCredit(
+            deadline,
+            .immediate,
+            false,
+        );
     }
 
     /// Keep connection credit available with low-watermark refills while the
     /// application owns stream-credit acknowledgements.
     pub fn pollRawResponseEventBatchedWithDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
-        return self.pollRawResponseEventWithCredit(deadline, .low_watermark);
+        return self.pollRawResponseEventWithCredit(
+            deadline,
+            .low_watermark,
+            false,
+        );
     }
 
-    fn pollRawResponseEventWithCredit(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy) Error!?RawClientEvent {
+    /// Endpoint-owner counterpart whose scheduler turn already classified the
+    /// RPC/write deadlines against its scan-cached awake timestamp.
+    pub fn pollRawResponseEventBatchedWithValidatedDeadline(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp) Error!?RawClientEvent {
+        return self.pollRawResponseEventWithCredit(
+            deadline,
+            .low_watermark,
+            true,
+        );
+    }
+
+    fn pollRawResponseEventWithCredit(self: *ClientDuplex, deadline: std.Io.Clock.Timestamp, policy: http2.runtime.ClientDuplexStream.ConnectionCreditPolicy, comptime deadline_validated: bool) Error!?RawClientEvent {
         try self.selectReceiveMode(.raw);
         if (deadline.clock != .awake) return error.Timeout;
         const effective = earlierDeadline(self.deadline, deadline);
         const rpc_limited = if (self.deadline) |rpc| !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc) else false;
-        return client_receive.pollWithConnectionCredit(self, effective, rpc_limited, 1, {}, unusedMessage, raw_receive_hooks, policy);
+        return if (deadline_validated)
+            client_receive.pollWithConnectionCreditValidatedDeadline(
+                self,
+                effective,
+                rpc_limited,
+                1,
+                {},
+                unusedMessage,
+                raw_receive_hooks,
+                policy,
+            )
+        else
+            client_receive.pollWithConnectionCredit(
+                self,
+                effective,
+                rpc_limited,
+                1,
+                {},
+                unusedMessage,
+                raw_receive_hooks,
+                policy,
+            );
     }
 
     fn unusedMessage(_: void, _: codec.DecodedMessage) Error!void {

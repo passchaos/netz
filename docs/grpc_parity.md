@@ -1749,3 +1749,19 @@ package tests, and the pinned grpc-cpp h2c/TLS forward matrix pass. This is a
 SharedChannel scheduling improvement, not closure of the remaining grpc-cpp
 large-message gap. Evidence is recorded in
 `docs/evidence/grpc_shared_cached_clock/2026-10-29.json`.
+
+## Shared owner validated-deadline poll
+
+The SharedChannel streaming owner now avoids a second exact clock read when it
+polls response events after already classifying RPC/write expiry against its
+scan-cached awake timestamp. Public HTTP/2 and gRPC deadline polls remain
+strict, and actual flow-control output retains the same absolute deadline and
+transport checks. An expired public-deadline regression plus shared streaming,
+bounded message and HTTP/2 batched-credit tests bind that split.
+
+Across eight fixed-binary pairs, instructions and cycles improved in all four
+0-byte/4-KiB/256-KiB persistent and 256-KiB per-call shapes. Small-message
+throughput improved by paired medians of 1.23% and 1.09%, each with 8/8 wins;
+large-message timing stayed neutral while PMU work fell 0.7-1.2%. The focused
+Debug/ReleaseFast and grpc-cpp h2c/TLS gates pass. Evidence is recorded in
+`docs/evidence/grpc_shared_validated_poll/2026-10-29.json`.
