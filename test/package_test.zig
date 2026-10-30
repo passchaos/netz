@@ -135,6 +135,38 @@ test "public gRPC ORCA per-RPC metadata owns validated backend metrics" {
     );
 }
 
+test "public gRPC ORCA OOB request exposes typed stream composition" {
+    const encoded = try netz.grpc.orca_oob.encodeRequestAlloc(
+        std.testing.allocator,
+        .{
+            .report_interval = .fromMilliseconds(250),
+            .request_cost_names = &.{"query"},
+        },
+    );
+    defer std.testing.allocator.free(encoded);
+    var request = try netz.grpc.orca_oob.decodeRequestAlloc(
+        std.testing.allocator,
+        encoded,
+    );
+    defer request.deinit();
+    try std.testing.expectEqual(
+        @as(i96, 250 * std.time.ns_per_ms),
+        request.request.report_interval.nanoseconds,
+    );
+    try std.testing.expectEqualStrings(
+        "query",
+        request.request.request_cost_names[0],
+    );
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
+        "startOrcaOobWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.orca_oob.ServerSession,
+        "writeReport",
+    ));
+}
+
 test "public gRPC-Web HTTP2 dispatch validates policy and deadline before I/O" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime.ServerConnection, "readWebRequest"));
     try std.testing.expect(@hasDecl(netz.grpc.web.http2.Request, "startServerStream"));
@@ -376,6 +408,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "grpc"));
     try std.testing.expect(@hasDecl(netz.grpc, "Status"));
     try std.testing.expect(@hasDecl(netz.grpc, "orca"));
+    try std.testing.expect(@hasDecl(netz.grpc, "orca_oob"));
     try std.testing.expect(@hasDecl(netz.grpc, "MessageIterator"));
     try std.testing.expect(@hasDecl(netz.grpc, "Timeout"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseBearerToken"));

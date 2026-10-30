@@ -885,6 +885,9 @@ Current protocol coverage includes:
   standard ORCA per-RPC backend load reports in
   `endpoint-load-metrics-bin`, with bounded protobuf decoding, exact metadata
   ownership, validated utilization values and named metric maps,
+  plus typed ORCA OOB request/client/server streams with protobuf Duration,
+  request-cost selection, incremental owned reports, per-read deadlines and
+  stream-local cancellation under explicit single-owner multiplexing,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
   comparison, a caller-buffer client field constructor that always requests
   HPACK Never Indexed across unary and streaming calls, and a server helper
@@ -959,7 +962,10 @@ Current protocol coverage includes:
   metadata from grpc-cpp to netz over both h2c and TLS. The canonical
   `orca_per_rpc` case is also bidirectional: netz emits reports consumed by
   grpc-cpp's backend-metrics policy and decodes reports emitted by grpc-cpp,
-  over both h2c and verified TLS. The official reflection
+  over both h2c and verified TLS. The canonical `orca_oob` case additionally
+  drives a long-lived report stream beside a business duplex RPC, applies and
+  observes two server metric updates, and cancels only the OOB stream in both
+  endpoint directions over h2c and verified TLS. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

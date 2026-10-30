@@ -35,27 +35,11 @@ pub fn encodePerQueryRequestAlloc(
     allocator: std.mem.Allocator,
     report: Report,
 ) Error![]u8 {
-    try validate(report);
-    var nested: std.ArrayList(u8) = .empty;
-    defer nested.deinit(allocator);
-    try appendFixed64(
-        &nested,
-        allocator,
-        1,
-        @bitCast(report.cpu_utilization),
-    );
-    try appendFixed64(
-        &nested,
-        allocator,
-        2,
-        @bitCast(report.memory_utilization),
-    );
-    try appendMap(&nested, allocator, 3, report.request_cost);
-    try appendMap(&nested, allocator, 4, report.utilization);
-
+    const nested = try encodeReportAlloc(allocator, report);
+    defer allocator.free(nested);
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
-    try appendBytes(&output, allocator, 11, nested.items);
+    try appendBytes(&output, allocator, 11, nested);
     return output.toOwnedSlice(allocator);
 }
 
@@ -73,7 +57,84 @@ pub fn decodePerQueryRequest(
     }
     const bytes = try reader.readBytes(1024);
     if (!reader.finished()) return error.UnsupportedField;
+    return decodeReport(bytes, request_cost_out, utilization_out);
+}
 
+/// Encode the official `orca_oob` FullDuplexCall update: one one-byte response
+/// request plus field 8 `orca_oob_report`.
+pub fn encodeOobUpdateAlloc(
+    allocator: std.mem.Allocator,
+    report: Report,
+) Error![]u8 {
+    const nested = try encodeReportAlloc(allocator, report);
+    defer allocator.free(nested);
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    try appendBytes(&output, allocator, 2, "\x08\x01");
+    try appendBytes(&output, allocator, 8, nested);
+    return output.toOwnedSlice(allocator);
+}
+
+pub fn decodeOobUpdate(
+    input: []const u8,
+    request_cost_out: []Metric,
+    utilization_out: []Metric,
+) Error!Report {
+    var reader = Reader{ .input = input };
+    var parameter_seen = false;
+    var report_bytes: ?[]const u8 = null;
+    while (!reader.finished()) {
+        const field = try reader.readTag();
+        if (field.number == 2 and field.wire_type == .length_delimited) {
+            if (parameter_seen) return error.DuplicateField;
+            parameter_seen = true;
+            if (!std.mem.eql(u8, try reader.readBytes(8), "\x08\x01")) {
+                return error.InvalidArgument;
+            }
+        } else if (field.number == 8 and
+            field.wire_type == .length_delimited)
+        {
+            if (report_bytes != null) return error.DuplicateField;
+            report_bytes = try reader.readBytes(1024);
+        } else return error.UnsupportedField;
+    }
+    if (!parameter_seen or report_bytes == null) return error.MissingPayload;
+    return decodeReport(
+        report_bytes.?,
+        request_cost_out,
+        utilization_out,
+    );
+}
+
+fn encodeReportAlloc(
+    allocator: std.mem.Allocator,
+    report: Report,
+) Error![]u8 {
+    try validate(report);
+    var nested: std.ArrayList(u8) = .empty;
+    errdefer nested.deinit(allocator);
+    try appendFixed64(
+        &nested,
+        allocator,
+        1,
+        @bitCast(report.cpu_utilization),
+    );
+    try appendFixed64(
+        &nested,
+        allocator,
+        2,
+        @bitCast(report.memory_utilization),
+    );
+    try appendMap(&nested, allocator, 3, report.request_cost);
+    try appendMap(&nested, allocator, 4, report.utilization);
+    return nested.toOwnedSlice(allocator);
+}
+
+fn decodeReport(
+    bytes: []const u8,
+    request_cost_out: []Metric,
+    utilization_out: []Metric,
+) Error!Report {
     var report_reader = Reader{ .input = bytes };
     var cpu_seen = false;
     var memory_seen = false;
@@ -373,4 +434,29 @@ test "canonical ORCA per-query fixture round trips" {
             &utilization,
         ),
     );
+}
+
+test "canonical ORCA OOB update round trips" {
+    const expected = Report{
+        .cpu_utilization = 0.29309,
+        .memory_utilization = 0.2,
+        .request_cost = &.{},
+        .utilization = &.{.{ .name = "util", .value = 0.2039 }},
+    };
+    const encoded = try encodeOobUpdateAlloc(
+        std.testing.allocator,
+        expected,
+    );
+    defer std.testing.allocator.free(encoded);
+    var request_cost: [1]Metric = undefined;
+    var utilization: [1]Metric = undefined;
+    const actual = try decodeOobUpdate(
+        encoded,
+        &request_cost,
+        &utilization,
+    );
+    try std.testing.expectEqual(expected.cpu_utilization, actual.cpu_utilization);
+    try std.testing.expectEqual(expected.memory_utilization, actual.memory_utilization);
+    try std.testing.expectEqualDeep(expected.request_cost, actual.request_cost);
+    try std.testing.expectEqualDeep(expected.utilization, actual.utilization);
 }

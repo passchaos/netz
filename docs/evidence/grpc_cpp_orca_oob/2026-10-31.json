@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "official grpc-cpp ORCA out-of-band streaming reports",
+  "decision": "accepted",
+  "scope": {
+    "directions": [
+      "netz client to official grpc-cpp server",
+      "official grpc-cpp client to netz server"
+    ],
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "service": "/xds.service.orca.v3.OpenRcaService/StreamCoreMetrics",
+    "business_method": "/grpc.testing.TestService/FullDuplexCall",
+    "request_interval": "1 second",
+    "updates": [
+      "cpu=0.8210 memory=0.5847 utilization[util]=0.30499",
+      "cpu=0.29309 memory=0.2 utilization[util]=0.2039"
+    ],
+    "lifecycle": "initial OOB snapshot, two interval-spaced updates beside a business duplex RPC, business OK, stream-local OOB cancellation"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ OrcaService, OobBackendMetricWatcher, interop client and interop server",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "description": "doc/interop-test-descriptions.md, src/proto/grpc/testing/xds/v3/orca_service.proto, src/cpp/server/orca/orca_service.cc, src/core/load_balancing/oob_backend_metric.cc, and test/cpp/interop/interop_client.cc"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "cc": "/usr/bin/gcc 13.3.0",
+    "cxx": "/usr/bin/g++ 13.3.0",
+    "client_io": "zio-std-io or grpc-cpp-posix-event-engine by direction",
+    "server_io": "grpc-cpp-posix-event-engine or zio-std-io by direction",
+    "grpc_cpp_client_sha256": "f3c8f9677d96a97499685c1c39e01b7eff7b75412cd01352ef46767582d1c0a3",
+    "grpc_cpp_client_build_id": "1110ce14f6868d70497ae0e09aec3cc4a5f4dc09",
+    "grpc_cpp_server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d",
+    "grpc_cpp_server_build_id": "f69c4665b89ff08fcd73ab81e813a5b6ccabfd0c",
+    "grpc_cpp_binaries_reused_from_pinned_checkout": true
+  },
+  "implementation": {
+    "request_codec": "owned OrcaLoadReportRequest with validated protobuf Duration and repeated request_cost_names",
+    "client": "typed incremental reports own decoded protobuf and metric indexes, expose per-read timeout/deadline and RST_STREAM CANCEL",
+    "server": "one-message request validation, typed report writes, flow-control resume, requested-cost filtering, and peer-reset observation",
+    "ownership_boundary": "the reconnecting Channel remains single-operation; OOB and business streams are opened on one explicit connected HTTP/2 owner and progressed alternately",
+    "reverse_fixture": "accepts OOB and business streams in either order, publishes an immediate snapshot and two one-second updates, then verifies business half-close and OOB cancellation",
+    "forward_fixture": "skips the official server's initial empty snapshot, validates both periodic reports, finishes the business stream, and cancels only OOB"
+  },
+  "results": {
+    "fixture_codec": "19/19 passed",
+    "grpc_debug": "422/422 passed",
+    "oob_release_fast": "136/136 passed",
+    "package": "26/26 passed",
+    "reverse_matrix": "27 scenarios per transport, 54 total, passed over h2c and TLS",
+    "reverse_oob": "official grpc-cpp client accepted both netz OOB updates and completed the business RPC over h2c and TLS",
+    "forward_matrix": "complete netz-client matrix passed over h2c and TLS, plus pick-first failover",
+    "forward_oob": "netz owned both official periodic reports and canceled the OOB stream without disrupting the business RPC over h2c and TLS"
+  },
+  "source_sha256": {
+    "src/grpc/orca/oob.zig": "3542e20ba625e345802172d8ffb5a729122feff62c138c20bb52127669f51276",
+    "src/grpc/orca/oob_tests.zig": "a7b5d6370525d255f4e78fd3521e4f713bdd1bf91463a2cb6165abdc763499cc",
+    "src/grpc/mod.zig": "835c63eb5e4d693752d8e985ed1a8a873bdc4feff99b4c6ddbfa64183ce1c06b",
+    "src/grpc/runtime.zig": "e9240ff5890ee265cc522124ba6d7a49340cd407ce18d910770bdf4b78ef0f6d",
+    "tools/interop/grpc_cpp/orca_messages.zig": "ac89580cfa9f33f62c741f7a30cac24f2a06ae47701f9ef50b4877ab35fd9e89",
+    "tools/interop/grpc_cpp/orca_oob.zig": "9851cc3706f90ac70bdc25cc78e9459564bec9f3a707273bb81db0f00ca54df1",
+    "tools/interop/grpc_cpp_client.zig": "2761598bc6a4561fbf85c2bf7b42acdb1f999dce39f4664cd1e03bede788b1de",
+    "tools/interop/grpc_cpp_server.zig": "46a78045d202030ce9bbc1e8149b81d51bc6c6a67f070f132ccdf9da8d393456",
+    "tools/interop/grpc_cpp.sh": "0934d41895031dce79fd197dadd927196c9fe402cb593b60390e01830c4f6693",
+    "tools/interop/grpc_cpp_client.sh": "ca009bc7f9365e2297a23c2eb73f80c37150731879c5e45d9da43e2f7e4f60c0",
+    "test/package_test.zig": "d6257f93235f1a4733aaca52796482ea39590d54882be87fcef672d7bf5b4be5"
+  },
+  "verification_commands": [
+    "zig test tools/interop/grpc_cpp_messages.zig",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC ORCA OOB' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_CLIENT=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_client zig build interop-grpc-cpp-client -Doptimize=ReleaseFast --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "Canonical OOB wire behavior and lifecycle are externally covered. Automatic SharedChannel admission, report fan-out, and reconnect policy remain separate higher-level composition work."
+}

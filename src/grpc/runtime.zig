@@ -11,6 +11,7 @@ const call = @import("call.zig");
 const web = @import("web.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
+const orca_oob = @import("orca/oob.zig");
 const service_config = @import("service_config.zig");
 const channel = @import("channel.zig");
 const streaming = @import("stream/runtime.zig");
@@ -210,6 +211,43 @@ pub const Client = struct {
             &self.connection,
             self.connection.allocator,
             options,
+        );
+    }
+
+    pub fn startOrcaOob(
+        self: *Client,
+        options: orca_oob.ClientOptions,
+    ) orca_oob.Error!orca_oob.ClientStream {
+        return orca_oob.start(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
+    pub fn startOrcaOobWithTimeout(
+        self: *Client,
+        options: orca_oob.ClientOptions,
+        timeout: std.Io.Duration,
+    ) orca_oob.Error!orca_oob.ClientStream {
+        return orca_oob.startWithTimeout(
+            &self.connection,
+            self.connection.allocator,
+            options,
+            timeout,
+        );
+    }
+
+    pub fn startOrcaOobWithDeadline(
+        self: *Client,
+        options: orca_oob.ClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) orca_oob.Error!orca_oob.ClientStream {
+        return orca_oob.startWithDeadline(
+            &self.connection,
+            self.connection.allocator,
+            options,
+            deadline,
         );
     }
 

@@ -39,6 +39,12 @@ existing HTTP/2 runtime:
   rules on input; output rejects duplicate names, non-finite values, and
   invalid utilization bounds. Metadata decoding owns its exact Base64 payload
   and rejects repeated or comma-combined non-repeatable reports,
+- standard ORCA OOB `OpenRcaService/StreamCoreMetrics` request codecs and
+  typed client/server streams. The request preserves a bounded protobuf
+  Duration plus selective request-cost names; clients incrementally own each
+  report and expose read deadlines/cancellation, while server sessions filter
+  request-cost entries and expose the requested cadence without introducing a
+  second HTTP/2 frame reader,
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length. A caller-buffer constructor emits the
@@ -310,8 +316,8 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_unary`, `large_unary`, `orca_per_rpc`, `pick_first_unary`, `rpc_soak`,
-`channel_soak`,
+`empty_unary`, `large_unary`, `orca_per_rpc`, `orca_oob`, `pick_first_unary`,
+`rpc_soak`, `channel_soak`,
 `max_concurrent_streams_connection_scaling`,
 `half_duplex`,
 `slow_consumer`, `empty_stream`,
@@ -405,6 +411,18 @@ paths run this bidirectional proof. The fixture also isolates a preceding
 optional OOB watcher with `UNIMPLEMENTED`; implementing its long-lived report
 stream is not conflated with this per-RPC case. Machine-readable evidence is
 recorded in `docs/evidence/grpc_cpp_orca_per_rpc/2026-10-31.json`.
+The canonical ORCA OOB case brings the reverse matrix to twenty-seven scenarios
+per transport. On one HTTP/2 connection, netz accepts the official client's
+long-lived `StreamCoreMetrics` request and business `FullDuplexCall`, emits an
+initial report, applies two independently validated metric updates, publishes
+both reports, finishes the business RPC, and observes OOB cancellation. The
+inverse gate uses the public netz OOB client stream against the official server,
+skips the initial empty snapshot, owns and validates both periodic updates, and
+cancels only the OOB stream. Both directions pass over h2c and certificate-
+verified TLS while the single connection owner explicitly alternates sibling
+stream progress.
+Machine-readable evidence is recorded in
+`docs/evidence/grpc_cpp_orca_oob/2026-10-31.json`.
 The half-duplex case sends all four canonical response-size requests before
 half-closing, then requires the peer to emit the four responses in order. Both
 netz and C++ server paths therefore prove response production begins only
@@ -537,9 +555,10 @@ reset race from closing with unread upload bytes.
    reconnection/backoff. SharedChannel now applies healthCheckConfig to
    same-connection endpoint admission for concurrent unary and streaming calls.
    Unary transport deadlines are already enforced locally as described above.
-   ORCA per-RPC reports are covered in both grpc-cpp directions; the standard
-   long-lived `OpenRcaService/StreamCoreMetrics` OOB reporting service and its
-   reconnect/update lifecycle remain open.
+   ORCA per-RPC and long-lived OOB reports are covered in both grpc-cpp
+   directions. Automatic SharedChannel OOB admission, consumer fan-out and
+   reconnect policy remain open; direct typed streams deliberately leave that
+   policy with the single connection owner.
 
 The current tests establish concurrent shared unary and streaming calls,
 sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature

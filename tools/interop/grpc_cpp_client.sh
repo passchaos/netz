@@ -143,7 +143,7 @@ PY
       '--service_config_json={"connectionScaling":{"maxConnectionsPerSubchannel": 2}}'
     )
   fi
-  if [[ "$client_scenario" == orca_per_rpc ]]; then
+  if [[ "$client_scenario" == orca_per_rpc || "$client_scenario" == orca_oob ]]; then
     # Upstream's registered test policy is selected by the official interop
     # coordinator; invoking the client binary alone otherwise uses pick_first
     # and never installs its per-call backend-metric tracker.
@@ -258,6 +258,7 @@ for transport in h2c tls; do
     empty_unary \
     large_unary \
     orca_per_rpc \
+    orca_oob \
     pick_first_unary \
     max_concurrent_streams_connection_scaling \
     ping_pong \
@@ -290,4 +291,4 @@ for transport in h2c tls; do
     'authorization:Bearer interop-token'
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large orca=per-rpc pick_first=100-stable-server-id connection_scaling=2-streams+1@2-connections rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large orca=per-rpc+oob pick_first=100-stable-server-id connection_scaling=2-streams+1@2-connections rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

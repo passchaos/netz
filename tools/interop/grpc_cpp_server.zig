@@ -58,6 +58,7 @@ const Scenario = enum {
     empty_unary,
     large_unary,
     orca_per_rpc,
+    orca_oob,
     pick_first_unary,
     max_concurrent_streams_connection_scaling,
     half_duplex,
@@ -291,6 +292,10 @@ pub fn main(init: std.process.Init) !void {
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
         .orca_per_rpc => try serveOrcaPerRpc(allocator, &connection),
+        .orca_oob => try @import("grpc_cpp/orca_oob.zig").serve(
+            allocator,
+            &connection,
+        ),
         .pick_first_unary => try servePickFirstUnary(
             allocator,
             &connection,
@@ -1271,6 +1276,7 @@ fn serveScenario(
         .empty_unary,
         .large_unary,
         .orca_per_rpc,
+        .orca_oob,
         .pick_first_unary,
         .max_concurrent_streams_connection_scaling,
         .client_streaming,

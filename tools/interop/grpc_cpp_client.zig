@@ -113,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
     try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
     try runOrcaPerRpc(allocator, &client, message_limit);
+    try runOrcaOob(allocator, &client, message_limit);
     try runRpcSoak(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
@@ -142,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
-            "orca=per-rpc " ++
+            "orca=per-rpc+oob " ++
             "rpc_soak=100x271828/314159 " ++
             "channel_soak=100x271828/314159 " ++
             "status=unary+bidi+unicode " ++
@@ -458,6 +459,89 @@ fn runOrcaPerRpc(
     {
         return error.InvalidOrcaReport;
     }
+}
+
+fn runOrcaOob(
+    allocator: std.mem.Allocator,
+    client: *InteropClient,
+    message_limit: usize,
+) !void {
+    const connection = client.connected() orelse return error.ChannelNotReady;
+    var reports = try netz.grpc.orca_oob.start(connection, allocator, .{
+        .report_interval = .fromSeconds(1),
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    defer reports.deinit();
+    var reports_live = true;
+    defer if (reports_live) reports.cancel() catch {};
+
+    var stream = try netz.grpc.startDuplex(connection, allocator, .{
+        .path = service_path,
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    var observer = Observer{ .expected_sizes = &.{ 1, 1 } };
+    const expected = [_]messages.orca.Report{
+        .{
+            .cpu_utilization = 0.8210,
+            .memory_utilization = 0.5847,
+            .request_cost = &.{},
+            .utilization = &.{.{ .name = "util", .value = 0.30499 }},
+        },
+        .{
+            .cpu_utilization = 0.29309,
+            .memory_utilization = 0.2,
+            .request_cost = &.{},
+            .utilization = &.{.{ .name = "util", .value = 0.2039 }},
+        },
+    };
+    for (expected) |wanted| {
+        const request = try messages.orca.encodeOobUpdateAlloc(
+            allocator,
+            wanted,
+        );
+        defer allocator.free(request);
+        try writeMessageFully(allocator, &stream, request, &observer);
+        try readThroughMessage(allocator, &stream, &observer);
+        try waitForOrcaOobReport(&reports, wanted);
+    }
+    try finishRequestFully(allocator, &stream, &observer);
+    try readThroughTerminal(allocator, &stream, &observer);
+    if (observer.message_count != expected.len or
+        observer.terminal_status != .ok)
+    {
+        return error.InvalidOrcaOobResponse;
+    }
+    try reports.cancel();
+    reports_live = false;
+}
+
+fn waitForOrcaOobReport(
+    reports: *netz.grpc.orca_oob.ClientStream,
+    expected: messages.orca.Report,
+) !void {
+    for (0..10) |_| {
+        var event = try reports.nextWithTimeout(.fromSeconds(2));
+        defer event.deinit();
+        switch (event) {
+            .terminal => return error.EarlyOrcaOobTerminal,
+            .report => |owned| {
+                const actual = owned.report;
+                if (actual.cpu_utilization == expected.cpu_utilization and
+                    actual.memory_utilization == expected.memory_utilization and
+                    actual.request_cost.len == 0 and
+                    actual.utilization.len == 1 and
+                    std.mem.eql(u8, actual.utilization[0].name, "util") and
+                    actual.utilization[0].value == expected.utilization[0].value)
+                {
+                    return;
+                }
+            },
+        }
+    }
+    return error.MissingOrcaOobReport;
 }
 
 fn runUnimplementedRoutes(
