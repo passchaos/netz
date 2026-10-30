@@ -1909,3 +1909,15 @@ runtime queue branch to every Shared call. Follow-up work must live below
 `ClientDuplex` or be selected only for a distinct large-message path while
 leaving Call layout and small-DATA code generation untouched. Evidence is in
 `docs/evidence/grpc_shared_retained_data_rejected/2026-10-30.json`.
+
+A later large-identity candidate kept Call/Decoder layouts unchanged and, once
+the prefix declared more than one 64-KiB turn, copied directly from the Shared
+ring into the decoder's final allocation under bounded lock turns. Correctness,
+wrapped-ring and slow-reader sibling tests passed 135/135. The branch was never
+taken by the zero-byte guard, but merely checking it added 0.129% instructions
+with 0/8 wins; roundtrip, p50 and p99 also regressed 0.23%, 0.24% and 0.16%.
+The candidate was removed without running 256-KiB timing. This further narrows
+the required boundary: large-message selection must live below HTTP/2 transport
+dispatch or in a distinct call implementation whose code is absent from the
+default reader. Full rows are in
+`docs/evidence/grpc_shared_large_ring_rejected/2026-10-30.json`.

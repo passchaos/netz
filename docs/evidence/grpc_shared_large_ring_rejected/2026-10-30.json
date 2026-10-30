@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "SharedChannel direct ring-to-decoder large identity assembly",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "ddb7d460d8f1984da5e711d4ff7d6c056019d7a4",
+    "binary_sha256": "2f37ec713ab471f2acff313c3b600dcbe5b1704ce568724c1dc799e27cfd5e98",
+    "binary_bytes": 27772648
+  },
+  "candidate": {
+    "binary_sha256": "870ba20242132b5cb4d003ed2b0431c3ebde9be5f0787ca7a61ddf0c61b7ae10",
+    "binary_bytes": 27774864,
+    "source_sha256": {
+      "src/grpc/channel/shared/stream/read.zig": "2940ea147999535f1ea677e586dc4f6cc619538f8253aec744b7e436f94bf249"
+    }
+  },
+  "reference": {
+    "implementation": "grpc-core",
+    "revision": "03d65cc67c",
+    "pattern": "grpc_slice_buffer retains segmented receive ownership and moves slices between transport and byte-buffer boundaries"
+  },
+  "objective": "For known large uncompressed messages, copy directly from the Shared Call ring into the decoder's final exact allocation and skip the temporary max_write_bytes_per_turn chunk without adding Call or Decoder fields.",
+  "design": {
+    "activation": "Only an existing identity reassembly or a wrapped ring prefix declaring more than the 64 KiB turn budget uses the direct path.",
+    "bounded_work": "At most max_write_bytes_per_turn bytes move under one State lock acquisition; the reader unlocks between turns so siblings and the endpoint owner can progress.",
+    "ownership": "feedLimitedAssembledOwned transfers the decoder allocation to the consumer on completion; compressed and small/direct messages retain the published path.",
+    "layout": "Shared Call, Decoder, and public event layouts are unchanged.",
+    "focused_result": "135/135 passed, including wrapped prefix detection, decoder ownership, and 128 KiB slow-reader sibling progress"
+  },
+  "zero_byte_guard": {
+    "mode": "persistent",
+    "payload_bytes": 0,
+    "warmup": 100,
+    "iterations": 10000,
+    "cpu": 1,
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "baseline_rows": [
+      { "instructions": 359901258, "cycles": 276518580, "ns_per_roundtrip": 17414, "p50_ns": 17296, "p99_ns": 17621 },
+      { "instructions": 359901904, "cycles": 277601721, "ns_per_roundtrip": 17446, "p50_ns": 17316, "p99_ns": 17704 },
+      { "instructions": 359963921, "cycles": 275913376, "ns_per_roundtrip": 17379, "p50_ns": 17242, "p99_ns": 17584 },
+      { "instructions": 359903133, "cycles": 277003475, "ns_per_roundtrip": 17420, "p50_ns": 17288, "p99_ns": 17603 },
+      { "instructions": 359901956, "cycles": 277100083, "ns_per_roundtrip": 17435, "p50_ns": 17297, "p99_ns": 17594 },
+      { "instructions": 359894484, "cycles": 276239909, "ns_per_roundtrip": 17418, "p50_ns": 17288, "p99_ns": 17584 },
+      { "instructions": 359893598, "cycles": 276009346, "ns_per_roundtrip": 17359, "p50_ns": 17233, "p99_ns": 17510 },
+      { "instructions": 359906020, "cycles": 276627411, "ns_per_roundtrip": 17381, "p50_ns": 17251, "p99_ns": 17566 }
+    ],
+    "candidate_rows": [
+      { "instructions": 360358068, "cycles": 275605094, "ns_per_roundtrip": 17389, "p50_ns": 17251, "p99_ns": 17630 },
+      { "instructions": 360361558, "cycles": 276782371, "ns_per_roundtrip": 17548, "p50_ns": 17417, "p99_ns": 17770 },
+      { "instructions": 360366471, "cycles": 276458680, "ns_per_roundtrip": 17527, "p50_ns": 17362, "p99_ns": 17872 },
+      { "instructions": 360366009, "cycles": 276281347, "ns_per_roundtrip": 17394, "p50_ns": 17270, "p99_ns": 17538 },
+      { "instructions": 360369702, "cycles": 276461740, "ns_per_roundtrip": 17448, "p50_ns": 17324, "p99_ns": 17612 },
+      { "instructions": 360362072, "cycles": 275961339, "ns_per_roundtrip": 17453, "p50_ns": 17324, "p99_ns": 17602 },
+      { "instructions": 360358744, "cycles": 276473665, "ns_per_roundtrip": 17460, "p50_ns": 17325, "p99_ns": 17676 },
+      { "instructions": 360432951, "cycles": 276209632, "ns_per_roundtrip": 17426, "p50_ns": 17297, "p99_ns": 17603 }
+    ],
+    "summary": {
+      "instructions_baseline_over_candidate_paired_median": 0.9987123766,
+      "instructions_candidate_wins": 0,
+      "cycles_baseline_over_candidate_paired_median": 1.0019107587,
+      "cycles_candidate_wins": 6,
+      "roundtrip_candidate_over_baseline_paired_median": 1.0022992248,
+      "roundtrip_candidate_wins": 2,
+      "p50_candidate_over_baseline_paired_median": 1.0023744407,
+      "p50_candidate_wins": 2,
+      "p99_candidate_over_baseline_paired_median": 1.0015649998,
+      "p99_candidate_wins": 1
+    },
+    "artifact": {
+      "path": "zig-out/grpc-large-direct-ring-ab/20261030T095908-zero",
+      "summary_sha256": "dfe129512535f341536334a55ff6381bdfcc39b73a217e8ed67ca6d1cb206d62"
+    }
+  },
+  "rejection_reason": "The large-message branch was not taken by the zero-byte workload, yet its common read-path check added about 0.129% instructions with 0/8 wins. Roundtrip, p50, and p99 also regressed by 0.23%, 0.24%, and 0.16%; a 256 KiB run was therefore not permitted to override the small-message guard.",
+  "follow_up": "Do not add large-message detection to every Shared reader turn. Future segmented ownership must be selected below HTTP/2 transport dispatch or through a distinct large-message call implementation whose code is absent from the default zero-byte path."
+}
