@@ -5869,6 +5869,22 @@ proxy evidence for the entire suite.
    saved. The production change was removed before crash gates. Full serial and
    five-shape rows are in
    [the rejected single-lock evidence](evidence/mqtt_pubrel_single_lock_rejected/2026-10-30.json).
+   A narrower follow-up attempted the same lock coalescing only when the
+   router had at most one subscription. Eight 100k-message serial pairs
+   initially improved broker instructions/cycles by 0.38%/1.38%, while p50
+   and p99 improved 0.50%/1.15%. Fanout-32 stayed neutral, but six
+   balanced-32x32 pairs exposed a 2.84% cycles regression because the inlined
+   single-route transaction enlarged every PUBREL stack frame from 0x480 to
+   0x580 bytes. Moving only route construction out of line restored balanced
+   cycles but regressed serial p50/p99 1.56%/0.59%. Splitting complete general
+   and single-route transactions reduced both generated frames to 0x3e0 and
+   improved balanced cycles/timing, yet its unavoidable topology check still
+   regressed balanced instructions by 0.05-0.07% with zero or one win in four
+   pairs. All source variants were removed before crash gates. Future serial
+   work must not add a per-PUBREL topology branch; it must remove work shared
+   by concurrent shapes or select a distinct implementation outside the packet
+   hot path. Full rows are in
+   [the rejected single-route evidence](evidence/mqtt_pubrel_single_route_lock_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

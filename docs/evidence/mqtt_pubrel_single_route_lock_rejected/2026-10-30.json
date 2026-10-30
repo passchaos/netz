@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT inbound QoS 2 single-route-only PUBREL lock coalescing",
+  "decision": "rejected",
+  "baseline": {
+    "head": "6a059f0a35aeb99f0d651a9eb0f97b0677506115",
+    "broker_sha256": "e47e8dca5f14ab32e32441f27526646e04859425018620f94e7ab01cfa1c7ceb",
+    "driver_sha256": "7ba9ef928560ceeda6827334b68fd5315e143d1efa158d9af0b012e55c6a1857",
+    "source_sha256": {
+      "src/mqtt/broker.zig": "cb6198e556c73375a8b1068c357631195289b9ddd351efcca92e8692a85b70b8"
+    }
+  },
+  "profile": {
+    "artifact": "zig-out/mqtt-current-serial-profile-20261030T174500Z",
+    "artifact_bytes": 108518188,
+    "aggregate_file_hash_digest": "7b8fb6f8e3973e1b427d96dad182d97c8dfe6b378cd98d624edc4b9dbf810e5c",
+    "samples": "about 12000 cycles samples, zero lost",
+    "workload": "one publisher, one subscriber, durable MQTT 5 QoS 2, window one, 5000 warmups plus 100000 measured 256-byte publishes",
+    "observations": {
+      "flush_slot_locked_mode_self_percent": 4.15,
+      "handle_pubrel_self_percent": 3.21,
+      "route_publish_self_percent": 2.29,
+      "clock_gettime_self_percent": 13.33,
+      "baseline_profile_publishes_per_second": 21974
+    },
+    "direct_mosquitto_smoke": {
+      "netz_publishes_per_second": 22656,
+      "mosquitto_publishes_per_second": 32116,
+      "netz_over_mosquitto": 0.7054452609
+    }
+  },
+  "reference": {
+    "implementation": "Mosquitto db__message_release_incoming plus handle__pubrel",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source_clean": true,
+    "observation": "Mosquitto's single event-loop owner releases and queues one inbound QoS 2 message in one database call before PUBCOMP."
+  },
+  "candidate_design": {
+    "rule": "Coalesce pending removal, decode, route mutation, and pending recycle only when router.subscriptionCount() is at most one. Multi-subscription fanout retains the production lock boundaries.",
+    "preserved_boundaries": [
+      "persistence_mutex is acquired before state_mutex",
+      "durable pending removal and route effects finalize before downstream network dispatch",
+      "state_mutex is released before socket delivery and PUBCOMP",
+      "unknown and repeated PUBREL remain idempotently acknowledged",
+      "Message Expiry uses one cached awake timestamp"
+    ]
+  },
+  "benchmark_method": {
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "schedule": "ABBA",
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ],
+    "attach_stabilization_seconds": 0.05
+  },
+  "variants": {
+    "inlined_route_helper": {
+      "broker_sha256": "2d559f7487db66b8944969fdc41833ea85ecde7cd8217853382e769e2f488460",
+      "handle_pubrel_stack_bytes": 1408,
+      "serial_100k": {
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T181500Z-serial-100k",
+        "artifact_bytes": 26679,
+        "aggregate_file_hash_digest": "6b0cbc9a5372dddaf06bb34542ac456fb12c0c2814590cb5615ca4a45127a0e7",
+        "pairs": 8,
+        "instructions_baseline_over_candidate_paired_median": 1.0038384411,
+        "cycles_baseline_over_candidate_paired_median": 1.0140195050,
+        "elapsed_baseline_over_candidate_paired_median": 0.9979297843,
+        "p50_baseline_over_candidate_paired_median": 1.0050507674,
+        "p99_baseline_over_candidate_paired_median": 1.0116743023
+      },
+      "fanout32_20k": {
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T183000Z-fanout32-20k",
+        "artifact_bytes": 13665,
+        "aggregate_file_hash_digest": "09ffde157042a1d92a13c1047a2e73b9bdee9c40dd0296d6ba868de0d527a1f2",
+        "pairs": 4,
+        "instructions_baseline_over_candidate_paired_median": 1.0001141874,
+        "cycles_baseline_over_candidate_paired_median": 0.9998898116,
+        "elapsed_baseline_over_candidate_paired_median": 1.0008595571,
+        "interpretation": "Fanout-32 is neutral and avoids the earlier general single-lock regression."
+      },
+      "balanced32_combined": {
+        "artifacts": [
+          "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T184500Z-controls",
+          "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T190000Z-balanced32-4pair"
+        ],
+        "artifact_bytes": [
+          20037,
+          13623
+        ],
+        "aggregate_file_hash_digests": [
+          "237e63f10d0c4197a676de2664517e479ffd929cebcbd950a6a54bd8c4e21d3e",
+          "f358b2ce0ee637fa48cb2ed08bf44cfe892d87df14884158bdb067740ca68412"
+        ],
+        "pairs": 6,
+        "instructions_baseline_over_candidate_paired_median": 1.0000886968,
+        "cycles_baseline_over_candidate_paired_median": 0.9723513675,
+        "cycles_candidate_wins": 1,
+        "elapsed_baseline_over_candidate_paired_median": 0.9907076931,
+        "reason": "Inlining the single-route transaction enlarged every PUBREL stack frame from 0x480 to 0x580 bytes and regressed balanced cycles 2.84%."
+      }
+    },
+    "noinline_route_helper": {
+      "broker_sha256": "9b774189faa7101a7dc3832efe09f87e6c78316beab08213a9106e36d79cc15c",
+      "handle_pubrel_stack_bytes": 1424,
+      "balanced32": {
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T193000Z-noinline-balanced32-4pair",
+        "artifact_bytes": 13623,
+        "aggregate_file_hash_digest": "0257e0ecc69ec9822730c7866f6f125557b3ad22da049bcf24a833fbd6e62b1a",
+        "instructions_baseline_over_candidate_paired_median": 0.9999136419,
+        "cycles_baseline_over_candidate_paired_median": 1.0022295976,
+        "elapsed_baseline_over_candidate_paired_median": 1.0028782561
+      },
+      "serial_100k": {
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T194500Z-noinline-serial-100k",
+        "artifact_bytes": 26685,
+        "aggregate_file_hash_digest": "077a778d1b3b3b71c2fe0331fa0d66c943d95f0703877ef559740d761e734845",
+        "instructions_baseline_over_candidate_paired_median": 0.9999555038,
+        "cycles_baseline_over_candidate_paired_median": 1.0126088990,
+        "p50_baseline_over_candidate_paired_median": 0.9845982644,
+        "p99_baseline_over_candidate_paired_median": 0.9940910142,
+        "reason": "Out-of-line route construction removed balanced cycles regression but added one call per serial PUBREL; p50/p99 regressed 1.56%/0.59%."
+      }
+    },
+    "split_transaction_functions": {
+      "noinline_dispatcher": {
+        "broker_sha256": "a6ec3c260de64ab0bdb84a810d1ed5e0de89a02bea91655957b393b448de3299",
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T203000Z-dispatch-balanced32-4pair",
+        "artifact_bytes": 13623,
+        "aggregate_file_hash_digest": "a659ddc0aa72e9ec74eb34a619d2cf02b15a0f5de8040a5f995367c14a508fcb",
+        "instructions_baseline_over_candidate_paired_median": 0.9995106285,
+        "instructions_candidate_wins": 0,
+        "cycles_baseline_over_candidate_paired_median": 1.0116167537
+      },
+      "inline_dispatcher": {
+        "broker_sha256": "535fecfdc704f54956e25de814f861ed9e939f6ddc888d827be260d7659db893",
+        "artifact": "zig-out/mqtt-pubrel-single-route-lock-ab/20261030T210000Z-inline-dispatch-balanced32-4pair",
+        "artifact_bytes": 13631,
+        "aggregate_file_hash_digest": "b8154413385c078a007fd4f2de2760625c0d712cd197daf47bee32b0247c2974",
+        "instructions_baseline_over_candidate_paired_median": 0.9993150711,
+        "instructions_candidate_wins": 1,
+        "cycles_baseline_over_candidate_paired_median": 1.0251878920,
+        "elapsed_baseline_over_candidate_paired_median": 1.0077573152,
+        "reason": "Splitting restored 0x3e0-byte general/single transaction frames and improved cycles/timing, but the per-PUBREL topology check still regressed balanced instructions 0.069% with only one win."
+      }
+    }
+  },
+  "correctness": {
+    "focused_debug": "130/130 inbound QoS 2, fanout ownership, restart and snapshot tests passed for the final development structure",
+    "crash_and_broad_interop": "not run because every code-generation structure failed an earlier mandatory PMU or latency boundary"
+  },
+  "rejection_reason": "Serial-only lock coalescing requires a dynamic topology check on every PUBREL. Inlining bloats concurrent stack/code, moving the route helper out of line regresses serial latency, and splitting complete transaction functions leaves a stable balanced instruction regression. Serial cycles cannot override a concurrent PMU regression.",
+  "final_state": {
+    "production_source_reverted": true,
+    "source_sha256": {
+      "src/mqtt/broker.zig": "cb6198e556c73375a8b1068c357631195289b9ddd351efcca92e8692a85b70b8"
+    },
+    "follow_up": "Do not add a per-PUBREL route-count branch. A future serial optimization must remove work shared by both single-route and concurrent shapes, or select a distinct implementation when the connection/session owner is created rather than in the packet hot path."
+  }
+}
