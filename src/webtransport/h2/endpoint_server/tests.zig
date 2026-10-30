@@ -51,10 +51,8 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
         }
 
         fn run(self: *@This()) !void {
-            var connection = try self.listener.acceptWithTimeout(.fromSeconds(3));
-            try std.testing.expectError(error.InvalidEndpointOptions, endpoint.EndpointServer.init(allocator, connection, .{ .max_sessions = 0 }));
-            var server = try endpoint.EndpointServer.init(allocator, connection, .{ .max_sessions = 2, .max_pending_sessions = 2 });
-            connection = undefined;
+            try std.testing.expectError(error.InvalidEndpointOptions, (endpoint.Options{ .max_sessions = 0 }).validate());
+            var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(allocator, self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
             defer server.deinit();
 
             var rejected = try acceptRequest(server, "/reject");

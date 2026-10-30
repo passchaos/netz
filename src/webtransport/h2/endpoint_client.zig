@@ -16,6 +16,10 @@ pub const Options = struct {
     max_sessions: usize = 64,
     max_queued_commands: usize = 256,
     operation_timeout: std.Io.Duration = .fromSeconds(20),
+
+    pub fn validate(self: Options) Error!void {
+        if (self.max_sessions == 0 or self.max_sessions > std.math.maxInt(u32) or self.max_queued_commands == 0 or self.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
+    }
 };
 
 pub const ConnectAttempt = struct {
@@ -221,8 +225,11 @@ pub const EndpointClient = struct {
     state: *State,
 
     /// Takes ownership of an already negotiated HTTP/2 connection.
-    pub fn init(allocator: std.mem.Allocator, connection: http2.runtime.Connection, options: Options) Error!EndpointClient {
-        if (options.max_sessions == 0 or options.max_sessions > std.math.maxInt(u32) or options.max_queued_commands == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
+    pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointClient {
+        var connection = connection_value;
+        var connection_owned = true;
+        errdefer if (connection_owned) connection.close();
+        try options.validate();
         const state = try allocator.create(State);
         var state_owned = true;
         errdefer if (state_owned) allocator.destroy(state);
@@ -231,6 +238,7 @@ pub const EndpointClient = struct {
         errdefer if (slots_owned) allocator.free(slots);
         @memset(slots, .{});
         state.* = .{ .allocator = allocator, .io = connection.io, .options = options, .connection = connection, .slots = slots };
+        connection_owned = false;
         state_owned = false;
         slots_owned = false;
         state.retain();
@@ -243,6 +251,43 @@ pub const EndpointClient = struct {
             return err;
         };
         return .{ .state = state };
+    }
+
+    pub fn connectAddressWithDeadline(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, limits: http2.runtime.Limits, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.runtime.Client.connectWithDeadline(allocator, io, address, limits, deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn connectAddressWithTimeout(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, limits: http2.runtime.Limits, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAddressWithDeadline(allocator, io, address, limits, options, .fromNow(io, .{ .raw = timeout, .clock = .awake }));
+    }
+    pub fn connectHostWithDeadline(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.runtime.Client.connectHostWithDeadline(allocator, io, host, port, limits, deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn connectHostWithTimeout(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostWithDeadline(allocator, io, host, port, limits, options, .fromNow(io, .{ .raw = timeout, .clock = .awake }));
+    }
+    pub fn connectTlsAddressWithDeadline(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, tls_host: []const u8, authority: []const u8, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.runtime.Client.connectTlsAddressWithDeadline(allocator, io, address, tls_host, authority, limits, tls_options, deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn connectTlsAddressWithTimeout(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, tls_host: []const u8, authority: []const u8, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressWithDeadline(allocator, io, address, tls_host, authority, limits, tls_options, options, .fromNow(io, .{ .raw = timeout, .clock = .awake }));
+    }
+    pub fn connectTlsHostWithDeadline(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.runtime.Client.connectTlsHostWithDeadline(allocator, io, host, port, limits, tls_options, deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn connectTlsHostWithTimeout(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostWithDeadline(allocator, io, host, port, limits, tls_options, options, .fromNow(io, .{ .raw = timeout, .clock = .awake }));
     }
 
     fn submit(self: EndpointClient, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {

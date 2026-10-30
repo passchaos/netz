@@ -18,6 +18,10 @@ pub const Options = struct {
     max_pending_sessions: usize = 64,
     max_queued_commands: usize = 256,
     operation_timeout: std.Io.Duration = .fromSeconds(20),
+
+    pub fn validate(self: Options) Error!void {
+        if (self.max_sessions == 0 or self.max_sessions > std.math.maxInt(u32) or self.max_pending_sessions == 0 or self.max_pending_sessions > std.math.maxInt(u32) or self.max_queued_commands == 0 or self.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
+    }
 };
 
 const PendingSlot = struct {
@@ -288,8 +292,11 @@ pub const EndpointServer = struct {
     state: *State,
 
     /// Takes ownership of an already negotiated server HTTP/2 connection.
-    pub fn init(allocator: std.mem.Allocator, connection: http2.runtime.Connection, options: Options) Error!EndpointServer {
-        if (options.max_sessions == 0 or options.max_sessions > std.math.maxInt(u32) or options.max_pending_sessions == 0 or options.max_pending_sessions > std.math.maxInt(u32) or options.max_queued_commands == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
+    pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointServer {
+        var connection = connection_value;
+        var connection_owned = true;
+        errdefer if (connection_owned) connection.close();
+        try options.validate();
         const state = try allocator.create(State);
         var state_owned = true;
         errdefer if (state_owned) allocator.destroy(state);
@@ -302,6 +309,7 @@ pub const EndpointServer = struct {
         @memset(pending, .{});
         @memset(sessions, .{});
         state.* = .{ .allocator = allocator, .io = connection.io, .options = options, .connection = connection, .pending = pending, .sessions = sessions };
+        connection_owned = false;
         state_owned = false;
         pending_owned = false;
         sessions_owned = false;
@@ -315,6 +323,24 @@ pub const EndpointServer = struct {
             return err;
         };
         return .{ .state = state };
+    }
+    pub fn acceptConnectionWithDeadline(allocator: std.mem.Allocator, listener: *http2.runtime.Server, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointServer {
+        try options.validate();
+        const connection = try listener.acceptWithDeadline(deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn acceptConnectionWithTimeout(allocator: std.mem.Allocator, listener: *http2.runtime.Server, options: Options, timeout: std.Io.Duration) Error!EndpointServer {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return acceptConnectionWithDeadline(allocator, listener, options, .fromNow(listener.io, .{ .raw = timeout, .clock = .awake }));
+    }
+    pub fn acceptTlsConnectionWithDeadline(allocator: std.mem.Allocator, listener: *http2.runtime.TlsServer, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointServer {
+        try options.validate();
+        const connection = try listener.acceptWithDeadline(deadline);
+        return init(allocator, connection, options);
+    }
+    pub fn acceptTlsConnectionWithTimeout(allocator: std.mem.Allocator, listener: *http2.runtime.TlsServer, options: Options, timeout: std.Io.Duration) Error!EndpointServer {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return acceptTlsConnectionWithDeadline(allocator, listener, options, .fromNow(listener.io, .{ .raw = timeout, .clock = .awake }));
     }
     fn submit(self: EndpointServer, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
         if (deadline.clock != .awake or deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0) return error.Timeout;

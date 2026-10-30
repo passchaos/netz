@@ -136,8 +136,8 @@ Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.
 
 The multiplexing transport, Session adapters and background endpoints pass
-175/175 focused Debug tests; the server endpoint's targeted ReleaseFast gate
-passes 136/136. The
+175/175 focused Debug tests; the combined endpoint ReleaseFast gate passes
+137/137. The
 production h2c connection fuzz gate
 passes 3/3, and the independent bidirectional Hyper matrix passes all 9 build
 steps across h2c and TLS while exercising multiplexing, cancellation, flow
@@ -171,6 +171,15 @@ send, consume/retire, RESET/STOP, credit grants, DRAIN/CLOSE, removal and
 exporters. Its destructor is an explicit abortive shutdown policy: queued work
 is completed with `EndpointClosed`, the worker is canceled and joined, every
 live Session is reset, and the owned HTTP/2 connection is closed.
+
+The client endpoint also exposes h2c address/host and TLS address/host
+constructors. Their timeout forms convert once at entry; the same absolute
+deadline spans TCP/DNS, TLS authentication and ALPN, HTTP/2 SETTINGS, and
+background-owner admission. `EndpointServer` has matching h2c/TLS listener
+accept constructors that carry one deadline through accept, TLS and HTTP/2
+bootstrap before transferring the connection to its worker. Endpoint options
+are validated before network I/O, while direct `init` owns and closes its
+connection on every later failure path.
 
 `webtransport.h2.EndpointServer` provides the matching server owner. Its
 wake-aware HTTP/2 pump returns new CONNECT requests separately from routed

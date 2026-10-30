@@ -1975,10 +1975,14 @@ their exact owners. Its TLS regression covers a complete 429 entity, two live
 Sessions, capacity rejection, virtual streams, DATAGRAM, CLOSE/FIN, generation
 reuse, exporter separation and shutdown with a live Session.
 
-The remaining HTTP/2 orchestration work is above the per-connection layer: a
-listener-owned multi-connection server and optional automatic client
-connection/reconnection policy. The current endpoints adopt one already
-negotiated connection. Independent draft-15 browser/proxy interop also remains
+Both endpoints now also provide h2c and TLS connection constructors. One
+caller-owned absolute deadline spans TCP/DNS, TLS authentication/ALPN, HTTP/2
+SETTINGS and endpoint worker admission; direct `init` remains available for an
+already negotiated connection and has explicit transfer-on-entry ownership.
+
+The remaining HTTP/2 orchestration work is above the single-connection layer:
+a listener-owned multi-connection manager and optional automatic client
+reconnection policy. Independent draft-15 browser/proxy interop also remains
 open.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

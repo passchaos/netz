@@ -176,13 +176,11 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     var peer_task = io.async(Peer.run, .{&peer});
     defer _ = peer_task.cancel(io) catch {};
 
-    var connection = try http2.runtime.Client.connectTlsAddressWithTimeout(allocator, io, server.address(), "localhost", "localhost", .{ .enable_connect_protocol = true, .webtransport = credit }, .{
+    var client = try endpoint.EndpointClient.connectTlsAddressWithTimeout(allocator, io, server.address(), "localhost", "localhost", .{ .enable_connect_protocol = true, .webtransport = credit }, .{
         .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() },
         .protocol_policy = .tls13_only,
-    }, .fromSeconds(3));
-    try std.testing.expectError(error.InvalidEndpointOptions, endpoint.EndpointClient.init(allocator, connection, .{ .max_sessions = 0 }));
-    var client = try endpoint.EndpointClient.init(allocator, connection, .{ .max_sessions = 2 });
-    connection = undefined;
+    }, .{ .max_sessions = 2 }, .fromSeconds(3));
+    try std.testing.expectError(error.InvalidEndpointOptions, (endpoint.Options{ .max_sessions = 0 }).validate());
     var client_owned = true;
     defer if (client_owned) client.deinit();
 

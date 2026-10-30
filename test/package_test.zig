@@ -222,6 +222,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     try std.testing.expect(@hasDecl(h2, "SessionHandle"));
     inline for (&.{
         "connectAttemptWithTimeout",
+        "connectTlsAddressWithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",
@@ -233,6 +234,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     try std.testing.expect(@hasDecl(h2, "EndpointServer"));
     inline for (&.{
         "receiveRequestWithTimeout",
+        "acceptTlsConnectionWithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",
@@ -241,6 +243,12 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "removeWithTimeout",
         "exportKeyingMaterialWithTimeout",
     }) |decl| try std.testing.expect(@hasDecl(h2.EndpointServer, decl));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectAddressWithTimeout(std.testing.allocator, undefined, undefined, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectHostWithTimeout(std.testing.allocator, undefined, "localhost", 80, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsAddressWithTimeout(std.testing.allocator, undefined, undefined, "localhost", "localhost", .{}, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostWithTimeout(std.testing.allocator, undefined, "localhost", 443, .{}, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptTlsConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
 }
 
 test "public HTTP1 owned heads accept folded metadata without requiring the body" {
