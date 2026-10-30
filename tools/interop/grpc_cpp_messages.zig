@@ -15,6 +15,7 @@ const std = @import("std");
 pub const max_payload_size: usize = 512 * 1024;
 pub const max_interval_us: u32 = 5 * 1000 * 1000;
 pub const max_status_message_size: usize = 4 * 1024;
+pub const max_server_id_size: usize = 256;
 
 pub const Error = std.mem.Allocator.Error || error{
     DuplicateField,
@@ -252,6 +253,47 @@ pub fn decodeSimpleRequest(input: []const u8) Error!SimpleRequestOptions {
     }
     if (!response_size_seen or !payload_seen) return error.MissingPayload;
     return result;
+}
+
+/// Decode the canonical pick-first request. The upstream client sends only
+/// `SimpleRequest.fill_server_id = true`; accepting other fields would weaken
+/// the fixture's proof that this exact interoperability case ran.
+pub fn decodePickFirstRequest(input: []const u8) Error!void {
+    var reader = Reader{ .input = input };
+    var fill_server_id_seen = false;
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        if (tag.field_number != 9) return error.UnsupportedField;
+        if (tag.wire_type != .varint) return error.UnsupportedWireType;
+        if (fill_server_id_seen) return error.DuplicateField;
+        fill_server_id_seen = true;
+        if (try reader.readVarint() != 1) return error.InvalidArgument;
+    }
+    if (!fill_server_id_seen) return error.InvalidArgument;
+}
+
+/// Encode a payload-free `SimpleResponse` carrying only field 4 `server_id`.
+pub fn encodeServerIdResponseAlloc(
+    allocator: std.mem.Allocator,
+    server_id: []const u8,
+) Error![]u8 {
+    if (server_id.len == 0 or server_id.len > max_server_id_size) {
+        return error.InvalidArgument;
+    }
+    if (!std.unicode.utf8ValidateSlice(server_id)) return error.InvalidUtf8;
+    const encoded = try allocator.alloc(
+        u8,
+        try lengthDelimitedFieldLen(server_id.len),
+    );
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(4, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, server_id.len);
+    @memcpy(encoded[cursor..][0..server_id.len], server_id);
+    cursor += server_id.len;
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
 }
 
 /// `SimpleResponse` and `StreamingOutputCallResponse` share the exact Payload
@@ -995,6 +1037,33 @@ test "decodes canonical unary custom metadata request" {
     try std.testing.expectError(
         error.UnsupportedField,
         decodeSimpleRequest(&.{ 0x20, 0x01, 0x10, 0x05, 0x1a, 0x00 }),
+    );
+}
+
+test "decodes pick-first request and encodes stable server identity" {
+    try decodePickFirstRequest(&.{ 0x48, 0x01 });
+    try std.testing.expectError(
+        error.InvalidArgument,
+        decodePickFirstRequest(&.{ 0x48, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodePickFirstRequest(&.{ 0x48, 0x01, 0x48, 0x01 }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodePickFirstRequest(&.{ 0x10, 0x00 }),
+    );
+
+    const encoded = try encodeServerIdResponseAlloc(
+        std.testing.allocator,
+        "netz-interop-server",
+    );
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        "\x22\x13netz-interop-server",
+        encoded,
     );
 }
 

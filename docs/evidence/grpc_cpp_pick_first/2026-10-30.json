@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "official grpc-cpp pick_first_unary interoperability",
+  "decision": "accepted",
+  "scope": {
+    "direction": "official grpc-cpp client to netz server",
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "rpc_count_per_transport": 100,
+    "method": "/grpc.testing.TestService/UnaryCall",
+    "request": "strict SimpleRequest containing only fill_server_id=true",
+    "response": "strict payload-free SimpleResponse containing server_id=netz-interop-server",
+    "assertion_owner": "upstream InteropClient::DoPickFirstUnary requires every response to carry the same server_id"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ interop_client",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "description": "doc/interop-test-descriptions.md and test/cpp/interop/interop_client.cc"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "bazel": "8.7.0",
+    "bazel_sha256": "bfe9558bd8a2ecfe4841ec46c0dbccb4b469fe22d81f2f859de0de222b3e7ce3",
+    "cc": "/usr/bin/gcc",
+    "cxx": "/usr/bin/g++",
+    "client_io": "grpc-cpp-posix-event-engine",
+    "server_io": "zio-std-io"
+  },
+  "implementation": {
+    "fixture_codec": "decodePickFirstRequest accepts exactly protobuf field 9 varint true; encodeServerIdResponseAlloc emits exactly field 4 with bounded UTF-8 identity",
+    "server": "one persistent HTTP/2 connection serves 100 sequential unary calls with one stable server identity",
+    "runner": "pick_first_unary is part of every h2c/TLS reverse matrix",
+    "dns": "the case enables service-config resolution; the runner disables only upstream event_engine_dns and selects upstream native DNS to preserve the pick-first channel while avoiding an unrelated _grpc_config.127.0.0.1 TXT query",
+    "tls": "upstream's pick-first-specific channel helper selects credentials through custom_credentials_type=ssl instead of its ordinary use_tls branch"
+  },
+  "results": {
+    "fixture_codec": "15/15 passed",
+    "grpc_debug": "396/396 passed",
+    "package": "22/22 passed",
+    "reverse_matrix": "24 scenarios per transport, including pick_first_unary, passed over h2c and TLS",
+    "forward_matrix": "netz client to grpc-cpp server complete h2c/TLS matrix passed",
+    "pick_first_h2c": "100/100 unary calls, stable server_id",
+    "pick_first_tls": "100/100 unary calls, stable server_id, certificate verified, ALPN h2"
+  },
+  "source_sha256": {
+    "tools/interop/grpc_cpp_messages.zig": "aacc03d387d89a197fd0bf07c34d399044e6d1feccb39a76de10711f7c5fe10a",
+    "tools/interop/grpc_cpp_server.zig": "63010cc249bc6e0bfdc4705eb0d121a2b154193383f7d75c743e8d3a7bb06093",
+    "tools/interop/grpc_cpp_client.sh": "7d900b9797d20c219e0272aea472fca112b2858fef581a94fd42de6c5b8426b4"
+  },
+  "verification_commands": [
+    "zig test tools/interop/grpc_cpp_messages.zig -O Debug",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp-client -Doptimize=ReleaseFast --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "This closes one standard external server-interoperability case. Multi-address external pick-first failover and max-concurrent-stream connection scaling remain separate conformance work."
+}

@@ -30,6 +30,8 @@ const slow_consumer_messages: usize = 2_000;
 const slow_consumer_response_size: u32 = 1_030;
 const rpc_soak_iterations: usize = 100;
 const channel_soak_iterations: usize = 100;
+const pick_first_iterations: usize = 100;
+const pick_first_server_id = "netz-interop-server";
 const status_message = "This is a test message";
 const special_status_message =
     "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
@@ -52,6 +54,7 @@ const Scenario = enum {
     unimplemented_service,
     empty_unary,
     large_unary,
+    pick_first_unary,
     half_duplex,
     slow_consumer,
     rpc_soak,
@@ -265,6 +268,10 @@ pub fn main(init: std.process.Init) !void {
         ),
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
+        .pick_first_unary => try servePickFirstUnary(
+            allocator,
+            &connection,
+        ),
         .half_duplex => try serveHalfDuplex(allocator, &connection),
         .slow_consumer => try serveSlowConsumer(allocator, &connection),
         .rpc_soak => try serveRpcSoak(allocator, &connection),
@@ -554,6 +561,30 @@ fn serveLargeUnary(
         return error.UnexpectedRequest;
     }
     try writeUnaryPayload(allocator, connection, &unary, false);
+}
+
+fn servePickFirstUnary(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    const response = try messages.encodeServerIdResponseAlloc(
+        allocator,
+        pick_first_server_id,
+    );
+    defer allocator.free(response);
+    for (0..pick_first_iterations) |_| {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path) or
+            unary.request.was_compressed)
+        {
+            return error.UnexpectedMethod;
+        }
+        try messages.decodePickFirstRequest(unary.request.message.payload);
+        try connection.writeUnary(unary.request.stream_id, .{
+            .message = response,
+        });
+    }
 }
 
 fn serveUnimplementedRoute(
@@ -1147,6 +1178,7 @@ fn serveScenario(
         .authenticated_empty_unary,
         .empty_unary,
         .large_unary,
+        .pick_first_unary,
         .client_streaming,
         .server_streaming,
         => unreachable,

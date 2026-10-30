@@ -156,6 +156,11 @@ PY
       --use_test_ca=false
       --server_host_override=localhost
     )
+    if [[ "$client_scenario" == pick_first_unary ]]; then
+      # The upstream pick-first channel helper selects credentials from this
+      # flag instead of its ordinary --use_tls branch.
+      client_args+=(--custom_credentials_type=ssl)
+    fi
   else
     client_args+=(--use_tls=false)
   fi
@@ -185,7 +190,21 @@ PY
   elif [[ "$scenario" == channel_soak ]]; then
     timeout_value=$channel_soak_timeout
   fi
-  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="$work/netz-ca.pem" \
+  local client_env=(
+    "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=$work/netz-ca.pem"
+  )
+  if [[ "$client_scenario" == pick_first_unary ]]; then
+    # The case deliberately enables service-config resolution. Keep it fully
+    # local and deterministic: EventEngine DNS also issues a TXT query for
+    # _grpc_config.127.0.0.1, which can wait on an unrelated host DNS outage.
+    # Upstream's native resolver still exercises its pick_first channel and
+    # address selection but performs only the numeric-host lookup.
+    client_env+=(
+      GRPC_EXPERIMENTS=-event_engine_dns
+      GRPC_DNS_RESOLVER=native
+    )
+  fi
+  env "${client_env[@]}" \
     timeout "$timeout_value" "$client" "${client_args[@]}" \
     >"$client_log" 2>&1
 
@@ -225,6 +244,7 @@ for transport in h2c tls; do
   for scenario in \
     empty_unary \
     large_unary \
+    pick_first_unary \
     ping_pong \
     half_duplex \
     slow_consumer \
@@ -255,4 +275,4 @@ for transport in h2c tls; do
     'authorization:Bearer interop-token'
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large pick_first=100-stable-server-id rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
