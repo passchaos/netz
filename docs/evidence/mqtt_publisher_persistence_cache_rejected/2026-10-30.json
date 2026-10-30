@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT inbound QoS 2 publisher persistence cache",
+  "decision": "rejected",
+  "baseline": {
+    "head": "d1c15a7412abd9edcb4e03222205c7631075e199",
+    "mqtt_source_commit": "1c4bd072500dab3772593ed7c3f6c7840570552d",
+    "equivalence": "src/mqtt is byte-identical between mqtt_source_commit and head",
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd",
+    "source_sha256": {
+      "src/mqtt/broker.zig": "cb6198e556c73375a8b1068c357631195289b9ddd351efcca92e8692a85b70b8"
+    }
+  },
+  "reference": {
+    "implementation": "Mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source_clean": true,
+    "observation": "Mosquitto keeps connection Session state local to its single event-loop owner; netz instead permits concurrent connection tasks and protects the Session Store globally"
+  },
+  "objective": "Avoid resolving stable route id to Session and reading expiry on each inbound QoS 2 PUBLISH and PUBREL when the generation-checked live ClientSlot already caches session_persistent.",
+  "candidates": {
+    "publish_and_pubrel": {
+      "broker_sha256": "4dc96d6ed77da64015f9fe0e3b6a6d0012f1d7f95d26d3ac38a3a6a094f0d7bd",
+      "design": "A shared helper validates connection slot generation, returns ClientSlot.state.session_persistent, and retains the original Store lookup for stale or non-connection identities. Both inbound QoS 2 stages use it.",
+      "focused_tests": "Debug and ReleaseFast durability, Session, and live QoS 2 filters passed 125/125",
+      "benchmark": {
+        "artifact": "zig-out/mqtt-publisher-persistence-cache-ab/20261030T034735Z-reattach",
+        "artifact_bytes": 25908,
+        "aggregate_file_hash_digest": "22cc4a62f421f6c6726992f337acebb045e5e5ccaca921a378fbe1d84f7c8c99",
+        "pairs": 8,
+        "instructions_baseline_over_candidate_paired_median": 1.0016654504,
+        "instructions_candidate_wins": 5,
+        "cycles_baseline_over_candidate_paired_median": 0.9928090113,
+        "cycles_candidate_wins": 2,
+        "throughput_candidate_over_baseline_paired_median": 1.0044194885,
+        "throughput_candidate_wins": 5,
+        "p50_candidate_over_baseline_paired_median": 0.9735268349,
+        "p50_candidate_wins": 4,
+        "p99_candidate_over_baseline_paired_median": 0.9695396743,
+        "p99_candidate_wins": 7
+      },
+      "rejection_reason": "The small instruction reduction did not translate to cycles: median cycles regressed 0.72% and the candidate won only 2/8 pairs. Timing improvements cannot override the fixed PMU guard."
+    },
+    "publish_only": {
+      "broker_sha256": "80ec957b5e2aa7bf22a2f794bf18d3cec134479c123d03061e43c7dd82e23b30",
+      "design": "PUBLISH reuses the ClientSlot already required immediately afterward and checks Store equivalence only in debug assertions. PUBREL retains the original Store lookup; there is no new helper or fallback branch.",
+      "focused_tests": "Debug and ReleaseFast durability, Session, and live QoS 2 filters passed 125/125",
+      "benchmark": {
+        "artifact": "zig-out/mqtt-publisher-persistence-cache-ab/20261030T035439Z-publish-only",
+        "artifact_bytes": 25910,
+        "aggregate_file_hash_digest": "8891cef044bbf8a04d89a07d4c22bad02e4138b9575c0a6aed84907c57e17207",
+        "pairs": 8,
+        "instructions_baseline_over_candidate_paired_median": 0.9968057222,
+        "instructions_candidate_wins": 2,
+        "cycles_baseline_over_candidate_paired_median": 0.9971407566,
+        "cycles_candidate_wins": 3,
+        "throughput_candidate_over_baseline_paired_median": 1.0107205618,
+        "throughput_candidate_wins": 5,
+        "p50_candidate_over_baseline_paired_median": 1.0288546652,
+        "p50_candidate_wins": 1,
+        "p99_candidate_over_baseline_paired_median": 1.0145164925,
+        "p99_candidate_wins": 3
+      },
+      "rejection_reason": "The narrower path regressed instructions 0.32%, cycles 0.29%, p50 2.89%, and p99 1.45% by paired medians. It failed both PMU guards despite noisy throughput improvement."
+    }
+  },
+  "benchmark_method": {
+    "driver_sha256": "7ba9ef928560ceeda6827334b68fd5315e143d1efa158d9af0b012e55c6a1857",
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "schedule": "ABBA repeated to eight pairs",
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "deliveries_per_arm": 10000,
+      "checksum_per_arm": 2695000
+    },
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ],
+    "attach_stabilization_seconds": 0.05,
+    "excluded_probe": "An earlier set without an explicit post-attach wait undercounted the first baseline instruction arm by about 6% and was excluded before making a decision."
+  },
+  "preserved_invariants": [
+    "durable incoming QoS 2 state commits before PUBREC",
+    "PUBREL removal and routing commit before PUBCOMP",
+    "exactly-once release and Message Expiry use one atomic persistence transaction",
+    "Client ID takeover and stale generations retain the original Store lookup semantics",
+    "ClientSlot, Pending, and transmission layouts are unchanged"
+  ],
+  "final_state": {
+    "production_source_reverted": true,
+    "mqtt_source_hash_matches_baseline": true,
+    "follow_up": "Do not add slot-generation or fallback selection merely to replace these Store lookups. Target a larger scheduling, locking, or ownership boundary and keep instructions plus cycles as mandatory guards."
+  }
+}

@@ -5842,6 +5842,20 @@ proxy evidence for the entire suite.
    state bit at lifecycle boundaries rather than return metadata from Session
    selection. Full rows are in
    [the rejected pending-out evidence](evidence/mqtt_session_pending_out_rejected/2026-10-30.json).
+   A follow-up applied that rule to inbound durable QoS 2: the live connection
+   slot already carries `session_persistent`, so candidates replaced the
+   route-ID-to-Session expiry lookup on both PUBLISH/PUBREL, then on PUBLISH
+   only. Debug assertions proved the cached bit equal to Store state, and
+   focused Debug/ReleaseFast durability coverage passed 125/125. Neither
+   candidate passed the fixed-binary PMU guard. The two-stage version improved
+   instructions only 0.17% with 5/8 wins but regressed cycles 0.72% with 2/8
+   wins. The narrower PUBLISH-only version regressed instructions 0.32% with
+   2/8 wins and cycles 0.29% with 3/8 wins; p50 also regressed 2.89%. Both
+   source variants were removed. This rules out adding generation/fallback
+   selection around the cached bit merely to replace the small Store lookup;
+   future work must remove a larger scheduling/ownership boundary without
+   growing these hot paths. Full rows are in
+   [the rejected persistence-cache evidence](evidence/mqtt_publisher_persistence_cache_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:
