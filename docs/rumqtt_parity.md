@@ -5823,6 +5823,16 @@ proxy evidence for the entire suite.
    than constructing a Publication solely for sidecar eligibility. Full rows
    are retained in
    [the rejected single-route adoption evidence](evidence/mqtt_single_route_publication_adoption_rejected/2026-10-30.json).
+   Another follow-up returned stable route identity and the exact pending-
+   suffix bit from the broker-only Session selection, removing subsequent
+   `routeId` and `hasUnselectedTransmission` lookups. The model gate passed and
+   instructions improved 0.56%, but cycles regressed 1.35% with only 1/8 wins;
+   throughput, p50 and p99 also regressed 0.76%, 1.29% and 0.44%. Enlarging the
+   inlined selection result and writing metadata was therefore costlier than
+   the two lookups, and the implementation was removed. A future attempt must
+   cache route/work state outside `DetachableTransmission` and retain the same
+   cycles guard. Full rows are in
+   [the rejected selection-metadata evidence](evidence/mqtt_session_selection_metadata_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

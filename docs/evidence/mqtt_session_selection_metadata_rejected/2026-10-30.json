@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT Session detach selection route/pending metadata",
+  "decision": "rejected",
+  "baseline": {
+    "source_parent": "b5d145b3a8288b0fbf82f0742608c13b6c034232",
+    "binary_source_commit": "1c4bd072500dab3772593ed7c3f6c7840570552d",
+    "equivalence": "b5d145b3 adds only rejection evidence; MQTT production sources match 1c4bd072",
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd"
+  },
+  "candidate": {
+    "broker_sha256": "e7c598c5c74cf771c451e621bb2e727c1457390db24e237b1e35911f1ee168f3",
+    "source_sha256": {
+      "src/mqtt/session/mod.zig": "636f3448096de9215208a996e464e68006cdb414d2156fa6b847dceaa17b5ddc",
+      "src/mqtt/session/ack_tests.zig": "512331a171d2e8a8a1d7a76e49aac9d8eae2df47e845a48011ca8cff840df3f4",
+      "src/mqtt/broker.zig": "1e7fad7d8787a81734a5bc18801c1fdff77388d51e45767c5e452eb6b9717c30"
+    }
+  },
+  "objective": "Eliminate two repeated Store lookups after one broker Session selection by returning route_id and the exact hasUnselectedTransmission result beside the existing shared-Publication sidecar.",
+  "design": {
+    "selection_metadata": [
+      "stable Session route_id",
+      "next_inflight_send != no_inflight_send or queued_count != 0"
+    ],
+    "ordinary_api": "The general drain path retained its comptime-separated no-metadata specialization.",
+    "broker_change": "takeSessionPacketAssumeLocked used sidecar metadata instead of Store.routeId and Store.hasUnselectedTransmission.",
+    "focused_test": "two queued QoS 1 publications preserve the stable route ID and report true then false pending suffix across ACK",
+    "focused_result": "126/126 passed"
+  },
+  "benchmark": {
+    "driver_sha256": "20892dcb26c338ae7ebcd25970d792b4aa63c2037f0e42cb739e7edc0564553e",
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "deliveries_per_arm": 10000,
+      "checksum_per_arm": 2695000
+    },
+    "baseline_rows": [
+      { "instructions": 255694227, "cycles": 134307012, "publishes_per_s": 22072, "p50_ns": 36584, "p99_ns": 44694 },
+      { "instructions": 258099822, "cycles": 136919420, "publishes_per_s": 21848, "p50_ns": 40630, "p99_ns": 45657 },
+      { "instructions": 258594070, "cycles": 136296396, "publishes_per_s": 21816, "p50_ns": 39731, "p99_ns": 46055 },
+      { "instructions": 255797846, "cycles": 137815719, "publishes_per_s": 21981, "p50_ns": 38528, "p99_ns": 45945 },
+      { "instructions": 257868129, "cycles": 137581495, "publishes_per_s": 21561, "p50_ns": 39805, "p99_ns": 47038 },
+      { "instructions": 256754805, "cycles": 135394943, "publishes_per_s": 22036, "p50_ns": 38889, "p99_ns": 46511 },
+      { "instructions": 258398299, "cycles": 137987753, "publishes_per_s": 21820, "p50_ns": 40019, "p99_ns": 48445 },
+      { "instructions": 257168478, "cycles": 135518180, "publishes_per_s": 21705, "p50_ns": 39584, "p99_ns": 48101 }
+    ],
+    "candidate_rows": [
+      { "instructions": 257341264, "cycles": 137134605, "publishes_per_s": 21652, "p50_ns": 39612, "p99_ns": 46260 },
+      { "instructions": 260422696, "cycles": 143559233, "publishes_per_s": 21116, "p50_ns": 42278, "p99_ns": 47705 },
+      { "instructions": 256534359, "cycles": 137165536, "publishes_per_s": 21607, "p50_ns": 39990, "p99_ns": 46620 },
+      { "instructions": 257468613, "cycles": 137816462, "publishes_per_s": 21443, "p50_ns": 41722, "p99_ns": 46630 },
+      { "instructions": 255190657, "cycles": 136382329, "publishes_per_s": 21610, "p50_ns": 39445, "p99_ns": 45029 },
+      { "instructions": 255308596, "cycles": 139106749, "publishes_per_s": 22070, "p50_ns": 38500, "p99_ns": 46352 },
+      { "instructions": 256989827, "cycles": 142134427, "publishes_per_s": 21699, "p50_ns": 40787, "p99_ns": 48232 },
+      { "instructions": 255202978, "cycles": 135884216, "publishes_per_s": 21816, "p50_ns": 39185, "p99_ns": 47509 }
+    ],
+    "summary": {
+      "instructions_baseline_over_candidate_paired_median": 1.0055726027,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 0.9865222312,
+      "cycles_candidate_wins": 1,
+      "throughput_candidate_over_baseline_paired_median": 0.9924372521,
+      "throughput_candidate_wins": 3,
+      "p50_candidate_over_baseline_paired_median": 1.0128548618,
+      "p50_candidate_wins": 3,
+      "p99_candidate_over_baseline_paired_median": 1.0044246972,
+      "p99_candidate_wins": 4
+    },
+    "artifact": {
+      "path": "zig-out/mqtt-session-selection-metadata-ab/20261030T093108",
+      "summary_sha256": "6d46303fe6d7d55f7ac84e248db9fe10c5ade8eed24ef584f3f1d2a4b2afc2b4"
+    }
+  },
+  "rejection_reason": "The sidecar metadata reduced instructions by about 0.56%, but enlarged the inlined selection result and changed hot-path layout enough to regress cycles by about 1.35% with only 1/8 wins. Throughput, p50, and p99 also regressed by 0.76%, 1.29%, and 0.44% at paired medians.",
+  "follow_up": "Do not enlarge DetachableTransmission or add metadata writes to its inlined drain. If these lookups are revisited, cache stable route identity or outgoing-work state on ClientSlot without changing the selected value representation, and require the same cycles guard."
+}
