@@ -5775,6 +5775,18 @@ proxy evidence for the entire suite.
    plus all 1,825 source-locked sequences. Full PMU, profile and lifecycle
    evidence is recorded in
    [the managed Keep Alive evidence](evidence/mqtt_managed_keep_alive/2026-10-29.json).
+   A subsequent detached-Session prototype retained the broker's refcounted
+   `Publication` across the unlocked socket write and copied only MQTT property
+   descriptors. The fallback still deep-copied Session-owned or alias-rewritten
+   bytes, and durable state remained committed before network-visible progress.
+   Although focused ownership and durable QoS 2 tests passed, eight fixed-binary
+   serial pairs regressed broker instructions and cycles by 0.43% and 0.67% at
+   paired medians, with only 2/8 and 3/8 wins. Throughput and p50/p99 were also
+   neutral-to-negative. The implementation was removed. A future ownership
+   attempt must avoid growing every `PublishTransmission` and instead use a
+   broker-only selection sidecar or a lower transport boundary. Full results
+   are recorded in
+   [the rejected shared-Publication detach evidence](evidence/mqtt_shared_publication_detach_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

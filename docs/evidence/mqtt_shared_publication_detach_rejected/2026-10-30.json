@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT durable Session detached shared-Publication ownership",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "87e0d12e598204c5e1a9fc192d4815537f34c733",
+    "broker_sha256": "2a8212f6b4a0bb883a7fd0ec7d4a2e725e8e5d8e4552a0b5365d1dc025b6537d",
+    "broker_bytes": 260028384
+  },
+  "candidate": {
+    "broker_sha256": "46d8a0c60d842f8898b48d9fa26a1f74ba36460f44343b0e936575dbe9aa512c",
+    "broker_bytes": 260027536,
+    "source_sha256": {
+      "src/mqtt/broker.zig": "69e4acdce8f0e4f04586276e75f5e717696b9cd85c0fa90c83069cdb343aa3e0",
+      "src/mqtt/broker/session_route.zig": "e20a71d2997b2c6ec0947129aecd73b8197c0216e08a75515bdd3f4ba1769cb9",
+      "src/mqtt/session/mod.zig": "75db774c630327066d49f1818e216dc6846917fe08715c25fd2fa812709e400f"
+    }
+  },
+  "reference": {
+    "implementation": "Mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "pattern": "refcounted base-message ownership retained through Session delivery"
+  },
+  "objective": "Eliminate the durable Session detach copy of Topic Name, payload, and variable-length MQTT 5 property values without borrowing Session storage after releasing the broker state lock.",
+  "design": {
+    "eligibility": "Only OwnedPublish values whose wire_allocation_len equals shared_publication_properties expose a SharedPublication owner.",
+    "detach": "Copy property descriptors into connection scratch, retain the SharedPublication, and continue borrowing its Topic Name, payload, and property-value bytes until the socket write finishes.",
+    "fallback": "Session-owned wire allocations and shared-publication wire copies retain the existing deep-copy path.",
+    "lifetime": "DetachedSessionPacket releases the retained Publication on success, oversized drop, socket failure, retry, continue, and return paths.",
+    "preserved_invariants": [
+      "durable state commits before network-visible progress",
+      "Client ID takeover cannot invalidate detached bytes",
+      "PUBREL routing and PUBCOMP ordering are unchanged",
+      "ordinary and alias-rewritten Session transmissions still deep-copy"
+    ]
+  },
+  "verification": {
+    "focused_command": "zig build test-lib -Dtest-filter='detached Session transmission' -Dtest-filter='MQTT durable QoS 2' --summary all",
+    "focused_result": "125/125 passed",
+    "integration_observation": "The first complete broker build exposed that the retained owner must be released by the broker-level DetachedSessionPacket rather than only session_route.DetachedPacket; the candidate was corrected and then built as the recorded ReleaseFast binary."
+  },
+  "benchmark": {
+    "driver_sha256": "20892dcb26c338ae7ebcd25970d792b4aa63c2037f0e42cb739e7edc0564553e",
+    "driver_bytes": 9465368,
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "deliveries_per_arm": 10000,
+      "checksum_per_arm": 2695000
+    },
+    "baseline_rows": [
+      { "instructions": 257031740, "cycles": 134125648, "publishes_per_s": 22043, "p50_ns": 38723, "p99_ns": 47592 },
+      { "instructions": 256330360, "cycles": 134359772, "publishes_per_s": 22061, "p50_ns": 38389, "p99_ns": 44861 },
+      { "instructions": 256298349, "cycles": 133684384, "publishes_per_s": 22034, "p50_ns": 38843, "p99_ns": 45121 },
+      { "instructions": 258197310, "cycles": 136200969, "publishes_per_s": 21892, "p50_ns": 39195, "p99_ns": 45769 },
+      { "instructions": 255386092, "cycles": 132810985, "publishes_per_s": 22056, "p50_ns": 36629, "p99_ns": 44046 },
+      { "instructions": 256923424, "cycles": 134805121, "publishes_per_s": 22258, "p50_ns": 38631, "p99_ns": 44704 },
+      { "instructions": 255946996, "cycles": 132248922, "publishes_per_s": 22129, "p50_ns": 38612, "p99_ns": 44585 },
+      { "instructions": 256656392, "cycles": 133020588, "publishes_per_s": 22331, "p50_ns": 38279, "p99_ns": 45047 }
+    ],
+    "candidate_rows": [
+      { "instructions": 257479437, "cycles": 136148465, "publishes_per_s": 22086, "p50_ns": 38907, "p99_ns": 44843 },
+      { "instructions": 261400890, "cycles": 137653885, "publishes_per_s": 21994, "p50_ns": 40815, "p99_ns": 45083 },
+      { "instructions": 256771221, "cycles": 133594258, "publishes_per_s": 21959, "p50_ns": 38796, "p99_ns": 45130 },
+      { "instructions": 257987399, "cycles": 135474281, "publishes_per_s": 21968, "p50_ns": 39185, "p99_ns": 45584 },
+      { "instructions": 257091619, "cycles": 132876054, "publishes_per_s": 21814, "p50_ns": 39093, "p99_ns": 45713 },
+      { "instructions": 259345480, "cycles": 136797861, "publishes_per_s": 22006, "p50_ns": 39046, "p99_ns": 45316 },
+      { "instructions": 258100577, "cycles": 133958324, "publishes_per_s": 22114, "p50_ns": 39037, "p99_ns": 45557 },
+      { "instructions": 255902155, "cycles": 132798855, "publishes_per_s": 21822, "p50_ns": 37315, "p99_ns": 44519 }
+    ],
+    "summary": {
+      "instructions_baseline_over_candidate_paired_median": 0.9957622324,
+      "instructions_candidate_wins": 2,
+      "cycles_baseline_over_candidate_paired_median": 0.9933748015,
+      "cycles_candidate_wins": 3,
+      "publishes_per_s_candidate_over_baseline_paired_median": 0.9967795679,
+      "publishes_per_s_candidate_wins": 2,
+      "p50_candidate_over_baseline_paired_median": 1.0077471829,
+      "p50_candidate_wins": 3,
+      "p99_candidate_over_baseline_paired_median": 1.0025740414,
+      "p99_candidate_wins": 3
+    },
+    "artifact": {
+      "path": "zig-out/mqtt-publication-owner-ab/20261030T082726",
+      "summary_sha256": "6620bef386ca75e27c2c095a16cbb502f61faff8003c264fea8729936bd9d281"
+    }
+  },
+  "rejection_reason": "The optional SharedPublication pointer and retained-owner path increased broker instructions by about 0.43% and cycles by about 0.67% at paired medians, with only 2/8 and 3/8 wins. Throughput and both latency percentiles were also neutral-to-negative. Removing one bounded memcpy did not repay the common-path representation and ownership cost.",
+  "follow_up": "Do not grow every PublishTransmission or add a retained-owner branch to its common path. A later attempt must carry ownership in a broker-only selection sidecar or move the optimization below the existing transmission representation, then pass the same fixed-binary PMU guard before broader matrices."
+}
