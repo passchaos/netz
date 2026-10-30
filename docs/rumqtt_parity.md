@@ -5812,6 +5812,17 @@ proxy evidence for the entire suite.
    log, restart, listener-mount and 40-run external matrix gates pass. Full
    evidence is recorded in
    [the shared-Publication sidecar evidence](evidence/mqtt_shared_publication_sidecar/2026-10-30.json).
+   A follow-up tried to extend the same owner path to a single durable route by
+   adopting an already prefixed inbound QoS 2 `Pending` into a refcounted
+   `Publication`. Ownership, OOM and persistence tests passed, and the serial
+   throughput median rose 0.64%, but fixed broker instructions regressed 0.18%
+   with only 2/8 wins; p50/p99 also moved 0.86%/0.34% slower. Publication
+   initialization, property ownership and refcount work outweighed the removed
+   copies, so the source change was removed before broader gates. Future serial
+   work must keep this path single-owner or reduce selection/locking work rather
+   than constructing a Publication solely for sidecar eligibility. Full rows
+   are retained in
+   [the rejected single-route adoption evidence](evidence/mqtt_single_route_publication_adoption_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

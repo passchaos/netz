@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT single-durable-route prefixed Publication adoption",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "1c4bd072500dab3772593ed7c3f6c7840570552d",
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd",
+    "broker_bytes": 260052696
+  },
+  "candidate": {
+    "broker_sha256": "31f2f3dde13939595d40062d2d56734ff362f8ca113ac772dc46a5feab7929f5",
+    "broker_bytes": 260053384,
+    "source_sha256": {
+      "src/mqtt/broker.zig": "51002a8004387f4458596fe42adeb11b7a69e82f52db1c732dbd7516dcd74ac6"
+    }
+  },
+  "reference": {
+    "implementation": "Mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "pattern": "one refcounted base message remains attached to each client message through send and ACK state"
+  },
+  "objective": "Remove the remaining single-subscriber durable QoS 2 Session copy by transferring a prefixed Pending backing into a Publication even when the route plan has only one durable destination.",
+  "design": {
+    "change": "Allow can_adopt_source to create shared_route_publication independently of session_plan.routes.len; borrowed inputs still require the existing multiple/offline ownership condition.",
+    "ownership": "qos2.Pending transfers its Publication-prefixed allocation only after Publication initialization succeeds; the Session retains that Publication and later broker detach uses the published sidecar path.",
+    "preserved_invariants": [
+      "PUBREL release remains one persistence transaction",
+      "routing and durable state still commit before PUBCOMP",
+      "borrowed single-route inputs do not acquire a new Publication",
+      "adoption failure leaves Pending ownership intact"
+    ],
+    "focused_test": "single durable route adopts Pending QoS 2 bytes and exposes a non-null detach sidecar",
+    "focused_result": "129/129 passed"
+  },
+  "benchmark": {
+    "driver_sha256": "20892dcb26c338ae7ebcd25970d792b4aa63c2037f0e42cb739e7edc0564553e",
+    "driver_bytes": 9465368,
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "deliveries_per_arm": 10000,
+      "checksum_per_arm": 2695000
+    },
+    "baseline_rows": [
+      { "instructions": 255832591, "cycles": 133693601, "publishes_per_s": 22137, "p50_ns": 38445, "p99_ns": 45713 },
+      { "instructions": 254981715, "cycles": 132684750, "publishes_per_s": 22270, "p50_ns": 36315, "p99_ns": 44009 },
+      { "instructions": 255833285, "cycles": 133917209, "publishes_per_s": 22242, "p50_ns": 38435, "p99_ns": 45074 },
+      { "instructions": 254667359, "cycles": 133589097, "publishes_per_s": 22527, "p50_ns": 35815, "p99_ns": 42778 },
+      { "instructions": 255399511, "cycles": 132670840, "publishes_per_s": 22046, "p50_ns": 38658, "p99_ns": 45241 },
+      { "instructions": 255335738, "cycles": 133678672, "publishes_per_s": 22050, "p50_ns": 37066, "p99_ns": 44741 },
+      { "instructions": 258068803, "cycles": 137637208, "publishes_per_s": 21577, "p50_ns": 40306, "p99_ns": 46121 },
+      { "instructions": 254457704, "cycles": 132869489, "publishes_per_s": 21936, "p50_ns": 36955, "p99_ns": 43936 }
+    ],
+    "candidate_rows": [
+      { "instructions": 255869586, "cycles": 133817508, "publishes_per_s": 22258, "p50_ns": 38435, "p99_ns": 45796 },
+      { "instructions": 255595393, "cycles": 133387957, "publishes_per_s": 22776, "p50_ns": 37046, "p99_ns": 44231 },
+      { "instructions": 255497635, "cycles": 134199356, "publishes_per_s": 22432, "p50_ns": 36066, "p99_ns": 44084 },
+      { "instructions": 255244765, "cycles": 132038740, "publishes_per_s": 22472, "p50_ns": 38121, "p99_ns": 44500 },
+      { "instructions": 256616766, "cycles": 132624046, "publishes_per_s": 21942, "p50_ns": 39130, "p99_ns": 45084 },
+      { "instructions": 255691993, "cycles": 134501291, "publishes_per_s": 21974, "p50_ns": 38787, "p99_ns": 45565 },
+      { "instructions": 256353270, "cycles": 133727572, "publishes_per_s": 22210, "p50_ns": 38613, "p99_ns": 45250 },
+      { "instructions": 255031842, "cycles": 132105648, "publishes_per_s": 22096, "p50_ns": 37139, "p99_ns": 44231 }
+    ],
+    "summary": {
+      "instructions_baseline_over_candidate_paired_median": 0.9981777311,
+      "instructions_candidate_wins": 2,
+      "cycles_baseline_over_candidate_paired_median": 0.9997134459,
+      "cycles_candidate_wins": 4,
+      "throughput_candidate_over_baseline_paired_median": 1.0063799540,
+      "throughput_candidate_wins": 5,
+      "p50_candidate_over_baseline_paired_median": 1.0085943309,
+      "p50_candidate_wins": 3,
+      "p99_candidate_over_baseline_paired_median": 1.0034300494,
+      "p99_candidate_wins": 3
+    },
+    "artifact": {
+      "path": "zig-out/mqtt-single-route-adopt-ab/20261030T092057",
+      "summary_sha256": "f5f219606af6523314ee1e67b05c2bbcbad5ecec6758793e074df95b877d6f37"
+    }
+  },
+  "rejection_reason": "Publication initialization, property ownership, and refcount work outweighed the eliminated single-route copies. Broker instructions regressed by about 0.18% with only 2/8 wins; p50 and p99 also moved 0.86% and 0.34% slower. The timing-only throughput increase does not override the fixed-PMU regression.",
+  "follow_up": "Do not convert a single-owner Pending into a refcounted Publication solely to reach the detach sidecar. A future serial optimization should transfer storage directly into single-owner Session state or reduce selection/locking bookkeeping without adding Publication construction."
+}
