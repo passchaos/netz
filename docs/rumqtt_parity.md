@@ -5833,6 +5833,15 @@ proxy evidence for the entire suite.
    cache route/work state outside `DetachableTransmission` and retain the same
    cycles guard. Full rows are in
    [the rejected selection-metadata evidence](evidence/mqtt_session_selection_metadata_rejected/2026-10-30.json).
+   A narrower variant kept every struct layout unchanged and returned only the
+   pending-suffix bit through a separate out parameter. It still regressed
+   instructions and cycles by 0.28%/0.66%, each with only 2/8 wins, while
+   p50/p99 moved 1.23%/1.98% slower. Even the extra inlined store and threaded
+   output cost more than the later lookup, so this implementation was also
+   removed. Any future outgoing-work cache must update an existing `ClientSlot`
+   state bit at lifecycle boundaries rather than return metadata from Session
+   selection. Full rows are in
+   [the rejected pending-out evidence](evidence/mqtt_session_pending_out_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:

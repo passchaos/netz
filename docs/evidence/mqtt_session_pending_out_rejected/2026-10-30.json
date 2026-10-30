@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT Session detach pending-suffix out parameter",
+  "decision": "rejected",
+  "baseline": {
+    "source_parent": "794b107016e5dc6e3909dadae8fb4f1e7f07b33c",
+    "binary_source_commit": "1c4bd072500dab3772593ed7c3f6c7840570552d",
+    "equivalence": "intervening commits add only rejected-candidate evidence; MQTT production sources match 1c4bd072",
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd"
+  },
+  "candidate": {
+    "broker_sha256": "3a03920c67853db3d6d621197d71ef06017d9673003f42a709f428b18e0fc69b",
+    "source_sha256": {
+      "src/mqtt/session/mod.zig": "4954d28eacb8b204891cd14358d07a8e89e0cbbc170de00d488eb61f359378de",
+      "src/mqtt/session/ack_tests.zig": "5df2904576cb1b8321c7cee6e4c9c3e65fe16dd46de1d9f78976c9106a57b350",
+      "src/mqtt/broker.zig": "84c781befd658f916b2dc99221abef3118ea6d7fdcda03f3240b4777b37cf9ec"
+    }
+  },
+  "objective": "Remove only the post-selection hasUnselectedTransmission Store lookup while preserving DetachableTransmission, ClientSlot, and ClientBuffers physical layouts.",
+  "design": {
+    "api": "A separate bool out parameter reports next_inflight_send != no_inflight_send or queued_count != 0 from drainIntoInternal's existing Session pointer.",
+    "compatibility": "The original drainOneForDetachTrackingSnapshotChange remains as a wrapper and ignores the additional result.",
+    "ordinary_api": "General drain instantiations retain their comptime-separated void parameter and no pending-state work.",
+    "broker_change": "takeSessionPacketAssumeLocked consumes the bool instead of calling Store.hasUnselectedTransmission.",
+    "layout": "DetachableTransmission, ClientSlot, and ClientBuffers are unchanged.",
+    "focused_test": "two queued QoS 1 publications report true then false pending suffix across ACK",
+    "focused_result": "126/126 passed"
+  },
+  "benchmark": {
+    "driver_sha256": "20892dcb26c338ae7ebcd25970d792b4aa63c2037f0e42cb739e7edc0564553e",
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "samples_per_version": 8,
+    "schedule": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "deliveries_per_arm": 10000,
+      "checksum_per_arm": 2695000
+    },
+    "baseline_rows": [
+      { "instructions": 255150212, "cycles": 135129977, "publishes_per_s": 22006, "p50_ns": 38657, "p99_ns": 45083 },
+      { "instructions": 257499872, "cycles": 135889831, "publishes_per_s": 21956, "p50_ns": 40760, "p99_ns": 46361 },
+      { "instructions": 257617467, "cycles": 137062635, "publishes_per_s": 21635, "p50_ns": 41352, "p99_ns": 48649 },
+      { "instructions": 255272579, "cycles": 135580361, "publishes_per_s": 21696, "p50_ns": 38814, "p99_ns": 44537 },
+      { "instructions": 255446812, "cycles": 134142769, "publishes_per_s": 21972, "p50_ns": 38991, "p99_ns": 44946 },
+      { "instructions": 255378043, "cycles": 134308880, "publishes_per_s": 22084, "p50_ns": 38658, "p99_ns": 44676 },
+      { "instructions": 256625112, "cycles": 135974328, "publishes_per_s": 21947, "p50_ns": 39010, "p99_ns": 45510 },
+      { "instructions": 254559787, "cycles": 133184838, "publishes_per_s": 21859, "p50_ns": 36973, "p99_ns": 44176 }
+    ],
+    "candidate_rows": [
+      { "instructions": 258452795, "cycles": 138972312, "publishes_per_s": 21029, "p50_ns": 40788, "p99_ns": 56750 },
+      { "instructions": 254831919, "cycles": 135530600, "publishes_per_s": 22074, "p50_ns": 38370, "p99_ns": 45241 },
+      { "instructions": 255341080, "cycles": 134174817, "publishes_per_s": 21862, "p50_ns": 39120, "p99_ns": 45344 },
+      { "instructions": 257020465, "cycles": 136454762, "publishes_per_s": 22009, "p50_ns": 40723, "p99_ns": 45324 },
+      { "instructions": 256261982, "cycles": 134482267, "publishes_per_s": 22035, "p50_ns": 38888, "p99_ns": 44981 },
+      { "instructions": 256009618, "cycles": 135237909, "publishes_per_s": 21949, "p50_ns": 39203, "p99_ns": 45657 },
+      { "instructions": 256991776, "cycles": 141688599, "publishes_per_s": 20998, "p50_ns": 39416, "p99_ns": 81779 },
+      { "instructions": 256072769, "cycles": 136268760, "publishes_per_s": 21591, "p50_ns": 40102, "p99_ns": 46083 }
+    ],
+    "summary": {
+      "instructions_baseline_over_candidate_paired_median": 0.9971760002,
+      "instructions_candidate_wins": 2,
+      "cycles_baseline_over_candidate_paired_median": 0.9933612090,
+      "cycles_candidate_wins": 2,
+      "throughput_candidate_over_baseline_paired_median": 0.9983771313,
+      "throughput_candidate_wins": 4,
+      "p50_candidate_over_baseline_paired_median": 1.0122527876,
+      "p50_candidate_wins": 3,
+      "p99_candidate_over_baseline_paired_median": 1.0198143995,
+      "p99_candidate_wins": 2
+    },
+    "artifact": {
+      "path": "zig-out/mqtt-session-pending-out-ab/20261030T094237",
+      "summary_sha256": "1e6dfeff91e0358808f207233919e3724a6d277e5b3e6b80600f1837e56259e3"
+    }
+  },
+  "rejection_reason": "Even without any struct growth, writing and threading the pending bool through the inlined drain regressed instructions by about 0.28% and cycles by about 0.66%, each with only 2/8 wins. p50 and p99 regressed by 1.23% and 1.98%; no longer matrix was justified.",
+  "follow_up": "Do not return pending state from the selection call. If outgoing-work state is revisited, update a cached ClientSlot state bit at enqueue/ACK lifecycle boundaries and clear it only after an existing empty probe, without adding selection outputs or growing the 96-byte slot."
+}
