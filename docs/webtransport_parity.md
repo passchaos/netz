@@ -1934,7 +1934,10 @@ provides draft-15 virtual STREAM/FIN, RESET_STREAM with Reliable Size,
 STOP_SENDING and per-stream flow-control wire types, plus an incremental
 bounded parser across HTTP DATA fragments. Independent wire vectors and the
 parser fuzz gate cover this layer. HTTP/2 virtual-stream state, SETTINGS ACK
-snapshots and the complete Extended CONNECT runtime remain implementation work;
+snapshots and the complete Extended CONNECT runtime were the next phase.
+Virtual-stream state and acknowledged SETTINGS snapshots are now implemented
+and covered by state plus real TCP update/failed-submission regressions. The
+complete HTTP/2 Extended CONNECT session driver remains implementation work;
 the current native Session runtime continues to use HTTP/3.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and

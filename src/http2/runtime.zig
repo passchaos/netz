@@ -16,6 +16,7 @@ const duplex_wake = @import("runtime/duplex/wake.zig");
 pub const ClientDuplexPumpEvent = client_duplex_owner.PumpEvent;
 const header_output = @import("runtime/headers/output.zig");
 test {
+    _ = @import("runtime/settings/webtransport_tests.zig");
     _ = @import("runtime/client/authority_tests.zig");
     _ = @import("runtime/client/authority_deadline_tests.zig");
     _ = @import("runtime/client/authority_uri_tests.zig");
@@ -197,6 +198,7 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
     EncryptionRequired,
     PayloadTooLarge,
     UnexpectedContextId,
+    SettingsAckPending,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
 pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
@@ -658,6 +660,9 @@ pub const Limits = struct {
     /// default because peers may start tunnelling arbitrary bytes on streams
     /// once extended CONNECT is accepted.
     enable_connect_protocol: bool = false,
+    /// Capsule-based WebTransport capability and connection-wide initial
+    /// quotas. Established Sessions retain their own acknowledged snapshot.
+    webtransport: http2.WebTransportSettings = .{},
     /// Explicitly opt in to HTTP/2 server push. The client otherwise sends
     /// SETTINGS_ENABLE_PUSH=0 and rejects PUSH_PROMISE.
     enable_push: bool = false,
@@ -1046,6 +1051,7 @@ pub const Server = struct {
         connection.applyLocalLimits();
         errdefer connection.close();
         try connection.applySettings(peer_settings);
+        connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
         try connection.reservePeerStream(1);
         errdefer connection.releasePeerStream(1);
         try connection.rememberResponseSemantics(
@@ -1374,6 +1380,7 @@ fn acceptConnectionTransportMaybeBefore(
     }
     connection.applyLocalLimits();
     try connection.applySettings(peer_settings);
+    connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
     return connection;
 }
 
@@ -3211,6 +3218,7 @@ pub const Client = struct {
                     &.{},
                     deadline,
                 );
+                connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
             }
         }
     }
@@ -3978,6 +3986,10 @@ pub const Connection = struct {
     /// the last advertised slot; use the next operation's original deadline.
     peer_reset_admission_pending: bool = false,
     peer_enable_connect_protocol: bool = false,
+    peer_webtransport_settings: http2.WebTransportSettings = .{},
+    peer_webtransport_acknowledged: http2.WebTransportSettings = .{},
+    local_webtransport_sent: http2.WebTransportSettings = .{},
+    local_webtransport_acknowledged: http2.WebTransportSettings = .{},
     peer_enable_push: bool = true,
     peer_no_rfc7540_priorities: bool = false,
     peer_priority_setting_seen: bool = false,
@@ -4238,6 +4250,35 @@ pub const Connection = struct {
     /// is false until an enabling SETTINGS frame has been processed.
     pub fn peerExtendedConnectEnabled(self: *const Connection) bool {
         return self.peer_enable_connect_protocol;
+    }
+
+    /// Last WebTransport SETTINGS whose ACK this endpoint completely sent.
+    /// Capture this value at CONNECT admission; later updates belong to new
+    /// Sessions and must not modify an established Session's initial credit.
+    pub fn peerWebTransportSettings(self: *const Connection) http2.WebTransportSettings {
+        return self.peer_webtransport_acknowledged;
+    }
+
+    /// Last locally advertised WebTransport SETTINGS acknowledged by the peer.
+    pub fn localWebTransportSettings(self: *const Connection) http2.WebTransportSettings {
+        return self.local_webtransport_acknowledged;
+    }
+
+    pub fn updateWebTransportSettingsWithDeadline(self: *Connection, settings: http2.WebTransportSettings, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        if (self.awaiting_settings_ack) return error.SettingsAckPending;
+        if (settings.enabled and !self.limits.enable_connect_protocol) return error.InvalidSetting;
+        var values: [7]http2.Setting = undefined;
+        var payload: [max_settings_payload_len]u8 = undefined;
+        const encoded = try encodeSettingsPayloadInto(&payload, settings.write(&values));
+        try self.writeControlFrameUntil(.settings, 0, encoded, deadline);
+        self.local_webtransport_sent = settings;
+        self.awaiting_settings_ack = true;
+    }
+
+    pub fn updateWebTransportSettingsWithTimeout(self: *Connection, settings: http2.WebTransportSettings, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.updateWebTransportSettingsWithDeadline(settings, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
     }
 
     fn localStreamConcurrencyUsed(self: *const Connection) usize {
@@ -14799,6 +14840,7 @@ pub const Connection = struct {
             if (frame_type == .window_update) {
                 self.resetPeerPingEnforcement();
             }
+            if (frame_type == .settings and flags & flag_ack != 0) self.peer_webtransport_acknowledged = self.peer_webtransport_settings;
             return;
         }
         writeFrameTransport(
@@ -14814,6 +14856,7 @@ pub const Connection = struct {
             return err;
         };
         if (frame_type == .window_update) self.resetPeerPingEnforcement();
+        if (frame_type == .settings and flags & flag_ack != 0) self.peer_webtransport_acknowledged = self.peer_webtransport_settings;
     }
 
     fn writeEncodedControlUntil(
@@ -18736,6 +18779,7 @@ pub const Connection = struct {
     fn applySettingsAck(self: *Connection) Error!void {
         if (!self.awaiting_settings_ack) return error.InvalidFrame;
         self.awaiting_settings_ack = false;
+        self.local_webtransport_acknowledged = self.local_webtransport_sent;
         self.adaptive_pending_stream_target = null;
         try self.sendQueuedAdaptiveWindowUpdate();
     }
@@ -18965,6 +19009,8 @@ pub const Connection = struct {
     }
 
     fn applyLocalLimits(self: *Connection) void {
+        self.local_webtransport_sent = self.limits.webtransport;
+        if (!self.awaiting_settings_ack) self.local_webtransport_acknowledged = self.local_webtransport_sent;
         self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
         self.hpack_encoder.setMaxDynamicTableSize(
             self.allocator,
@@ -23038,6 +23084,7 @@ fn writeFrame(
 }
 
 fn validateLocalLimits(limits: Limits) Error!void {
+    if (limits.webtransport.enabled and !limits.enable_connect_protocol) return error.InvalidSetting;
     // Both values are emitted verbatim in SETTINGS and therefore must fit the
     // protocol's 32-bit setting value. Silently saturating them would make
     // the local decoder policy disagree with the limit advertised on wire.
@@ -23485,16 +23532,16 @@ fn headersContainHttpToken(headers: []const http1.Header, name: []const u8, need
     return false;
 }
 
-const max_settings_payload_len = 8 * 6;
+const max_settings_payload_len = 15 * 6;
 
 const SettingsForLimits = struct {
-    buf: [8]http2.Setting,
+    buf: [15]http2.Setting,
     count: usize,
 };
 
 fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
     try validateLocalLimits(limits);
-    var settings_buf: [8]http2.Setting = undefined;
+    var settings_buf: [15]http2.Setting = undefined;
     var count: usize = 0;
     settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(limits.header_table_size) };
     count += 1;
@@ -23527,6 +23574,12 @@ fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
             .value = @intFromBool(limits.enable_push),
         };
         count += 1;
+    }
+    if (limits.webtransport.enabled) {
+        var wt_settings: [7]http2.Setting = undefined;
+        const values = limits.webtransport.write(&wt_settings);
+        @memcpy(settings_buf[count..][0..values.len], values);
+        count += values.len;
     }
     return .{ .buf = settings_buf, .count = count };
 }

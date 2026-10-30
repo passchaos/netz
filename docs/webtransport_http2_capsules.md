@@ -63,12 +63,35 @@ zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all
 zig build fuzz-parsers --summary all
 ```
 
+The virtual-stream `h2.State` now enforces direction/initiator ownership,
+cumulative implicit opening, session and per-stream data credit, duplicate
+FIN/reset/STOP rejection and exact RESET Reliable Size. Output preparation is
+separate from commit so a failed Capsule submission cannot advance stream
+offsets or grants. Equal MAX values are permitted for this HTTP/2 wire family;
+decreasing values fail. Retirement requires terminal directions and consumed
+receive data, then folds IDs into compact per-type closed prefixes. A 1024-
+stream sequential churn regression leaves no live entries or sparse ranges.
+
+HTTP/2 supports the seven draft-15 SETTINGS codepoints. `Limits.webtransport`
+advertises capability and initial credit; capability requires Extended CONNECT
+opt-in. `Connection.peerWebTransportSettings()` returns only values whose ACK
+was completely sent. `localWebTransportSettings()` returns only locally sent
+values acknowledged by the peer. Callers capture those value snapshots at
+CONNECT request/acceptance; later updates cannot mutate the copies. Dynamic
+updates preserve the old acknowledged value until ACK and reject overlapping
+unacknowledged SETTINGS transactions. A blocked submission retires connection
+reuse while keeping the old local sent/acknowledged snapshots.
+
 This layer does not yet establish an HTTP/2 WebTransport session. The remaining
-implementation must supply virtual-stream state/flow control, acknowledged
-SETTINGS snapshots, WebTransport-Init parsing, Extended CONNECT admission and
-client/server transport drivers. Stream reset Reliable Size equality,
-duplicate/reset ordering and flow-control updates must be enforced there.
-These requirements remain part of the active library goal.
+implementation must supply WebTransport-Init parsing, Extended CONNECT
+admission and client/server transport drivers. These requirements remain part
+of the active library goal.
 
 The protocol foundation's Debug and ReleaseFast filters pass 141/141, package
 checks pass 22/22, and the seeded plus deterministic parser fuzz checks pass.
+
+The subsequent virtual-stream/SETTINGS filters pass 155/155 in Debug and
+ReleaseFast. Real TCP tests exchange and update all seven SETTINGS in both
+directions and retain pre-update snapshots across PING/ACK barriers; a
+saturated-socket regression verifies failed-output ownership. Package checks
+pass 22/22 and the HTTP/2 connection state-model target passes all three tests.

@@ -18,6 +18,7 @@ pub fn Controller(comptime Context: type) type {
         }
 
         fn applyOne(self: *Connection, setting: http2.Setting) Error!void {
+            try self.peer_webtransport_settings.apply(setting);
             switch (setting.id) {
                 .initial_window_size => try Context.applyInitialWindowSize(self, setting.value),
                 .max_frame_size => {

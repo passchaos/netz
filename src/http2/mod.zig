@@ -131,6 +131,13 @@ pub const SettingId = enum(u16) {
     max_header_list_size = 0x6,
     enable_connect_protocol = 0x8,
     no_rfc7540_priorities = 0x9,
+    webtransport_enabled = 0x2b60,
+    webtransport_initial_max_data = 0x2b61,
+    webtransport_initial_max_stream_data_uni = 0x2b62,
+    webtransport_initial_max_stream_data_bidi_local = 0x2b63,
+    webtransport_initial_max_streams_uni = 0x2b64,
+    webtransport_initial_max_streams_bidi = 0x2b65,
+    webtransport_initial_max_stream_data_bidi_remote = 0x2b66,
     _,
 };
 
@@ -138,6 +145,8 @@ pub const Setting = struct {
     id: SettingId,
     value: u32,
 };
+
+pub const WebTransportSettings = @import("webtransport_settings.zig").Settings;
 
 /// Borrow a complete SETTINGS payload after validating every entry. Unknown
 /// identifiers remain ignorable; repeated known identifiers retain wire order.
@@ -203,6 +212,7 @@ pub fn validateSetting(id: SettingId, value: u32) Error!void {
         .enable_push => if (value > 1) return error.InvalidSetting,
         .enable_connect_protocol => if (value > 1) return error.InvalidSetting,
         .no_rfc7540_priorities => if (value > 1) return error.InvalidSetting,
+        .webtransport_enabled => if (value > 1) return error.InvalidSetting,
         .initial_window_size => if (value > std.math.maxInt(i31)) return error.InvalidSetting,
         .max_frame_size => if (value < 16_384 or value > 16_777_215) return error.InvalidSetting,
         else => {},
