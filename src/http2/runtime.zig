@@ -9472,11 +9472,83 @@ pub const Connection = struct {
         );
     }
 
+    /// Start an Extended CONNECT whose request and response halves are routed
+    /// by the connection's single-owner duplex scheduler. Multiple returned
+    /// handles may remain active; one owner must serially pump or poll them.
+    pub fn startExtendedConnectDuplex(
+        self: *Connection,
+        options: RequestOptions,
+    ) Error!ClientDuplexStream {
+        return self.startExtendedConnectDuplexUntil(options, null);
+    }
+
+    pub fn startExtendedConnectDuplexWithDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ClientDuplexStream {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.startExtendedConnectDuplexUntil(options, deadline);
+    }
+
+    pub fn startExtendedConnectDuplexWithTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ClientDuplexStream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startExtendedConnectDuplexWithDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn startExtendedConnectDuplexUntil(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ClientDuplexStream {
+        if ((self.duplex_reader_active and self.duplex_owners.count() == 0) or
+            self.callback_reader_active)
+        {
+            return error.UnexpectedFrame;
+        }
+        const stream_id = try self.writeExtendedConnectRequestUntil(
+            options,
+            deadline,
+        );
+        var stream_owned = true;
+        errdefer if (stream_owned) self.releaseLocalStream(stream_id);
+        self.duplex_owners.acquire();
+        self.duplex_reader_active = true;
+        stream_owned = false;
+        return .{
+            .connection = self,
+            .registered = true,
+            .stream_id = stream_id,
+            .expected_request_length = null,
+            .extended_connect = true,
+        };
+    }
+
     fn openExtendedConnectAttemptUntil(
         self: *Connection,
         options: RequestOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!ExtendedConnectAttempt {
+        const stream_id = try self.writeExtendedConnectRequestUntil(
+            options,
+            deadline,
+        );
+        errdefer self.releaseLocalStream(stream_id);
+        return self.readExtendedConnectAttemptUntil(stream_id, deadline);
+    }
+
+    fn writeExtendedConnectRequestUntil(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!u31 {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         request_options.authority = self.resolveRequestAuthorityFromHeaders(
@@ -9528,7 +9600,8 @@ pub const Connection = struct {
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
-        errdefer self.releaseLocalStream(stream_id);
+        var stream_owned = true;
+        errdefer if (stream_owned) self.releaseLocalStream(stream_id);
         // Extended CONNECT establishes a bidirectional byte tunnel.  The
         // opening HEADERS therefore deliberately keeps the stream open instead
         // of using END_STREAM like a request with no body would.
@@ -9536,7 +9609,8 @@ pub const Connection = struct {
             _ = try deadline_policy.usableAwake(self.io, absolute);
         }
         try self.writeHeadersUntil(stream_id, fields.items, false, deadline);
-        return self.readExtendedConnectAttemptUntil(stream_id, deadline);
+        stream_owned = false;
+        return stream_id;
     }
 
     pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
@@ -20589,6 +20663,7 @@ pub const ClientDuplexStream = struct {
     request_written: usize = 0,
     request_finished: bool = false,
     head_request: bool = false,
+    extended_connect: bool = false,
     response_head_seen: bool = false,
     response_finished: bool = false,
     response_finished_reported: bool = false,
@@ -21263,8 +21338,8 @@ pub const ClientDuplexStream = struct {
             self.response_content_length = lookup.content_length;
             self.response_body_forbidden = responseForbidsBody(
                 status,
-                if (self.head_request) "HEAD" else "POST",
-                false,
+                if (self.extended_connect) "CONNECT" else if (self.head_request) "HEAD" else "POST",
+                self.extended_connect,
             );
             if (status == 204 and lookup.content_length != null) {
                 return error.InvalidContentLength;

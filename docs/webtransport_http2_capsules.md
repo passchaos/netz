@@ -126,7 +126,7 @@ saturated-socket regression verifies failed-output ownership. Package checks
 pass 22/22 and the HTTP/2 connection state-model target passes all three tests.
 
 The complete Session driver filter passes 157/157 in Debug and ReleaseFast;
-package checks pass 23/23 and the parser fuzz gate passes 2/2. Its authenticated
+package checks pass 24/24 and the parser fuzz gate passes 2/2. Its authenticated
 TLS loopback tests exchange both stream directions, datagrams, flow-control
 updates, reset, stop, drain, close, application protocols, accepted response
 metadata, and explicit WebTransport-Init credit. A second regression preserves
@@ -134,3 +134,11 @@ a complete 429 response entity, proves 400 rejections for invalid CONNECT
 metadata and Init syntax, and then accepts a succeeding sibling Session.
 Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.
+
+The multiplexing transport follow-up passes 167/167 focused Debug tests and
+133/133 targeted ReleaseFast tests. The production h2c connection fuzz gate
+passes 3/3, and the independent bidirectional Hyper matrix passes all 9 build
+steps across h2c and TLS while exercising multiplexing, cancellation, flow
+control, GOAWAY, pooling, trailers, redirects, and TLS KeyUpdate. Hyper does not
+implement draft-15 WebTransport, so this proves the shared HTTP/2 router stayed
+interoperable; it is not presented as independent WebTransport evidence.

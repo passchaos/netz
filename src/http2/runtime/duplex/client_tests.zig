@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
+const frame_io = @import("../frame/io.zig");
 const allocator = std.testing.allocator;
 
 const Fixture = @import("testing.zig").Fixture;
@@ -268,4 +269,93 @@ test "HTTP/2 multiplexed duplex deferred frame overflow prevents sibling reuse" 
     try std.testing.expectError(error.MessageTooLarge, read(&a));
     try std.testing.expect(fixture.connection.aggregate_timeout_unusable);
     try std.testing.expectError(error.ConnectionClosed, read(&b));
+}
+
+test "HTTP/2 extended CONNECT duplex multiplexes response heads and DATA" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var fixture = try Fixture.init(threaded.io());
+    defer fixture.deinit();
+    fixture.connection.peer_enable_connect_protocol = true;
+    try std.testing.expectError(error.Timeout, fixture.connection.startExtendedConnectDuplexWithTimeout(.{
+        .method = "CONNECT",
+        .protocol = "webtransport",
+        .authority = "localhost",
+    }, .zero));
+    try std.testing.expectEqual(@as(usize, 0), fixture.connection.activeLocalStreamCount());
+    var a = try fixture.connection.startExtendedConnectDuplexWithTimeout(.{
+        .method = "CONNECT",
+        .protocol = "webtransport",
+        .path = "/a",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "x-session", .value = "a" }},
+    }, .fromSeconds(1));
+    defer a.deinit();
+    var b = try fixture.connection.startExtendedConnectDuplexWithTimeout(.{
+        .method = "CONNECT",
+        .protocol = "webtransport",
+        .path = "/b",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "x-session", .value = "b" }},
+    }, .fromSeconds(1));
+    defer b.deinit();
+    try std.testing.expectEqual(@as(u31, 1), a.streamId());
+    try std.testing.expectEqual(@as(u31, 3), b.streamId());
+    try std.testing.expectEqual(@as(usize, 2), fixture.connection.activeClientDuplexCount());
+
+    var request_decoder: http2.Hpack.Decoder = .{};
+    defer request_decoder.deinit(allocator);
+    for ([_]struct { id: u31, path: []const u8, session: []const u8 }{
+        .{ .id = 1, .path = "/a", .session = "a" },
+        .{ .id = 3, .path = "/b", .session = "b" },
+    }) |expected| {
+        var frame = try frame_io.readOwned(allocator, fixture.io, fixture.peer, 16_384);
+        defer frame.deinit(allocator);
+        try std.testing.expectEqual(http2.FrameType.headers, frame.frame.header.frame_type);
+        try std.testing.expectEqual(expected.id, frame.frame.header.stream_id);
+        try std.testing.expectEqual(@as(u8, 0), frame.frame.header.flags & 1);
+        const fields = try request_decoder.decodeBlockOwnedWithLimit(allocator, frame.frame.payload, 16, 4096);
+        defer http2.Hpack.freeOwnedFields(allocator, fields);
+        try expectField(fields, ":method", "CONNECT");
+        try expectField(fields, ":protocol", "webtransport");
+        try expectField(fields, ":path", expected.path);
+        try expectField(fields, "x-session", expected.session);
+    }
+
+    _ = try a.finishRequestWithTimeout(.fromSeconds(1));
+    _ = try b.finishRequestWithTimeout(.fromSeconds(1));
+    var response_encoder: http2.Hpack.Encoder = .{};
+    defer response_encoder.deinit(allocator);
+    try fixture.headers(&response_encoder, b.streamId(), false, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "x-response", .value = "b" },
+    });
+    try fixture.headers(&response_encoder, a.streamId(), false, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "x-response", .value = "a" },
+    });
+    try fixture.frame(.data, 1, b.streamId(), "from-b");
+    try fixture.frame(.data, 1, a.streamId(), "from-a");
+
+    var a_head = try read(&a);
+    defer a_head.deinit(allocator);
+    try expectField(a_head.head.headers, "x-response", "a");
+    try std.testing.expect(a_head.head.body_allowed);
+    var b_head = try read(&b);
+    defer b_head.deinit(allocator);
+    try expectField(b_head.head.headers, "x-response", "b");
+    var a_data = try read(&a);
+    defer a_data.deinit(allocator);
+    try std.testing.expectEqualStrings("from-a", a_data.data.data);
+    var b_data = try read(&b);
+    defer b_data.deinit(allocator);
+    try std.testing.expectEqualStrings("from-b", b_data.data.data);
+    var a_done = try read(&a);
+    defer a_done.deinit(allocator);
+    try std.testing.expect(a_done == .finished);
+    var b_done = try read(&b);
+    defer b_done.deinit(allocator);
+    try std.testing.expect(b_done == .finished);
+    try std.testing.expectEqual(@as(usize, 0), fixture.connection.activeClientDuplexCount());
+    try std.testing.expect(!fixture.connection.duplex_reader_active);
 }

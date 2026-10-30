@@ -78,6 +78,17 @@ test "public HTTP2 resolves Host before an implicit IP authority default" {
     try std.testing.expectEqualStrings("explicit.example", connection.resolveRequestAuthorityFromHeaders("explicit.example", &.{.{ .name = "host", .value = "virtual.example" }}).?);
 }
 
+test "public HTTP2 exposes multiplexed Extended CONNECT admission" {
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "startExtendedConnectDuplexWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "startExtendedConnectDuplexWithTimeout",
+    ));
+}
+
 test "public gRPC streaming terminal synthesizes UNKNOWN without grpc-status" {
     const allocator = std.testing.allocator;
     var terminal = try netz.grpc.stream.runtime.parseResponseTerminal(allocator, 200, &.{}, &.{}, null);

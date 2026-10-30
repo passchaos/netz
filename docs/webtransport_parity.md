@@ -1943,10 +1943,16 @@ healthy sibling Session.
 
 HTTP/2 still lacks an independent draft-15 implementation or browser/proxy
 interop gate comparable to the HTTP/3 Chrome, Firefox, Safari, and wtransport
-matrix. It also does not yet have the connection-owning pooled endpoint layer
-available to the production HTTP/3 runtime; callers currently own one HTTP/2
-Connection and its Session scheduling. These are the remaining HTTP/2 evidence
-and higher-level orchestration gaps rather than missing core Session behavior.
+matrix. The HTTP/2 connection now exposes
+`startExtendedConnectDuplexWith{Timeout,Deadline}` as the transport foundation
+for a pooled endpoint: multiple CONNECT request/response halves register with
+the existing single-owner duplex router, retain out-of-order HPACK and DATA by
+stream ID, and share one connection without per-handle socket reads. The
+WebTransport adapter does not yet promote those duplex handles into its
+connection-owning pooled endpoint, so callers still own one blocking HTTP/2
+Connection and its Session scheduling. That adapter and independent interop are
+the remaining HTTP/2 orchestration/evidence gaps rather than missing core
+Session behavior.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and
