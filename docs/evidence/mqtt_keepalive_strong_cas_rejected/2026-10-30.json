@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT managed Keep Alive one-shot strong-CAS renewal",
+  "decision": "rejected",
+  "baseline": {
+    "head": "8fa9a38e84212cd7661ed6dc9e1f4ae5cbd462f3",
+    "broker_sha256": "e47e8dca5f14ab32e32441f27526646e04859425018620f94e7ab01cfa1c7ceb",
+    "driver_sha256": "7ba9ef928560ceeda6827334b68fd5315e143d1efa158d9af0b012e55c6a1857",
+    "source_sha256": {
+      "src/mqtt/runtime/broker_keep_alive.zig": "2277473a363663987140ee7fcd0d3c493ddca1e0f0bcd3e290312a8ed7d00eb1"
+    }
+  },
+  "candidate": {
+    "broker_sha256": "6443f3af9673a07203d98a2a839cb33023510a214f22127bfb5d2c389a0e8e57",
+    "design": "Replace the positive-deadline weak-CAS retry loop with one strong compare/exchange. The Connection's single receive owner serializes renewals; the only intended concurrent transition is the lifecycle driver's exact expiry claim.",
+    "layout_changes": false,
+    "deadline_calculation_changes": false
+  },
+  "profile_basis": {
+    "artifact": "zig-out/mqtt-current-serial-profile-20261030T174500Z",
+    "renew_managed_keep_alive_self_percent": 1.21,
+    "renew_weak_cas_child_share_percent": 54.90,
+    "samples": "about 12000 cycles samples, zero lost"
+  },
+  "benchmark": {
+    "artifact": "zig-out/mqtt-keepalive-strong-cas-ab/20261030T220000Z-serial-100k",
+    "artifact_bytes": 26679,
+    "aggregate_file_hash_digest": "2c096b68efec827f37ca9b711b9b268774485e7ffc29394137102521cdd7e7ff",
+    "pairs": 8,
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "warmup_messages": 5000,
+    "measured_messages": 100000,
+    "publisher_window": 1,
+    "payload_bytes": 256,
+    "instructions_baseline_over_candidate_paired_median": 0.9986535051,
+    "instructions_candidate_wins": 4,
+    "cycles_baseline_over_candidate_paired_median": 1.0030271432,
+    "cycles_candidate_wins": 4,
+    "elapsed_baseline_over_candidate_paired_median": 0.9842272160,
+    "elapsed_candidate_wins": 3,
+    "p50_baseline_over_candidate_paired_median": 0.9814373340,
+    "p50_candidate_wins": 2,
+    "p99_baseline_over_candidate_paired_median": 0.9304923953,
+    "p99_candidate_wins": 3,
+    "completion": "Every arm completed exactly 100000 deliveries with checksum 25725000."
+  },
+  "correctness": {
+    "focused_debug": "131/131 broker Keep Alive and managed-deadline tests passed",
+    "preserved_invariants": [
+      "a deadline claimed as expired cannot be resurrected",
+      "complete packet and large-body progress use the same 1.5x timeout calculation",
+      "zero Keep Alive remains disabled",
+      "the lifecycle driver still claims the exact observed deadline"
+    ]
+  },
+  "rejection_reason": "On AArch64 LSE the weak and strong CAS primitives do not provide the expected hot-path reduction. The candidate regressed broker instructions 0.135%, elapsed time 1.60%, p50 1.89%, and p99 7.47%; cycles were mixed. The source was removed before wider QoS/interop gates.",
+  "final_state": {
+    "production_source_reverted": true,
+    "source_sha256": {
+      "src/mqtt/runtime/broker_keep_alive.zig": "2277473a363663987140ee7fcd0d3c493ddca1e0f0bcd3e290312a8ed7d00eb1"
+    },
+    "follow_up": "Keep the exact weak-CAS expiry race. Future common-path work should target event-loop scheduling or packet decode work rather than changing the atomic primitive."
+  }
+}

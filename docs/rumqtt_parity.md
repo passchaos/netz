@@ -5775,6 +5775,15 @@ proxy evidence for the entire suite.
    plus all 1,825 source-locked sequences. Full PMU, profile and lifecycle
    evidence is recorded in
    [the managed Keep Alive evidence](evidence/mqtt_managed_keep_alive/2026-10-29.json).
+   A follow-up replaced the per-packet weak-CAS renewal loop with one strong
+   compare/exchange, relying on the Connection's single receive owner and the
+   lifecycle driver's sole concurrent expiry claim. Focused Keep Alive tests
+   passed 131/131, but eight fixed-binary 100k durable QoS 2 serial pairs
+   regressed broker instructions 0.135%, elapsed time 1.60%, p50 1.89%, and
+   p99 7.47%; cycles were mixed. On this AArch64 LSE target, changing the CAS
+   primitive did not remove the profiled cost and harmed code generation. The
+   original exact weak-CAS loop remains. Full rows are in
+   [the rejected strong-CAS evidence](evidence/mqtt_keepalive_strong_cas_rejected/2026-10-30.json).
    A subsequent detached-Session prototype retained the broker's refcounted
    `Publication` across the unlocked socket write and copied only MQTT property
    descriptors. The fallback still deep-copied Session-owned or alias-rewritten
