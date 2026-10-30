@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "QUIC direct per-frame outbound traits classification",
+  "decision": "accepted",
+  "baseline": {
+    "head": "74194675170389f6fd80bfb62a77b69fe27ae343",
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "7b75caeb423223f94b48a93d5653d58e59339a28179f36bba7c7dcd20dce75e2"
+    },
+    "benchmark_sha256": "00141776ae7fd29839e5c4d26284f42c4b2a31e1c8223ceb26a6f2d331464a17"
+  },
+  "candidate": {
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "4865c2517ff193ae3d086760658016998c5bac4c0918232e0ce9f1444628d14e"
+    },
+    "benchmark_sha256": "7548f2d863837d7b8e9cabe915a6e596a9bdfc01e7432154a79d642ac56f015e",
+    "implementation": "validateOutboundFrameAndTraits preserves its out-pointer ABI but overwrites the zero per-frame scratch with classify(frame), then attaches exact STREAM bytes. Packet aggregation still performs one checked merge.",
+    "wire_changes": false,
+    "layout_changes": false
+  },
+  "reference": {
+    "quiche_revision": "0b1a89af341b7e42c4e75fedf7bdda246d8319af",
+    "quiche_observation": "Frame methods classify ACK elicitation directly from one frame; no empty aggregate is populated before packet accounting",
+    "tquic_revision": "0169abde20c6701c68b1ac5021c3e64702f20cfa"
+  },
+  "rejected_variants": {
+    "return_value": {
+      "benchmark_sha256": "dd99c5d5733e98c6d8ed097dd151c36937d2da1311f0b541fe2edc971be11b55",
+      "stream1_instructions_baseline_over_candidate_paired_median": 1.0031441288,
+      "stream1_instructions_candidate_wins": 8,
+      "stream1_cycles_baseline_over_candidate_paired_median": 0.9861908603,
+      "stream1_cycles_candidate_wins": 2,
+      "reason": "Returning Traits reduced instructions but regressed cycles 1.38% and both sequential and batch wall time."
+    },
+    "forced_inline_return_value": {
+      "benchmark_sha256": "26d5979067e857fea3ceab46d337cd35ba1e91f73ba03fd97bb9c1ad98d92e50",
+      "stream4_50k_instructions_baseline_over_candidate_paired_median": 1.0182589587,
+      "stream4_50k_instructions_candidate_wins": 5,
+      "stream4_50k_cycles_baseline_over_candidate_paired_median": 0.9962652007,
+      "stream4_50k_cycles_candidate_wins": 2,
+      "reason": "Forced inline recovered the one-frame shape but retained a 0.37% cycles regression in the long H3-shaped control."
+    }
+  },
+  "benchmark_method": {
+    "cpu": 0,
+    "schedule": "ABBA",
+    "warmup_iterations": 1000,
+    "packets_per_batch": 32,
+    "payload_bytes_per_packet": 1024,
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ]
+  },
+  "results": {
+    "h3_shaped_stream4_50k": {
+      "artifact": "zig-out/quic-frame-traits-direct-ab/20261030T043137Z-stream4-outptr-50k",
+      "artifact_bytes": 5350,
+      "aggregate_file_hash_digest": "9e279950ed71d0e341d04c643ed07ed7e82632a12ec27a8f15046a07508e11dc",
+      "pairs": 5,
+      "measured_iterations": 50000,
+      "packets_per_path": 1600000,
+      "stream_descriptors_per_packet": 4,
+      "instructions_baseline_over_candidate_paired_median": 1.0179606479,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0058266068,
+      "cycles_candidate_wins": 4,
+      "sequential_baseline_over_candidate_paired_median": 1.0080376758,
+      "sequential_candidate_wins": 4,
+      "batch_baseline_over_candidate_paired_median": 1.0111174247,
+      "batch_candidate_wins": 3
+    },
+    "stream1_control": {
+      "artifact": "zig-out/quic-frame-traits-direct-ab/20261030T043422Z-controls-outptr/stream1",
+      "artifact_bytes": 5310,
+      "aggregate_file_hash_digest": "eff3f80009646da87b751e842fcf80996a31657680ae5e233f0d7164590d2aec",
+      "pairs": 5,
+      "measured_iterations": 20000,
+      "instructions_baseline_over_candidate_paired_median": 1.0064150123,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0030812247,
+      "cycles_candidate_wins": 4,
+      "sequential_baseline_over_candidate_paired_median": 1.0039710348,
+      "sequential_candidate_wins": 4,
+      "batch_baseline_over_candidate_paired_median": 1.0031051171,
+      "batch_candidate_wins": 5
+    },
+    "datagram_control": {
+      "artifact": "zig-out/quic-frame-traits-direct-ab/20261030T043637Z-datagram-outptr",
+      "artifact_bytes": 5540,
+      "aggregate_file_hash_digest": "da97ce37adb45f73307f670232dc7d80ebc55cfea19c6c34b68e9da81df268ef",
+      "pairs": 5,
+      "measured_iterations": 20000,
+      "payloads_per_path": 640000,
+      "instructions_baseline_over_candidate_paired_median": 1.0108936025,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0066729802,
+      "cycles_candidate_wins": 5,
+      "sequential_baseline_over_candidate_paired_median": 1.0061387561,
+      "sequential_candidate_wins": 4,
+      "packed_baseline_over_candidate_paired_median": 0.9996026069,
+      "packed_candidate_wins": 2,
+      "packed_interpretation": "The pure-DATAGRAM packed preflight bypasses general frame validation, so neutrality is the expected control."
+    }
+  },
+  "verification": {
+    "focused_debug": "137/137 passed for the return-value development variant; final out-pointer focused set passed 136/136",
+    "quic_debug": "1122/1122 passed",
+    "one_rtt_release_fast": "339/339 passed",
+    "package": "22/22 passed",
+    "real_h3": "three 4-stream 16-MiB TLS/H3 uploads completed 48 MiB total at 232.25 MiB/s mean",
+    "quic_go": "HTTP/3 v1/v2 bidirectional cancellation, STOP_SENDING recovery, trailers, redirect/pool, and informational matrix passed",
+    "tquic": "HTTP/3 normal, Retry, client/server connection reuse, and two-phase GOAWAY matrix passed",
+    "toolchains": {
+      "zig": "0.16.0",
+      "go": "go1.24.13 linux/arm64",
+      "rust": "rustc 1.90.0 (1159e78c4 2025-09-14)"
+    }
+  },
+  "remaining_gap": "Frame-traits validation no longer performs the empty merge. Equal-wire H3 packetization, packet-protection, recovery, and event-loop costs remain broader optimization targets."
+}

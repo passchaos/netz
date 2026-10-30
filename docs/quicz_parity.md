@@ -2849,6 +2849,22 @@ cost and tail scheduling.
    the batch median from 101.473 to 98.525 us/batch (2.9%, 4/5 pairs). One
    baseline batch sample reached 116.687 us and one final pair regressed 0.36%,
    so this is a median fast-path result rather than an all-pairs claim.
+   Send validation no longer merges each classified frame into an all-zero
+   temporary Traits before merging that temporary into the packet aggregate.
+   The final implementation preserves the existing out-pointer call shape and
+   overwrites the per-frame scratch directly, including exact STREAM byte
+   accounting. Two return-value variants were rejected first: the uninlined
+   form reduced instructions 0.31% but regressed cycles 1.38% in the one-frame
+   shape; forcing it inline reduced H3-shaped instructions 1.83% but still
+   regressed 50k four-fragment cycles 0.37%. The out-pointer form passed the
+   same long H3 guard with instructions/cycles/sequential/batch improved by
+   paired medians of 1.80%/0.58%/0.80%/1.11%. Single-STREAM controls improved
+   0.64%/0.31% instructions/cycles, and DATAGRAM controls improved 1.09%/0.67%;
+   its packed DATAGRAM batch path intentionally bypasses the changed validator
+   and remained neutral. A real TLS/H3 four-stream 16-MiB upload completed 3/3
+   at 232.25 MiB/s mean, while quic-go v1/v2 and tquic normal/Retry/GOAWAY
+   matrices remained green. Full fixed-binary rows are recorded in
+   `docs/evidence/quic_frame_traits_direct/2026-10-30.json`.
    STREAM/DATA framing now borrows all body bytes in the common case, and both
    ordinary and batch sends encode directly into stable recovery storage
    instead of copying a second plaintext payload. Exact-size batching still

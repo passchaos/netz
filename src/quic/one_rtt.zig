@@ -5489,7 +5489,6 @@ pub const Connection = struct {
 
     fn validateOutboundFrameAndTraits(self: Connection, frame: quic.Frame, traits: *OutboundFrameTraits) Error!void {
         try quic.validateFrameForPacketType(frame, .one_rtt);
-        try traits.observe(frame);
         switch (frame) {
             .padding, .ack, .connection_close, .application_close => {},
             .new_token => |new_token| {
@@ -5534,6 +5533,13 @@ pub const Connection = struct {
                 return error.AckFrequencyDisabled;
             },
             else => {},
+        }
+        traits.* = frame_traits.classify(frame);
+        if (frame == .stream) {
+            traits.stream_bytes = std.math.cast(
+                u64,
+                frame.stream.data.len,
+            ) orelse return error.InvalidFrameLength;
         }
     }
 
