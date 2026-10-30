@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT inbound QoS 2 single-lock PUBREL memory transaction",
+  "decision": "rejected",
+  "baseline": {
+    "head": "80eaff2687120495532afc8d55cbd79b4f81fde7",
+    "mqtt_source_commit": "1c4bd072500dab3772593ed7c3f6c7840570552d",
+    "equivalence": "src/mqtt is byte-identical between mqtt_source_commit and head",
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd",
+    "source_sha256": {
+      "src/mqtt/broker.zig": "cb6198e556c73375a8b1068c357631195289b9ddd351efcca92e8692a85b70b8"
+    }
+  },
+  "candidate": {
+    "broker_sha256": "6701fc08abdd93b394886cd92c5e44ce4d6291c5370c51ec72a6e4553aecce58",
+    "design": "Keep state_mutex across pending QoS2 removal, bounded asPublish decode, deferred route-plan construction, and pending storage recycle. Release it before persistence output, downstream network dispatch, and PUBCOMP.",
+    "removed_lock_round_trips_per_released_publish": 2,
+    "layout_changes": false
+  },
+  "reference": {
+    "implementation": "Mosquitto db__message_release_incoming plus handle__pubrel",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source_clean": true,
+    "observation": "Mosquitto's single event-loop owner releases and queues one incoming QoS2 message in one database call before sending PUBCOMP"
+  },
+  "correctness": {
+    "debug": "126/126 focused durability, Session, live QoS2, exact release, and PUBREL snapshot tests passed",
+    "release_fast": "126/126 focused tests passed",
+    "preserved_invariants": [
+      "inbound QoS2 state commits before PUBREC",
+      "pending removal and all durable routing effects commit atomically before downstream delivery or PUBCOMP",
+      "Message Expiry observes the same cached timestamp as route enqueue",
+      "unknown or repeated PUBREL remains idempotently acknowledged",
+      "network writes never occur while state_mutex is held"
+    ]
+  },
+  "benchmark_method": {
+    "driver_sha256": "7ba9ef928560ceeda6827334b68fd5315e143d1efa158d9af0b012e55c6a1857",
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "schedule": "ABBA",
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ],
+    "attach_stabilization_seconds": 0.05
+  },
+  "serial": {
+    "ten_thousand": {
+      "artifact": "zig-out/mqtt-pubrel-single-lock-ab/20261030T040547Z-serial",
+      "artifact_bytes": 25906,
+      "aggregate_file_hash_digest": "c013902666aaa6b1949359dce9ab37810d966c4573355a45078f2a2748c12f4d",
+      "pairs": 8,
+      "instructions_baseline_over_candidate_paired_median": 1.0009665275,
+      "instructions_candidate_wins": 4,
+      "cycles_baseline_over_candidate_paired_median": 1.0095812731,
+      "cycles_candidate_wins": 8,
+      "throughput_candidate_over_baseline_paired_median": 0.9983426883,
+      "p50_candidate_over_baseline_paired_median": 1.0057014990,
+      "p99_candidate_over_baseline_paired_median": 0.9839903115
+    },
+    "forty_thousand": {
+      "artifact": "zig-out/mqtt-pubrel-single-lock-ab/20261030T040620Z-serial-40k",
+      "artifact_bytes": 26096,
+      "aggregate_file_hash_digest": "eb415c268cd43a0ab0ac762b98bc524cc0b7bca63a52106be7a98374c5966b11",
+      "pairs": 8,
+      "instructions_baseline_over_candidate_paired_median": 1.0000820232,
+      "instructions_candidate_wins": 4,
+      "cycles_baseline_over_candidate_paired_median": 1.0148209458,
+      "cycles_candidate_wins": 5,
+      "throughput_candidate_over_baseline_paired_median": 0.9997769480,
+      "p50_candidate_over_baseline_paired_median": 1.0079045924,
+      "p99_candidate_over_baseline_paired_median": 1.0072423745
+    },
+    "interpretation": "Serial cycles improved while instructions and throughput were neutral. The longer state-lock lifetime therefore required concurrent-shape validation before acceptance."
+  },
+  "five_shape": {
+    "artifact": "zig-out/mqtt-pubrel-single-lock-ab/20261030T040741Z-five-shape",
+    "artifact_bytes": 64944,
+    "aggregate_file_hash_digest": "11df325c4d33bda1edddbcf1742ebf4b01ff72ed270c2a557be85cc77270ed01",
+    "pairs_per_shape": 4,
+    "shapes": {
+      "serial": {
+        "instructions_baseline_over_candidate_paired_median": 1.0025512646,
+        "cycles_baseline_over_candidate_paired_median": 1.0371713272
+      },
+      "publishers-32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0022101250,
+        "instructions_candidate_wins": 4,
+        "cycles_baseline_over_candidate_paired_median": 1.0227002940,
+        "cycles_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 0.9975272817
+      },
+      "fanout-32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0012249055,
+        "instructions_candidate_wins": 4,
+        "cycles_baseline_over_candidate_paired_median": 0.9421878946,
+        "cycles_candidate_wins": 0,
+        "throughput_candidate_over_baseline_paired_median": 0.9859972464,
+        "throughput_candidate_wins": 0,
+        "p50_candidate_over_baseline_paired_median": 1.0147016610,
+        "p50_candidate_wins": 0,
+        "p99_candidate_over_baseline_paired_median": 1.0138809837,
+        "p99_candidate_wins": 0
+      },
+      "balanced-32x32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0011305894,
+        "cycles_baseline_over_candidate_paired_median": 1.0024331657,
+        "throughput_candidate_over_baseline_paired_median": 0.9932169148
+      },
+      "large-payload": {
+        "instructions_baseline_over_candidate_paired_median": 1.0013367149,
+        "cycles_baseline_over_candidate_paired_median": 0.9971916339,
+        "throughput_candidate_over_baseline_paired_median": 1.0052334091
+      }
+    }
+  },
+  "rejection_reason": "The global state lock covered destination materialization. Fanout-32 regressed cycles by 5.78%, throughput by 1.40%, p50 by 1.47%, and p99 by 1.39%; cycles and all timing metrics lost every pair. Serial savings cannot override that concurrent fanout regression.",
+  "final_state": {
+    "production_source_reverted": true,
+    "mqtt_source_hash_matches_baseline": true,
+    "crash_gates_skipped": "The candidate failed the earlier five-shape performance gate; running broader crash gates could not make it acceptable.",
+    "follow_up": "Keep bounded decode outside state_mutex. Future PUBREL work may reduce lock ownership only if route materialization is split into a short state mutation phase without blocking destination writers."
+  }
+}

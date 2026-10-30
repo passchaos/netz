@@ -5856,6 +5856,19 @@ proxy evidence for the entire suite.
    future work must remove a larger scheduling/ownership boundary without
    growing these hot paths. Full rows are in
    [the rejected persistence-cache evidence](evidence/mqtt_publisher_persistence_cache_rejected/2026-10-30.json).
+   The next candidate reduced PUBREL's three `state_mutex` acquisitions to one
+   across pending removal, bounded in-memory decode, route planning, and pending
+   recycling. Persistence writes, downstream network dispatch, and PUBCOMP all
+   remained after state unlock and the existing durable commit. Serial 10k and
+   40k decision sets improved cycles by 0.96% and 1.48% at paired medians, with
+   instructions neutral, so the candidate advanced to the five-shape QoS 2
+   guard. It then failed the fanout boundary: fanout-32 cycles regressed 5.78%
+   with 0/4 wins, throughput regressed 1.40%, and p50/p99 regressed 1.47%/1.39%,
+   also 0/4 wins. Holding the global state lock while materializing 32
+   destinations blocked their writers more than the removed lock handoffs
+   saved. The production change was removed before crash gates. Full serial and
+   five-shape rows are in
+   [the rejected single-lock evidence](evidence/mqtt_pubrel_single_lock_rejected/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:
