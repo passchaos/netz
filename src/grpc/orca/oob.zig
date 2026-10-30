@@ -166,6 +166,46 @@ pub const ClientStream = struct {
         return self.nextUntil(deadline);
     }
 
+    /// Consume only response events already routed by the connection owner.
+    /// Null means no event was queued before `deadline`; this never starts a
+    /// second socket read and is suitable for SharedChannel endpoint workers.
+    pub fn pollNextWithDeadline(
+        self: *ClientStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?ClientEvent {
+        if (deadline.clock != .awake) return error.Timeout;
+        if (self.takePending()) |report| return .{ .report = report };
+        if (self.terminal_seen) return error.ConnectionClosed;
+        while (true) {
+            var event = (try self.stream.pollResponseEventWithDeadline(
+                deadline,
+                self,
+                collectReport,
+            )) orelse return null;
+            switch (event) {
+                .terminal => |terminal| {
+                    event = undefined;
+                    self.terminal_seen = true;
+                    return .{ .terminal = terminal };
+                },
+                .informational, .initial_metadata, .messages => {
+                    event.deinit(self.allocator);
+                    if (self.takePending()) |report| {
+                        return .{ .report = report };
+                    }
+                },
+            }
+        }
+    }
+
+    pub fn resumeRequestWithDeadline(
+        self: *ClientStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (deadline.clock != .awake) return error.Timeout;
+        try self.resumeRequestIfNeeded(deadline);
+    }
+
     fn nextUntil(
         self: *ClientStream,
         deadline: ?std.Io.Clock.Timestamp,
@@ -288,6 +328,45 @@ fn startUntil(
         .request_cost_names = options.request_cost_names,
     });
     defer allocator.free(request);
+    return startEncodedUntil(
+        connection,
+        allocator,
+        options,
+        request,
+        deadline,
+    );
+}
+
+/// Start from an already validated, owned request image. SharedChannel uses
+/// this to reconnect without retaining caller-owned request-cost name slices.
+pub fn startPreparedWithDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: ClientOptions,
+    request: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+) Error!ClientStream {
+    if (deadline.clock != .awake or
+        deadline.durationFromNow(connection.io).raw.nanoseconds <= 0)
+    {
+        return error.Timeout;
+    }
+    return startEncodedUntil(
+        connection,
+        allocator,
+        options,
+        request,
+        deadline,
+    );
+}
+
+fn startEncodedUntil(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: ClientOptions,
+    request: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!ClientStream {
     const request_options: duplex.RequestOptions = .{
         .path = path,
         .authority = options.authority,

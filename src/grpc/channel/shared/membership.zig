@@ -21,9 +21,14 @@ pub fn Membership(comptime State: type) type {
             errdefer owner.deinit();
             const tracker = try connectivity.Tracker.create(allocator, state.io);
             errdefer tracker.release();
+            const orca_tracker = try State.OrcaTracker.create(
+                allocator,
+                state.io,
+            );
+            errdefer orca_tracker.release();
             const wake = try Wake.create(allocator);
             errdefer wake.release();
-            worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker, .wake = wake };
+            worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker, .orca_tracker = orca_tracker, .wake = wake };
             try state.group.concurrent(state.io, State.Worker.run, .{worker});
             state.workers.appendAssumeCapacity(worker);
             return worker;
@@ -38,6 +43,7 @@ pub fn Membership(comptime State: type) type {
             worker.eligible = false;
             worker.capacity = 0;
             worker.tracker.setState(.shutdown);
+            worker.orca_tracker.shutdown();
             if (state.selected == worker) state.selected = null;
             worker.wake.set(state.io);
         }

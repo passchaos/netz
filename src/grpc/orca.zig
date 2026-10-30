@@ -56,8 +56,12 @@ pub const OwnedLoadReport = struct {
     pub fn clone(
         self: OwnedLoadReport,
         allocator: std.mem.Allocator,
-    ) Error!OwnedLoadReport {
-        return decodeAlloc(allocator, self.bytes);
+    ) std.mem.Allocator.Error!OwnedLoadReport {
+        return decodeAlloc(allocator, self.bytes) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            // `self.bytes` was validated before this OwnedLoadReport existed.
+            else => unreachable,
+        };
     }
 };
 

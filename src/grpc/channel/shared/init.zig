@@ -7,6 +7,7 @@ const connectivity = @import("../connectivity.zig");
 const State = @import("state.zig").State;
 const Error = @import("state.zig").Error;
 const Options = @import("options.zig").Options;
+const orca_config = @import("orca/config.zig");
 
 pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!*State {
     if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.max_buffered_stream_bytes == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
@@ -24,6 +25,11 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     }
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
+    var owned_orca = if (options.orca_oob) |orca|
+        try orca_config.Config.init(allocator, orca)
+    else
+        null;
+    errdefer if (!transferred) if (owned_orca) |*config_value| config_value.deinit();
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
     const state = try allocator.create(State);
@@ -32,12 +38,14 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     retained.service_config_json = null;
     retained.health_service = owned_name;
     retained.health_metadata.service = owned_name orelse "";
+    retained.orca_oob = null;
     state.* = .{
         .allocator = allocator,
         .io = io,
         .options = retained,
         .config = config,
         .health_service = owned_name,
+        .orca_oob = owned_orca,
         .tracker = tracker,
         .policy = options.channel.selection_policy orelse (if (balancing.configured) switch (balancing.policy) {
             .pick_first => channel.SelectionPolicy.pick_first,
@@ -48,6 +56,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             @intCast(keepalive.interval.nanoseconds)
         else
             0),
+        .demand = owned_orca != null,
     };
     transferred = true;
     errdefer {

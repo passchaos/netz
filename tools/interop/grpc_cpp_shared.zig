@@ -49,6 +49,137 @@ fn readShared(reader: netz.grpc.SharedStreamReader, size: usize, allocator: std.
     }
 }
 
+fn readSharedMessage(
+    reader: netz.grpc.SharedStreamReader,
+    size: usize,
+    allocator: std.mem.Allocator,
+) !void {
+    while (true) {
+        var event = try reader.nextWithTimeout(.fromSeconds(10));
+        defer event.deinit(allocator);
+        switch (event) {
+            .message => |message| {
+                try messages.validateStreamingOutputCallResponse(
+                    message.payload,
+                    size,
+                );
+                return;
+            },
+            .terminal => return error.EarlySharedOrcaTerminal,
+            else => {},
+        }
+    }
+}
+
+fn waitSharedOrca(
+    watch: *netz.grpc.SharedChannelOrcaOobWatch,
+    expected: messages.orca.Report,
+) !void {
+    const deadline = std.Io.Clock.Timestamp.fromNow(watch.tracker.io, .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    });
+    while (true) {
+        var update = try watch.nextWithDeadline(deadline);
+        defer update.deinit();
+        if (update.header.status != .ready) continue;
+        const actual = update.report.?.report;
+        if (actual.cpu_utilization == expected.cpu_utilization and
+            actual.memory_utilization == expected.memory_utilization and
+            actual.request_cost.len == 0 and actual.utilization.len == 1 and
+            std.mem.eql(u8, actual.utilization[0].name, "util") and
+            actual.utilization[0].value == expected.utilization[0].value)
+        {
+            return;
+        }
+    }
+}
+
+fn runOrca(
+    allocator: std.mem.Allocator,
+    channel: netz.grpc.SharedChannel,
+    sender: netz.grpc.SharedChannelSender,
+) !void {
+    channel.connect();
+    var connectivity = channel.watchConnectivity();
+    defer connectivity.deinit();
+    try connectivity.waitForReadyWithTimeout(.fromSeconds(10));
+    var first = channel.watchEndpointOrca(0).?;
+    defer first.deinit();
+    var second = channel.watchEndpointOrca(0).?;
+    defer second.deinit();
+    var rpc = try sender.startDuplex(.{
+        .path = "/grpc.testing.TestService/FullDuplexCall",
+        .wait_for_ready = true,
+        .timeout = .{ .value = 20, .unit = .second },
+    });
+    defer rpc.deinit();
+    var writer = rpc.writer();
+    defer writer.deinit();
+    var reader = rpc.reader();
+    defer reader.deinit();
+    const expected = [_]messages.orca.Report{
+        .{
+            .cpu_utilization = 0.8210,
+            .memory_utilization = 0.5847,
+            .request_cost = &.{},
+            .utilization = &.{.{ .name = "util", .value = 0.30499 }},
+        },
+        .{
+            .cpu_utilization = 0.29309,
+            .memory_utilization = 0.2,
+            .request_cost = &.{},
+            .utilization = &.{.{ .name = "util", .value = 0.2039 }},
+        },
+    };
+    for (expected, 0..) |wanted, index| {
+        const request = try messages.orca.encodeOobUpdateAlloc(
+            allocator,
+            wanted,
+        );
+        defer allocator.free(request);
+        try writer.writeMessage(request);
+        try readSharedMessage(reader, 1, allocator);
+        try waitSharedOrca(&first, wanted);
+        if (index == 0) try waitSharedOrca(&second, wanted);
+    }
+    try writer.finishRequest();
+    var terminal_seen = false;
+    while (!terminal_seen) {
+        var event = try reader.nextWithTimeout(.fromSeconds(10));
+        defer event.deinit(allocator);
+        switch (event) {
+            .terminal => |response| {
+                if (response.status != .ok) return error.InvalidSharedOrcaStatus;
+                terminal_seen = true;
+            },
+            .message => return error.UnexpectedSharedOrcaMessage,
+            else => {},
+        }
+    }
+}
+
+fn runOrcaChannel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: netz.grpc.ChannelTarget,
+    resolver: netz.grpc.ChannelAddressResolver,
+) !void {
+    var channel = try netz.grpc.SharedChannel.init(allocator, io, target, .{
+        .service_config_json = "{\"healthCheckConfig\":{\"serviceName\":\"\"}}",
+        .channel = .{
+            .address_resolver = resolver,
+            .resolver_min_refresh_interval = .zero,
+        },
+        .keepalive = null,
+        .orca_oob = .{ .report_interval = .fromSeconds(1) },
+    });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    try runOrca(allocator, channel, sender);
+}
+
 fn runDuplex(allocator: std.mem.Allocator, io: std.Io, sender: netz.grpc.SharedChannelSender) !void {
     const options: netz.grpc.StreamingRequestOptions = .{ .path = "/grpc.testing.TestService/FullDuplexCall", .wait_for_ready = true, .timeout = .{ .value = 10, .unit = .second } };
     var a = try sender.startDuplex(options);
@@ -202,4 +333,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
     try runDuplex(allocator, io, sender);
     try runOperationDeadlinesAndCancellation(allocator, io, sender);
     try verifyKeepAlive(channel, io);
+    try runOrcaChannel(allocator, io, target, .{
+        .context = &resolver_context,
+        .resolve = resolve,
+    });
 }

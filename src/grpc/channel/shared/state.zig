@@ -7,9 +7,12 @@ const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
+const orca_oob = @import("../../orca/oob.zig");
+const orca_config = @import("orca/config.zig");
+pub const orca_tracker = @import("orca/tracker.zig");
 const Job = @import("job.zig").Job;
 pub const Options = @import("options.zig").Options;
-pub const Error = health.WatchError || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
+pub const Error = health.WatchError || orca_oob.Error || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -24,6 +27,7 @@ pub const State = struct {
     resolution_changed: std.Io.Event = .unset,
     config: ?service_config.ServiceConfig = null,
     health_service: ?[]u8 = null,
+    orca_oob: ?orca_config.Config = null,
     tracker: *connectivity.Tracker,
     policy: channel.SelectionPolicy,
     head: ?*Job = null,
@@ -45,6 +49,7 @@ pub const State = struct {
     pub const Resolution = @import("resolution.zig").Resolution(State);
     pub const Failure = @import("state.zig").Error;
     pub const StreamCall = @import("stream/call.zig").Call(State);
+    pub const OrcaTracker = orca_tracker.Tracker;
 
     pub fn retain(self: *State) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -101,6 +106,7 @@ pub const State = struct {
         self.allocator.free(self.sources);
         if (self.config) |*config| config.deinit();
         if (self.health_service) |name| self.allocator.free(name);
+        if (self.orca_oob) |*config| config.deinit();
         self.tracker.release();
         self.allocator.destroy(self);
     }
@@ -167,12 +173,43 @@ pub const State = struct {
         const tracker = self.endpointTrackerLocked(index) orelse return null;
         return try .initWithDeadline(tracker, deadline);
     }
+    pub fn watchEndpointOrca(self: *State, index: usize) ?orca_tracker.Watch {
+        self.lock();
+        defer self.unlock();
+        if (self.closed or self.orca_oob == null) return null;
+        const tracker = self.endpointOrcaTrackerLocked(index) orelse return null;
+        return .init(tracker);
+    }
+    pub fn watchEndpointOrcaWithDeadline(
+        self: *State,
+        index: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?orca_tracker.Watch {
+        try self.lockBefore(deadline);
+        defer self.unlock();
+        if (self.closed or self.orca_oob == null) return null;
+        const tracker = self.endpointOrcaTrackerLocked(index) orelse return null;
+        tracker.retain();
+        return .{ .tracker = tracker };
+    }
     fn endpointTrackerLocked(self: *State, index: usize) ?*connectivity.Tracker {
         if (self.closed) return null;
         var ordinal = index;
         for (self.sources) |*source| {
             const members = source.latest();
             if (ordinal < members.len) return members[ordinal].tracker;
+            ordinal -= members.len;
+        }
+        return null;
+    }
+    fn endpointOrcaTrackerLocked(
+        self: *State,
+        index: usize,
+    ) ?*orca_tracker.Tracker {
+        var ordinal = index;
+        for (self.sources) |*source| {
+            const members = source.latest();
+            if (ordinal < members.len) return members[ordinal].orca_tracker;
             ordinal -= members.len;
         }
         return null;

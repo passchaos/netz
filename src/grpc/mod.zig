@@ -100,6 +100,14 @@ pub const SharedChannelKeepAliveOptions =
     @import("channel/shared.zig").KeepAliveOptions;
 pub const SharedChannelKeepAliveStats =
     @import("channel/shared.zig").KeepAliveStats;
+pub const SharedChannelOrcaOobOptions =
+    @import("channel/shared.zig").OrcaOobOptions;
+pub const SharedChannelOrcaOobWatch =
+    @import("channel/shared.zig").OrcaOobWatch;
+pub const SharedChannelOrcaOobUpdate =
+    @import("channel/shared.zig").OrcaOobUpdate;
+pub const SharedChannelOrcaOobStatus =
+    @import("channel/shared.zig").OrcaOobStatus;
 pub const SharedClientDuplex = runtime.SharedClientDuplex;
 pub const SharedStreamWriter = runtime.SharedStreamWriter;
 pub const SharedStreamOwnedWriteMessage = runtime.SharedStreamOwnedWriteMessage;

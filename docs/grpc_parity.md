@@ -45,6 +45,13 @@ existing HTTP/2 runtime:
   report and expose read deadlines/cancellation, while server sessions filter
   request-cost entries and expose the requested cadence without introducing a
   second HTTP/2 frame reader,
+- optional SharedChannel ORCA OOB ownership per endpoint. Enabling it creates
+  background connection demand, owns and reconnects the OOB stream beside
+  Health/keepalive/business RPCs, and publishes a bounded latest-value
+  generation tracker. Multiple endpoint watches receive independent owned
+  report clones plus explicit `unavailable`, `unimplemented`, and `shutdown`
+  lifecycle states; slow consumers coalesce gauges instead of growing an
+  unbounded queue,
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length. A caller-buffer constructor emits the
@@ -556,9 +563,14 @@ reset race from closing with unread upload bytes.
    same-connection endpoint admission for concurrent unary and streaming calls.
    Unary transport deadlines are already enforced locally as described above.
    ORCA per-RPC and long-lived OOB reports are covered in both grpc-cpp
-   directions. Automatic SharedChannel OOB admission, consumer fan-out and
-   reconnect policy remain open; direct typed streams deliberately leave that
-   policy with the single connection owner.
+   directions. SharedChannel now performs automatic per-endpoint OOB admission,
+   latest-value consumer fan-out, UNIMPLEMENTED isolation and reconnect across
+   transport replacement while preserving its single frame owner. Cross-
+   endpoint aggregation and load-balancing policies that consume these metrics
+   remain application-selected rather than silently changing endpoint picks.
+
+Machine-readable SharedChannel ORCA evidence is recorded in
+`docs/evidence/grpc_cpp_shared_orca_oob/2026-10-31.json`.
 
 The current tests establish concurrent shared unary and streaming calls,
 sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature

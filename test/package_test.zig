@@ -165,6 +165,20 @@ test "public gRPC ORCA OOB request exposes typed stream composition" {
         netz.grpc.orca_oob.ServerSession,
         "writeReport",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.SharedChannel,
+        "watchEndpointOrcaWithDeadline",
+    ));
+    const shared_options: netz.grpc.SharedChannelOptions = .{
+        .orca_oob = .{
+            .report_interval = .fromSeconds(1),
+            .request_cost_names = &.{"query"},
+        },
+    };
+    try std.testing.expectEqual(
+        @as(i96, std.time.ns_per_s),
+        shared_options.orca_oob.?.report_interval.nanoseconds,
+    );
 }
 
 test "public gRPC-Web HTTP2 dispatch validates policy and deadline before I/O" {

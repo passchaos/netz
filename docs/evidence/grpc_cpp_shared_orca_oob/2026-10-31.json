@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "SharedChannel background ORCA OOB ownership and latest-value fan-out",
+  "decision": "accepted",
+  "scope": {
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "ownership": "one endpoint worker owns Health, keepalive, ORCA OOB and business streams on each HTTP/2 connection",
+    "fan_out": "multiple per-endpoint generation watches receive independent owned clones of the latest report",
+    "lifecycle": [
+      "ready report",
+      "unavailable on transport loss",
+      "automatic reconnect and new report",
+      "UNIMPLEMENTED disables only telemetry",
+      "shutdown remains observable by retained watches"
+    ],
+    "backpressure": "periodic gauges coalesce to the latest generation instead of accumulating an unbounded per-subscriber queue"
+  },
+  "reference": {
+    "implementation": "grpc-core OobBackendMetricWatcher and the existing netz SharedChannel endpoint-owner and Health watch design",
+    "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "description": "src/core/load_balancing/oob_backend_metric.cc plus netz src/grpc/channel/shared worker, membership and stream owner modules"
+  },
+  "implementation": {
+    "configuration": "SharedChannelOptions.orca_oob is validated and deep-copied, including request metadata and serialized request-cost selection",
+    "admission": "enabling OOB creates endpoint connection demand without requiring an application RPC",
+    "worker": "starts and polls OOB without a second socket reader, resumes partial request output, preserves business capacity accounting, and retries with channel backoff",
+    "tracker": "stable refcounted tracker outlives worker retirement, clones reports on read, preserves watch cursor after OOM, and publishes explicit lifecycle states",
+    "isolation": "ORCA UNIMPLEMENTED retires only telemetry; business RPCs remain admitted on the same connection",
+    "goaway": "no replacement OOB stream is opened after peer GOAWAY; transport replacement owns the next admission"
+  },
+  "results": {
+    "focused_debug": "142/142 passed",
+    "grpc_debug": "426/426 passed",
+    "focused_release_fast": "142/142 passed",
+    "package": "26/26 passed",
+    "local_reconnect": "two independent watchers received report 0.25, business unary completed, transport was replaced, and report 0.75 arrived from the reconnected endpoint",
+    "unimplemented": "telemetry reached UNIMPLEMENTED while a same-connection business unary still completed",
+    "official_forward_matrix": "9/9 build steps passed over h2c and TLS with shared_orca=oob-background+fanout while the original exact keepalive ACK gate remained enabled"
+  },
+  "source_sha256": {
+    "src/grpc/orca.zig": "6ff5851ba33431a7928908ae73fcb3a9bb4e34de7ff3fe30a2a031d154e6d3b1",
+    "src/grpc/orca/oob.zig": "bb28dfac7fbc54bf4618bc1daf192e2708ee57e84b8b8b7735202ad5b529e5b7",
+    "src/grpc/mod.zig": "cc89ecb90d287c116794443117eded1cf1c5e5407c5604c9d8fb12877d0aff0d",
+    "src/grpc/runtime.zig": "b6990e330f02732ca4ce6ba5900ccd7c5ddbd14e3eafae3351b788ce3559ce55",
+    "src/grpc/channel/shared.zig": "5e51e081633f4041441134f8c7f43ded3daa978371e04a57917740f6e58bbdf6",
+    "src/grpc/channel/shared/options.zig": "e73ab55eeb0d7489fd77e412a3f30feb7dc60d71cb4eeeb87f430b2f36d4302e",
+    "src/grpc/channel/shared/init.zig": "dd41d9774f8b03349d86a7877991555153681c0f2646d4579a2c5b442e6efdf9",
+    "src/grpc/channel/shared/state.zig": "63ed53b985130ff74b2e009b50d3244dbae9bf4ea5353aed2801adaf37f0c846",
+    "src/grpc/channel/shared/membership.zig": "dba364c5c7de3c474ed3a77e0563957a30a18ff345d094ae9ad61b7267117908",
+    "src/grpc/channel/shared/worker.zig": "549fe5e70d69714b599435df1fb89d48662d6318fdc33688cf87a49f9f910043",
+    "src/grpc/channel/shared/orca/config.zig": "77bdcb31991cd7cec1a487cd51a92fe8b9ba1db39313a05c1b9550c8de119b67",
+    "src/grpc/channel/shared/orca/tracker.zig": "e9aeb6b9d35c8df6bf899c6296607e891143f6652b6376f8c8e06f1d25324e7d",
+    "src/grpc/channel/shared/orca/tracker_tests.zig": "3ac5e0f51a19981b8eb9d36912a8bc0108655705b42b98ee76c0963a1441c8ce",
+    "src/grpc/channel/shared/orca/tests.zig": "3bcaa9aa0a0bcc8c104e28d72aca31c81bf56e95466e5ae8c269bef87bc116e9",
+    "tools/interop/grpc_cpp_shared.zig": "02997a6343d72c7f38e2ca74452efb6b5bae85e67650d9f0897a4320d30ac536",
+    "tools/interop/grpc_cpp_client.zig": "443a1c38ffc47504cf65a0744dd4e06424b47c321bf02833afa94713d0dbd0ae",
+    "tools/interop/grpc_cpp.sh": "f1d1bb381d497c288003a1c30e0929b65bcabbd8a44cb00be0ae14d05f889241",
+    "test/package_test.zig": "21468cc2885476e631b261446603a80d08b99d32a6f6d1b9980f809ef7022554"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel ORCA' -Dtest-filter='gRPC shared ORCA tracker' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC SharedChannel ORCA' -Dtest-filter='gRPC shared ORCA tracker' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "The transport and fan-out lifecycle are covered. Cross-endpoint aggregation and load-balancing decisions remain explicit application policy rather than being silently inferred from ORCA metrics."
+}

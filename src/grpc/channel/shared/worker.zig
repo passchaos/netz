@@ -6,6 +6,7 @@ const http2 = @import("../../../http2/mod.zig");
 const duplex = @import("../../stream/duplex.zig");
 const streaming = @import("../../stream/runtime.zig");
 const health = @import("../../health.zig");
+const orca_oob = @import("../../orca/oob.zig");
 const connectivity = @import("../connectivity.zig");
 const Active = @import("active.zig").Active;
 const Wake = @import("wake.zig").Wake;
@@ -20,6 +21,7 @@ pub fn Worker(comptime State: type) type {
         retired: bool = false,
         owner: channel.Channel,
         tracker: *connectivity.Tracker,
+        orca_tracker: *State.OrcaTracker,
         wake: *Wake,
         published: connectivity.State = .idle,
         capacity: usize = 0,
@@ -28,6 +30,11 @@ pub fn Worker(comptime State: type) type {
         active: std.ArrayList(Active) = .empty,
         streams: std.ArrayList(StreamOwner.Active) = .empty,
         watch: ?health.ClientWatch = null,
+        orca: ?orca_oob.ClientStream = null,
+        orca_disabled: bool = false,
+        orca_seen: bool = false,
+        orca_failures: usize = 0,
+        orca_at: ?std.Io.Clock.Timestamp = null,
         health_disabled: bool = false,
         health_seen: bool = false,
         health_failures: usize = 0,
@@ -50,6 +57,8 @@ pub fn Worker(comptime State: type) type {
                 self.owner.deinit();
                 parent.workerStopped(self);
                 self.tracker.release();
+                self.orca_tracker.shutdown();
+                self.orca_tracker.release();
                 self.wake.release();
                 parent.allocator.destroy(self);
             }
@@ -102,8 +111,16 @@ pub fn Worker(comptime State: type) type {
             if (self.watch) |*watch| watch.deinit();
             self.watch = null;
         }
+        fn dropOrca(self: *Self) void {
+            if (self.orca) |*stream| stream.deinit();
+            self.orca = null;
+        }
         fn disconnect(self: *Self, err: anyerror) void {
             self.dropWatch();
+            self.dropOrca();
+            if (self.parent.orca_oob != null) {
+                self.orca_tracker.setStatus(.unavailable);
+            }
             while (self.active.items.len != 0) self.failActive(0, err);
             while (self.streams.items.len != 0) StreamOwner.fail(self, 0, err);
             self.owner.disconnect() catch {};
@@ -114,6 +131,9 @@ pub fn Worker(comptime State: type) type {
             self.health_disabled = false;
             self.health_at = null;
             self.health_seen = false;
+            self.orca_disabled = false;
+            self.orca_at = null;
+            self.orca_seen = false;
             self.local_state = .transient_failure;
             self.parent.publish(self, .transient_failure, 0);
             self.parent.connectionFailed(self);
@@ -138,7 +158,10 @@ pub fn Worker(comptime State: type) type {
         fn tick(self: *Self) !void {
             const demand = self.parent.needsConnection(self);
             const retiring = self.parent.isRetired(self);
-            if (retiring) self.dropWatch();
+            if (retiring) {
+                self.dropWatch();
+                self.dropOrca();
+            }
             self.parent.expireQueued();
             if (!demand and self.active.items.len == 0 and self.streams.items.len == 0) return self.sleepUntilWake(null);
             if (self.connection == null) {
@@ -157,6 +180,7 @@ pub fn Worker(comptime State: type) type {
                 self.connect_at = null;
                 self.connect_failures = 0;
                 self.health_failures = 0;
+                self.orca_failures = 0;
                 self.local_state = if (self.parent.health_service == null) .ready else .connecting;
             }
             const connection = self.connection.?;
@@ -175,6 +199,10 @@ pub fn Worker(comptime State: type) type {
                     }
                 }
                 self.dropWatch();
+                self.dropOrca();
+                if (self.parent.orca_oob != null) {
+                    self.orca_tracker.setStatus(.unavailable);
+                }
                 self.local_state = .transient_failure;
                 self.publish();
                 if (self.active.items.len == 0 and self.streams.items.len == 0) {
@@ -190,7 +218,31 @@ pub fn Worker(comptime State: type) type {
                 self.health_seen = false;
                 self.local_state = .connecting;
             }
+            if (connection.peer_goaway_last_stream_id == null and
+                !retiring and self.parent.orca_oob != null and
+                !self.orca_disabled and self.orca == null and
+                (self.orca_at == null or self.expired(self.orca_at)))
+            {
+                const config = &self.parent.orca_oob.?;
+                const opened: ?orca_oob.ClientStream = orca_oob.startPreparedWithDeadline(
+                    connection,
+                    self.parent.allocator,
+                    config.options,
+                    config.request,
+                    self.outputDeadline(),
+                ) catch |err| blk: {
+                    if (connection.aggregate_timeout_unusable) return err;
+                    self.retryOrca();
+                    break :blk null;
+                };
+                if (opened) |stream| {
+                    self.orca = stream;
+                    self.orca_at = null;
+                    self.orca_seen = false;
+                }
+            }
             var progress = try self.pollHealth();
+            progress = try self.pollOrca() or progress;
             self.publish();
             var i: usize = 0;
             while (i < self.active.items.len) {
@@ -290,7 +342,10 @@ pub fn Worker(comptime State: type) type {
                 self.publish();
             }
             if (progress) return;
-            var until = minimum(self.parent.nextQueuedDeadline(), self.health_at);
+            var until = minimum(
+                self.parent.nextQueuedDeadline(),
+                minimum(self.health_at, self.orca_at),
+            );
             for (self.active.items) |item| until = minimum(until, item.job.deadline);
             for (self.streams.items) |item| {
                 until = minimum(until, item.call.deadline);
@@ -342,7 +397,8 @@ pub fn Worker(comptime State: type) type {
 
         fn hasActiveCalls(self: *const Self) bool {
             return self.active.items.len != 0 or
-                self.streams.items.len != 0 or self.watch != null;
+                self.streams.items.len != 0 or self.watch != null or
+                self.orca != null;
         }
 
         fn pollHealth(self: *Self) !bool {
@@ -395,6 +451,69 @@ pub fn Worker(comptime State: type) type {
             }
             self.health_seen = false;
             self.health_at = .fromNow(self.parent.io, .{ .raw = delay, .clock = .awake });
+        }
+        fn pollOrca(self: *Self) !bool {
+            const stream = if (self.orca) |*value| value else return false;
+            var progress = false;
+            while (true) {
+                const next = stream.pollNextWithDeadline(
+                    self.outputDeadline(),
+                ) catch |err| {
+                    if (err == error.Canceled) return err;
+                    if (self.connection.?.aggregate_timeout_unusable) return err;
+                    self.retryOrca();
+                    return true;
+                };
+                if (next) |ready| {
+                    var event = ready;
+                    switch (event) {
+                        .report => |*report| {
+                            self.orca_seen = true;
+                            self.orca_tracker.publish(report);
+                            event = undefined;
+                            progress = true;
+                        },
+                        .terminal => |terminal| {
+                            if (terminal.status == .unimplemented) {
+                                self.dropOrca();
+                                self.orca_disabled = true;
+                                self.orca_tracker.setStatus(.unimplemented);
+                            } else self.retryOrca();
+                            event.deinit();
+                            return true;
+                        },
+                    }
+                } else break;
+            }
+            if (stream.request_pending) {
+                const before = stream.stream.transport.requestCommittedBytes();
+                try stream.resumeRequestWithDeadline(self.outputDeadline());
+                if (before != stream.stream.transport.requestCommittedBytes()) {
+                    progress = true;
+                }
+            }
+            return progress;
+        }
+        fn retryOrca(self: *Self) void {
+            self.dropOrca();
+            self.orca_tracker.setStatus(.unavailable);
+            var delay: std.Io.Duration = .zero;
+            if (self.orca_seen) {
+                self.orca_failures = 0;
+            } else {
+                self.orca_failures +|= 1;
+                var sample: u64 = undefined;
+                self.parent.io.random(std.mem.asBytes(&sample));
+                delay = self.parent.options.channel.backoff.delay(
+                    self.orca_failures,
+                    sample,
+                );
+            }
+            self.orca_seen = false;
+            self.orca_at = .fromNow(self.parent.io, .{
+                .raw = delay,
+                .clock = .awake,
+            });
         }
     };
 }

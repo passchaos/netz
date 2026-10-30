@@ -2,6 +2,7 @@ const std = @import("std");
 const channel = @import("../../channel.zig");
 const health = @import("../../health.zig");
 const keepalive = @import("keepalive.zig");
+const orca_config = @import("orca/config.zig");
 
 pub const Options = struct {
     channel: channel.Options = .{},
@@ -17,4 +18,8 @@ pub const Options = struct {
     /// grpc-core-compatible HTTP/2 liveness probes. Null disables keepalive;
     /// the default probes active transports after two hours of peer silence.
     keepalive: ?keepalive.Options = .{},
+    /// Optional per-endpoint ORCA OOB stream. Enabling it creates background
+    /// connection demand and publishes latest-value reports to endpoint
+    /// watches across reconnects.
+    orca_oob: ?orca_config.Options = null,
 };

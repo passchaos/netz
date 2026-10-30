@@ -143,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
-            "orca=per-rpc+oob " ++
+            "orca=per-rpc+oob shared_orca=oob-background+fanout " ++
             "rpc_soak=100x271828/314159 " ++
             "channel_soak=100x271828/314159 " ++
             "status=unary+bidi+unicode " ++

@@ -15,6 +15,10 @@ pub const Error = state_module.Error;
 pub const Options = state_module.Options;
 pub const KeepAliveOptions = @import("shared/keepalive.zig").Options;
 pub const KeepAliveStats = @import("shared/keepalive.zig").Stats;
+pub const OrcaOobOptions = @import("shared/orca/config.zig").Options;
+pub const OrcaOobWatch = state_module.orca_tracker.Watch;
+pub const OrcaOobUpdate = state_module.orca_tracker.Update;
+pub const OrcaOobStatus = state_module.orca_tracker.Status;
 
 pub const Sender = struct {
     state: *State,
@@ -117,6 +121,27 @@ pub const SharedChannel = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.watchEndpointConnectivityWithDeadline(index, .fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
     }
+    pub fn watchEndpointOrca(self: SharedChannel, index: usize) ?OrcaOobWatch {
+        return self.state.watchEndpointOrca(index);
+    }
+    pub fn watchEndpointOrcaWithDeadline(
+        self: SharedChannel,
+        index: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!?OrcaOobWatch {
+        return self.state.watchEndpointOrcaWithDeadline(index, deadline);
+    }
+    pub fn watchEndpointOrcaWithTimeout(
+        self: SharedChannel,
+        index: usize,
+        timeout: std.Io.Duration,
+    ) Error!?OrcaOobWatch {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.watchEndpointOrcaWithDeadline(index, .fromNow(
+            self.state.io,
+            .{ .clock = .awake, .raw = timeout },
+        ));
+    }
     pub fn endpointCount(self: SharedChannel) usize {
         return self.state.endpointCount();
     }
@@ -156,4 +181,6 @@ test {
     _ = @import("shared/keepalive_throttle_tests.zig");
     _ = @import("shared/resolution/tests.zig");
     _ = @import("shared/stream/tests.zig");
+    _ = @import("shared/orca/tracker_tests.zig");
+    _ = @import("shared/orca/tests.zig");
 }

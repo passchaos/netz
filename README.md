@@ -888,6 +888,10 @@ Current protocol coverage includes:
   plus typed ORCA OOB request/client/server streams with protobuf Duration,
   request-cost selection, incremental owned reports, per-read deadlines and
   stream-local cancellation under explicit single-owner multiplexing,
+  with optional SharedChannel per-endpoint background ownership, bounded
+  latest-value fan-out, explicit unavailable/unimplemented/shutdown states,
+  automatic transport reconnect and coexistence with Health, keepalive and
+  business RPCs,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
   comparison, a caller-buffer client field constructor that always requests
   HPACK Never Indexed across unary and streaming calls, and a server helper
@@ -965,7 +969,9 @@ Current protocol coverage includes:
   over both h2c and verified TLS. The canonical `orca_oob` case additionally
   drives a long-lived report stream beside a business duplex RPC, applies and
   observes two server metric updates, and cancels only the OOB stream in both
-  endpoint directions over h2c and verified TLS. The official reflection
+  endpoint directions over h2c and verified TLS. A separate official-server
+  SharedChannel gate verifies background OOB admission and two independent
+  report watchers without weakening the exact keepalive ACK gate. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
