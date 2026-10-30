@@ -7,6 +7,7 @@ const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
+const weighted_round_robin = @import("weighted_round_robin.zig");
 const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
@@ -42,6 +43,9 @@ pub const State = struct {
     /// Zero means disabled. Config validation keeps enabled intervals within
     /// i64 nanoseconds so endpoint workers can observe throttling lock-free.
     keepalive_interval_ns: std.atomic.Value(i64) = .init(0),
+    wrr_config: ?service_config.WeightedRoundRobinConfig = null,
+    wrr_sequence: u32 = 0,
+    wrr_scheduler: weighted_round_robin.Scheduler = .{},
 
     pub const Worker = @import("worker.zig").Worker(State);
     pub const Source = @import("source.zig").Source(Worker);
@@ -102,6 +106,7 @@ pub const State = struct {
         std.debug.assert(self.closed and self.head == null);
         std.debug.assert(self.workers.items.len == 0);
         self.workers.deinit(self.allocator);
+        self.wrr_scheduler.deinit(self.allocator);
         for (self.sources) |*source| source.deinit(self.allocator);
         self.allocator.free(self.sources);
         if (self.config) |*config| config.deinit();
@@ -362,6 +367,7 @@ pub const State = struct {
             break;
         };
         worker.tracker.setState(.shutdown);
+        self.wrr_scheduler.remove(worker);
         self.recomputeLocked();
     }
     pub fn canceled(self: *State, job: *Job) bool {
@@ -394,16 +400,38 @@ pub const State = struct {
             cursor = next;
         }
     }
-    fn pickLocked(self: *State) ?*Worker {
+    fn pickLocked(self: *State, claimant: *Worker) ?*Worker {
         if (self.policy == .pick_first) {
             if (self.selected) |worker| if (worker.eligible and worker.published == .ready) {
                 return if (worker.capacity != 0) worker else null;
             };
         }
+        if (self.policy == .weighted_round_robin) {
+            if (self.wrr_config) |config| {
+                const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+                if (now >= self.wrr_scheduler.next_update_ns) {
+                    self.wrr_scheduler.rebuild(
+                        self.allocator,
+                        self.workers.items,
+                        now,
+                        config,
+                    ) catch {};
+                }
+                // Endpoint tasks race to claim the shared queue. Only consume
+                // a stride choice when its selected endpoint owns this claim;
+                // otherwise a non-selected task could discard every pick.
+                var sequence = self.wrr_sequence;
+                if (self.wrr_scheduler.pick(Worker, &sequence)) |worker| {
+                    if (worker == claimant) self.wrr_sequence = sequence;
+                    return worker;
+                }
+            }
+        }
         var count: usize = 0;
         for (self.sources) |source| count += source.current.len;
         for (0..count) |offset| {
-            var ordinal = if (self.policy == .round_robin) (self.next_pick + offset) % count else offset;
+            const rotates = self.policy == .round_robin or self.policy == .weighted_round_robin;
+            var ordinal = if (rotates) (self.next_pick + offset) % count else offset;
             for (self.sources) |source| {
                 if (ordinal >= source.current.len) {
                     ordinal -= source.current.len;
@@ -422,7 +450,7 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or self.head == null) return null;
-        const picked = self.pickLocked() orelse return null;
+        const picked = self.pickLocked(worker) orelse return null;
         if (picked != worker) return null;
         const job = self.head.?;
         self.removeQueuedLocked(job);

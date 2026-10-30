@@ -25,7 +25,12 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     }
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
-    var owned_orca = if (options.orca_oob) |orca|
+    const balancing = if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{};
+    const requested_orca = options.orca_oob orelse if (balancing.policy == .weighted_round_robin and
+        balancing.weighted_round_robin.enable_oob_load_report) @import("../../orca/oob.zig").ClientOptions{
+        .report_interval = balancing.weighted_round_robin.oob_reporting_period,
+    } else null;
+    var owned_orca = if (requested_orca) |orca|
         try orca_config.Config.init(allocator, orca)
     else
         null;
@@ -33,7 +38,6 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
     const state = try allocator.create(State);
-    const balancing = if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{};
     var retained = options;
     retained.service_config_json = null;
     retained.health_service = owned_name;
@@ -50,6 +54,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .policy = options.channel.selection_policy orelse (if (balancing.configured) switch (balancing.policy) {
             .pick_first => channel.SelectionPolicy.pick_first,
             .round_robin => channel.SelectionPolicy.round_robin,
+            .weighted_round_robin => channel.SelectionPolicy.weighted_round_robin,
         } else if (target == .resolved) target.resolved.policy else .pick_first),
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
         .keepalive_interval_ns = .init(if (options.keepalive) |keepalive|
@@ -57,6 +62,10 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         else
             0),
         .demand = owned_orca != null,
+        .wrr_config = if (balancing.policy == .weighted_round_robin)
+            balancing.weighted_round_robin
+        else
+            null,
     };
     transferred = true;
     errdefer {

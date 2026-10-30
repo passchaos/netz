@@ -42,6 +42,7 @@ pub const CustomConnector = struct {
 pub const SelectionPolicy = enum {
     pick_first,
     round_robin,
+    weighted_round_robin,
 };
 
 pub const ConnectivityState = connectivity.State;
@@ -432,6 +433,7 @@ pub const Channel = struct {
             resolved.selection_policy = switch (balancing.policy) {
                 .pick_first => .pick_first,
                 .round_robin => .round_robin,
+                .weighted_round_robin => .weighted_round_robin,
             };
         }
         if (resolved.shuffle_address_list == null and balancing.configured) {
@@ -817,7 +819,7 @@ pub const Channel = struct {
         errdefer if (!self.hasReadyConnection()) self.setConnectivityState(.transient_failure);
         try self.prepareSlots();
         try self.ensureHostResolution(wait_for_ready, deadline);
-        if (self.selection_policy == .round_robin) {
+        if (self.selection_policy != .pick_first) {
             if (self.pickReadyRoundRobin()) |ready_connection| {
                 return ready_connection;
             }
@@ -958,7 +960,7 @@ pub const Channel = struct {
     fn pickStart(self: *const Channel) usize {
         return switch (self.selection_policy) {
             .pick_first => self.selected_index orelse 0,
-            .round_robin => self.next_pick_index,
+            .round_robin, .weighted_round_robin => self.next_pick_index,
         };
     }
 
@@ -979,7 +981,7 @@ pub const Channel = struct {
     ) ReadyConnection {
         self.selected_index = index;
         self.setConnectivityState(.ready);
-        if (self.selection_policy == .round_robin) {
+        if (self.selection_policy != .pick_first) {
             self.next_pick_index = (index + 1) % self.slots.len;
         }
         return .{ .index = index, .connection = connection };

@@ -7,10 +7,12 @@ const duplex = @import("../../stream/duplex.zig");
 const streaming = @import("../../stream/runtime.zig");
 const health = @import("../../health.zig");
 const orca_oob = @import("../../orca/oob.zig");
+const orca_report = @import("../../orca.zig");
 const connectivity = @import("../connectivity.zig");
 const Active = @import("active.zig").Active;
 const Wake = @import("wake.zig").Wake;
 const keepalive = @import("keepalive.zig");
+const weighted_round_robin = @import("weighted_round_robin.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -44,6 +46,7 @@ pub fn Worker(comptime State: type) type {
         keep_alive: keepalive.Driver = .{},
         goaway_keepalive_applied: bool = false,
         connection_keepalive_interval: ?std.Io.Duration = null,
+        wrr_weight: weighted_round_robin.Weight = .{},
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
@@ -128,6 +131,7 @@ pub fn Worker(comptime State: type) type {
             self.keep_alive.disconnected();
             self.goaway_keepalive_applied = false;
             self.connection_keepalive_interval = null;
+            self.wrr_weight.disconnected();
             self.health_disabled = false;
             self.health_at = null;
             self.health_seen = false;
@@ -265,6 +269,26 @@ pub fn Worker(comptime State: type) type {
                     var event = ready;
                     switch (event) {
                         .terminal => |terminal| {
+                            if (self.parent.wrr_config) |config| {
+                                if (!config.enable_oob_load_report) {
+                                    const headers = if (terminal.head) |head| head.headers else &.{};
+                                    if (orca_report.fromMetadataAlloc(
+                                        self.parent.allocator,
+                                        headers,
+                                        terminal.trailers orelse &.{},
+                                    )) |owned_optional| {
+                                        if (owned_optional) |owned_value| {
+                                            var owned = owned_value;
+                                            defer owned.deinit();
+                                            self.wrr_weight.update(
+                                                owned.report,
+                                                std.Io.Clock.awake.now(self.parent.io).nanoseconds,
+                                                config,
+                                            );
+                                        }
+                                    } else |_| {}
+                                }
+                            }
                             const result = item.finish(terminal) catch |err| {
                                 var abandoned = terminal;
                                 abandoned.deinit();
@@ -469,6 +493,15 @@ pub fn Worker(comptime State: type) type {
                     switch (event) {
                         .report => |*report| {
                             self.orca_seen = true;
+                            if (self.parent.wrr_config) |config| {
+                                if (config.enable_oob_load_report) {
+                                    self.wrr_weight.update(
+                                        report.report,
+                                        std.Io.Clock.awake.now(self.parent.io).nanoseconds,
+                                        config,
+                                    );
+                                }
+                            }
                             self.orca_tracker.publish(report);
                             event = undefined;
                             progress = true;

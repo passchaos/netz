@@ -31,6 +31,7 @@ pub fn Membership(comptime State: type) type {
             worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker, .orca_tracker = orca_tracker, .wake = wake };
             try state.group.concurrent(state.io, State.Worker.run, .{worker});
             state.workers.appendAssumeCapacity(worker);
+            state.wrr_scheduler.next_update_ns = 0;
             return worker;
         }
 
@@ -44,6 +45,7 @@ pub fn Membership(comptime State: type) type {
             worker.capacity = 0;
             worker.tracker.setState(.shutdown);
             worker.orca_tracker.shutdown();
+            state.wrr_scheduler.remove(worker);
             if (state.selected == worker) state.selected = null;
             worker.wake.set(state.io);
         }

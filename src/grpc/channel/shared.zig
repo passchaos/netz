@@ -183,4 +183,5 @@ test {
     _ = @import("shared/stream/tests.zig");
     _ = @import("shared/orca/tracker_tests.zig");
     _ = @import("shared/orca/tests.zig");
+    _ = @import("shared/weighted_round_robin_tests.zig");
 }

@@ -46,12 +46,24 @@ const JsonServiceConfig = struct {
 pub const LoadBalancingPolicy = enum {
     pick_first,
     round_robin,
+    weighted_round_robin,
+};
+
+pub const WeightedRoundRobinConfig = struct {
+    enable_oob_load_report: bool = false,
+    oob_reporting_period: std.Io.Duration = .fromSeconds(10),
+    blackout_period: std.Io.Duration = .fromSeconds(10),
+    weight_update_period: std.Io.Duration = .fromSeconds(1),
+    weight_expiration_period: std.Io.Duration = .fromSeconds(180),
+    error_utilization_penalty: f64 = 1,
+    metric_names: []const []const u8 = &.{},
 };
 
 pub const LoadBalancingConfig = struct {
     policy: LoadBalancingPolicy = .pick_first,
     shuffle_address_list: bool = false,
     configured: bool = false,
+    weighted_round_robin: WeightedRoundRobinConfig = .{},
 };
 
 const OwnedRetryPolicy = struct {
@@ -201,7 +213,7 @@ pub const ServiceConfig = struct {
             result.* = value;
             break :blk result;
         } else null;
-        const load_balancing = try parseLoadBalancing(parsed);
+        const load_balancing = try parseLoadBalancing(owned, parsed);
         return .{
             .arena = arena,
             .methods = methods,
@@ -387,6 +399,7 @@ fn throttlerPointer(config: *ServiceConfig) ?*call.RetryThrottler {
 }
 
 fn parseLoadBalancing(
+    allocator: std.mem.Allocator,
     config: JsonServiceConfig,
 ) Error!LoadBalancingConfig {
     if (config.loadBalancingConfig) |entries| {
@@ -431,6 +444,72 @@ fn parseLoadBalancing(
                     .configured = true,
                 };
             }
+            if (std.mem.eql(u8, item.key_ptr.*, "weighted_round_robin")) {
+                const options = switch (item.value_ptr.*) {
+                    .object => |value| value,
+                    else => return error.InvalidServiceConfig,
+                };
+                var weighted: WeightedRoundRobinConfig = .{};
+                var metric_names_value: ?std.json.Value = null;
+                var fields = options.iterator();
+                while (fields.next()) |field| {
+                    const key = field.key_ptr.*;
+                    const value = field.value_ptr.*;
+                    if (std.mem.eql(u8, key, "enableOobLoadReport")) {
+                        weighted.enable_oob_load_report = switch (value) {
+                            .bool => |v| v,
+                            else => return error.InvalidServiceConfig,
+                        };
+                    } else if (std.mem.eql(u8, key, "oobReportingPeriod")) {
+                        weighted.oob_reporting_period = try parseDurationValue(value);
+                    } else if (std.mem.eql(u8, key, "blackoutPeriod")) {
+                        weighted.blackout_period = try parseDurationValue(value);
+                    } else if (std.mem.eql(u8, key, "weightUpdatePeriod")) {
+                        weighted.weight_update_period = try parseDurationValue(value);
+                    } else if (std.mem.eql(u8, key, "weightExpirationPeriod")) {
+                        weighted.weight_expiration_period = try parseDurationValue(value);
+                    } else if (std.mem.eql(u8, key, "errorUtilizationPenalty")) {
+                        weighted.error_utilization_penalty = switch (value) {
+                            .float => |v| v,
+                            .integer => |v| @floatFromInt(v),
+                            .number_string => |v| std.fmt.parseFloat(f64, v) catch return error.InvalidServiceConfig,
+                            else => return error.InvalidServiceConfig,
+                        };
+                    } else if (std.mem.eql(u8, key, "metricNamesForComputingUtilization")) {
+                        metric_names_value = value;
+                    } else return error.InvalidServiceConfig;
+                }
+                if (!std.math.isFinite(weighted.error_utilization_penalty) or
+                    weighted.error_utilization_penalty < 0)
+                {
+                    return error.InvalidServiceConfig;
+                }
+                if (weighted.weight_update_period.nanoseconds <
+                    100 * std.time.ns_per_ms)
+                {
+                    weighted.weight_update_period = .fromMilliseconds(100);
+                }
+                if (metric_names_value) |raw| {
+                    const array = switch (raw) {
+                        .array => |v| v,
+                        else => return error.InvalidServiceConfig,
+                    };
+                    const names = try allocator.alloc([]const u8, array.items.len);
+                    for (array.items, names) |value, *name| {
+                        name.* = switch (value) {
+                            .string => |v| v,
+                            else => return error.InvalidServiceConfig,
+                        };
+                        if (!validWrrMetricName(name.*)) return error.InvalidServiceConfig;
+                    }
+                    weighted.metric_names = names;
+                }
+                return .{
+                    .policy = .weighted_round_robin,
+                    .configured = true,
+                    .weighted_round_robin = weighted,
+                };
+            }
             // gRPC selects the first policy implemented by the client.
         }
         return error.InvalidServiceConfig;
@@ -445,6 +524,22 @@ fn parseLoadBalancing(
         return error.InvalidServiceConfig;
     }
     return .{};
+}
+
+fn parseDurationValue(value: std.json.Value) Error!std.Io.Duration {
+    const text = switch (value) {
+        .string => |v| v,
+        else => return error.InvalidServiceConfig,
+    };
+    return parseDuration(text, true);
+}
+
+fn validWrrMetricName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "cpu_utilization") or
+        std.mem.eql(u8, name, "mem_utilization") or
+        std.mem.eql(u8, name, "application_utilization") or
+        std.mem.startsWith(u8, name, "named_metrics.") or
+        std.mem.startsWith(u8, name, "utilization.");
 }
 
 fn parseOptionalSize(value: ?std.json.Value) Error!?u32 {
@@ -696,6 +791,50 @@ test "gRPC service config accepts an immediate method timeout" {
         @as(i96, 0),
         config.methodPolicy("/demo.Service/Call").?.timeout.?.nanoseconds,
     );
+}
+
+test "gRPC service config parses weighted round robin defaults and bounds" {
+    var defaults = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[{"weighted_round_robin":{}}]}
+    );
+    defer defaults.deinit();
+    const default_lb = defaults.loadBalancingConfig();
+    try std.testing.expectEqual(LoadBalancingPolicy.weighted_round_robin, default_lb.policy);
+    try std.testing.expect(!default_lb.weighted_round_robin.enable_oob_load_report);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_s), default_lb.weighted_round_robin.oob_reporting_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_s), default_lb.weighted_round_robin.blackout_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, std.time.ns_per_s), default_lb.weighted_round_robin.weight_update_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 180 * std.time.ns_per_s), default_lb.weighted_round_robin.weight_expiration_period.nanoseconds);
+    try std.testing.expectEqual(@as(f64, 1), default_lb.weighted_round_robin.error_utilization_penalty);
+
+    var configured = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[{"weighted_round_robin":{
+        \\ "enableOobLoadReport":true,"oobReportingPeriod":"2s",
+        \\ "blackoutPeriod":"0s","weightUpdatePeriod":"0.001s",
+        \\ "weightExpirationPeriod":"9s","errorUtilizationPenalty":2.5,
+        \\ "metricNamesForComputingUtilization":["cpu_utilization","utilization.disk"]}}]}
+    );
+    defer configured.deinit();
+    const wrr = configured.loadBalancingConfig().weighted_round_robin;
+    try std.testing.expect(wrr.enable_oob_load_report);
+    try std.testing.expectEqual(@as(i96, 2 * std.time.ns_per_s), wrr.oob_reporting_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 0), wrr.blackout_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 100 * std.time.ns_per_ms), wrr.weight_update_period.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 9 * std.time.ns_per_s), wrr.weight_expiration_period.nanoseconds);
+    try std.testing.expectEqual(@as(usize, 2), wrr.metric_names.len);
+    try std.testing.expectEqual(@as(f64, 2.5), wrr.error_utilization_penalty);
+
+    for ([_][]const u8{
+        \\{"loadBalancingConfig":[{"weighted_round_robin":{"errorUtilizationPenalty":-1}}]}
+        ,
+        \\{"loadBalancingConfig":[{"weighted_round_robin":{"metricNamesForComputingUtilization":["unsupported"]}}]}
+        ,
+    }) |json| {
+        try std.testing.expectError(
+            error.InvalidServiceConfig,
+            ServiceConfig.parse(std.testing.allocator, json),
+        );
+    }
 }
 
 test "gRPC service config selects the first supported balancing policy" {

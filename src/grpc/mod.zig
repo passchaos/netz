@@ -92,6 +92,7 @@ pub const ServiceConfig = service_config.ServiceConfig;
 pub const MethodPolicy = service_config.MethodPolicy;
 pub const LoadBalancingPolicy = service_config.LoadBalancingPolicy;
 pub const LoadBalancingConfig = service_config.LoadBalancingConfig;
+pub const WeightedRoundRobinConfig = service_config.WeightedRoundRobinConfig;
 pub const Channel = runtime.Channel;
 pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
 pub const SharedChannelSender = @import("channel/shared.zig").Sender;
