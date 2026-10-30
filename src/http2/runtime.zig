@@ -21,6 +21,8 @@ test {
     _ = @import("runtime/client/authority_uri_tests.zig");
     _ = @import("runtime/headers/authority_reuse_tests.zig");
     _ = client_authority;
+    _ = endpoint_host;
+    _ = host_connect;
     _ = @import("runtime/connect/deadline_tests.zig");
     _ = @import("runtime/connect/output_deadline_tests.zig");
     _ = @import("runtime/connect/protocol_error_tests.zig");
@@ -67,6 +69,8 @@ const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const endpoint_host = @import("../internal/endpoint_host.zig");
+const host_connect = @import("runtime/client/host_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const content_coding = @import("../http/content_coding.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
@@ -2230,12 +2234,10 @@ pub const Client = struct {
         limits: Limits,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const host_name = try net.HostName.init(host);
-        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-        errdefer allocator.free(owned_host);
-        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
-        var connection = try connectStream(allocator, io, stream, limits);
-        connection.default_authority = owned_host;
+        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, null);
+        errdefer allocator.free(opened.authority);
+        var connection = try connectStream(allocator, io, opened.stream, limits);
+        connection.default_authority = opened.authority;
         connection.default_scheme = "http";
         return connection;
     }
@@ -2249,31 +2251,16 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const host_name = try net.HostName.init(host);
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
-        errdefer allocator.free(owned_host);
-        const stream = try tcp_connect.hostWithDeadline(
-            io,
-            host_name,
-            port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
-        );
+        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, deadline);
+        errdefer allocator.free(opened.authority);
         var connection = try connectStreamBefore(
             allocator,
             io,
-            stream,
+            opened.stream,
             limits,
             deadline,
         );
-        connection.default_authority = owned_host;
+        connection.default_authority = opened.authority;
         connection.default_scheme = "http";
         return connection;
     }
@@ -2306,27 +2293,15 @@ pub const Client = struct {
         tls_options: TlsConnectOptions,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.host(io, host_name, port, limits.connect_timeout);
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
-        var authority_owned = true;
-        errdefer if (authority_owned) allocator.free(owned_host);
+        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, null);
         // connectTlsStream assumes both resources at entry and provides the
         // only cleanup path after this transfer.
-        stream_owned = false;
-        authority_owned = false;
         return connectTlsStream(
             allocator,
             io,
-            stream,
-            host,
-            owned_host,
+            opened.stream,
+            opened.identity,
+            opened.authority,
             limits,
             tls_options,
         );
@@ -2342,34 +2317,13 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithDeadline(
-            io,
-            host_name,
-            port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
-        );
-        var stream_owned = true;
-        errdefer if (stream_owned) stream.close(io);
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
-        var authority_owned = true;
-        errdefer if (authority_owned) allocator.free(owned_host);
-        stream_owned = false;
-        authority_owned = false;
+        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, deadline);
         return connectTlsStreamBefore(
             allocator,
             io,
-            stream,
-            host,
-            owned_host,
+            opened.stream,
+            opened.identity,
+            opened.authority,
             limits,
             tls_options,
             deadline,
@@ -2398,7 +2352,7 @@ pub const Client = struct {
     }
 
     /// Connect to an already resolved address while verifying TLS against a
-    /// separate hostname. This keeps service discovery and certificate/SNI
+    /// separate DNS or IP identity. This keeps service discovery and certificate/SNI
     /// identity independent without weakening mandatory HTTP/2 ALPN checks.
     pub fn connectTlsAddress(
         allocator: std.mem.Allocator,
@@ -2410,7 +2364,7 @@ pub const Client = struct {
         tls_options: TlsConnectOptions,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        _ = try net.HostName.init(tls_host);
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
         if (authority.len == 0) return error.InvalidHeader;
         const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
         var stream_owned = true;
@@ -2424,7 +2378,7 @@ pub const Client = struct {
             allocator,
             io,
             stream,
-            tls_host,
+            identity.host,
             owned_authority,
             limits,
             tls_options,
@@ -2442,7 +2396,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        _ = try net.HostName.init(tls_host);
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
         if (authority.len == 0) return error.InvalidHeader;
         const stream = try tcp_connect.ipWithDeadline(
             io,
@@ -2464,7 +2418,7 @@ pub const Client = struct {
             allocator,
             io,
             stream,
-            tls_host,
+            identity.host,
             owned_authority,
             limits,
             tls_options,
@@ -2529,7 +2483,6 @@ pub const Client = struct {
         tls_options: TlsConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(io, deadline);
         return connectTlsStreamMaybeBefore(
             allocator,
             io,
@@ -2555,6 +2508,7 @@ pub const Client = struct {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         errdefer allocator.free(owned_authority);
+        if (deadline) |until| _ = try deadline_policy.usableAwake(io, until);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
         const options = verifiedTlsClientOptions(tls_host, tls_options);
         const tls_connection = if (deadline) |absolute|

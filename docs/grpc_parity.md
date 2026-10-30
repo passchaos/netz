@@ -1960,3 +1960,28 @@ the required boundary: large-message selection must live below HTTP/2 transport
 dispatch or in a distinct call implementation whose code is absent from the
 default reader. Full rows are in
 `docs/evidence/grpc_shared_large_ring_rejected/2026-10-30.json`.
+
+## Numeric endpoint identities
+
+Host targets now accept IPv4 and bare, bracketed or expanded IPv6 in both
+Channel owners and endpoint lists. A shared parser formats exact IPv6 HTTP/2
+authority, bypasses system DNS for literals and preserves a configured
+resolver's address override without replacing the original TLS identity.
+HTTP/2 host and pre-resolved TLS APIs use the same identity policy. Native
+TLS 1.2/1.3 verifies exact IP SANs and omits numeric SNI; Vail supplies the
+ClientHello correction in commit `5443a07`. The new host-opening module also
+preserves the original connect budget across allocation and releases socket
+ownership if TCP success arrives after expiry.
+
+The dedicated [numeric endpoint gate](grpc_ip_literals.md) checks ordinary,
+timeout and deadline entry points, both gRPC owners, exact messages and
+connection reuse against independent peers, plus DNS-only-certificate
+rejection. It records the pinned grpc-js 1.14.0 SDK's current-Node IP-SNI
+failure independently and uses the standard Node TLS verifier for the strict
+CA/IP-SAN oracle.
+
+The recorded matrix completes 216 exact RPCs through 108 reused native
+connections and rejects all 80 DNS-only-certificate attempts. Debug and
+ReleaseFast gRPC/address filters pass 414/414, and package checks pass 22/22.
+Detailed rows and source hashes are in
+`docs/evidence/grpc_ip_literals/2026-10-30.json`.

@@ -150,6 +150,7 @@ test {
     _ = @import("call/refused_retry_tests.zig");
     _ = @import("call/retry_lifecycle_tests.zig");
     _ = @import("channel_tests.zig");
+    _ = @import("channel/host_tests.zig");
     _ = runtime;
     _ = stream;
     _ = health;

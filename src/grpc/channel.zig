@@ -9,6 +9,7 @@ const wire = @import("wire.zig");
 const backoff = @import("channel/backoff.zig");
 const connectivity = @import("channel/connectivity.zig");
 const resolver = @import("channel/resolver.zig");
+const endpoint_host = @import("../internal/endpoint_host.zig");
 
 const net = std.Io.net;
 
@@ -55,11 +56,15 @@ pub const Endpoint = union(enum) {
         limits: http2.runtime.Limits = .{},
     },
     cleartext_host: struct {
+        /// DNS name or IP literal. IPv6 accepts bare or bracketed text;
+        /// `port` remains a separate argument.
         host: []const u8,
         port: u16,
         limits: http2.runtime.Limits = .{},
     },
     tls_host: struct {
+        /// DNS/IP certificate identity, independent of a custom resolver's
+        /// selected socket address. IPv6 brackets are removed for TLS.
         host: []const u8,
         port: u16,
         limits: http2.runtime.Limits = .{},
@@ -255,7 +260,7 @@ const HostResolution = struct {
         target: Target,
         options: Options,
     ) Error!?HostResolution {
-        const host: []const u8, const port: u16, const transport = switch (target) {
+        const host: []const u8, const port: u16, var transport = switch (target) {
             .cleartext_host => |value| .{
                 value.host,
                 value.port,
@@ -275,11 +280,9 @@ const HostResolution = struct {
             else => return null,
         };
         if (port == 0) return error.InvalidChannelOptions;
-        const authority = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
+        const parsed = try endpoint_host.parse(host, port);
+        if (transport == .tls) transport.tls.host = parsed.host;
+        const authority = try parsed.authorityAlloc(allocator, port);
         errdefer allocator.free(authority);
         const state = try resolver.State.create(
             allocator,

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const address_resolver = @import("../../internal/address_resolver.zig");
+const endpoint_host = @import("../../internal/endpoint_host.zig");
 const backoff = @import("backoff.zig");
 
 const net = std.Io.net;
@@ -34,6 +35,7 @@ pub const State = struct {
     io: std.Io,
     host: []const u8,
     port: u16,
+    literal: ?net.IpAddress = null,
     resolver: ?AddressResolver,
     minimum_refresh_interval: std.Io.Duration,
     backoff_policy: backoff.Policy,
@@ -60,13 +62,14 @@ pub const State = struct {
         minimum_refresh_interval: std.Io.Duration,
         backoff_policy: backoff.Policy,
     ) (std.mem.Allocator.Error || net.HostName.ValidateError)!*State {
-        _ = try net.HostName.init(host);
+        const parsed = try endpoint_host.parse(host, port);
         const state = try allocator.create(State);
         state.* = .{
             .allocator = allocator,
             .io = io,
-            .host = host,
+            .host = parsed.host,
             .port = port,
+            .literal = parsed.literal,
             .resolver = resolver,
             .minimum_refresh_interval = minimum_refresh_interval,
             .backoff_policy = backoff_policy,
@@ -231,6 +234,7 @@ pub const State = struct {
                 null,
             );
         }
+        if (self.literal) |address| return self.allocator.dupe(net.IpAddress, &.{address});
         return address_resolver.resolveSystem(
             self.allocator,
             self.io,

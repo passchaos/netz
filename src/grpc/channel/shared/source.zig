@@ -2,6 +2,7 @@
 const std = @import("std");
 const channel = @import("../../channel.zig");
 const resolver = @import("../resolver.zig");
+const endpoint_host = @import("../../../internal/endpoint_host.zig");
 
 pub fn Source(comptime Worker: type) type {
     return struct {
@@ -23,10 +24,13 @@ pub fn Source(comptime Worker: type) type {
                 else => return .{ .endpoint = endpoint },
             };
             if (port == 0 or push) return error.InvalidChannelOptions;
-            const authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+            const parsed = try endpoint_host.parse(host, port);
+            const authority = try parsed.authorityAlloc(allocator, port);
             errdefer allocator.free(authority);
             const state = try resolver.State.create(allocator, io, host, port, options.address_resolver, options.resolver_min_refresh_interval, options.backoff);
-            return .{ .endpoint = endpoint, .resolver = state, .authority = authority };
+            var normalized = endpoint;
+            if (normalized == .tls_host) normalized.tls_host.host = parsed.host;
+            return .{ .endpoint = normalized, .resolver = state, .authority = authority };
         }
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.resolver) |state| state.deinit();

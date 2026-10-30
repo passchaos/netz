@@ -1975,6 +1975,21 @@ pub fn build(b: *std.Build) void {
     const grpc_response_step = b.step("interop-grpc-response", "Verify native gRPC response fallback with an independent HTTP/2 peer and official grpc-js");
     grpc_response_step.dependOn(&grpc_response.step);
 
+    const grpc_ip_literals_client = b.addExecutable(.{
+        .name = "netz-grpc-ip-literals-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_ip_literals/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_ip_literals = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_ip_literals/run.py" });
+    grpc_ip_literals.addArtifactArg(grpc_ip_literals_client);
+    if (b.args) |args| grpc_ip_literals.addArgs(args);
+    const grpc_ip_literals_step = b.step("interop-grpc-ip-literals", "Verify numeric gRPC targets, HTTP/2 authority, TLS SNI and IP SAN identity with grpc-js/OpenSSL");
+    grpc_ip_literals_step.dependOn(&grpc_ip_literals.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{
