@@ -4,6 +4,7 @@
 //! `03d65cc67c450ccbb58a8a45627c4da83a886ccd`'s canonical `ping_pong`,
 //! `client_compressed_unary`, `server_compressed_unary`, `custom_metadata`,
 //! `client_compressed_streaming`, `server_compressed_streaming`,
+//! `orca_per_rpc`,
 //! `status_code_and_message`, `special_status_message`,
 //! `cancel_after_first_response`, and
 //! `timeout_on_sleeping_server` cases.  Only the bounded protobuf fixture
@@ -111,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
     try runSlowConsumer(allocator, io, &client, message_limit);
     try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
+    try runOrcaPerRpc(allocator, &client, message_limit);
     try runRpcSoak(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
@@ -140,6 +142,7 @@ pub fn main(init: std.process.Init) !void {
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
+            "orca=per-rpc " ++
             "rpc_soak=100x271828/314159 " ++
             "channel_soak=100x271828/314159 " ++
             "status=unary+bidi+unicode " ++
@@ -406,6 +409,55 @@ fn runUnaryBasics(
         response.message.?.payload,
         metadata_response_size,
     );
+}
+
+fn runOrcaPerRpc(
+    allocator: std.mem.Allocator,
+    client: *InteropClient,
+    message_limit: usize,
+) !void {
+    const request = try messages.orca.encodePerQueryRequestAlloc(
+        allocator,
+        .{
+            .cpu_utilization = 0.8210,
+            .memory_utilization = 0.5847,
+            .request_cost = &.{.{ .name = "cost", .value = 3456.32 }},
+            .utilization = &.{.{ .name = "util", .value = 0.30499 }},
+        },
+    );
+    defer allocator.free(request);
+    var response = try client.unary(.{
+        .path = unary_service_path,
+        .authority = authority,
+        .message = request,
+        .max_message_size = message_limit,
+    });
+    defer response.deinit();
+    if (response.status != .ok or response.message == null or
+        response.message.?.payload.len != 0 or response.was_compressed)
+    {
+        return error.InvalidOrcaResponse;
+    }
+    const transport = response.transport orelse
+        return error.InvalidOrcaResponse;
+    var owned = (try netz.grpc.orca.fromMetadataAlloc(
+        allocator,
+        transport.headers,
+        transport.trailers,
+    )) orelse return error.MissingOrcaReport;
+    defer owned.deinit();
+    const report = owned.report;
+    if (report.cpu_utilization != 0.8210 or
+        report.memory_utilization != 0.5847 or
+        report.request_cost.len != 1 or
+        !std.mem.eql(u8, report.request_cost[0].name, "cost") or
+        report.request_cost[0].value != 3456.32 or
+        report.utilization.len != 1 or
+        !std.mem.eql(u8, report.utilization[0].name, "util") or
+        report.utilization[0].value != 0.30499)
+    {
+        return error.InvalidOrcaReport;
+    }
 }
 
 fn runUnimplementedRoutes(

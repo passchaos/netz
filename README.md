@@ -882,6 +882,9 @@ Current protocol coverage includes:
   status-consistency validation and dedicated unary/streaming/gRPC-Web output,
   request content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
+  standard ORCA per-RPC backend load reports in
+  `endpoint-load-metrics-bin`, with bounded protobuf decoding, exact metadata
+  ownership, validated utilization values and named metric maps,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
   comparison, a caller-buffer client field constructor that always requests
   HPACK Never Indexed across unary and streaming calls, and a server helper
@@ -953,7 +956,10 @@ Current protocol coverage includes:
   additionally verifies persistent-channel stream retirement. A matching
   100-iteration channel soak recreates TCP/TLS/ALPN/certificate state for every
   large unary RPC. An authenticated EmptyCall additionally carries Bearer
-  metadata from grpc-cpp to netz over both h2c and TLS. The official reflection
+  metadata from grpc-cpp to netz over both h2c and TLS. The canonical
+  `orca_per_rpc` case is also bidirectional: netz emits reports consumed by
+  grpc-cpp's backend-metrics policy and decodes reports emitted by grpc-cpp,
+  over both h2c and verified TLS. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

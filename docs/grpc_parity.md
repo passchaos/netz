@@ -33,6 +33,12 @@ existing HTTP/2 runtime:
   preserved, repeated singular fields follow protobuf's last-value rule, and
   malformed containers, invalid UTF-8, ambiguous duplicate metadata and
   contradictory status codes are rejected,
+- standard ORCA per-RPC `endpoint-load-metrics-bin` support with a public,
+  dependency-free `xds.data.orca.v3.OrcaLoadReport` codec. Scalar metrics and
+  request-cost, utilization, and named-metric maps follow protobuf last-value
+  rules on input; output rejects duplicate names, non-finite values, and
+  invalid utilization bounds. Metadata decoding owns its exact Base64 payload
+  and rejects repeated or comma-combined non-repeatable reports,
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length. A caller-buffer constructor emits the
@@ -304,7 +310,8 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_unary`, `large_unary`, `pick_first_unary`, `rpc_soak`, `channel_soak`,
+`empty_unary`, `large_unary`, `orca_per_rpc`, `pick_first_unary`, `rpc_soak`,
+`channel_soak`,
 `max_concurrent_streams_connection_scaling`,
 `half_duplex`,
 `slow_consumer`, `empty_stream`,
@@ -388,6 +395,16 @@ second transport reader. Both h2c and certificate-verified TLS pass, bringing
 the reverse matrix to twenty-five scenarios per transport. Machine-readable
 evidence is recorded in
 `docs/evidence/grpc_cpp_connection_scaling/2026-10-30.json`.
+The canonical ORCA per-RPC case brings that matrix to twenty-six scenarios per
+transport. The official C++ client sends its exact `TestOrcaReport`, then its
+backend-metrics load-balancing policy independently decodes the netz server's
+`endpoint-load-metrics-bin` trailer. The inverse gate sends the same report to
+the official C++ server and requires netz to decode every scalar and map entry
+from the returned standard ORCA protobuf. Both h2c and certificate-verified TLS
+paths run this bidirectional proof. The fixture also isolates a preceding
+optional OOB watcher with `UNIMPLEMENTED`; implementing its long-lived report
+stream is not conflated with this per-RPC case. Machine-readable evidence is
+recorded in `docs/evidence/grpc_cpp_orca_per_rpc/2026-10-31.json`.
 The half-duplex case sends all four canonical response-size requests before
 half-closing, then requires the peer to emit the four responses in order. Both
 netz and C++ server paths therefore prove response production begins only
@@ -520,6 +537,9 @@ reset race from closing with unread upload bytes.
    reconnection/backoff. SharedChannel now applies healthCheckConfig to
    same-connection endpoint admission for concurrent unary and streaming calls.
    Unary transport deadlines are already enforced locally as described above.
+   ORCA per-RPC reports are covered in both grpc-cpp directions; the standard
+   long-lived `OpenRcaService/StreamCoreMetrics` OOB reporting service and its
+   reconnect/update lifecycle remain open.
 
 The current tests establish concurrent shared unary and streaming calls,
 sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature

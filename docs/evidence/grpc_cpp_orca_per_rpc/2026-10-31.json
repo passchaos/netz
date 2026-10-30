@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "official grpc-cpp ORCA per-RPC backend load reports",
+  "decision": "accepted",
+  "scope": {
+    "directions": [
+      "netz client to official grpc-cpp server",
+      "official grpc-cpp client to netz server"
+    ],
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "method": "/grpc.testing.TestService/UnaryCall",
+    "request": "canonical SimpleRequest.orca_per_query_report with cpu=0.8210, memory=0.5847, request_cost[cost]=3456.32, utilization[util]=0.30499",
+    "response_metadata": "one endpoint-load-metrics-bin value containing xds.data.orca.v3.OrcaLoadReport",
+    "official_client_policy": "test_backend_metrics_load_balancer selected by the same loadBalancingConfig used by upstream run_interop_tests.py",
+    "oob_boundary": "OpenRcaService/StreamCoreMetrics remains a separate feature; a preceding optional watcher receives UNIMPLEMENTED in the per-RPC fixture"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ interop_client, interop_server, backend metrics filter, parser, and test LB policy",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "description": "doc/interop-test-descriptions.md, tools/run_tests/run_interop_tests.py, test/cpp/interop/interop_client.cc, test/cpp/interop/interop_server.cc, and src/core/ext/filters/backend_metrics/backend_metric_filter.cc"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "cc": "/usr/bin/gcc 13.3.0",
+    "cxx": "/usr/bin/g++ 13.3.0",
+    "client_io": "zio-std-io or grpc-cpp-posix-event-engine by direction",
+    "server_io": "grpc-cpp-posix-event-engine or zio-std-io by direction",
+    "grpc_cpp_client_sha256": "f3c8f9677d96a97499685c1c39e01b7eff7b75412cd01352ef46767582d1c0a3",
+    "grpc_cpp_client_build_id": "1110ce14f6868d70497ae0e09aec3cc4a5f4dc09",
+    "grpc_cpp_server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d",
+    "grpc_cpp_server_build_id": "f69c4665b89ff08fcd73ab81e813a5b6ccabfd0c",
+    "grpc_cpp_binaries_reused_from_pinned_checkout": true
+  },
+  "implementation": {
+    "public_codec": "netz.grpc.orca encodes and decodes the complete xds.data.orca.v3.OrcaLoadReport schema without generated bindings, including deprecated integer RPS and all three metric maps",
+    "validation": "non-finite scalars, negative nonnegative metrics, memory or utilization fractions outside 0..1, invalid UTF-8 metric names, and duplicate output map keys are rejected",
+    "protobuf_semantics": "unknown fields are skipped; repeated scalar and map values use last-value-wins behavior",
+    "metadata_ownership": "decoded Base64 and metric indexes are owned together; repeated or comma-combined non-repeatable report values are rejected",
+    "fixture_layout": "the canonical grpc.testing.TestOrcaReport codec is isolated under tools/interop/grpc_cpp/orca_messages.zig instead of enlarging the general fixture root",
+    "reverse_runner": "orca_per_rpc is one of 26 official client scenarios per transport and uses upstream's required test load-balancing service config",
+    "forward_runner": "the persistent netz client sends the canonical report and validates every scalar and map entry returned by the official server"
+  },
+  "results": {
+    "fixture_codec": "18/18 passed",
+    "grpc_debug": "418/418 passed",
+    "orca_release_fast": "136/136 passed",
+    "package": "25/25 passed",
+    "reverse_matrix": "26 scenarios per transport, 52 total, passed over h2c and TLS",
+    "reverse_orca": "official grpc-cpp backend-metrics policy accepted the netz endpoint-load-metrics-bin report over h2c and TLS",
+    "forward_matrix": "complete netz-client matrix passed over h2c and TLS, plus pick-first failover",
+    "forward_orca": "netz decoded the official grpc-cpp endpoint-load-metrics-bin report over h2c and certificate-verified TLS"
+  },
+  "source_sha256": {
+    "src/grpc/orca.zig": "21bb1cb513dc2b7767b0883b1874e911e19704a1994f3450928367678bbdbffd",
+    "src/grpc/orca/tests.zig": "f2eaf8824a287c22bea307282fab03e92a5c47f9dc41073cb97e9216af3ec4a8",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/mod.zig": "f6d7f6ea22e9a6ef04d3ffc9d8fdee039d4b3d44ac5c6c4d11af48b700adfa35",
+    "tools/interop/grpc_cpp/orca_messages.zig": "e5b12600f266974abb1f2cd48b2fa82cd70e5188afbc15b0eac1a7e140ad80c7",
+    "tools/interop/grpc_cpp_messages.zig": "8c9ea1eed0530caa028ca8792c71a807fc53e59301c538d8ea657b513d81b118",
+    "tools/interop/grpc_cpp_client.zig": "71de0a9a9762813e9dd7446736cf44d70c5163a43137edd618d505f1f371f1f6",
+    "tools/interop/grpc_cpp_server.zig": "6c703f634ba020e952262ddbda0427144cfca7b5ff08091413b0dc8c51e43793",
+    "tools/interop/grpc_cpp.sh": "8dd70629bf137e7d0e0868be949f7ac5202ecae66b1e7d3e57e271c971f7268b",
+    "tools/interop/grpc_cpp_client.sh": "0fea481409cec79379534bc893e0da1caeed6a5f637d22619c1508cd1c2bc460"
+  },
+  "verification_commands": [
+    "zig test tools/interop/grpc_cpp_messages.zig",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC ORCA' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_CLIENT=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_client zig build interop-grpc-cpp-client -Doptimize=ReleaseFast --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "The canonical per-RPC report is externally covered in both directions. The long-lived OpenRcaService OOB report stream, update cadence, reconnect, and consumer integration remain separate work."
+}

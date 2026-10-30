@@ -8,6 +8,7 @@
 pub const wire = @import("wire.zig");
 pub const auth = @import("auth.zig");
 pub const status_details = @import("status_details.zig");
+pub const orca = @import("orca.zig");
 pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
@@ -139,6 +140,7 @@ test {
     _ = compression;
     _ = @import("compression/negotiation_runtime_tests.zig");
     _ = status_details;
+    _ = orca;
     _ = @import("response_metadata.zig");
     _ = auth;
     _ = web;

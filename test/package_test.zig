@@ -112,6 +112,29 @@ test "public gRPC rich status details preserve opaque Any and reject inconsisten
     try std.testing.expect(std.mem.indexOf(u8, block, "grpc-status-details-bin:") != null);
 }
 
+test "public gRPC ORCA per-RPC metadata owns validated backend metrics" {
+    const encoded = try netz.grpc.orca.encodeAlloc(std.testing.allocator, .{
+        .cpu_utilization = 0.75,
+        .memory_utilization = 0.5,
+        .request_cost = &.{.{ .name = "query", .value = 12 }},
+    });
+    defer std.testing.allocator.free(encoded);
+    var report = try netz.grpc.orca.decodeAlloc(
+        std.testing.allocator,
+        encoded,
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(f64, 0.75), report.report.cpu_utilization);
+    try std.testing.expectEqualStrings(
+        "query",
+        report.report.request_cost[0].name,
+    );
+    try std.testing.expectEqual(
+        @as(f64, 12),
+        report.report.request_cost[0].value,
+    );
+}
+
 test "public gRPC-Web HTTP2 dispatch validates policy and deadline before I/O" {
     try std.testing.expect(@hasDecl(netz.grpc.runtime.ServerConnection, "readWebRequest"));
     try std.testing.expect(@hasDecl(netz.grpc.web.http2.Request, "startServerStream"));
@@ -352,6 +375,7 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz, "grpc"));
     try std.testing.expect(@hasDecl(netz.grpc, "Status"));
+    try std.testing.expect(@hasDecl(netz.grpc, "orca"));
     try std.testing.expect(@hasDecl(netz.grpc, "MessageIterator"));
     try std.testing.expect(@hasDecl(netz.grpc, "Timeout"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseBearerToken"));

@@ -9,6 +9,7 @@
 //! passing gate into a weaker, partially parsed test.
 
 const std = @import("std");
+pub const orca = @import("grpc_cpp/orca_messages.zig");
 
 /// The canonical interop cases stay below this value (the largest is 314159).
 /// Apply the bound before allocation and again while decoding peer input.
@@ -1509,4 +1510,8 @@ test "request and response payload limits are enforced" {
         error.MessageTooLarge,
         validateStreamingOutputCallResponse(&.{}, max_payload_size + 1),
     );
+}
+
+test {
+    _ = orca;
 }

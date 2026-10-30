@@ -19,6 +19,8 @@ const unimplemented_method_path =
     "/grpc.testing.TestService/UnimplementedCall";
 const unimplemented_service_path =
     "/grpc.testing.UnimplementedService/UnimplementedCall";
+const orca_oob_service_path =
+    "/xds.service.orca.v3.OpenRcaService/StreamCoreMetrics";
 const message_limit = messages.max_payload_size + 64;
 const echo_initial_key = "x-grpc-test-echo-initial";
 const echo_initial_value = "test_initial_metadata_value";
@@ -55,6 +57,7 @@ const Scenario = enum {
     unimplemented_service,
     empty_unary,
     large_unary,
+    orca_per_rpc,
     pick_first_unary,
     max_concurrent_streams_connection_scaling,
     half_duplex,
@@ -287,6 +290,7 @@ pub fn main(init: std.process.Init) !void {
         ),
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
+        .orca_per_rpc => try serveOrcaPerRpc(allocator, &connection),
         .pick_first_unary => try servePickFirstUnary(
             allocator,
             &connection,
@@ -370,6 +374,75 @@ fn serveRpcSoak(
 ) !void {
     for (0..rpc_soak_iterations) |_| {
         try serveLargeUnary(allocator, connection);
+    }
+}
+
+fn serveOrcaPerRpc(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    while (true) {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (std.mem.eql(u8, unary.request.path, orca_oob_service_path)) {
+            // The official backend-metrics policy also starts the optional
+            // OOB watcher. This slice proves per-RPC metadata, so terminate
+            // that independent stream with its specified capability signal.
+            try connection.writeUnary(unary.request.stream_id, .{
+                .status = .unimplemented,
+                .trailers_only = true,
+            });
+            continue;
+        }
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path) or
+            unary.request.was_compressed)
+        {
+            return error.UnexpectedMethod;
+        }
+        var request_cost: [1]messages.orca.Metric = undefined;
+        var utilization: [1]messages.orca.Metric = undefined;
+        const requested = try messages.orca.decodePerQueryRequest(
+            unary.request.message.payload,
+            &request_cost,
+            &utilization,
+        );
+        try expectCanonicalOrca(requested);
+
+        const encoded_report = try netz.grpc.orca.encodeAlloc(allocator, .{
+            .cpu_utilization = requested.cpu_utilization,
+            .memory_utilization = requested.memory_utilization,
+            .request_cost = &.{.{
+                .name = requested.request_cost[0].name,
+                .value = requested.request_cost[0].value,
+            }},
+            .utilization = &.{.{
+                .name = requested.utilization[0].name,
+                .value = requested.utilization[0].value,
+            }},
+        });
+        defer allocator.free(encoded_report);
+        try connection.writeUnary(unary.request.stream_id, .{
+            .message = "",
+            .trailing_binary_metadata = &.{.{
+                .name = netz.grpc.orca.name,
+                .value = encoded_report,
+            }},
+        });
+        return;
+    }
+}
+
+fn expectCanonicalOrca(report: messages.orca.Report) !void {
+    if (report.cpu_utilization != 0.8210 or
+        report.memory_utilization != 0.5847 or
+        report.request_cost.len != 1 or
+        !std.mem.eql(u8, report.request_cost[0].name, "cost") or
+        report.request_cost[0].value != 3456.32 or
+        report.utilization.len != 1 or
+        !std.mem.eql(u8, report.utilization[0].name, "util") or
+        report.utilization[0].value != 0.30499)
+    {
+        return error.UnexpectedOrcaReport;
     }
 }
 
@@ -1197,6 +1270,7 @@ fn serveScenario(
         .authenticated_empty_unary,
         .empty_unary,
         .large_unary,
+        .orca_per_rpc,
         .pick_first_unary,
         .max_concurrent_streams_connection_scaling,
         .client_streaming,

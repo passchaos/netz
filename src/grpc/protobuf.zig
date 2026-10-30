@@ -43,6 +43,17 @@ pub const Reader = struct {
         return value;
     }
 
+    pub fn fixed64(self: *Reader) Error!u64 {
+        if (8 > self.bytes.len - self.cursor) return error.TruncatedMessage;
+        const value = std.mem.readInt(
+            u64,
+            self.bytes[self.cursor..][0..8],
+            .little,
+        );
+        self.cursor += 8;
+        return value;
+    }
+
     pub fn string(self: *Reader) Error![]const u8 {
         const value = try self.bytesValue();
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
