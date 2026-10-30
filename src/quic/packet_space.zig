@@ -635,22 +635,23 @@ pub const SentPacketTracker = struct {
     fn sentInFlightAtWithStoredMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, datagram_size: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, pmtu_probe_epoch: u32, pmtu_path_epoch: u32, largest_acknowledged_sent: ?u64) !void {
         const monotonic_append = self.packets.items.len == 0 or
             packet_number > self.packets.items[self.packets.items.len - 1].packet_number;
+        const maintain_packet_index =
+            !monotonic_append or !self.packets_sorted_ascending;
         // Packet numbers issued by a QUIC packet number space are normally
         // strictly increasing. In that hot path, the tail comparison proves the
         // packet is new and avoids an exact-index lookup before every send.
-        // Tests and rollback helpers can still insert out of order, so the
-        // conservative duplicate check remains for the uncommon non-monotonic
-        // path.
-        if (!monotonic_append) {
+        // Tests and rollback helpers can still insert out of order. Once that
+        // happens, a number above the current tail may still duplicate an
+        // earlier high number, so every later unordered-history insertion keeps
+        // the conservative exact check.
+        if (maintain_packet_index) {
             if (self.findPacketIndex(packet_number) != null) return error.DuplicatePacket;
         }
-        const packet_storage_available = self.packets.items.len < self.packets.capacity;
-        // Some send paths pre-reserve packet metadata and deliberately run
-        // under a no-allocation guard to verify protected packet storage reuse.
-        // Grow the exact lookup index only when the packet list itself is about
-        // to allocate; otherwise use already-reserved map slots and let lookup
-        // helpers fall back to the ordered packet list if the map is also full.
-        if (!packet_storage_available) {
+        // Normal QUIC packet numbers append monotonically. Tail checks and the
+        // ordered binary-search fallback make a hash insertion on every send
+        // redundant. Once a caller creates unordered history, retain the
+        // best-effort index for later exact operations on that rare path.
+        if (maintain_packet_index and !self.packetIndexHasUnusedCapacity()) {
             try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
         }
         if (!monotonic_append) {
@@ -670,7 +671,7 @@ pub const SentPacketTracker = struct {
             .largest_acknowledged_sent = largest_acknowledged_sent,
         });
         const index = self.packets.items.len - 1;
-        if (self.packetIndexHasUnusedCapacity()) {
+        if (maintain_packet_index) {
             self.packet_index.putAssumeCapacityNoClobber(packet_number, index);
         }
         self.considerLatestAckElicitingInFlight(index);
@@ -1190,8 +1191,20 @@ pub const SentPacketTracker = struct {
             range_end - range_start,
             1,
         ) catch return false;
-        const start_index = self.lowerBoundPacketIndex(range_start);
-        const end_index = self.upperBoundPacketIndex(range_end);
+        // Cumulative ACKs normally cover the complete retained packet
+        // history.  Prove those two bounds from the endpoints instead of
+        // paying for two binary searches on every repeated ACK validation.
+        // Partial ranges keep the general lower/upper-bound path.
+        const start_index = if (self.packets.items.len == 0 or
+            self.packets.items[0].packet_number >= range_start)
+            0
+        else
+            self.lowerBoundPacketIndex(range_start);
+        const end_index = if (self.packets.items.len == 0 or
+            self.packets.items[self.packets.items.len - 1].packet_number <= range_end)
+            self.packets.items.len
+        else
+            self.upperBoundPacketIndex(range_end);
         const retained: u64 = @intCast(end_index - start_index);
         const retired = self.retiredIntersectionLen(.{
             .start = range_start,
@@ -2834,6 +2847,8 @@ test "QUIC sent packet tracker preserves exact lookup behavior" {
     try sent.sentAt(0, true, 100, .not_ect, 1_000);
     try sent.sentAt(1, true, 200, .not_ect, 2_000);
     try sent.sentAt(2, true, 300, .not_ect, 3_000);
+    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
+    try std.testing.expect(sent.packetsSortedAscending());
     try std.testing.expectError(
         error.DuplicatePacket,
         sent.sent(1, true, 100),
@@ -2857,6 +2872,46 @@ test "QUIC sent packet tracker preserves exact lookup behavior" {
         @as(?SentPacketTracker.RttSample, null),
         try sent.ackRttSample(ack, 4_000, 3),
     );
+}
+
+test "QUIC sent packet tracker indexes only unordered packet history" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sent(10, true, 100);
+    try sent.sent(12, true, 100);
+    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
+
+    try sent.sent(11, true, 100);
+    try std.testing.expect(!sent.packetsSortedAscending());
+    try std.testing.expect(sent.packet_index.get(11) != null);
+    // The duplicate is above the unordered tail but already exists earlier.
+    try std.testing.expectError(error.DuplicatePacket, sent.sent(12, true, 100));
+    try sent.sent(13, true, 100);
+    try std.testing.expect(sent.packet_index.get(13) != null);
+    try std.testing.expect(sent.markAcknowledged(10));
+    try std.testing.expect(sent.markAcknowledged(13));
+}
+
+test "QUIC sent packet coverage endpoint fast path preserves gap validation" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sent(10, true, 100);
+    try sent.sent(11, true, 100);
+    try sent.sent(12, true, 100);
+    try std.testing.expect(sent.sentCoverageMatchesRange(10, 12));
+    try std.testing.expect(sent.sentCoverageMatchesRange(11, 11));
+    try std.testing.expect(!sent.sentCoverageMatchesRange(9, 12));
+    try std.testing.expect(!sent.sentCoverageMatchesRange(10, 13));
+
+    var gapped = SentPacketTracker.init(allocator);
+    defer gapped.deinit();
+    try gapped.sent(10, true, 100);
+    try gapped.sent(12, true, 100);
+    try std.testing.expect(!gapped.sentCoverageMatchesRange(10, 12));
 }
 
 test "QUIC sent packet tracker forgets pre-reserved tail" {

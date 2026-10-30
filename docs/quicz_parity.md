@@ -2883,6 +2883,32 @@ cost and tail scheduling.
    tquic normal/Retry/GOAWAY, Debug/ReleaseFast and package gates remain green.
    Evidence is in
    `docs/evidence/quic_traits_aggregate_direct/2026-10-30.json`.
+   The next accepted send-path pass removes the best-effort exact-index hash
+   write from strictly increasing sent packet numbers. Ordered history keeps
+   tail and binary-search exact lookup; only unordered synthetic history
+   maintains the sparse hash plus linear fallback, including duplicate checks
+   for candidates above an unordered tail. Cumulative ACK validation
+   additionally proves full retained-history bounds from its endpoints, and
+   ordered recovery with no retransmission copies updates aggregate counters
+   once per ACK. The first server 1-RTT send consequently allocates three
+   times instead of four. Five CPU-0 fixed-binary 50k four-fragment pairs
+   improved instructions/cycles/sequential/batch by paired medians of
+   1.05%/4.73%/2.43%/1.93%; PMU won 5/5 and both wall-time paths won 4/5.
+   The ordinary 5k recovery timer was too
+   noisy at a roughly one-percent boundary, so the decision gate increased
+   both fixed binaries to 100k identical recovery cycles. A correctness fix
+   for unordered history then exposed an instruction-placement regression in
+   byte-identical recovery code; the hot `applyAck` entry is now explicitly
+   32-byte aligned. Final arm medians were 5218/5058 ns for
+   baseline/candidate, with a 2.49% paired improvement and 3/5 wins. It is
+   retained as a no-regression gate rather than a broad recovery speed claim.
+   Three final-source real
+   four-stream 16-MiB TLS/H3 uploads completed at 168.53-170.38 MiB/s, and
+   quic-go v1/v2, 32/64-stream loss/reorder churn, tquic Retry/GOAWAY,
+   Debug/ReleaseFast, and package gates remained green. This is
+   same-application-shape evidence, not an equal-wire claim. Full rows and the
+   rejected intermediate ACK/recovery measurements are in
+   `docs/evidence/quic_sent_packet_ordered_fast_path/2026-10-30.json`.
    STREAM/DATA framing now borrows all body bytes in the common case, and both
    ordinary and batch sends encode directly into stable recovery storage
    instead of copying a second plaintext payload. Exact-size batching still

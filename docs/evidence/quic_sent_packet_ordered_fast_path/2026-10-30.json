@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "QUIC ordered sent-packet tracking without monotonic exact-index writes",
+  "decision": "accepted",
+  "baseline": {
+    "head": "5c87fa958af25923f7257b83307d264827c7fbeb",
+    "send_benchmark_sha256": "0fd79bc47bc284754ba434166decc1a48afe0173c2ba154d9f72558343071740",
+    "ack_benchmark_100k_sha256": "88352fd11bbe9b32294b2e4d4ba29e07cbcb57c8f8ee0f6590198446642e8411",
+    "source_sha256": {
+      "src/quic/packet_space.zig": "2747b9d4a2dbf9e3b4d35504a3176aa9890343f3906646d185734ded6f425e68",
+      "src/quic/recovery.zig": "672b5ddbddd12a2855f6b051d9e5aa27ca4acb504545d3aba406894578605f3c",
+      "src/quic/one_rtt/tests/handshake_status.zig": "9726529aec96b23ce83d923244729613b9c6a27b98c4bb7188d22e88e83ab2bc"
+    }
+  },
+  "candidate": {
+    "send_benchmark_sha256": "b80601eb46d739f89d8a251b909dad2ca5fa4f083e9357e1d90a728162c4f94f",
+    "ack_benchmark_100k_sha256": "feaa166ffc955de52abe75beeef9a3c76522e0004a52a36fa594f7163c024b6f",
+    "source_sha256": {
+      "src/quic/packet_space.zig": "28cd563747c38d34c73c77d813d4faec8e5af82296362f3efb766d18f7b0e626",
+      "src/quic/recovery.zig": "9324a16e68ed50f2c519f795846a414db10a3ac21faaa9d8ea888ec6ffb477db",
+      "src/quic/one_rtt/tests/handshake_status.zig": "b79562029faf209aec2f6e8473528ad2b8f1072c2ff8b5db6afdb7eda509d402"
+    },
+    "implementation": [
+      "Strictly increasing sent packet numbers keep ordered packet metadata without allocating or writing the best-effort exact-index hash. Tail and binary-search lookup remain exact; unordered synthetic history retains sparse hash indexing plus the linear fallback and exact duplicate checks even when a candidate is above the unordered tail.",
+      "Cumulative ACK coverage proves full retained-history bounds from the first and last packet before falling back to lower/upper binary searches for partial ranges.",
+      "Ordered recovery queues with no retransmission copies retire packet-count and payload-byte aggregates once per ACK instead of repeating saturating counter updates for every acknowledged entry. The hot applyAck entry is 32-byte aligned to make its instruction placement independent of unrelated packet-space code size.",
+      "The first server 1-RTT send now requires three durable-ownership allocations instead of four."
+    ],
+    "wire_changes": false,
+    "public_api_changes": false,
+    "object_layout_changes": false
+  },
+  "references": {
+    "quiche": {
+      "revision": "0b1a89af341b7e42c4e75fedf7bdda246d8319af",
+      "observation": "Recovery keeps sent packets in ordered VecDeque storage and appends ordinary sends at the tail."
+    },
+    "tquic": {
+      "revision": "0169abde20c6701c68b1ac5021c3e64702f20cfa",
+      "observation": "Each packet-number space keeps ordered VecDeque sent metadata and merges ascending ACK ranges with an ascending sent-packet cursor."
+    }
+  },
+  "benchmark_method": {
+    "cpu": 0,
+    "schedule": "ABBA",
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ],
+    "send": {
+      "warmup_iterations": 1000,
+      "measured_iterations": 50000,
+      "packets_per_batch": 32,
+      "stream_descriptors_per_packet": 4,
+      "packets_per_path": 1600000
+    },
+    "ack": {
+      "ordinary_benchmark_recovery_iterations": 5000,
+      "decision_benchmark_recovery_iterations": 100000,
+      "note": "The 100000-cycle decision binaries changed only the identical benchmark constant in temporary baseline/candidate worktrees. The source change and temporary worktree were removed after capture."
+    }
+  },
+  "results": {
+    "h3_shaped_stream4_50k": {
+      "artifact": "zig-out/quic-sent-index-ordered-final-ab/20261030T085500Z-align32-stream4-50k",
+      "artifact_bytes": 5680,
+      "aggregate_file_hash_digest": "4a136d9f6e2b8fc6f555be023be5638eddd8aa8243b791e991745fe82ae48d2d",
+      "pairs": 5,
+      "instructions_baseline_over_candidate_paired_median": 1.0105801488,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0496634601,
+      "cycles_candidate_wins": 5,
+      "sequential_baseline_over_candidate_paired_median": 1.0249160268,
+      "sequential_candidate_wins": 4,
+      "batch_baseline_over_candidate_paired_median": 1.0196334637,
+      "batch_candidate_wins": 4
+    },
+    "ack_recovery_100k": {
+      "artifact": "zig-out/quic-sent-index-ordered-ack-long-ab/20261030T084500Z-align32-recovery100k-5pair",
+      "artifact_bytes": 6203,
+      "aggregate_file_hash_digest": "c4b96f979a7402064eb5f95cfca8ddd8ebc33152957e2a8cd86c2487fb9c6aa6",
+      "pairs": 5,
+      "instructions_baseline_over_candidate_paired_median": 1.0649300727,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0587710413,
+      "cycles_candidate_wins": 5,
+      "sent_ack_validation_ns_per_op_median": {
+        "baseline": 24,
+        "candidate_integer_truncated": 0,
+        "interpretation": "The repeated invariant cumulative-ACK check fell below the benchmark's integer-nanosecond reporting resolution. This is retained as a no-regression sentinel, not an exact universal latency claim."
+      },
+      "validated_ack_cycle_baseline_over_candidate_paired_median": 1.1246105919,
+      "validated_ack_cycle_candidate_wins": 5,
+      "recovery_ns_per_cycle_arm_median": {
+        "baseline": 5218,
+        "candidate": 5058
+      },
+      "recovery_baseline_over_candidate_paired_median": 1.0255091952,
+      "recovery_candidate_wins": 3,
+      "recovery_interpretation": "The longer recovery timer passes after aligning the hot applyAck entry: arm medians favor the candidate by 3.07%, paired median favors it by 2.49%, and wins are mixed at 3/5. This is retained as a no-regression gate rather than a broad recovery speed claim."
+    }
+  },
+  "development_guards": {
+    "initial_ack_regression": {
+      "artifact": "zig-out/quic-sent-index-ordered-ack-ab/20261030T063000Z-5pair",
+      "artifact_bytes": 4756,
+      "aggregate_file_hash_digest": "66907a539c53ea8bbb1108cfb18d003e68d4d69d7e781baf3056d5c11d5f34e0",
+      "observation": "Hash-write removal alone moved the 4096-packet cumulative ACK validation median from 28 to 32 ns/op, so it was not accepted without the endpoint-bound coverage fast path."
+    },
+    "short_recovery_timer": {
+      "artifact": "zig-out/quic-sent-index-ordered-ack-ab/20261030T073500Z-batched-recovery-stats-10pair",
+      "artifact_bytes": 12016,
+      "aggregate_file_hash_digest": "777e9622ef87293565148f51440bfb32be49d24b89c4a685111a11818e88c2dc",
+      "pairs": 10,
+      "recovery_ns_per_cycle_arm_median": {
+        "baseline": 5203.5,
+        "candidate": 5267.5
+      },
+      "recovery_baseline_over_candidate_paired_median": 0.9914958870,
+      "recovery_candidate_wins": 2,
+      "resolution": "The 25 ms recovery arm was too short to decide a sub-2% boundary. The otherwise identical 100000-cycle arm above runs about 20 times longer and replaces it for the acceptance decision."
+    },
+    "recovery_profile": {
+      "artifact": "zig-out/quic-sent-index-recovery-profile/20261030T074500Z",
+      "artifact_bytes": 416846,
+      "aggregate_file_hash_digest": "62b157ec828ff8207c880445e10692a55a029ce14927660afdb77a90946f7bcc",
+      "observation": "Cycles sampling showed lower candidate self attribution in Queue.applyAck and Queue.recycleEntry while much of the benchmark remained inlined into main. It is diagnostic support only; the long fixed-binary timer is the decision gate."
+    },
+    "unaligned_unordered_duplicate_layout": {
+      "artifact": "zig-out/quic-sent-index-ordered-ack-long-ab/20261030T083500Z-unordered-duplicate-recovery100k-5pair",
+      "artifact_bytes": 6203,
+      "aggregate_file_hash_digest": "37a2e39f8d1486e1d6a22e23d4404aa218268a312459ecfa6f374e4798483801",
+      "recovery_ns_per_cycle_arm_median": {
+        "baseline": 5174,
+        "candidate": 5325
+      },
+      "recovery_baseline_over_candidate_paired_median": 0.9805060918,
+      "recovery_candidate_wins": 1,
+      "resolution": "The unordered-duplicate correctness fix shifted byte-identical Queue.applyAck code by 16 bytes and exposed a stable instruction-placement regression. Aligning this hot public method to 32 bytes produced the accepted decision row above."
+    },
+    "rejected_empty_retransmission_deinit_skip": "A follow-up branch that skipped deinit for never-grown retransmission storage regressed the single recovery smoke and was removed before final measurement."
+  },
+  "verification": {
+    "focused_debug": "sent-packet coverage, packet tracker, and recovery filters passed",
+    "quic_debug": "1125/1125 passed",
+    "one_rtt_release_fast": "340/340 passed",
+    "package": "22/22 passed",
+    "real_h3": "three final-source 4-stream 16-MiB TLS/H3 uploads from netz to quic-go completed 48 MiB total at 168.534-170.380 MiB/s; the reverse role also completed all three exact-byte/checksum/FIN samples",
+    "quic_go_http3": "QUIC v1/v2 bidirectional cancellation, dropped STOP_SENDING recovery, trailers, redirect/pool reuse, and informational response matrices passed",
+    "quic_go_loss_reorder": "32/64-stream mixed FIN/reset churn passed for both endpoint-role pairs, both sender roles, loss and reordering, two runs per arm",
+    "tquic": "HTTP/3 normal, Retry, connection reuse, and two-phase GOAWAY passed in both endpoint-role directions",
+    "reference_checkouts_clean": true,
+    "toolchains": {
+      "zig": "0.16.0",
+      "go": "go1.24.13 linux/arm64",
+      "rust": "rustc 1.99.0 (b940084d7 2026-09-28)"
+    }
+  },
+  "scope": "The microbenchmark and real-H3 evidence are same-application-shape. They do not establish equal-wire superiority over another implementation.",
+  "remaining_gap": "Packet protection, equal-wire HTTP/3 packetization, and shared-socket event-loop scheduling remain broader performance targets."
+}

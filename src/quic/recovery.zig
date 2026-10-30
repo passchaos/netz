@@ -586,7 +586,7 @@ pub const Queue = struct {
         unreachable;
     }
 
-    pub fn applyAck(self: *Queue, ack: quic.AckFrame) Error!usize {
+    pub fn applyAck(self: *Queue, ack: quic.AckFrame) align(32) Error!usize {
         if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
         // Validate the entire descending range chain before mutating recovery
         // ownership. This preserves transactional rejection without building
@@ -668,6 +668,7 @@ pub const Queue = struct {
             ack.ranges[ack.ranges.len - 1].ack_range_length;
         var write_index: usize = 0;
         var removed: usize = 0;
+        var removed_payload_bytes: usize = 0;
 
         for (self.pending.items, 0..) |*entry, read_index| {
             const packet_number = entry.original_packet_number.?;
@@ -684,7 +685,7 @@ pub const Queue = struct {
             const acknowledged = packet_number >= range_start and
                 packet_number <= range_end;
             if (acknowledged) {
-                self.removeEntryStats(entry);
+                removed_payload_bytes += entry.payload_len;
                 self.recycleEntry(entry);
                 removed += 1;
                 continue;
@@ -696,6 +697,12 @@ pub const Queue = struct {
             write_index += 1;
         }
         if (removed == 0) return 0;
+        // This ordered-original path is selected only when there are no
+        // retransmission copies, so every retired entry contributes exactly
+        // one packet number. Update aggregate counters once per ACK instead of
+        // repeating saturating arithmetic for every acknowledged packet.
+        self.packet_number_copies -|= removed;
+        self.payload_bytes -|= removed_payload_bytes;
         self.pending.items.len = write_index;
         if (write_index == 0) self.originals_sorted_ascending = true;
         return removed;
@@ -710,11 +717,14 @@ pub const Queue = struct {
         const remove_end = self.upperBoundOriginalPacketNumber(end);
         if (remove_start == remove_end) return 0;
 
+        var removed_payload_bytes: usize = 0;
         for (self.pending.items[remove_start..remove_end]) |*entry| {
-            self.removeEntryStats(entry);
+            removed_payload_bytes += entry.payload_len;
             self.recycleEntry(entry);
         }
         const removed = remove_end - remove_start;
+        self.packet_number_copies -|= removed;
+        self.payload_bytes -|= removed_payload_bytes;
         const remaining = self.pending.items.len - remove_end;
         if (remaining != 0) {
             @memmove(
