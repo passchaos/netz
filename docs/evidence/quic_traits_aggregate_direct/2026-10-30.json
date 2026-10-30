@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "QUIC direct packet-traits aggregation during outbound validation",
+  "decision": "accepted",
+  "baseline": {
+    "head": "bb472296dc7a9edb7a6b52ab139be9f0ca15694f",
+    "benchmark_sha256": "7548f2d863837d7b8e9cabe915a6e596a9bdfc01e7432154a79d642ac56f015e",
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "4865c2517ff193ae3d086760658016998c5bac4c0918232e0ce9f1444628d14e",
+      "src/quic/one_rtt/frame_traits.zig": "aececde5b8b3b8d1e33a882c020cddf8f628508231cce35d1feffd85ebd172a2",
+      "src/quic/one_rtt/tests/frame_traits.zig": "6f2ba5f63942c15f7a105e92aad5a40f2296b77dbe48646a6682aadc52d3579d"
+    }
+  },
+  "candidate": {
+    "benchmark_sha256": "0fd79bc47bc284754ba434166decc1a48afe0173c2ba154d9f72558343071740",
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "1275395b79f29dfac95708405b9cd452e46cad46ee73b3a03d589b0dbcbb33c8",
+      "src/quic/one_rtt/frame_traits.zig": "af7fdac5fb704e177f74e246a671038d0f8872f411246ebc4f4b9f8bcc334894",
+      "src/quic/one_rtt/tests/frame_traits.zig": "7e218ddb18576d7332675f7ee236e5576f9a2a7a6a196c26bd860c7d3564c97f"
+    },
+    "implementation": "Outbound validation merges each classified frame directly into the caller's packet aggregate. observeRetransmittable returns only the frame-local recovery classification needed by batch recovery-length accounting.",
+    "wire_changes": false,
+    "layout_changes": false
+  },
+  "profile": {
+    "baseline": {
+      "artifact": "zig-out/quic-frame-traits-direct-profile/20261030T045702Z",
+      "artifact_bytes": 3154380789,
+      "aggregate_file_hash_digest": "18ada233884af71a5acf7a598360749a7b58358ea42706c5816157aa45263e98",
+      "samples": 187000,
+      "lost_samples": 1256,
+      "memcpy_self_percent": 13.41,
+      "memcpy_below_validate_outbound_percent": 9.83,
+      "scope": "diagnostic only because high-frequency DWARF capture lost samples"
+    },
+    "candidate": {
+      "artifact": "zig-out/quic-traits-aggregate-direct-profile/20261030T050545Z",
+      "artifact_bytes": 627240913,
+      "aggregate_file_hash_digest": "fd998551cefec9debae7edcd642d06f89b3607ef84d8802f6969b2c86b170438",
+      "samples": 36858,
+      "lost_chunks": 1,
+      "observation": "Direct packet aggregation removed the empty per-frame merge, but returning and forwarding the complete packet Traits still appeared as memcpy below validation/preparation. The rejected borrowed-pointer experiment below showed that removing that value boundary harms code generation."
+    }
+  },
+  "benchmark_method": {
+    "cpu": 0,
+    "schedule": "ABBA",
+    "warmup_iterations": 1000,
+    "packets_per_batch": 32,
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ]
+  },
+  "results": {
+    "h3_shaped_stream4_50k": {
+      "artifact": "zig-out/quic-traits-aggregate-direct-ab/20261030T050019Z-stream4-50k",
+      "artifact_bytes": 5350,
+      "aggregate_file_hash_digest": "5fd6fc5e7b09045628b911c4e93a50aa3189a1d25e58ee776f01769f390ecf9d",
+      "pairs": 5,
+      "packets_per_path": 1600000,
+      "instructions_baseline_over_candidate_paired_median": 1.0048274692,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0013343438,
+      "cycles_candidate_wins": 4,
+      "sequential_baseline_over_candidate_paired_median": 0.9997298597,
+      "sequential_candidate_wins": 2,
+      "batch_baseline_over_candidate_paired_median": 1.0056139258,
+      "batch_candidate_wins": 3
+    },
+    "stream1_control": {
+      "artifact": "zig-out/quic-traits-aggregate-direct-ab/20261030T050303Z-controls/stream1",
+      "artifact_bytes": 5310,
+      "aggregate_file_hash_digest": "8b52486f4f07e5b90b2e84551d00d449def1b5c41c2a49ed5b9fef7ae76b5c72",
+      "pairs": 5,
+      "instructions_baseline_over_candidate_paired_median": 1.0040025796,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0066857780,
+      "cycles_candidate_wins": 4,
+      "sequential_baseline_over_candidate_paired_median": 1.0048933913,
+      "sequential_candidate_wins": 4,
+      "batch_baseline_over_candidate_paired_median": 1.0093532064,
+      "batch_candidate_wins": 5
+    },
+    "datagram_control_50k": {
+      "artifact": "zig-out/quic-traits-aggregate-direct-ab/20261030T050436Z-datagram-50k",
+      "artifact_bytes": 5570,
+      "aggregate_file_hash_digest": "81daec30bf8cee95caf78bd1a3e18f85a07c9842f9538e23630315b5735ae67b",
+      "pairs": 5,
+      "payloads_per_path": 1600000,
+      "instructions_baseline_over_candidate_paired_median": 1.0056693525,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0029460016,
+      "cycles_candidate_wins": 3,
+      "sequential_baseline_over_candidate_paired_median": 0.9958713819,
+      "sequential_candidate_wins": 2,
+      "packed_baseline_over_candidate_paired_median": 1.0011918951,
+      "packed_candidate_wins": 3,
+      "interpretation": "PMU work improves while sequential wall time is 0.41% slower with 2/5 wins; the specialized packed path bypasses the changed validator and remains neutral. No DATAGRAM timing improvement is claimed."
+    }
+  },
+  "rejected_follow_up": {
+    "feature": "borrow complete packet Traits through validation and preparation",
+    "benchmark_sha256": "069245b63230206d91c3226bb34c4d594d2e9c1ccc9f5f9ec0ecc990754510f7",
+    "artifact": "zig-out/quic-traits-borrowed-ab/20261030T051113Z-stream4-50k",
+    "artifact_bytes": 5350,
+    "aggregate_file_hash_digest": "292bf9e85b8d6b641696fe7c7f91f61c25398786a43c9f272548fb37749f8bfc",
+    "instructions_baseline_over_candidate_paired_median": 0.9599871576,
+    "instructions_candidate_wins": 0,
+    "cycles_baseline_over_candidate_paired_median": 0.9740539663,
+    "cycles_candidate_wins": 0,
+    "sequential_baseline_over_candidate_paired_median": 0.9696093360,
+    "sequential_candidate_wins": 0,
+    "batch_baseline_over_candidate_paired_median": 1.0000571121,
+    "rejection_reason": "Optional pointer aliasing inhibited H3 sequential code generation: instructions regressed 4.0%, cycles 2.6%, and wall time 3.0%, all 0/5. The value boundary is retained."
+  },
+  "verification": {
+    "focused_debug": "137/137 passed",
+    "focused_release_fast": "137/137 passed",
+    "quic_debug": "1123/1123 passed",
+    "one_rtt_release_fast": "340/340 passed",
+    "package": "22/22 passed",
+    "real_h3": "three 4-stream 16-MiB TLS/H3 uploads completed 48 MiB total at 226.44 MiB/s mean",
+    "quic_go": "HTTP/3 v1/v2 bidirectional cancellation, STOP_SENDING recovery, trailers, redirect/pool, and informational matrix passed",
+    "tquic": "HTTP/3 normal, Retry, client/server connection reuse, and two-phase GOAWAY matrix passed"
+  },
+  "remaining_gap": "Direct aggregation removes redundant per-frame merging. The complete packet Traits value boundary remains because borrowing it regresses code generation; packet protection, equal-wire packetization, and event-loop costs remain broader targets."
+}

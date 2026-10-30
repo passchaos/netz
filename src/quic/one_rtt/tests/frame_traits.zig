@@ -93,3 +93,17 @@ test "QUIC 1-RTT frame traits identify fully retransmittable payloads" {
     try std.testing.expect(!traits.has_non_retransmittable);
     try std.testing.expect(traits.allPayloadBytesRetransmittable());
 }
+
+test "QUIC 1-RTT frame traits report current retransmission while accumulating" {
+    var traits: frame_traits.Traits = .{};
+    try std.testing.expect(try traits.observeRetransmittable(.{
+        .stream = .{ .stream_id = 0, .offset = 0, .data = "abc" },
+    }));
+    try std.testing.expect(!(try traits.observeRetransmittable(.{
+        .datagram = .{ .data = "unreliable", .length_present = true },
+    })));
+    try std.testing.expectEqual(@as(u64, 3), traits.stream_bytes);
+    try std.testing.expect(traits.retransmittable);
+    try std.testing.expect(traits.has_non_retransmittable);
+    try std.testing.expect(!traits.allPayloadBytesRetransmittable());
+}

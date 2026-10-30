@@ -42,6 +42,15 @@ pub const Traits = struct {
         self: *Traits,
         frame: quic.Frame,
     ) error{InvalidFrameLength}!void {
+        _ = try self.observeRetransmittable(frame);
+    }
+
+    /// Merge one frame directly into a packet aggregate and return the only
+    /// per-frame trait needed separately by recovery-length accounting.
+    pub inline fn observeRetransmittable(
+        self: *Traits,
+        frame: quic.Frame,
+    ) error{InvalidFrameLength}!bool {
         var traits = classify(frame);
         if (frame == .stream) {
             traits.stream_bytes = std.math.cast(
@@ -50,6 +59,7 @@ pub const Traits = struct {
             ) orelse return error.InvalidFrameLength;
         }
         try self.merge(traits);
+        return traits.retransmittable;
     }
 
     pub fn autoEcnEligible(self: Traits) bool {

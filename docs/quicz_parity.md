@@ -2865,6 +2865,24 @@ cost and tail scheduling.
    at 232.25 MiB/s mean, while quic-go v1/v2 and tquic normal/Retry/GOAWAY
    matrices remained green. Full fixed-binary rows are recorded in
    `docs/evidence/quic_frame_traits_direct/2026-10-30.json`.
+   Profiling that accepted binary then showed the remaining per-frame scratch
+   copy below `validateOutboundFrames`: one frame was classified into a
+   temporary Traits and then merged into the packet aggregate. Validation now
+   accumulates directly into the packet Traits and returns only the current
+   frame's retransmittable bit for recovery-length accounting. Relative to the
+   preceding accepted binary, five 50k four-fragment pairs improved H3-shaped
+   instructions/cycles/batch medians by 0.48%/0.13%/0.56%; one-fragment
+   controls improved instructions/cycles/sequential/batch by
+   0.40%/0.67%/0.49%/0.94%. A 50k DATAGRAM control improved instructions and
+   cycles 0.57%/0.29%; sequential wall time moved 0.41% slower with 2/5 wins,
+   while the specialized packed path stayed neutral, so no DATAGRAM timing
+   claim is made. A follow-up that borrowed the complete packet Traits by
+   pointer into preparation was rejected: H3 sequential instructions/cycles/
+   wall time regressed 4.0%/2.6%/3.0%, each 0/5. The value boundary therefore
+   remains despite its diagnostic memcpy attribution. Real H3, quic-go v1/v2,
+   tquic normal/Retry/GOAWAY, Debug/ReleaseFast and package gates remain green.
+   Evidence is in
+   `docs/evidence/quic_traits_aggregate_direct/2026-10-30.json`.
    STREAM/DATA framing now borrows all body bytes in the common case, and both
    ordinary and batch sends encode directly into stable recovery storage
    instead of copying a second plaintext payload. Exact-size batching still

@@ -2597,13 +2597,12 @@ pub const Connection = struct {
             var payload_len: usize = 0;
             var recovery_payload_len: usize = 0;
             for (frames) |frame| {
-                var current_traits: OutboundFrameTraits = .{};
-                try self.validateOutboundFrameAndTraits(
-                    frame,
-                    &current_traits,
-                );
+                const current_retransmittable =
+                    try self.validateOutboundFrameAndTraits(
+                        frame,
+                        &traits,
+                    );
                 if (frame == .reset_stream_at) try self.validateResetPrefixQueued(frame.reset_stream_at, packets[0 .. i + 1]);
-                try traits.merge(current_traits);
                 if (frame == .stream) {
                     try self.validateStreamFrameForBatchSendAt(
                         frame.stream,
@@ -2618,7 +2617,7 @@ pub const Connection = struct {
                     payload_len,
                     frame_len,
                 ) catch return error.InvalidFrameLength;
-                if (current_traits.retransmittable) {
+                if (current_retransmittable) {
                     recovery_payload_len = std.math.add(
                         usize,
                         recovery_payload_len,
@@ -5479,15 +5478,17 @@ pub const Connection = struct {
         if (frames.len == 0) return error.MissingFrame;
         var combined: frame_traits.Traits = .{};
         for (frames) |frame| {
-            var traits: OutboundFrameTraits = .{};
-            try self.validateOutboundFrameAndTraits(frame, &traits);
+            _ = try self.validateOutboundFrameAndTraits(frame, &combined);
             if (frame == .reset_stream_at) try self.validateResetPrefixQueued(frame.reset_stream_at, &[_][]const quic.Frame{frames});
-            try combined.merge(traits);
         }
         return combined;
     }
 
-    fn validateOutboundFrameAndTraits(self: Connection, frame: quic.Frame, traits: *OutboundFrameTraits) Error!void {
+    fn validateOutboundFrameAndTraits(
+        self: Connection,
+        frame: quic.Frame,
+        traits: *OutboundFrameTraits,
+    ) Error!bool {
         try quic.validateFrameForPacketType(frame, .one_rtt);
         switch (frame) {
             .padding, .ack, .connection_close, .application_close => {},
@@ -5534,13 +5535,7 @@ pub const Connection = struct {
             },
             else => {},
         }
-        traits.* = frame_traits.classify(frame);
-        if (frame == .stream) {
-            traits.stream_bytes = std.math.cast(
-                u64,
-                frame.stream.data.len,
-            ) orelse return error.InvalidFrameLength;
-        }
+        return traits.observeRetransmittable(frame);
     }
 
     fn validateResetPrefixQueued(self: Connection, reset: quic.ResetStreamAtFrame, packets: anytype) Error!void {
