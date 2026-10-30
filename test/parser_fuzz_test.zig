@@ -88,6 +88,11 @@ test "fuzz bounded cross-protocol parsers" {
         &webtransport_bidi_seed,
         &webtransport_uni_seed,
         &webtransport_max_data_seed,
+        &webtransport_h2_stream_seed,
+        &webtransport_h2_reset_seed,
+        &webtransport_h2_stop_seed,
+        &webtransport_h2_max_stream_seed,
+        &webtransport_h2_blocked_seed,
         &webtransport_max_bidi_seed,
         &webtransport_max_uni_seed,
         &webtransport_data_blocked_seed,
@@ -102,6 +107,8 @@ test "fuzz bounded cross-protocol parsers" {
 
 test "bounded deterministic parser mutation smoke" {
     const seeds = [_][]const u8{
+        &.{ 0x99, 0x0b, 0x4d, 0x3c, 4, 4, 'a', 'b', 'c' },
+        &.{ 0x99, 0x0b, 0x4d, 0x39, 3, 4, 1, 0 },
         authority_pair_seed[4..],
         authority_ipv6_seed[4..],
         http_get_seed[4..],
@@ -455,8 +462,14 @@ const webtransport_max_uni_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x40, 1, 
 const webtransport_data_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x41, 1, 0 });
 const webtransport_bidi_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x43, 1, 0 });
 const webtransport_uni_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x44, 1, 0 });
+const webtransport_h2_stream_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x3b, 4, 4, 'a', 'b', 'c' });
+const webtransport_h2_reset_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x39, 3, 4, 1, 0 });
+const webtransport_h2_stop_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x3a, 2, 4, 1 });
+const webtransport_h2_max_stream_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x3e, 2, 4, 42 });
+const webtransport_h2_blocked_seed = smithSliceSeed(&.{ 0x99, 0x0b, 0x4d, 0x42, 2, 4, 42 });
 
 fn exerciseWebTransport(bytes: []const u8) !void {
+    try exerciseWebTransportHttp2(bytes);
     if (netz.webtransport.Capsule.parse(bytes)) |parsed| {
         try std.testing.expect(parsed.consumed <= bytes.len);
         switch (parsed.capsule) {
@@ -495,6 +508,40 @@ fn exerciseWebTransport(bytes: []const u8) !void {
             try std.testing.expect(session_id.isClientInitiatedBidirectional());
         }
     } else |_| {}
+}
+
+fn exerciseWebTransportHttp2(bytes: []const u8) !void {
+    const h2 = netz.webtransport.h2;
+    if (h2.Capsule.parse(bytes)) |parsed| {
+        try std.testing.expect(parsed.consumed <= bytes.len);
+        // Non-zero received padding can legally be ignored, while the writer
+        // must emit only zero padding. Every other parsed value is encodable.
+        const encodable = parsed.capsule != .padding or std.mem.allEqual(u8, parsed.capsule.padding, 0);
+        if (encodable) {
+            const output = try std.testing.allocator.alloc(u8, try parsed.capsule.encodedLen());
+            defer std.testing.allocator.free(output);
+            const encoded = try parsed.capsule.writeInto(output);
+            try std.testing.expectEqualDeep(parsed.capsule, (try h2.Capsule.parse(encoded)).capsule);
+        }
+    } else |_| {}
+    var reader = h2.Reader.init(std.testing.allocator, max_input_bytes);
+    defer reader.deinit();
+    var offset: usize = 0;
+    var event_count: usize = 0;
+    while (offset < bytes.len) {
+        const amount = @min(bytes.len - offset, 1 + offset % 17);
+        var part: []const u8 = bytes[offset..][0..amount];
+        while (true) {
+            const event = reader.next(&part) catch break;
+            if (event == null) break;
+            event_count += 1;
+            try std.testing.expect(event_count <= bytes.len + 1);
+            try std.testing.expect(h2.capsule.known(reader.kind));
+        }
+        offset += amount;
+    }
+    reader.finish() catch |err| try std.testing.expect(err == error.InvalidCapsule);
+    try std.testing.expect(reader.buffer.items.len <= max_input_bytes);
 }
 
 const mqtt_connect_seed = smithSliceSeed(

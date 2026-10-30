@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const h2 = @import("h2/mod.zig");
 const wire = @import("../internal/wire.zig");
 const webtransport_error = @import("../internal/webtransport_error.zig");
 const quic = @import("../quic/mod.zig");
@@ -702,6 +703,7 @@ test "WebTransport settings negotiation and datagram budget" {
 }
 
 test {
+    _ = h2;
     _ = runtime;
     _ = @import("settings/flow_tests.zig");
     _ = flow_control;
