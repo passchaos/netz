@@ -2,6 +2,7 @@
 set -euo pipefail
 
 client=${1:?netz grpc-cpp client executable path}
+pick_first_failover=${2:?netz grpc-cpp pick-first failover executable path}
 grpc_root=${GRPC_ROOT:-"$HOME/Work/grpc"}
 expected_grpc_commit=03d65cc67c450ccbb58a8a45627c4da83a886ccd
 bazel_bin=${BAZEL:-}
@@ -14,8 +15,13 @@ build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
 case_timeout=${GRPC_CPP_CASE_TIMEOUT:-120s}
 work=$(mktemp -d)
 server_pid=
+client_pid=
 
 cleanup() {
+  if [[ -n "$client_pid" ]]; then
+    kill "$client_pid" 2>/dev/null || true
+    wait "$client_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]]; then
     kill -INT "$server_pid" 2>/dev/null || true
     # The upstream loop checks SIGINT at five-second intervals. Avoid leaving
@@ -102,6 +108,10 @@ if [[ -z "$server" ]]; then
 fi
 if [[ ! -x "$server" ]]; then
   echo "grpc-cpp interop server is not executable: $server" >&2
+  exit 127
+fi
+if [[ ! -x "$pick_first_failover" ]]; then
+  echo "netz pick-first failover client is not executable: $pick_first_failover" >&2
   exit 127
 fi
 port=$(python3 - <<'PY'
@@ -208,3 +218,101 @@ grep -Fq \
   'netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client-tls.log"
 cat "$work/client-tls.log"
+
+kill -INT "$server_pid" 2>/dev/null || true
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+
+free_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+start_failover_server() {
+  local transport=$1
+  local listen_port=$2
+  local log=$3
+  local args=(--port="$listen_port")
+  if [[ "$transport" == tls ]]; then
+    args+=(
+      --use_tls=true
+      --tls_cert_file="$cert_file"
+      --tls_key_file="$key_file"
+    )
+  else
+    args+=(--use_tls=false)
+  fi
+  "$server" "${args[@]}" >"$log" 2>&1 &
+  server_pid=$!
+  for _ in $(seq 1 200); do
+    if grep -Fq "Server listening on 0.0.0.0:$listen_port" "$log"; then
+      return
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "grpc-cpp failover server exited before readiness: $transport" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  python3 - "$listen_port" <<'PY'
+import socket
+import sys
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1):
+    pass
+PY
+}
+
+run_pick_first_failover() {
+  local transport=$1
+  local first_port second_port first_log second_log client_log
+  first_port=$(free_port)
+  second_port=$(free_port)
+  while [[ "$second_port" == "$first_port" ]]; do second_port=$(free_port); done
+  first_log="$work/failover-$transport-server-a.log"
+  second_log="$work/failover-$transport-server-b.log"
+  client_log="$work/failover-$transport-client.log"
+
+  start_failover_server "$transport" "$first_port" "$first_log"
+  local client_args=("$first_port" "$second_port")
+  if [[ "$transport" == tls ]]; then client_args+=("$ca_file"); fi
+  timeout "$case_timeout" "$pick_first_failover" "${client_args[@]}" \
+    >"$client_log" 2>&1 &
+  client_pid=$!
+  for _ in $(seq 1 400); do
+    if grep -Fq \
+        "netz grpc-cpp pick-first phase one complete: transport=$transport endpoint=0" \
+        "$client_log"; then
+      break
+    fi
+    if ! kill -0 "$client_pid" 2>/dev/null; then
+      echo "netz pick-first client exited before phase one: $transport" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  grep -Fq \
+    "netz grpc-cpp pick-first phase one complete: transport=$transport endpoint=0" \
+    "$client_log"
+
+  kill -INT "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+  start_failover_server "$transport" "$second_port" "$second_log"
+
+  wait "$client_pid"
+  client_pid=
+  grep -Fq \
+    "netz grpc-cpp pick-first failover complete: transport=$transport endpoint_order=0->1 rpcs=2" \
+    "$client_log"
+  cat "$client_log"
+  kill -INT "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+}
+
+run_pick_first_failover h2c
+run_pick_first_failover tls

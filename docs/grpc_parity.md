@@ -361,6 +361,16 @@ selects upstream `ssl` custom credentials because the pick-first channel helper
 does not use the ordinary `--use_tls` branch. Full source hashes and commands
 are recorded in
 `docs/evidence/grpc_cpp_pick_first/2026-10-30.json`.
+The forward gate now independently covers real multi-address pick-first
+failover. One SharedChannel is constructed with grpc-cpp endpoints A and B in
+that order while only A is listening. After a canonical 271828-byte request and
+314159-byte response complete through A, the runner retires A and starts B on
+the already configured second address. A second wait-for-ready unary on the
+same channel must validate every response byte through B. Separate h2c and TLS
+runs require the explicit `endpoint_order=0->1` marker; TLS additionally keeps
+certificate verification and `h2` ALPN. The runner never has both external
+servers available during phase one, so success cannot be explained by choosing
+B initially or by constructing a replacement channel.
 The half-duplex case sends all four canonical response-size requests before
 half-closing, then requires the peer to emit the four responses in order. Both
 netz and C++ server paths therefore prove response production begins only

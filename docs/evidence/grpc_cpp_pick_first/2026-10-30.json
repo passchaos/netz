@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-10-30",
-  "feature": "official grpc-cpp pick_first_unary interoperability",
+  "feature": "official grpc-cpp pick_first interoperability and endpoint failover",
   "decision": "accepted",
   "scope": {
     "direction": "official grpc-cpp client to netz server",
@@ -13,10 +13,21 @@
     "method": "/grpc.testing.TestService/UnaryCall",
     "request": "strict SimpleRequest containing only fill_server_id=true",
     "response": "strict payload-free SimpleResponse containing server_id=netz-interop-server",
-    "assertion_owner": "upstream InteropClient::DoPickFirstUnary requires every response to carry the same server_id"
+    "assertion_owner": "upstream InteropClient::DoPickFirstUnary requires every response to carry the same server_id",
+    "netz_client_failover": {
+      "endpoints": 2,
+      "policy": "pick_first",
+      "sequence": "canonical unary on grpc-cpp A, retire A, start grpc-cpp B, second wait-for-ready unary on the same SharedChannel",
+      "request_body_bytes": 271828,
+      "response_body_bytes": 314159,
+      "transports": [
+        "h2c",
+        "certificate-verified TLS with h2 ALPN"
+      ]
+    }
   },
   "reference": {
-    "implementation": "grpc-core C++ interop_client",
+    "implementation": "grpc-core C++ interop_client and two independently managed interop_server processes",
     "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
     "source_clean": true,
     "description": "doc/interop-test-descriptions.md and test/cpp/interop/interop_client.cc"
@@ -34,6 +45,7 @@
     "fixture_codec": "decodePickFirstRequest accepts exactly protobuf field 9 varint true; encodeServerIdResponseAlloc emits exactly field 4 with bounded UTF-8 identity",
     "server": "one persistent HTTP/2 connection serves 100 sequential unary calls with one stable server identity",
     "runner": "pick_first_unary is part of every h2c/TLS reverse matrix",
+    "failover_runner": "the forward gate starts only server A for phase one, retires it after an explicit client marker, then starts preconfigured server B before phase two",
     "dns": "the case enables service-config resolution; the runner disables only upstream event_engine_dns and selects upstream native DNS to preserve the pick-first channel while avoiding an unrelated _grpc_config.127.0.0.1 TXT query",
     "tls": "upstream's pick-first-specific channel helper selects credentials through custom_credentials_type=ssl instead of its ordinary use_tls branch"
   },
@@ -44,9 +56,14 @@
     "reverse_matrix": "24 scenarios per transport, including pick_first_unary, passed over h2c and TLS",
     "forward_matrix": "netz client to grpc-cpp server complete h2c/TLS matrix passed",
     "pick_first_h2c": "100/100 unary calls, stable server_id",
-    "pick_first_tls": "100/100 unary calls, stable server_id, certificate verified, ALPN h2"
+    "pick_first_tls": "100/100 unary calls, stable server_id, certificate verified, ALPN h2",
+    "failover_h2c": "same SharedChannel completed endpoint order 0->1 with two canonical full-byte unary validations",
+    "failover_tls": "same SharedChannel completed endpoint order 0->1 with two canonical full-byte unary validations, certificate verified, ALPN h2"
   },
   "source_sha256": {
+    "build.zig": "28d36718dce5e776a031c0d3971fcd5fa12d640f9f7520d5a91ed7c1cb383981",
+    "tools/interop/grpc_cpp.sh": "0e93829cbcaf51d33096cdcff48431f53527ba240f8b5eb65eb78a73c4c31e01",
+    "tools/interop/grpc_cpp_pick_first_failover.zig": "921960a9eae7bc3f4dd288b23ad7ba7f58320c0d6b170a7179d8ea1a8e2e91ad",
     "tools/interop/grpc_cpp_messages.zig": "aacc03d387d89a197fd0bf07c34d399044e6d1feccb39a76de10711f7c5fe10a",
     "tools/interop/grpc_cpp_server.zig": "63010cc249bc6e0bfdc4705eb0d121a2b154193383f7d75c743e8d3a7bb06093",
     "tools/interop/grpc_cpp_client.sh": "7d900b9797d20c219e0272aea472fca112b2858fef581a94fd42de6c5b8426b4"
@@ -58,5 +75,5 @@
     "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp-client -Doptimize=ReleaseFast --summary all",
     "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
   ],
-  "remaining_gap": "This closes one standard external server-interoperability case. Multi-address external pick-first failover and max-concurrent-stream connection scaling remain separate conformance work."
+  "remaining_gap": "Standard single-server pick_first and real two-endpoint A-to-B failover are externally covered. Max-concurrent-stream connection scaling and broader repeated/fault-injected failover distributions remain separate conformance work."
 }
