@@ -49,7 +49,7 @@ pub const ConnectAttempt = struct {
     pub fn deinit(self: *ConnectAttempt) void {
         if (self.accepted_session) |*value| {
             if (self.state) |state| {
-                _ = (EndpointClient{ .state = state }).removeWithTimeout(value.handle, state.options.operation_timeout) catch false;
+                state.enqueueDetached(.{ .remove = value.handle });
             }
             value.deinit();
         }
@@ -137,6 +137,23 @@ const State = struct {
         self.tail = job;
         self.queued += 1;
         self.wake.set(self.io);
+    }
+    fn enqueueDetached(self: *State, operation: job_mod.Command) void {
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = self.options.operation_timeout, .clock = .awake });
+        const job = Job.create(self, operation, deadline) catch return;
+        self.lock();
+        if (self.closed or self.failure != null) {
+            self.unlock();
+            job.release();
+            return;
+        }
+        job.retain();
+        if (self.tail) |tail| tail.next = job else self.head = job;
+        self.tail = job;
+        self.queued += 1;
+        self.wake.set(self.io);
+        self.unlock();
+        job.release();
     }
 
     pub fn claim(self: *State) ?*Job {

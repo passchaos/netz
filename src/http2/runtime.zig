@@ -14,6 +14,12 @@ const client_duplex_owner = @import("runtime/duplex/client_owner.zig");
 const DuplexOwners = @import("runtime/duplex/owners.zig").Owners;
 const duplex_wake = @import("runtime/duplex/wake.zig");
 pub const ClientDuplexPumpEvent = client_duplex_owner.PumpEvent;
+pub const ServerDuplexPumpEvent = union(enum) {
+    request: ServerDuplexStream,
+    stream: u31,
+    progress,
+    wake,
+};
 const header_output = @import("runtime/headers/output.zig");
 test {
     _ = @import("runtime/settings/webtransport_tests.zig");
@@ -11832,6 +11838,14 @@ pub const Connection = struct {
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!RetainedFrame {
+        if (try self.pollOwnedServerDuplexFrame(stream_id)) |frame| return frame;
+        return self.readOwnedFrameForDuplexWithDeadline(deadline);
+    }
+
+    fn pollOwnedServerDuplexFrame(
+        self: *Connection,
+        stream_id: u31,
+    ) Error!?RetainedFrame {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.peekQueuedFrameForStream(stream_id)) |queued| {
@@ -11841,7 +11855,7 @@ pub const Connection = struct {
                 return self.popQueuedFrameForStream(stream_id).?;
             }
         }
-        return self.readOwnedFrameForDuplexWithDeadline(deadline);
+        return null;
     }
 
     const client_duplex_hooks = .{
@@ -11905,6 +11919,43 @@ pub const Connection = struct {
         return switch (result) {
             .wake => .wake,
             .frame => |frame| try client_duplex_owner.ingest(self, frame, .fromNow(self.io, .{ .raw = output_timeout, .clock = .awake }), client_duplex_hooks),
+        };
+    }
+
+    /// Sole-owner server pump for new duplex requests and routed DATA on
+    /// existing streams. A command wake cancels and joins the socket read;
+    /// a simultaneously completed frame wins and remains observable.
+    pub fn pumpServerUntilOrWake(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: *std.Io.Event) Error!ServerDuplexPumpEvent {
+        if (output_timeout.nanoseconds <= 0) return error.Timeout;
+        if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.role != .server or self.callback_reader_active) return error.UnexpectedFrame;
+        if (try self.acceptQueuedDuplexRequest()) |value| return .{ .request = value };
+        const result = duplex_wake.read(self, read_until, wake, RetainedFrame, Error, readClientDuplexWireFrame, retainInterruptedClientDuplexFrame) catch |err| return @errorCast(err);
+        return switch (result) {
+            .wake => .wake,
+            .frame => |input| blk: {
+                var frame = input;
+                var frame_owned = true;
+                defer if (frame_owned) frame.deinit(self.allocator);
+                const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = output_timeout, .clock = .awake });
+                if (try self.handleConnectionFrameUntil(frame.frame, deadline)) break :blk .progress;
+                if (frame.frame.header.frame_type == .goaway) break :blk .progress;
+                const stream_id = frame.frame.header.stream_id;
+                const initial_headers = frame.frame.header.frame_type == .headers and
+                    !self.pending_duplex_sibling_header.hasValue() and
+                    (stream_id > self.last_peer_client_stream_id or
+                        self.gracefulPreadmittedIndex(stream_id) != null);
+                if (initial_headers) {
+                    if (try self.acceptDuplexRequestFrameUntil(frame.frame, deadline)) |value| {
+                        break :blk .{ .request = value };
+                    }
+                    break :blk .progress;
+                }
+                try self.queueDuplexSiblingFrameUntil(frame);
+                frame_owned = false;
+                break :blk .{ .stream = stream_id };
+            },
         };
     }
 
@@ -21891,7 +21942,7 @@ pub const ServerDuplexStream = struct {
     pub fn readRequestEvent(
         self: *ServerDuplexStream,
     ) Error!DuplexRequestEvent {
-        return self.readRequestEventUntil(null);
+        return (try self.readRequestEventUntil(null, false)).?;
     }
 
     pub fn readRequestEventWithTimeout(
@@ -21899,10 +21950,10 @@ pub const ServerDuplexStream = struct {
         timeout: std.Io.Duration,
     ) Error!DuplexRequestEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readRequestEventUntil(.fromNow(
+        return (try self.readRequestEventUntil(.fromNow(
             self.connection.io,
             .{ .raw = timeout, .clock = .awake },
-        ));
+        ), false)).?;
     }
 
     pub fn readRequestEventWithDeadline(
@@ -21910,7 +21961,17 @@ pub const ServerDuplexStream = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!DuplexRequestEvent {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
-        return self.readRequestEventUntil(deadline);
+        return (try self.readRequestEventUntil(deadline, false)).?;
+    }
+
+    /// Consume only input already routed by the shared server owner.
+    pub fn pollRequestEvent(self: *ServerDuplexStream) Error!?DuplexRequestEvent {
+        return self.readRequestEventUntil(null, true);
+    }
+
+    pub fn pollRequestEventWithDeadline(self: *ServerDuplexStream, deadline: std.Io.Clock.Timestamp) Error!?DuplexRequestEvent {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.readRequestEventUntil(deadline, true);
     }
 
     /// Discard the remaining request body after the response half has ended.
@@ -21924,7 +21985,7 @@ pub const ServerDuplexStream = struct {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         if (self.request_finished) return .finished;
         while (true) {
-            var event = try self.readRequestEventUntil(deadline);
+            var event = (try self.readRequestEventUntil(deadline, false)).?;
             defer event.deinit(self.connection.allocator);
             switch (event) {
                 .data => if (self.request_finished) return .finished,
@@ -22007,7 +22068,8 @@ pub const ServerDuplexStream = struct {
     fn readRequestEventUntil(
         self: *ServerDuplexStream,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!DuplexRequestEvent {
+        buffered: bool,
+    ) Error!?DuplexRequestEvent {
         if (self.request_finished_reported) {
             return error.ConnectionClosed;
         }
@@ -22018,6 +22080,7 @@ pub const ServerDuplexStream = struct {
         }
         while (true) {
             if (self.pending_header.getPtr()) |pending| {
+                if (buffered and !pending.end_headers) return null;
                 const trailers = (try pending.resumeUntil(
                     self.connection,
                     deadline,
@@ -22032,11 +22095,14 @@ pub const ServerDuplexStream = struct {
                 self.request_finished = true;
                 return .{ .trailers = trailers };
             }
-            var frame = try self.connection
-                .readOwnedServerDuplexFrameWithDeadline(
-                self.stream_id,
-                deadline,
-            );
+            const next_frame: ?RetainedFrame = if (buffered)
+                try self.connection.pollOwnedServerDuplexFrame(self.stream_id)
+            else
+                try self.connection.readOwnedServerDuplexFrameWithDeadline(
+                    self.stream_id,
+                    deadline,
+                );
+            var frame = next_frame orelse return null;
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) continue;

@@ -1965,10 +1965,21 @@ uses concurrent callers, reversed sibling traffic, capacity refusal, stale and
 reused handles, deterministic exporter separation, queued-command abandonment,
 and shutdown with a live Session.
 
-The remaining HTTP/2 orchestration work is a matching connection-owning server
-accept endpoint and optional automatic client connection/reconnection policy;
-the current client endpoint adopts an already negotiated connection.
-Independent draft-15 browser/proxy interop also remains open.
+`h2.EndpointServer` now supplies the matching connection owner: a wake-aware
+server pump separates new CONNECT admission from routed Session input, pending
+requests retain owned inspection metadata, accept/reject decisions are
+deadline-bound, and optimistic pre-accept Capsule traffic applies bounded
+backpressure. Pending requests, Sessions and commands have independent limits;
+dropped pending requests, stale handles and abortive shutdown remain scoped to
+their exact owners. Its TLS regression covers a complete 429 entity, two live
+Sessions, capacity rejection, virtual streams, DATAGRAM, CLOSE/FIN, generation
+reuse, exporter separation and shutdown with a live Session.
+
+The remaining HTTP/2 orchestration work is above the per-connection layer: a
+listener-owned multi-connection server and optional automatic client
+connection/reconnection policy. The current endpoints adopt one already
+negotiated connection. Independent draft-15 browser/proxy interop also remains
+open.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

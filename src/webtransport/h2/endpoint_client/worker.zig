@@ -169,6 +169,10 @@ pub fn Worker(comptime State: type) type {
                         result.blocked = true;
                         continue;
                     }
+                    if (err == error.ResponseAvailable) {
+                        result.progress = true;
+                        continue;
+                    }
                     if (state.connection.aggregate_timeout_unusable) return err;
                     session.deinit();
                     slot.session = null;

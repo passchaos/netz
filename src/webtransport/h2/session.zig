@@ -14,6 +14,7 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     tunnel: http2.runtime.Tunnel,
     duplex: ?http2.runtime.ClientDuplexStream = null,
+    server_duplex: ?http2.runtime.ServerDuplexStream = null,
     state: model.State,
     reader: reader_mod.Reader,
     input: ?http2.runtime.OwnedTunnelData = null,
@@ -42,9 +43,13 @@ pub const Session = struct {
         if (options.max_payload < 4 or options.max_payload > std.math.maxInt(usize) - 16) return error.CapsuleTooLarge;
         return .{ .allocator = allocator, .tunnel = undefined, .duplex = duplex, .state = try model.State.init(allocator, .client, receive_limits, send_limits, options.max_live_streams), .reader = reader_mod.Reader.init(allocator, options.max_payload), .options = options };
     }
+    pub fn initServerDuplex(allocator: std.mem.Allocator, duplex: http2.runtime.ServerDuplexStream, receive_limits: model.Limits, send_limits: model.Limits, options: Options) Error!Session {
+        if (options.max_payload < 4 or options.max_payload > std.math.maxInt(usize) - 16) return error.CapsuleTooLarge;
+        return .{ .allocator = allocator, .tunnel = undefined, .server_duplex = duplex, .state = try model.State.init(allocator, .server, receive_limits, send_limits, options.max_live_streams), .reader = reader_mod.Reader.init(allocator, options.max_payload), .options = options };
+    }
     pub fn deinit(self: *Session) void {
         self.clearInput();
-        if (self.duplex) |*duplex| duplex.deinit() else self.tunnel.abort(null);
+        if (self.duplex) |*duplex| duplex.deinit() else if (self.server_duplex) |*duplex| duplex.deinit() else self.tunnel.abort(null);
         if (self.pending) |pending| self.allocator.free(pending.bytes);
         self.reader.deinit();
         self.delivered_storage.deinit(self.allocator);
@@ -78,13 +83,17 @@ pub const Session = struct {
         return if (self.duplex_response) |response| response.headers else &.{};
     }
     pub fn multiplexed(self: Session) bool {
-        return self.duplex != null;
+        return self.duplex != null or self.server_duplex != null;
     }
     fn connection(self: *Session) *http2.runtime.Connection {
-        return if (self.duplex) |*duplex| duplex.connection else self.tunnel.connection;
+        if (self.duplex) |*duplex| return duplex.connection;
+        if (self.server_duplex) |*duplex| return duplex.connection;
+        return self.tunnel.connection;
     }
     fn streamId(self: *Session) u31 {
-        return if (self.duplex) |duplex| duplex.streamId() else self.tunnel.stream_id;
+        if (self.duplex) |duplex| return duplex.streamId();
+        if (self.server_duplex) |duplex| return duplex.stream_id;
+        return self.tunnel.stream_id;
     }
     fn clearInput(self: *Session) void {
         if (self.input) |*input| input.deinit(self.connection().allocator);
@@ -95,7 +104,7 @@ pub const Session = struct {
 
     fn fail(self: *Session, deadline: std.Io.Clock.Timestamp) void {
         self.terminal = true;
-        if (self.duplex) |*duplex| duplex.reset(.cancel) catch {} else self.tunnel.abort(deadline);
+        if (self.duplex) |*duplex| duplex.reset(.cancel) catch {} else if (self.server_duplex) |*duplex| duplex.reset(.cancel) catch {} else self.tunnel.abort(deadline);
     }
     fn stage(self: *Session, capsule: capsules.Capsule, fin: bool) Error!void {
         if (self.terminal or self.state.local_closed) return error.SessionClosed;
@@ -130,6 +139,22 @@ pub const Session = struct {
                 response_available = result.response_available;
             } else {
                 progress.fin_committed = duplex.requestFinished();
+            }
+        } else if (self.server_duplex) |*duplex| {
+            if (pending.offset != pending.bytes.len or (pending.fin and !duplex.responseFinished())) {
+                const before = duplex.responseCommittedBytes();
+                const result = duplex.writeResponseSlicesWithDeadline(&.{pending.bytes[pending.offset..]}, pending.fin, deadline) catch |err| {
+                    progress.committed_bytes = duplex.responseCommittedBytes() - before;
+                    progress.fin_committed = duplex.responseFinished();
+                    pending.offset += progress.committed_bytes;
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                    return err;
+                };
+                progress.committed_bytes = result.written;
+                progress.fin_committed = duplex.responseFinished();
+                response_available = result.response_available;
+            } else {
+                progress.fin_committed = duplex.responseFinished();
             }
         } else self.tunnel.writeWithDeadline(pending.bytes[pending.offset..], pending.fin, &progress, deadline) catch |err| {
             pending.offset += progress.committed_bytes;
@@ -282,7 +307,7 @@ pub const Session = struct {
     /// method never reads the socket and is therefore safe for sibling
     /// progress while another Session resumes output.
     pub fn pollWithDeadline(self: *Session, deadline: std.Io.Clock.Timestamp) Error!bool {
-        const duplex = if (self.duplex) |*value| value else return false;
+        if (self.duplex == null and self.server_duplex == null) return false;
         if (self.terminal) return false;
         var progressed = false;
         while (true) {
@@ -327,26 +352,50 @@ pub const Session = struct {
                 continue;
             }
             self.clearInput();
-            var transport_event = (try duplex.pollResponseEventWithDeadline(deadline)) orelse return progressed;
-            progressed = true;
-            var event_owned = true;
-            defer if (event_owned) transport_event.deinit(self.connection().allocator);
-            switch (transport_event) {
-                .data => |data| {
-                    self.duplex_input = data;
-                    event_owned = false;
-                    self.remaining = data.data;
-                    self.input_fin = duplex.responseFinished();
-                },
-                .finished => self.input_fin = true,
-                .reset => {
-                    self.terminal = true;
-                    return error.StreamReset;
-                },
-                .informational, .head, .trailers => {
-                    self.fail(deadline);
-                    return error.UnexpectedFrame;
-                },
+            if (self.duplex) |*duplex| {
+                var transport_event = (try duplex.pollResponseEventWithDeadline(deadline)) orelse return progressed;
+                progressed = true;
+                var event_owned = true;
+                defer if (event_owned) transport_event.deinit(self.connection().allocator);
+                switch (transport_event) {
+                    .data => |data| {
+                        self.duplex_input = data;
+                        event_owned = false;
+                        self.remaining = data.data;
+                        self.input_fin = duplex.responseFinished();
+                    },
+                    .finished => self.input_fin = true,
+                    .reset => {
+                        self.terminal = true;
+                        return error.StreamReset;
+                    },
+                    .informational, .head, .trailers => {
+                        self.fail(deadline);
+                        return error.UnexpectedFrame;
+                    },
+                }
+            } else if (self.server_duplex) |*duplex| {
+                var transport_event = (try duplex.pollRequestEventWithDeadline(deadline)) orelse return progressed;
+                progressed = true;
+                var event_owned = true;
+                defer if (event_owned) transport_event.deinit(self.connection().allocator);
+                switch (transport_event) {
+                    .data => |data| {
+                        self.duplex_input = data;
+                        event_owned = false;
+                        self.remaining = data.data;
+                        self.input_fin = duplex.requestFinished();
+                    },
+                    .finished => self.input_fin = true,
+                    .reset => {
+                        self.terminal = true;
+                        return error.StreamReset;
+                    },
+                    .trailers => {
+                        self.fail(deadline);
+                        return error.UnexpectedFrame;
+                    },
+                }
             }
         }
     }
@@ -407,6 +456,30 @@ pub const Session = struct {
                         return error.UnexpectedFrame;
                     },
                 }
+            } else if (self.server_duplex) |*duplex| {
+                var transport_event = duplex.readRequestEventWithDeadline(deadline) catch |err| {
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                    return err;
+                };
+                var event_owned = true;
+                defer if (event_owned) transport_event.deinit(self.connection().allocator);
+                switch (transport_event) {
+                    .data => |data| {
+                        self.duplex_input = data;
+                        event_owned = false;
+                        self.remaining = data.data;
+                        self.input_fin = duplex.requestFinished();
+                    },
+                    .finished => self.input_fin = true,
+                    .reset => {
+                        self.terminal = true;
+                        return error.StreamReset;
+                    },
+                    .trailers => {
+                        self.fail(deadline);
+                        return error.UnexpectedFrame;
+                    },
+                }
             } else {
                 const input = self.tunnel.readWithDeadline(deadline) catch |err| {
                     if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable) self.fail(deadline);
@@ -422,6 +495,13 @@ pub const Session = struct {
         if (self.duplex) |*duplex| {
             if (!duplex.requestFinished()) {
                 _ = duplex.finishRequestWithDeadline(deadline) catch |err| {
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                    return err;
+                };
+            }
+        } else if (self.server_duplex) |*duplex| {
+            if (!duplex.responseFinished()) {
+                _ = duplex.finishResponseWithDeadline(deadline) catch |err| {
                     if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
                     return err;
                 };

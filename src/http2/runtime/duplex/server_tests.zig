@@ -91,6 +91,7 @@ test "HTTP/2 server duplex handles coexist under one frame reader" {
     try fixture.requestHeaders(&encoder, 1, "/first");
     var first = try fixture.connection.acceptDuplexRequest();
     defer first.deinit();
+    try std.testing.expect((try first.pollRequestEvent()) == null);
 
     // Reading stream 1 encounters and retains stream 3 first. Accepting the
     // second handle must reuse that predecoded HPACK state rather than create
@@ -109,7 +110,7 @@ test "HTTP/2 server duplex handles coexist under one frame reader" {
         @as(usize, 2),
         fixture.connection.activeServerDuplexCount(),
     );
-    var second_data = try second.readRequestEvent();
+    var second_data = (try second.pollRequestEvent()).?;
     defer second_data.deinit(allocator);
     try std.testing.expectEqualStrings("b", second_data.data.data);
 
@@ -132,4 +133,30 @@ test "HTTP/2 server duplex handles coexist under one frame reader" {
         fixture.connection.activeServerDuplexCount(),
     );
     try std.testing.expect(!fixture.connection.duplex_reader_active);
+}
+
+test "HTTP/2 server duplex pump races command wake and routes streams" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    var wake: std.Io.Event = .unset;
+    wake.set(io);
+    try std.testing.expect((try fixture.connection.pumpServerUntilOrWake(null, .fromSeconds(1), &wake)) == .wake);
+    wake.reset();
+    var encoder: http2.Hpack.Encoder = .{};
+    defer encoder.deinit(allocator);
+    try fixture.requestHeaders(&encoder, 1, "/pumped");
+    var request_event = try fixture.connection.pumpServerUntilOrWake(null, .fromSeconds(1), &wake);
+    var request = request_event.request;
+    request_event = undefined;
+    defer request.deinit();
+    try std.testing.expectEqualStrings("/pumped", request.path);
+    try fixture.frame(.data, 1, 1, "payload");
+    const routed = try fixture.connection.pumpServerUntilOrWake(null, .fromSeconds(1), &wake);
+    try std.testing.expectEqual(@as(u31, 1), routed.stream);
+    var data = (try request.pollRequestEvent()).?;
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings("payload", data.data.data);
 }

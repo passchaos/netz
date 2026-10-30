@@ -17,6 +17,11 @@ pub const SessionHandle = endpoint_client.Handle;
 pub const EndpointEvent = endpoint_client.Event;
 pub const EndpointAccepted = endpoint_client.Accepted;
 pub const EndpointKeyingMaterial = endpoint_client.KeyingMaterial;
+pub const endpoint_server = @import("endpoint_server.zig");
+pub const EndpointServer = endpoint_server.EndpointServer;
+pub const EndpointServerOptions = endpoint_server.Options;
+pub const PendingSessionHandle = endpoint_server.PendingHandle;
+pub const EndpointPendingRequest = endpoint_server.PendingRequest;
 
 test {
     _ = capsule;
@@ -25,4 +30,5 @@ test {
     _ = @import("runtime_tests.zig");
     _ = @import("session_write_tests.zig");
     _ = endpoint_client;
+    _ = endpoint_server;
 }

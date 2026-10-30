@@ -340,6 +340,152 @@ pub fn readRequestWithTimeout(connection: *http2.runtime.Connection, timeout: st
     return readRequestWithDeadline(connection, .fromNow(connection.io, .{ .raw = timeout, .clock = .awake }));
 }
 
+pub const PendingDuplexSession = struct {
+    request: http2.runtime.ServerDuplexStream,
+    receive_settings: http2.WebTransportSettings,
+    active: bool = true,
+    rejection_status: ?u16 = null,
+    rejection_offset: usize = 0,
+
+    pub fn deinit(self: *PendingDuplexSession) void {
+        if (!self.active) return;
+        self.request.deinit();
+        self.* = undefined;
+    }
+};
+
+fn rejectDuplexHeaders(pending: *PendingDuplexSession, status: u16, deadline: std.Io.Clock.Timestamp) Error!void {
+    try pending.request.finishResponseHeadersWithDeadline(.{ .status = status, .request_method = "CONNECT", .extended_connect = true }, deadline);
+    _ = try pending.request.drainRequestAfterResponseWithDeadline(deadline);
+    pending.request.deinit();
+    pending.active = false;
+}
+
+pub fn readDuplexRequestWithDeadline(connection: *http2.runtime.Connection, deadline: std.Io.Clock.Timestamp) Error!PendingDuplexSession {
+    try encryption(connection);
+    const request = try connection.acceptDuplexRequestWithDeadline(deadline);
+    return prepareDuplexRequestWithDeadline(connection, request, deadline);
+}
+
+pub fn prepareDuplexRequestWithDeadline(connection: *http2.runtime.Connection, request_value: http2.runtime.ServerDuplexStream, deadline: std.Io.Clock.Timestamp) Error!PendingDuplexSession {
+    try encryption(connection);
+    var request = request_value;
+    var pending = PendingDuplexSession{ .request = request, .receive_settings = connection.localWebTransportSettings() };
+    request = undefined;
+    var pending_owned = true;
+    errdefer if (pending_owned) pending.deinit();
+    if (!connection.localWebTransportSettings().enabled) {
+        try rejectDuplexHeaders(&pending, 405, deadline);
+        pending_owned = false;
+        return error.WebTransportDisabled;
+    }
+    const candidate = &pending.request;
+    if (!std.mem.eql(u8, candidate.method, "CONNECT") or candidate.protocol == null or !std.mem.eql(u8, candidate.protocol.?, "webtransport") or !std.mem.eql(u8, candidate.scheme, "https") or candidate.authority == null or candidate.authority.?.len == 0 or candidate.path.len == 0) {
+        try rejectDuplexHeaders(&pending, 400, deadline);
+        pending_owned = false;
+        return error.InvalidConnect;
+    }
+    pending_owned = false;
+    return pending;
+}
+
+pub fn readDuplexRequestWithTimeout(connection: *http2.runtime.Connection, timeout: std.Io.Duration) Error!PendingDuplexSession {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readDuplexRequestWithDeadline(connection, .fromNow(connection.io, .{ .raw = timeout, .clock = .awake }));
+}
+
+pub fn acceptDuplexWithDeadline(allocator: std.mem.Allocator, connection: *http2.runtime.Connection, pending: *PendingDuplexSession, options: ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Session {
+    try encryption(connection);
+    if (!pending.active or pending.rejection_status != null) return error.InvalidConnect;
+    origin_policy.validateOrigin(pending.request, options.origin) catch {
+        try rejectDuplexHeaders(pending, 403, deadline);
+        return error.InvalidOrigin;
+    };
+    const send_limits = init_header.parse(pending.request.headers, init_header.fromSettings(connection.peerWebTransportSettings())) catch |err| {
+        try rejectDuplexHeaders(pending, 400, deadline);
+        return err;
+    };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+    const selection = protocol.serverSelection(try qpack(temporary, pending.request.headers), try qpack(temporary, options.headers), options.protocols) catch |err| {
+        if (err == error.NoCommonApplicationProtocol) try rejectDuplexHeaders(pending, 400, deadline);
+        return err;
+    };
+    var headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+    try headers.appendSlice(temporary, options.headers);
+    if (selection) |value| {
+        var supplied = false;
+        for (options.headers) |field| supplied = supplied or std.ascii.eqlIgnoreCase(field.name, protocol.selected_header);
+        if (!supplied) try headers.append(temporary, .{ .name = protocol.selected_header, .value = try protocol.writeItem(temporary, value) });
+    }
+    var init_storage: [64]u8 = undefined;
+    if (options.initial_receive_stream_data) |limits| {
+        const value = init_header.writeInto(&init_storage, limits) catch |err| switch (err) {
+            error.InvalidWebTransportInit => return err,
+            error.BufferTooShort => unreachable,
+        };
+        try headers.append(temporary, .{ .name = "webtransport-init", .value = value });
+    }
+    const receive_limits = try init_header.parse(headers.items, init_header.fromSettings(pending.receive_settings));
+    if (options.session.max_payload < 4 or options.session.max_payload > std.math.maxInt(usize) - 16) return error.CapsuleTooLarge;
+    const selected_copy = if (selection) |value| try allocator.dupe(u8, value) else null;
+    var selected_transferred = false;
+    errdefer if (!selected_transferred) if (selected_copy) |value| allocator.free(value);
+    var state = try model.State.init(allocator, .server, receive_limits, send_limits, options.session.max_live_streams);
+    state.deinit();
+    try pending.request.startResponseWithDeadline(.{ .status = 200, .headers = headers.items, .request_method = "CONNECT", .extended_connect = true }, deadline);
+    var transport = pending.request;
+    pending.active = false;
+    var transport_owned = true;
+    errdefer if (transport_owned) transport.deinit();
+    var session = try Session.initServerDuplex(allocator, transport, receive_limits, send_limits, options.session);
+    transport_owned = false;
+    errdefer session.deinit();
+    session.selected_protocol = selected_copy;
+    selected_transferred = true;
+    return session;
+}
+
+pub fn rejectDuplexWithDeadline(pending: *PendingDuplexSession, options: RejectOptions, deadline: std.Io.Clock.Timestamp) Error!void {
+    if (!pending.active) return error.InvalidConnect;
+    if (pending.rejection_status) |status| {
+        if (status != options.status) return error.InvalidStatus;
+    } else {
+        try pending.request.startResponseWithDeadline(.{
+            .status = options.status,
+            .headers = options.headers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        }, deadline);
+        pending.rejection_status = options.status;
+    }
+    while (pending.rejection_offset < options.body.len) {
+        const result = try pending.request.writeResponseWithDeadline(options.body[pending.rejection_offset..], deadline);
+        pending.rejection_offset += result.written;
+        if (result.response_available) return error.ResponseAvailable;
+    }
+    if (options.trailers.len != 0) {
+        try pending.request.finishResponseTrailersWithDeadline(options.trailers, deadline);
+    } else {
+        const result = try pending.request.finishResponseWithDeadline(deadline);
+        if (result.response_available and !pending.request.responseFinished()) return error.ResponseAvailable;
+    }
+    _ = try pending.request.drainRequestAfterResponseWithDeadline(deadline);
+    pending.request.deinit();
+    pending.active = false;
+}
+
+pub fn rejectDuplexWithTimeout(pending: *PendingDuplexSession, options: RejectOptions, timeout: std.Io.Duration) Error!void {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return rejectDuplexWithDeadline(pending, options, .fromNow(pending.request.connection.io, .{ .raw = timeout, .clock = .awake }));
+}
+
+pub fn acceptDuplexWithTimeout(allocator: std.mem.Allocator, connection: *http2.runtime.Connection, pending: *PendingDuplexSession, options: ServerOptions, timeout: std.Io.Duration) Error!Session {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return acceptDuplexWithDeadline(allocator, connection, pending, options, .fromNow(connection.io, .{ .raw = timeout, .clock = .awake }));
+}
+
 pub fn acceptWithDeadline(allocator: std.mem.Allocator, connection: *http2.runtime.Connection, pending: PendingSession, options: ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Session {
     try encryption(connection);
     origin_policy.validateOrigin(pending.request, options.origin) catch {

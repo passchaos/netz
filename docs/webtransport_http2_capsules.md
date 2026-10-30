@@ -135,8 +135,9 @@ metadata and Init syntax, and then accepts a succeeding sibling Session.
 Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.
 
-The multiplexing transport, Session adapter and background endpoint pass
-170/170 focused Debug tests and 135/135 targeted ReleaseFast tests. The
+The multiplexing transport, Session adapters and background endpoints pass
+175/175 focused Debug tests; the server endpoint's targeted ReleaseFast gate
+passes 136/136. The
 production h2c connection fuzz gate
 passes 3/3, and the independent bidirectional Hyper matrix passes all 9 build
 steps across h2c and TLS while exercising multiplexing, cancellation, flow
@@ -170,3 +171,20 @@ send, consume/retire, RESET/STOP, credit grants, DRAIN/CLOSE, removal and
 exporters. Its destructor is an explicit abortive shutdown policy: queued work
 is completed with `EndpointClosed`, the worker is canceled and joined, every
 live Session is reset, and the owned HTTP/2 connection is closed.
+
+`webtransport.h2.EndpointServer` provides the matching server owner. Its
+wake-aware HTTP/2 pump returns new CONNECT requests separately from routed
+Session input, so admission waits never create a second frame reader or block
+commands behind an idle socket read. Pending requests own inspected authority,
+path, Origin and headers until explicit accept/reject; dropped requests reset
+only their stream. Accepted Sessions use generation-checked handles and the
+same complete control/data surface as the client endpoint. Pending, accepted
+and queued-command capacities are bounded independently. Optimistic Capsule
+input on an undecided CONNECT pauses further socket reads until admission,
+preventing the shared connection queue from growing past application policy.
+
+The authenticated endpoint regression covers an application 429 entity, two
+accepted Sessions, server-side capacity rejection, virtual streams, DATAGRAM,
+independent CLOSE/FIN, handle generation reuse, exporters and shutdown with a
+live Session. Both client and server concurrency regressions pass three
+consecutive focused reruns.

@@ -230,6 +230,17 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "removeWithTimeout",
         "exportKeyingMaterialWithTimeout",
     }) |decl| try std.testing.expect(@hasDecl(h2.EndpointClient, decl));
+    try std.testing.expect(@hasDecl(h2, "EndpointServer"));
+    inline for (&.{
+        "receiveRequestWithTimeout",
+        "sendDatagramWithTimeout",
+        "receiveWithTimeout",
+        "openStreamWithTimeout",
+        "sendStreamWithTimeout",
+        "closeWithTimeout",
+        "removeWithTimeout",
+        "exportKeyingMaterialWithTimeout",
+    }) |decl| try std.testing.expect(@hasDecl(h2.EndpointServer, decl));
 }
 
 test "public HTTP1 owned heads accept folded metadata without requiring the body" {
