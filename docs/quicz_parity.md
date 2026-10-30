@@ -2909,6 +2909,27 @@ cost and tail scheduling.
    same-application-shape evidence, not an equal-wire claim. Full rows and the
    rejected intermediate ACK/recovery measurements are in
    `docs/evidence/quic_sent_packet_ordered_fast_path/2026-10-30.json`.
+   A post-change DWARF profile then attributed 2.06% self time to
+   `Frame.wireLen`, split almost evenly between ordinary preparation and the
+   stateful batch preflight. STREAM range validation already checked the end
+   offset and computed the stream-ID/offset varint lengths. It now returns
+   that metadata so batch wire sizing adds only the data-length varint and
+   payload bytes; non-STREAM and ordinary paths are unchanged. Five CPU-0
+   50k four-fragment pairs improved instructions/cycles by paired medians of
+   0.72%/0.79% (5/5 and 4/5) and batch wall time by 0.38%. A one-fragment
+   control improved instructions/cycles 0.18%/1.04%, both 5/5; a 50k DATAGRAM
+   control was instruction/wall neutral and improved cycles 0.42%. The next
+   profile reduced `Frame.wireLen` to 0.82% and retained it only below the
+   unchanged ordinary prepare path. Five fixed-binary real-H3 pairs, with
+   three exact 16-MiB/four-stream samples per arm, were neutral at a 0.22%
+   paired improvement and 3/5 wins. Compacting the complete validated Traits
+   result was rejected after instructions/cycles/sequential regressed
+   0.10%/0.22%/0.78%; the existing value boundary remains. A separate
+   quic-go-style one-millisecond pacing floor barely changed peer queue drops
+   and reduced netz upload to 13.7-15.3 MiB/s, so it was also removed rather
+   than turning a host-specific loopback limit into a production default.
+   Full evidence is in
+   `docs/evidence/quic_stream_range_wirelen/2026-10-30.json`.
    STREAM/DATA framing now borrows all body bytes in the common case, and both
    ordinary and batch sends encode directly into stable recovery storage
    instead of copying a second plaintext payload. Exact-size batching still

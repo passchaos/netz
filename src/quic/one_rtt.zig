@@ -85,6 +85,37 @@ fn streamFrameEnd(stream: quic.StreamFrame) Error!u64 {
     return end;
 }
 
+const ValidatedStreamSendRange = struct {
+    end: u64,
+    stream_id_len: u8,
+    offset_len: u8,
+
+    fn frameWireLen(
+        self: ValidatedStreamSendRange,
+        data_len: usize,
+    ) Error!usize {
+        const data_len_u64 = std.math.cast(u64, data_len) orelse
+            return error.InvalidFrameLength;
+        var len = std.math.add(
+            usize,
+            1,
+            self.stream_id_len,
+        ) catch return error.InvalidFrameLength;
+        len = std.math.add(
+            usize,
+            len,
+            self.offset_len,
+        ) catch return error.InvalidFrameLength;
+        len = std.math.add(
+            usize,
+            len,
+            try quic.varint.length(data_len_u64),
+        ) catch return error.InvalidFrameLength;
+        return std.math.add(usize, len, data_len) catch
+            return error.InvalidFrameLength;
+    }
+};
+
 fn validateRequestedMaxAckDelay(
     requested_us: u64,
     advertised_min_us: ?u64,
@@ -1925,7 +1956,7 @@ pub const Connection = struct {
                 deadline,
             );
         }
-        try self.validateStreamRangeForSendAt(
+        _ = try self.validateStreamRangeForSendAt(
             stream_id,
             offset,
             total_len,
@@ -2138,7 +2169,7 @@ pub const Connection = struct {
             .fin = fin,
         } };
         _ = try complete.wireLen();
-        try self.validateStreamFrameForSendAt(
+        _ = try self.validateStreamFrameForSendAt(
             complete.stream,
             self.monotonicNowNs(),
         );
@@ -2603,15 +2634,15 @@ pub const Connection = struct {
                         &traits,
                     );
                 if (frame == .reset_stream_at) try self.validateResetPrefixQueued(frame.reset_stream_at, packets[0 .. i + 1]);
-                if (frame == .stream) {
-                    try self.validateStreamFrameForBatchSendAt(
+                const frame_len = if (frame == .stream)
+                    try (try self.validateStreamFrameForBatchSendAt(
                         frame.stream,
                         now_ns,
                         &stream_validation,
                         &stream_validation_allocated,
-                    );
-                }
-                const frame_len = try frame.wireLen();
+                    )).frameWireLen(frame.stream.data.len)
+                else
+                    try frame.wireLen();
                 payload_len = std.math.add(
                     usize,
                     payload_len,
@@ -3284,7 +3315,7 @@ pub const Connection = struct {
         };
         for (frames) |frame| {
             if (frame != .stream) continue;
-            try self.validateStreamFrameForBatchSendAt(
+            _ = try self.validateStreamFrameForBatchSendAt(
                 frame.stream,
                 sent_time_ns,
                 &validation,
@@ -11123,7 +11154,7 @@ pub const Connection = struct {
         for (frames) |frame| {
             try quic.validateFrameForPacketType(frame, .zero_rtt);
             if (frame != .stream) continue;
-            try self.validateStreamFrameForBatchSendAt(
+            _ = try self.validateStreamFrameForBatchSendAt(
                 frame.stream,
                 null,
                 &validation,
@@ -15950,7 +15981,7 @@ pub const Connection = struct {
         self: *Connection,
         stream: quic.StreamFrame,
         sent_time_ns: ?u64,
-    ) Error!void {
+    ) Error!ValidatedStreamSendRange {
         if (self.findSendStreamEntry(stream.stream_id)) |entry| {
             if (entry.stopped != null or entry.reset_sent != null) {
                 const prefix = if (entry.required_reset_prefix) |*value| value else return error.StreamStopped;
@@ -15973,16 +16004,21 @@ pub const Connection = struct {
         data_len: usize,
         fin: bool,
         sent_time_ns: ?u64,
-    ) Error!void {
-        _ = quic.varint.length(stream_id) catch
+    ) Error!ValidatedStreamSendRange {
+        const stream_id_len = quic.varint.length(stream_id) catch
             return error.InvalidFrameLength;
-        _ = quic.varint.length(offset) catch
+        const encoded_offset_len = quic.varint.length(offset) catch
             return error.InvalidFrameLength;
         const data_len_u64 = std.math.cast(u64, data_len) orelse
             return error.InvalidFrameLength;
         const end = std.math.add(u64, offset, data_len_u64) catch
             return error.InvalidFrameLength;
         if (end > quic.varint.max_value) return error.InvalidFrameLength;
+        const validated = ValidatedStreamSendRange{
+            .end = end,
+            .stream_id_len = stream_id_len,
+            .offset_len = if (offset == 0) 0 else encoded_offset_len,
+        };
 
         if (self.findSendStreamEntry(stream_id)) |entry| {
             if (entry.stopped != null or entry.reset_sent != null) {
@@ -16004,13 +16040,15 @@ pub const Connection = struct {
                     return error.FinalSizeMismatch;
                 }
             }
-            return;
+            return validated;
         }
         if (self.isClosedStream(stream_id)) {
             return error.StreamStateError;
         }
         if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
-        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return;
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return validated;
+        }
 
         const count = streamCountForId(stream_id);
         const direction = streamDirection(stream_id);
@@ -16018,7 +16056,7 @@ pub const Connection = struct {
             .bidirectional => self.peer_max_streams_bidi,
             .unidirectional => self.peer_max_streams_uni,
         };
-        if (count <= limit) return;
+        if (count <= limit) return validated;
         if (sent_time_ns) |now_ns|
             try self.sendStreamsBlockedAt(direction, now_ns)
         else
@@ -16032,9 +16070,12 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
         validation: *std.ArrayList(SendStreamPreflightEntry),
         allocated: *bool,
-    ) Error!void {
-        try self.validateStreamFrameForSendAt(stream, sent_time_ns);
-        const end = try streamFrameEnd(stream);
+    ) Error!ValidatedStreamSendRange {
+        const validated = try self.validateStreamFrameForSendAt(
+            stream,
+            sent_time_ns,
+        );
+        const end = validated.end;
         var shadow: *SendStreamPreflightEntry = for (validation.items) |*item| {
             if (item.stream_id == stream.stream_id) break item;
         } else blk: {
@@ -16067,6 +16108,7 @@ pub const Connection = struct {
         }
         shadow.highest_sent_end = @max(shadow.highest_sent_end, end);
         if (stream.fin) shadow.final_size = end;
+        return validated;
     }
 
     fn validateLocalStreamCount(self: *Connection, stream_id: u64) Error!void {

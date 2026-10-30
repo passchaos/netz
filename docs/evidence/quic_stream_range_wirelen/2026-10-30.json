@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "QUIC batch STREAM validation reuses range metadata for exact wire length",
+  "decision": "accepted",
+  "baseline": {
+    "head": "971568588bc1a5f5596ec4c90b7df32a66839b90",
+    "benchmark_sha256": "b80601eb46d739f89d8a251b909dad2ca5fa4f083e9357e1d90a728162c4f94f",
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "1275395b79f29dfac95708405b9cd452e46cad46ee73b3a03d589b0dbcbb33c8"
+    },
+    "real_h3_binary_sha256": {
+      "client": "5fe7b85d70f034bf068152ca55279b9f8dd7f083e4f9ebc2a3eabce78d193054",
+      "server": "18044e1ffa4d402145df39421219a1d8dd002d5f001dbce820fdc46ce3db67c1"
+    }
+  },
+  "candidate": {
+    "benchmark_sha256": "ebff03392d5d43b02117d02241c9fdfd3d2469aa46bd311cf3e2064ca96c39fd",
+    "source_sha256": {
+      "src/quic/one_rtt.zig": "85b24a549001b526f632b262dca2041aaf6690560d73d0feb128887d9a37b1a9"
+    },
+    "real_h3_binary_sha256": {
+      "client": "6d392f949aaef33c2871c33c6d1c7cbf17b762f8e64cf58c17086b66f89d5e75",
+      "server": "84a1f8e2ec2bc68d0a86d04dceb225ad8d36414ada6aa2ff816a32243c824fe0"
+    },
+    "implementation": [
+      "STREAM send-range validation returns the already checked end offset plus stream-ID and optional offset varint lengths.",
+      "The stateful batch preflight derives the exact STREAM wire length from that result instead of calling Frame.wireLen and recomputing the same end/varint metadata.",
+      "Non-STREAM frames, ordinary single-packet preparation, frame encoding, flow-control transactions, and final-size validation retain their existing paths."
+    ],
+    "wire_changes": false,
+    "public_api_changes": false,
+    "connection_layout_changes": false
+  },
+  "profile": {
+    "baseline": {
+      "artifact": "zig-out/quic-post-index-memcpy-profile/20261030T162000Z-stream4-5k-dwarf",
+      "artifact_bytes": 75991740,
+      "aggregate_file_hash_digest": "8430e68e21523cd478809b191f3f89ee4074f736baa5e976d296d0d7407b969f",
+      "samples": "about 8000 cycles samples, zero lost",
+      "frame_wire_len_self_percent": 2.06,
+      "frame_wire_len_batch_share_percent": 50.60
+    },
+    "candidate": {
+      "artifact": "zig-out/quic-stream-range-wirelen-profile/20261030T171000Z-stream4-5k-dwarf",
+      "artifact_bytes": 75871660,
+      "aggregate_file_hash_digest": "a2442c90ddff40307ca9324cdbd13ce8665edc8f5bdc6f3df7ee0cc9c5e499f5",
+      "samples": "about 8000 cycles samples, zero lost",
+      "frame_wire_len_self_percent": 0.82,
+      "observation": "Every retained Frame.wireLen stack was under ordinary single-packet prepareFramesForSend; the stateful batch caller disappeared."
+    }
+  },
+  "benchmark_method": {
+    "cpu": 0,
+    "schedule": "ABBA",
+    "warmup_iterations": 1000,
+    "packets_per_batch": 32,
+    "payload_bytes_per_stream_packet": 1024,
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ]
+  },
+  "results": {
+    "h3_shaped_stream4_50k": {
+      "artifact": "zig-out/quic-stream-range-wirelen-ab/20261030T165500Z-stream4-50k",
+      "artifact_bytes": 5680,
+      "aggregate_file_hash_digest": "295fa5172ace8f0fa2cf865cd1e44fb768f08d0f5c624fa5ea88f89ca9e85b85",
+      "pairs": 5,
+      "packets_per_path": 1600000,
+      "instructions_baseline_over_candidate_paired_median": 1.0072173935,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0079996205,
+      "cycles_candidate_wins": 4,
+      "sequential_baseline_over_candidate_paired_median": 0.9982972263,
+      "sequential_candidate_wins": 1,
+      "batch_baseline_over_candidate_paired_median": 1.0038065722,
+      "batch_candidate_wins": 3,
+      "interpretation": "PMU work improves while sequential wall time is 0.17% slower with one win and one scheduler outlier; the unchanged sequential logic is checked separately below."
+    },
+    "stream1_control_20k": {
+      "artifact": "zig-out/quic-stream-range-wirelen-ab/20261030T170000Z-stream1-20k",
+      "artifact_bytes": 5640,
+      "aggregate_file_hash_digest": "4efe37ba0d8759b45c8dd5890c0df263ca4eba1d14d40251374bf343004c6631",
+      "pairs": 5,
+      "instructions_baseline_over_candidate_paired_median": 1.0017572755,
+      "instructions_candidate_wins": 5,
+      "cycles_baseline_over_candidate_paired_median": 1.0105496512,
+      "cycles_candidate_wins": 5,
+      "sequential_baseline_over_candidate_paired_median": 1.0039171323,
+      "sequential_candidate_wins": 3,
+      "batch_baseline_over_candidate_paired_median": 1.0029261091,
+      "batch_candidate_wins": 3
+    },
+    "datagram_control_50k": {
+      "artifact": "zig-out/quic-stream-range-wirelen-ab/20261030T173000Z-datagram-50k",
+      "artifact_bytes": 5900,
+      "aggregate_file_hash_digest": "470ef854cd14e9fc956b8c82daecb5ac339c05e758886c11de0d8718bf367717",
+      "pairs": 5,
+      "instructions_baseline_over_candidate_paired_median": 0.9999991781,
+      "instructions_candidate_wins": 2,
+      "cycles_baseline_over_candidate_paired_median": 1.0042092375,
+      "cycles_candidate_wins": 3,
+      "sequential_baseline_over_candidate_paired_median": 0.9997127229,
+      "sequential_candidate_wins": 2,
+      "packed_baseline_over_candidate_paired_median": 1.0000831808,
+      "packed_candidate_wins": 3,
+      "interpretation": "The compile-time pure-DATAGRAM path bypasses the changed STREAM validation; instructions and both wall-time paths are neutral, while cycles do not regress."
+    },
+    "real_h3_fixed_binary": {
+      "schedule": "ABBA",
+      "pairs": 5,
+      "samples_per_arm": 3,
+      "streams": 4,
+      "bytes_per_stream": 4194304,
+      "baseline_arm_median_elapsed_ns": [
+        95772556,
+        97322307,
+        94498547,
+        94645796,
+        95213118
+      ],
+      "candidate_arm_median_elapsed_ns": [
+        94591401,
+        95623424,
+        96410470,
+        96335508,
+        94999958
+      ],
+      "baseline_over_candidate_paired_median": 1.0022437905,
+      "candidate_wins": 3,
+      "interpretation": "Every arm completed exact bytes, checksum, four FINs, and HTTP status against the same quic-go v0.59.0 peer. The 0.22% paired result is retained only as no-regression evidence."
+    }
+  },
+  "rejected_experiments": {
+    "compact_validated_traits": {
+      "artifact": "zig-out/quic-compact-validated-traits-ab/20261030T164000Z-stream4-50k",
+      "artifact_bytes": 5680,
+      "aggregate_file_hash_digest": "56cd06db925e15daa5a25bbd6cc4e52fe450b48c5ce60539e29bf7cf4b9b77d9",
+      "benchmark_sha256": "96b368c0cba451a8eb872924df959ed5bf64b37ca533850be00d496abd230052",
+      "instructions_baseline_over_candidate_paired_median": 0.9990180719,
+      "cycles_baseline_over_candidate_paired_median": 0.9978461459,
+      "sequential_baseline_over_candidate_paired_median": 0.9922401609,
+      "reason": "Packing the 32-byte validated Traits into a 16-byte flagged summary added more instructions and alias/branch cost than the removed ABI copy. The original Traits value boundary is retained."
+    },
+    "minimum_one_millisecond_pacing_deadline": {
+      "baseline_netz_sender": {
+        "upload_datagrams": 106145,
+        "upload_packets_lost": 3828,
+        "download_datagrams": 107223,
+        "download_packets_lost": 4977
+      },
+      "candidate_netz_sender": {
+        "upload_datagrams": 106859,
+        "upload_packets_lost": 3761,
+        "download_datagrams": 107459,
+        "download_packets_lost": 4436
+      },
+      "candidate_real_h3_mib_per_second": [
+        15.293,
+        14.227,
+        13.701
+      ],
+      "reason": "The timer floor did not converge userspace wire shape and reduced ordinary netz upload throughput by roughly 90%. The congestion-derived rate, ten-packet burst, and sub-millisecond deadline remain unchanged."
+    },
+    "short_datagram_control": {
+      "artifact": "zig-out/quic-stream-range-wirelen-ab/20261030T172000Z-datagram-20k",
+      "artifact_bytes": 5879,
+      "aggregate_file_hash_digest": "0d0a0223546a09ba7df0d801af438501af50ca79f1e92ac19d08621c8c37eb10",
+      "observation": "The 20k cycles control favored the baseline by 0.68% with one candidate win. The 2.5-times-longer 50k decision row above reversed that to a 0.42% candidate improvement with three wins; the short row is retained as noise evidence."
+    }
+  },
+  "verification": {
+    "quic_debug": "1125/1125 passed",
+    "one_rtt_debug": "340/340 passed",
+    "one_rtt_release_fast": "340/340 passed",
+    "package": "22/22 passed",
+    "quic_go_http3": "QUIC v1/v2 bidirectional cancellation, STOP_SENDING recovery, trailers, redirect/pool reuse, and informational response matrices passed",
+    "quic_go_loss_reorder": "32/64-stream mixed FIN/reset churn passed for both endpoint-role pairs, both sender roles, loss and reordering, two runs per arm",
+    "tquic": "HTTP/3 normal, Retry, connection reuse, and two-phase GOAWAY passed in both endpoint-role directions",
+    "reference_checkouts_clean": true,
+    "toolchains": {
+      "zig": "0.16.0",
+      "go": "go1.24.13 linux/arm64",
+      "rust": "rustc 1.99.0 (b940084d7 2026-09-28)"
+    }
+  },
+  "scope": "The microbenchmark and real-H3 rows are same-application-shape, not equal-wire claims.",
+  "remaining_gap": "AES-CTR/GHASH dominate protection cost. The complete Traits value boundary remains because both borrowed-pointer and compact-summary variants regress fixed PMU. Kernel packet capture still requires CAP_NET_RAW on this host."
+}
