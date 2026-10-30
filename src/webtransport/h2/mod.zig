@@ -10,6 +10,13 @@ pub const Limits = state.Limits;
 pub const Session = @import("session.zig").Session;
 pub const init_header = @import("init_header.zig");
 pub const runtime = @import("runtime.zig");
+pub const endpoint_client = @import("endpoint_client.zig");
+pub const EndpointClient = endpoint_client.EndpointClient;
+pub const EndpointClientOptions = endpoint_client.Options;
+pub const SessionHandle = endpoint_client.Handle;
+pub const EndpointEvent = endpoint_client.Event;
+pub const EndpointAccepted = endpoint_client.Accepted;
+pub const EndpointKeyingMaterial = endpoint_client.KeyingMaterial;
 
 test {
     _ = capsule;
@@ -17,4 +24,5 @@ test {
     _ = state;
     _ = @import("runtime_tests.zig");
     _ = @import("session_write_tests.zig");
+    _ = endpoint_client;
 }

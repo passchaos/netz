@@ -1954,10 +1954,21 @@ Sessions reuse the complete Capsule/virtual-stream state machine, while
 rejections retain status, headers, bounded body and trailers. A real TLS test
 drives two accepted Sessions plus one rejected attempt on one connection,
 forces reverse sibling Capsule order, and completes independent CLOSE/FIN.
-Callers must still serialize Session operations and own the HTTP/2 Connection;
-the remaining orchestration gap is a connection-owning background endpoint
-with stable handles, command wakeup, capacity and shutdown policy. Independent
-draft-15 interop also remains open.
+Direct Session callers must still serialize operations and own the HTTP/2 Connection;
+`h2.EndpointClient` now removes that restriction for clients: one background
+task owns the adopted connection, multiplexes commands and routed input, and
+returns generation-checked handles plus caller-owned events. It bounds Session
+and queued-command capacity, retains accepted/rejected response metadata,
+cleans abandoned jobs after deadline races, automatically removes a dropped
+accepted attempt, and applies abortive endpoint shutdown. A real TLS regression
+uses concurrent callers, reversed sibling traffic, capacity refusal, stale and
+reused handles, deterministic exporter separation, queued-command abandonment,
+and shutdown with a live Session.
+
+The remaining HTTP/2 orchestration work is a matching connection-owning server
+accept endpoint and optional automatic client connection/reconnection policy;
+the current client endpoint adopts an already negotiated connection.
+Independent draft-15 browser/proxy interop also remains open.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

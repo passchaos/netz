@@ -135,8 +135,9 @@ metadata and Init syntax, and then accepts a succeeding sibling Session.
 Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.
 
-The multiplexing transport and Session adapter pass 168/168 focused Debug tests
-and 134/134 targeted ReleaseFast tests. The production h2c connection fuzz gate
+The multiplexing transport, Session adapter and background endpoint pass
+170/170 focused Debug tests and 135/135 targeted ReleaseFast tests. The
+production h2c connection fuzz gate
 passes 3/3, and the independent bidirectional Hyper matrix passes all 9 build
 steps across h2c and TLS while exercising multiplexing, cancellation, flow
 control, GOAWAY, pooling, trailers, redirects, and TLS KeyUpdate. Hyper does not
@@ -152,3 +153,20 @@ than duplicated. Non-2xx duplex attempts retain the complete bounded response
 entity. Multiple Sessions on one connection may be driven serially; each read
 routes sibling frames through the connection owner and later delivers them to
 the correct Session without a second socket reader.
+
+`webtransport.h2.EndpointClient` now takes ownership of one negotiated HTTP/2
+connection and runs that router in a single background task. Fixed-capacity
+Session slots expose generation-checked handles, so removing and reusing a slot
+cannot revive a stale caller. Commands deep-copy caller input before enqueue,
+carry one absolute deadline through queueing and transport work, wake an idle
+socket pump, and use an atomic completion race so a timed-out caller never
+leaves borrowed memory or an unowned accepted Session behind. Queue and Session
+capacity are independently bounded. Accepted attempts own response metadata and
+the selected application protocol; dropped attempts automatically remove their
+Session. Receive events and TLS exporter bytes are caller-owned values.
+
+The endpoint surface covers CONNECT attempts, DATAGRAM, virtual-stream open and
+send, consume/retire, RESET/STOP, credit grants, DRAIN/CLOSE, removal and
+exporters. Its destructor is an explicit abortive shutdown policy: queued work
+is completed with `EndpointClosed`, the worker is canceled and joined, every
+live Session is reset, and the owned HTTP/2 connection is closed.

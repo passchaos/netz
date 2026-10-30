@@ -218,6 +218,18 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         .bidi_remote = 4096,
     });
     try std.testing.expectEqualStrings("u=1024, bl=2048, br=4096", encoded);
+    try std.testing.expect(@hasDecl(h2, "EndpointClient"));
+    try std.testing.expect(@hasDecl(h2, "SessionHandle"));
+    inline for (&.{
+        "connectAttemptWithTimeout",
+        "sendDatagramWithTimeout",
+        "receiveWithTimeout",
+        "openStreamWithTimeout",
+        "sendStreamWithTimeout",
+        "closeWithTimeout",
+        "removeWithTimeout",
+        "exportKeyingMaterialWithTimeout",
+    }) |decl| try std.testing.expect(@hasDecl(h2.EndpointClient, decl));
 }
 
 test "public HTTP1 owned heads accept folded metadata without requiring the body" {

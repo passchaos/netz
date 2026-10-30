@@ -276,6 +276,80 @@ pub const Session = struct {
         self.queued_bytes += bytes;
         self.deferred_event = null;
     }
+
+    /// Consume only frames already routed by the shared HTTP/2 owner. Any
+    /// application event is retained in this Session's bounded queue; this
+    /// method never reads the socket and is therefore safe for sibling
+    /// progress while another Session resumes output.
+    pub fn pollWithDeadline(self: *Session, deadline: std.Io.Clock.Timestamp) Error!bool {
+        const duplex = if (self.duplex) |*value| value else return false;
+        if (self.terminal) return false;
+        var progressed = false;
+        while (true) {
+            if (self.deferred_event != null) {
+                try self.queueDeferred();
+                return true;
+            }
+            if (self.pending_terminal != null) {
+                self.deferred_event = try self.finishPeerClose(deadline);
+                try self.queueDeferred();
+                return true;
+            }
+            const decoded = self.reader.next(&self.remaining) catch |err| {
+                if (err != error.OutOfMemory) self.fail(deadline);
+                return err;
+            };
+            if (decoded) |value| {
+                const event = self.state.receive(value) catch |err| {
+                    self.fail(deadline);
+                    return err;
+                };
+                if (event == .closed) {
+                    if (self.remaining.len != 0) {
+                        self.fail(deadline);
+                        return error.InvalidCapsule;
+                    }
+                    self.pending_terminal = event;
+                    continue;
+                }
+                if (event != .progress) {
+                    self.deferred_event = event;
+                    try self.queueDeferred();
+                }
+                return true;
+            }
+            if (self.input_fin) {
+                self.reader.finish() catch |err| {
+                    self.fail(deadline);
+                    return err;
+                };
+                self.pending_terminal = self.state.receiveFin();
+                continue;
+            }
+            self.clearInput();
+            var transport_event = (try duplex.pollResponseEventWithDeadline(deadline)) orelse return progressed;
+            progressed = true;
+            var event_owned = true;
+            defer if (event_owned) transport_event.deinit(self.connection().allocator);
+            switch (transport_event) {
+                .data => |data| {
+                    self.duplex_input = data;
+                    event_owned = false;
+                    self.remaining = data.data;
+                    self.input_fin = duplex.responseFinished();
+                },
+                .finished => self.input_fin = true,
+                .reset => {
+                    self.terminal = true;
+                    return error.StreamReset;
+                },
+                .informational, .head, .trailers => {
+                    self.fail(deadline);
+                    return error.UnexpectedFrame;
+                },
+            }
+        }
+    }
     fn receiveTransportWithDeadline(self: *Session, deadline: std.Io.Clock.Timestamp) Error!Event {
         if (self.terminal) return error.SessionClosed;
         if (self.pending_terminal != null) return self.finishPeerClose(deadline);
