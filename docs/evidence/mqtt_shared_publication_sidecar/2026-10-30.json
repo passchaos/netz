@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT broker-only shared-Publication detach sidecar",
+  "decision": "accepted",
+  "baseline": {
+    "source_parent": "edada4d76d405c39ecedb1e5c958f24a57f49807",
+    "binary_source_commit": "87e0d12e598204c5e1a9fc192d4815537f34c733",
+    "equivalence": "edada4d7 changes only rejection evidence; the MQTT production sources match 87e0d12e",
+    "broker_sha256": "2a8212f6b4a0bb883a7fd0ec7d4a2e725e8e5d8e4552a0b5365d1dc025b6537d"
+  },
+  "candidate": {
+    "broker_sha256": "032b83f7beda199d970bc2841bc1163418b264697cc217a93f72126da03b2bbd",
+    "driver_sha256": "20892dcb26c338ae7ebcd25970d792b4aa63c2037f0e42cb739e7edc0564553e",
+    "source_sha256": {
+      "src/mqtt/broker.zig": "cb6198e556c73375a8b1068c357631195289b9ddd351efcca92e8692a85b70b8",
+      "src/mqtt/broker/session_route.zig": "8320ed2df170f3e4302bbd91dba8597b587e012d2e466c05a6cba608fc82b7ef",
+      "src/mqtt/session/mod.zig": "51d24d5c015ec093292aeb24aa4d0e90c42a997986dd11f490901d1c6b68ed5a",
+      "src/mqtt/session/shared_properties_tests.zig": "85a30e1c04556a84f1c98e0937c93ec41f868ab5663ad7672239870be3b63674",
+      "tools/interop/mqtt_broker_matrix.sh": "b765134ee5408df8dd82ec40c44000406b92dd3142ee16fc926d6c658687ed7c"
+    }
+  },
+  "reference": {
+    "implementation": "Mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "pattern": "mosquitto__client_msg stores a refcounted mosquitto__base_msg instead of copying topic and payload at delivery time"
+  },
+  "implementation": {
+    "common_representation": "PublishTransmission and Transmission retain their original layouts",
+    "selection": "A broker-only one-item drain specialization returns DetachableTransmission with a borrowed SharedPublication sidecar. The ordinary drain specialization is comptime-separated and has no owner branch.",
+    "eligibility": "Only OwnedPublish.wire_allocation_len == shared_publication_properties exposes the sidecar; restored, ordinary, partially shared-property, and alias-independent ownership continues to deep-copy.",
+    "detach": "Property descriptors copy into connection scratch, while Topic Name, payload, and all variable-length property values remain borrowed from one retained Publication.",
+    "release": "DetachedSessionPacket releases the retained Publication on success, oversized drop, socket failure, retry, continue, and return paths.",
+    "preserved_invariants": [
+      "durable state commits before network-visible PUBLISH or PUBREL progress",
+      "Client ID takeover or concurrent ACK cannot invalidate detached bytes",
+      "PUBREL routing and PUBCOMP ordering are unchanged",
+      "listener mount-point topic projection remains a subslice of the retained Publication",
+      "allocation failure before retain leaves the Session as sole owner and retryable"
+    ]
+  },
+  "fixed_binary_serial": {
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "publisher_window": 1,
+    "payload_bytes": 256,
+    "schedule": "ABBA",
+    "sets": [
+      {
+        "measured_publishes": 10000,
+        "pairs": 8,
+        "instructions_baseline_over_candidate_paired_median": 1.0058662788,
+        "instructions_candidate_wins": 7,
+        "cycles_baseline_over_candidate_paired_median": 1.0030719894,
+        "cycles_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 1.0044109713,
+        "throughput_candidate_wins": 5,
+        "p50_candidate_over_baseline_paired_median": 0.9831468877,
+        "p50_candidate_wins": 6,
+        "p99_candidate_over_baseline_paired_median": 1.0041456687,
+        "p99_candidate_wins": 3,
+        "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T084035",
+        "summary_sha256": "8d1bc99569a53fd7b9b2c2d23071101e294324b434e664ea7205f866154cb42d"
+      },
+      {
+        "measured_publishes": 40000,
+        "pairs": 8,
+        "instructions_baseline_over_candidate_paired_median": 1.0056727288,
+        "instructions_candidate_wins": 8,
+        "cycles_baseline_over_candidate_paired_median": 1.0039021313,
+        "cycles_candidate_wins": 5,
+        "throughput_candidate_over_baseline_paired_median": 0.9957894015,
+        "throughput_candidate_wins": 2,
+        "p50_candidate_over_baseline_paired_median": 1.0006135740,
+        "p50_candidate_wins": 3,
+        "p99_candidate_over_baseline_paired_median": 1.0025426736,
+        "p99_candidate_wins": 3,
+        "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T084103-long",
+        "summary_sha256": "73658671e18d15005919edf99e6e35613f3f76787abe2e96fe2b8dc566b23882"
+      },
+      {
+        "measured_publishes": 100000,
+        "pairs": 6,
+        "instructions_baseline_over_candidate_paired_median": 1.0057659057,
+        "instructions_candidate_wins": 4,
+        "cycles_baseline_over_candidate_paired_median": 1.0044793506,
+        "cycles_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 1.0047006688,
+        "throughput_candidate_wins": 4,
+        "p50_candidate_over_baseline_paired_median": 0.9881602187,
+        "p50_candidate_wins": 4,
+        "p99_candidate_over_baseline_paired_median": 0.9982486775,
+        "p99_candidate_wins": 3,
+        "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T084156-100k",
+        "summary_sha256": "24854eab8fdfd762a5d450f2ec86a4ecdcf3c9da53d138e3de4f71563adcd1c5"
+      }
+    ],
+    "claim": "Broker instructions improve by about 0.57% in all three paired medians. The 100k decision set also improves cycles, throughput, and p50; p99 is neutral. Shorter timing sets moved in both directions and are not promoted as a general timing claim."
+  },
+  "fixed_binary_five_shape": {
+    "pairs_per_shape": 4,
+    "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T084337-five-shape",
+    "summary_sha256": "338e9f0e987415ae7fb65582c44f58c615d4e15f7c9efe41d5f27dea177fce17",
+    "shapes": {
+      "serial": {
+        "instructions_baseline_over_candidate_paired_median": 1.0037838137,
+        "instructions_candidate_wins": 3,
+        "throughput_candidate_over_baseline_paired_median": 0.9944342247,
+        "rss_candidate_over_baseline_paired_median": 1.0020833333
+      },
+      "publishers-32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0027423190,
+        "instructions_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 1.0129524276,
+        "rss_candidate_over_baseline_paired_median": 1.0012615643
+      },
+      "fanout-32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0093651788,
+        "instructions_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 0.9992136994,
+        "rss_candidate_over_baseline_paired_median": 0.9992012944
+      },
+      "balanced-32x32": {
+        "instructions_baseline_over_candidate_paired_median": 1.0140562870,
+        "instructions_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 1.0146313547,
+        "rss_candidate_over_baseline_paired_median": 1.0069422538
+      },
+      "large-payload": {
+        "instructions_baseline_over_candidate_paired_median": 1.0483761501,
+        "instructions_candidate_wins": 4,
+        "cycles_baseline_over_candidate_paired_median": 1.0346630856,
+        "cycles_candidate_wins": 4,
+        "throughput_candidate_over_baseline_paired_median": 1.0063900262,
+        "rss_candidate_over_baseline_paired_median": 0.9939242750
+      }
+    },
+    "claim": "Instructions improve in every shape; fanout, balanced, and 4 KiB payload reductions scale with avoided byte copies. Timing and 2 ms RSS samples are mostly neutral and remain supporting controls rather than universal claims."
+  },
+  "profile": {
+    "workload": "5000 warmup plus 100000 measured serial durable QoS 2 publishes at 199 Hz user cycles with DWARF call graphs",
+    "baseline": {
+      "artifact": "zig-out/mqtt-managed-keepalive-final-profile/20261029T192000",
+      "perf_sha256": "f2811976d8ea6081b7f3606216ab570d3492f4354f20a97c9b11aa9495ed8f5",
+      "report_sha256": "5e49e1a5d343ff77db20ec9a55a6b01a1c4e43d8bbd439ec7c61a1d19793ee2f",
+      "memcpy_self_percent": 1.82,
+      "memcpy_below_flush_percent": 1.15
+    },
+    "candidate": {
+      "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T084448-profile",
+      "perf_sha256": "548eb516e9bae4af20a6b43dc6131529c064f7437fb2c93d0aa9b69ff473324a",
+      "report_sha256": "881be289799b73c31c4b15a5958480e3aec0c2cef25e7118d654ce2c9799873c",
+      "samples": 830,
+      "lost_samples": 0,
+      "memcpy_self_percent": 1.04,
+      "remaining_detach_memcpy": "property descriptor copies; the Topic Name and payload copy is absent"
+    }
+  },
+  "mosquitto_comparison": {
+    "direct_serial_100k": {
+      "artifact": "zig-out/mqtt-publication-sidecar-ab/20261030T085948-mosquitto-direct",
+      "aggregate_file_hash_digest": "71ce1bf7e5b14ddb0a5599b919560295a3bd3573f0a19ab19a21794486731069",
+      "netz_publishes_per_s": 22316,
+      "mosquitto_publishes_per_s": 33184,
+      "netz_over_mosquitto": 0.6725,
+      "netz_rss_kib": 3844,
+      "mosquitto_rss_kib": 3052
+    },
+    "four_sample_five_shape_matrix": {
+      "artifact": "zig-out/mqtt-broker-matrix/run.20261030T005800Z.2016472",
+      "artifact_bytes": 9989006,
+      "aggregate_file_hash_digest": "48af870fcb96273a6093a31f5bd1420d2367d7a54441054775674a0629c64e41",
+      "summary_sha256": "0c8ce3684201cb2e3bdb9f700bec9a82d6f6d63b5c95a076a786a07c241d3c40",
+      "netz_throughput_over_mosquitto": {
+        "serial": 0.717,
+        "publishers-32": 0.962,
+        "fanout-32": 1.106,
+        "balanced-32x32": 1.061,
+        "large-payload": 1.044
+      },
+      "scope": "same-client loopback shapes, not equal-wire or universal broker superiority"
+    },
+    "remaining_gap": "Long serial durable QoS 2 throughput and every measured broker RSS shape remain behind Mosquitto."
+  },
+  "matrix_packaging_fix": {
+    "problem": "The timing matrix copied a 260 MiB ReleaseFast broker with DWARF into identity and exceeded its 128 MiB artifact cap after all 40 runs.",
+    "fix": "Archive and execute install -s identity copies, matching the allocator matrix; hashes now identify the exact stripped loadable code used by every sample.",
+    "failed_artifact_bytes": 270331185,
+    "successful_artifact_bytes": 9989006,
+    "checker_tests": "12/12 passed",
+    "failed_generated_artifact_removed": true
+  },
+  "verification": [
+    "zig build test-lib -Dtest-filter='MQTT broker' -Dtest-filter='MQTT durable QoS 2' -Dtest-filter='Session shared properties' -Dtest-filter='detached Session' --summary all -> 217/217",
+    "zig build test-lib -Doptimize=ReleaseFast with the same filters -> 217/217",
+    "zig build test-package --summary all -> 22/22",
+    "zig build interop-mqtt-commit-log -Doptimize=ReleaseFast --summary all -> passed all SIGKILL recovery scenarios",
+    "zig build interop-mqtt-session-expiry-restart -Doptimize=ReleaseFast --summary all -> 9/9 steps, including shared-retained QoS 2",
+    "zig build fuzz-mqtt-live-broker -Doptimize=ReleaseFast --summary all -> 3/3",
+    "zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast --summary all -> 1825/1825",
+    "zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast --summary all -> passed MQTT 3.1.1/5",
+    "MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 MQTT_MATRIX_SAMPLES=4 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast --summary all -> 40/40 broker runs"
+  ]
+}

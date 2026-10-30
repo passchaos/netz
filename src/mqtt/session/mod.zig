@@ -234,6 +234,15 @@ pub const Transmission = union(enum) {
     pubrel: PubRelTransmission,
 };
 
+/// One Session transmission plus an optional borrowed owner for immutable
+/// publication bytes. The owner pointer is valid only while the caller keeps
+/// the Store externally serialized; retaining it transfers lifetime beyond
+/// that boundary.
+pub const DetachableTransmission = struct {
+    transmission: Transmission,
+    shared_publication: ?*SharedPublication,
+};
+
 pub const AckAction = enum {
     completed,
     send_pubrel,
@@ -2335,17 +2344,81 @@ pub const Store = struct {
         out: []Transmission,
         snapshot_changed: *bool,
     ) Error![]Transmission {
-        return self.drainIntoInternal(handle, now, receive_maximum, out, snapshot_changed, null);
+        return self.drainIntoInternal(
+            false,
+            handle,
+            now,
+            receive_maximum,
+            out,
+            snapshot_changed,
+            null,
+            {},
+        );
+    }
+
+    /// Select at most one transmission for a broker detach operation. Unlike
+    /// the general drain API, this returns the refcounted Publication sidecar
+    /// when every variable-length byte borrows that same owner. The returned
+    /// pointer is not retained and must not outlive external Store locking.
+    pub fn drainOneForDetachTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        now: std.Io.Timestamp,
+        receive_maximum: u16,
+        snapshot_changed: *bool,
+    ) Error!?DetachableTransmission {
+        var transmissions: [1]Transmission = undefined;
+        var shared_publications: [1]?*SharedPublication = undefined;
+        const selected = try self.drainIntoInternal(
+            true,
+            handle,
+            now,
+            receive_maximum,
+            &transmissions,
+            snapshot_changed,
+            null,
+            &shared_publications,
+        );
+        if (selected.len == 0) return null;
+        return .{
+            .transmission = selected[0],
+            .shared_publication = shared_publications[0],
+        };
     }
 
     /// Borrow reservations only for this call; queued messages do not retain
     /// pointers into a Network Connection and snapshots remain Session-only.
     pub fn drainIntoAvoiding(self: *Store, handle: Handle, now: std.Io.Timestamp, receive_maximum: u16, out: []Transmission, reserved: PacketIdentifierOwnership) Error![]Transmission {
         var ignored_snapshot_change = false;
-        return self.drainIntoInternal(handle, now, receive_maximum, out, &ignored_snapshot_change, reserved);
+        return self.drainIntoInternal(
+            false,
+            handle,
+            now,
+            receive_maximum,
+            out,
+            &ignored_snapshot_change,
+            reserved,
+            {},
+        );
     }
 
-    fn drainIntoInternal(self: *Store, handle: Handle, now: std.Io.Timestamp, receive_maximum: u16, out: []Transmission, snapshot_changed: *bool, reserved: ?PacketIdentifierOwnership) Error![]Transmission {
+    fn drainIntoInternal(
+        self: *Store,
+        comptime track_shared_publications: bool,
+        handle: Handle,
+        now: std.Io.Timestamp,
+        receive_maximum: u16,
+        out: []Transmission,
+        snapshot_changed: *bool,
+        reserved: ?PacketIdentifierOwnership,
+        shared_publications: if (track_shared_publications)
+            []?*SharedPublication
+        else
+            void,
+    ) Error![]Transmission {
+        if (comptime track_shared_publications) {
+            std.debug.assert(shared_publications.len == out.len);
+        }
         snapshot_changed.* = false;
         if (receive_maximum == 0) return error.InvalidProperty;
         const session = try self.getSession(handle);
@@ -2438,6 +2511,12 @@ pub const Store = struct {
                 send_index = next_send_index;
                 continue;
             }
+            if (comptime track_shared_publications) {
+                shared_publications[written] = switch (transmission) {
+                    .publish => sharedPublicationOwner(inflight.publish),
+                    .pubrel => null,
+                };
+            }
             out[written] = transmission;
             noteInflightSelected(session, inflight);
             if (transmission == .publish) {
@@ -2462,6 +2541,10 @@ pub const Store = struct {
                     // Receive Maximum credit, but it must not overtake an
                     // earlier durable PUBLISH that is waiting for such credit.
                     if (blocked_qos_publish) break;
+                    if (comptime track_shared_publications) {
+                        shared_publications[written] =
+                            sharedPublicationOwner(publish);
+                    }
                     out[written] = .{ .publish = .{
                         .topic = publish.topic,
                         .payload = publish.payload,
@@ -2550,6 +2633,11 @@ pub const Store = struct {
                 // persistent Packet Identifier.
                 snapshot_changed.* = true;
                 publish_window_used += 1;
+                if (comptime track_shared_publications) {
+                    shared_publications[written] = sharedPublicationOwner(
+                        session.inflight.items[inflight_index].publish,
+                    );
+                }
                 out[written] = .{ .publish = publishTransmission(
                     session.inflight.items[inflight_index],
                     now.nanoseconds,
@@ -3662,6 +3750,15 @@ fn transmissionForInflight(
             },
         },
     };
+}
+
+fn sharedPublicationOwner(
+    publish: OwnedPublish,
+) ?*SharedPublication {
+    if (publish.wire_allocation_len != shared_publication_properties) {
+        return null;
+    }
+    return SharedPublication.ownerForBytes(publish.wire);
 }
 
 fn publishTransmission(

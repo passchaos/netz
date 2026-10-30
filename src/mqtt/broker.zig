@@ -662,6 +662,11 @@ const DetachedSessionPacket = struct {
     payload_len: usize,
     handle: session_mod.Handle,
     route_id: u64,
+
+    fn deinit(self: *DetachedSessionPacket) void {
+        self.detached.deinit();
+        self.* = undefined;
+    }
 };
 
 const SessionAckResult = struct {
@@ -7776,7 +7781,8 @@ pub const Broker = struct {
             };
             if (maybe_packet) |packet_value| {
                 self.state_mutex.unlock(self.io);
-                const packet = packet_value;
+                var packet = packet_value;
+                defer packet.deinit();
                 defer slot.releaseOversizedSessionScratch(
                     self.allocator,
                 );
@@ -8051,13 +8057,12 @@ pub const Broker = struct {
         }
 
         while (true) {
-            var storage: [1]session_mod.Transmission = undefined;
             var selection_changed = false;
-            const transmissions = self.sessions.drainIntoTrackingSnapshotChange(
+            const maybe_selection = self.sessions
+                .drainOneForDetachTrackingSnapshotChange(
                 handle,
                 netz_runtime.cachedAwakeNow(self.io),
                 connection.max_outgoing_inflight,
-                &storage,
                 &selection_changed,
             ) catch |err| {
                 persistent_changed = persistent_changed or
@@ -8067,12 +8072,12 @@ pub const Broker = struct {
             };
             persistent_changed = persistent_changed or
                 (persistent_session and selection_changed);
-            if (transmissions.len == 0) {
+            const selection = maybe_selection orelse {
                 persistent_changed_out.* = persistent_changed;
                 self.recordPersistentChangeLocked(persistent_changed);
                 return null;
-            }
-            const transmission = transmissions[0];
+            };
+            const transmission = selection.transmission;
             if (transmission == .publish and
                 authorizers.configured() and
                 !authorizers.authorize(.{
@@ -8126,12 +8131,14 @@ pub const Broker = struct {
                 .pubrel => 0,
             };
             const buffers = try slot.ensureBuffers(self.allocator);
-            const detached = session_route.detachTransmission(
+            var detached = session_route
+                .detachTransmissionWithSharedPublication(
                 &buffers.session_write_scratch,
                 &buffers.session_property_scratch,
                 self.allocator,
                 wire_transmission,
                 connection.localMaximumQoS(),
+                selection.shared_publication,
             ) catch |err| {
                 switch (transmission) {
                     .publish => |publish| self.sessions.retryUnsentPublish(
@@ -8142,6 +8149,7 @@ pub const Broker = struct {
                 }
                 return err;
             };
+            errdefer detached.deinit();
             more_pending_out.* =
                 (try self.sessions.hasUnselectedTransmission(handle)) or
                 slot.queuedCount() != 0;

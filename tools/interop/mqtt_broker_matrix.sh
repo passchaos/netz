@@ -74,8 +74,12 @@ client_cpu=${bench_cpus[0]}
 server_cpu=${bench_cpus[1]}
 sampler_cpu=${bench_cpus[2]}
 
-install -m 0755 "$netz_broker" "$matrix_root/identity/netz-broker"
-install -m 0755 "$driver" "$matrix_root/identity/mqtt-driver"
+# ReleaseFast retains DWARF sections that are not used by the captured
+# workload and can make one identity copy exceed the complete matrix budget.
+# Execute the stripped copies too, so the recorded hashes still identify the
+# exact loadable code used by every sample.
+install -s -m 0755 "$netz_broker" "$matrix_root/identity/netz-broker"
+install -s -m 0755 "$driver" "$matrix_root/identity/mqtt-driver"
 install -m 0755 "$mosquitto_binary" "$matrix_root/identity/mosquitto"
 install -m 0755 "$repo_root/tools/compare_mqtt_mosquitto.sh" \
   "$matrix_root/identity/compare_mqtt_mosquitto.sh"

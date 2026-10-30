@@ -77,6 +77,37 @@ test "Session shared properties copy unrelated caller values and preserve logica
     try std.testing.expect(value.properties[1].binary.value.ptr != publication.properties[1].binary.value.ptr);
 }
 
+test "Session detach selection excludes partially shared property ownership" {
+    const publication = try source();
+    defer publication.release();
+    var external = "application/octet-stream".*;
+    var properties: [4]mqtt.Property = undefined;
+    @memcpy(&properties, publication.properties);
+    properties[0].utf8.value = &external;
+    var store = session.Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("partial-owner", false, 60, .zero);
+    var snapshot_changed = false;
+    _ = try store.enqueueSharedPublicationTrackingSnapshotChange(
+        opened.handle,
+        publication,
+        .{
+            .qos = .at_least_once,
+            .properties = &properties,
+            .now = .zero,
+        },
+        &snapshot_changed,
+    );
+    const selected = (try store.drainOneForDetachTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &snapshot_changed,
+    )).?;
+    try std.testing.expect(selected.transmission == .publish);
+    try std.testing.expect(selected.shared_publication == null);
+}
+
 test "Session shared properties allocation and quota failures retain publication ownership" {
     const publication = try source();
     defer publication.release();

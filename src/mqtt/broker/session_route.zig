@@ -16,11 +16,17 @@ const max_connection_generation: u32 = (1 << 31) - 1;
 pub const DetachedPacket = struct {
     transmission: session.Transmission,
     packet_id: u16,
+    shared_publication: ?*session.SharedPublication = null,
     kind: enum {
         qos0_publish,
         publish,
         pubrel,
     },
+
+    pub fn deinit(self: *DetachedPacket) void {
+        if (self.shared_publication) |publication| publication.release();
+        self.* = undefined;
+    }
 };
 
 pub fn detachTransmission(
@@ -29,6 +35,24 @@ pub fn detachTransmission(
     allocator: std.mem.Allocator,
     transmission: session.Transmission,
     maximum_qos: mqtt.QoS,
+) session.Error!DetachedPacket {
+    return detachTransmissionWithSharedPublication(
+        bytes,
+        properties,
+        allocator,
+        transmission,
+        maximum_qos,
+        null,
+    );
+}
+
+pub fn detachTransmissionWithSharedPublication(
+    bytes: *std.ArrayList(u8),
+    properties: *std.ArrayList(mqtt.Property),
+    allocator: std.mem.Allocator,
+    transmission: session.Transmission,
+    maximum_qos: mqtt.QoS,
+    shared_publication: ?*session.SharedPublication,
 ) session.Error!DetachedPacket {
     bytes.clearRetainingCapacity();
     properties.clearRetainingCapacity();
@@ -47,14 +71,28 @@ pub fn detachTransmission(
                 .qos0_publish
             else
                 .publish;
+            try properties.ensureTotalCapacity(
+                allocator,
+                capped.properties.len,
+            );
+            if (shared_publication) |publication| {
+                std.debug.assert(sliceWithin(
+                    publication.bytes,
+                    capped.topic,
+                ));
+                std.debug.assert(sliceWithin(
+                    publication.bytes,
+                    capped.payload,
+                ));
+                properties.appendSliceAssumeCapacity(capped.properties);
+                capped.properties = properties.items;
+                publication.retain();
+                break :blk .{ .publish = capped };
+            }
             const byte_count = try detachedPublishByteCount(capped);
             try bytes.ensureTotalCapacity(
                 allocator,
                 byte_count,
-            );
-            try properties.ensureTotalCapacity(
-                allocator,
-                capped.properties.len,
             );
             bytes.items.len = byte_count;
             var offset: usize = 0;
@@ -84,7 +122,16 @@ pub fn detachTransmission(
         .transmission = detached,
         .packet_id = packet_id,
         .kind = kind,
+        .shared_publication = shared_publication,
     };
+}
+
+fn sliceWithin(container: []const u8, slice: []const u8) bool {
+    const container_start = @intFromPtr(container.ptr);
+    const container_end = container_start + container.len;
+    const slice_start = @intFromPtr(slice.ptr);
+    const slice_end = slice_start + slice.len;
+    return slice_start >= container_start and slice_end <= container_end;
 }
 
 fn detachedPublishByteCount(
@@ -306,6 +353,231 @@ test "detached Session transmission owns bytes and reuses caller scratch" {
     try std.testing.expectEqual(allocation_count, failing.alloc_index);
     try std.testing.expectEqual(@as(u16, 9), detached.packet_id);
     try std.testing.expectEqual(.publish, detached.kind);
+}
+
+test "detached broker selection retains shared Publication without byte copy" {
+    const allocator = std.testing.allocator;
+    var source_properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "shared-key",
+        .value = "shared-value",
+    } }};
+    const publication = try session.SharedPublication.createFromPublish(
+        allocator,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "shared/topic",
+            .packet_id = 1,
+            .properties = &source_properties,
+            .payload = "shared-payload",
+        },
+        1,
+        .zero,
+    );
+    var publication_owned = true;
+    defer if (publication_owned) publication.release();
+    var store = session.Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open(
+        "detached-owner",
+        false,
+        3600,
+        .zero,
+    );
+    var snapshot_changed = false;
+    _ = try store.enqueueSharedPublicationTrackingSnapshotChange(
+        opened.handle,
+        publication,
+        .{
+            .qos = .exactly_once,
+            .properties = publication.properties,
+            .now = .zero,
+        },
+        &snapshot_changed,
+    );
+    publication.release();
+    publication_owned = false;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        publication.references.load(.acquire),
+    );
+
+    var selected = (try store.drainOneForDetachTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &snapshot_changed,
+    )).?;
+    try std.testing.expectEqual(publication, selected.shared_publication.?);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(failing.allocator());
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(failing.allocator());
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        detachTransmissionWithSharedPublication(
+            &bytes,
+            &properties,
+            failing.allocator(),
+            selected.transmission,
+            .exactly_once,
+            selected.shared_publication,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        publication.references.load(.acquire),
+    );
+    try store.retryUnsentPublish(
+        opened.handle,
+        selected.transmission.publish.packet_id,
+    );
+
+    failing.fail_index = std.math.maxInt(usize);
+    selected = (try store.drainOneForDetachTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &snapshot_changed,
+    )).?;
+    var detached = try detachTransmissionWithSharedPublication(
+        &bytes,
+        &properties,
+        failing.allocator(),
+        selected.transmission,
+        .exactly_once,
+        selected.shared_publication,
+    );
+    defer detached.deinit();
+    try std.testing.expectEqual(@as(usize, 0), bytes.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        publication.references.load(.acquire),
+    );
+
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(
+            opened.handle,
+            .pubrec,
+            detached.packet_id,
+            0,
+        ),
+    );
+    const pubrel = (try store.drainOneForDetachTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &snapshot_changed,
+    )).?;
+    try std.testing.expect(pubrel.transmission == .pubrel);
+    try std.testing.expect(pubrel.shared_publication == null);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(
+            opened.handle,
+            .pubcomp,
+            detached.packet_id,
+            0,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        publication.references.load(.acquire),
+    );
+    try std.testing.expectEqualStrings(
+        "shared/topic",
+        detached.transmission.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "shared-payload",
+        detached.transmission.publish.payload,
+    );
+    try std.testing.expectEqualStrings(
+        "shared-value",
+        detached.transmission.publish.properties[0].utf8_pair.value,
+    );
+}
+
+test "detached Session shared Publication survives native QoS0 completion" {
+    const allocator = std.testing.allocator;
+    const publication = try session.SharedPublication.createFromPublish(
+        allocator,
+        .{
+            .dup = false,
+            .qos = .at_most_once,
+            .retain = false,
+            .topic = "shared/qos0",
+            .packet_id = 0,
+            .properties = &.{},
+            .payload = "qos0-payload",
+        },
+        1,
+        .zero,
+    );
+    var publication_owned = true;
+    defer if (publication_owned) publication.release();
+    var store = session.Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("qos0-owner", false, 3600, .zero);
+    const route_id = try store.routeId(opened.handle);
+    var snapshot_changed = false;
+    _ = try store.enqueueSharedPublicationTrackingSnapshotChange(
+        opened.handle,
+        publication,
+        .{
+            .qos = .at_most_once,
+            .properties = publication.properties,
+            .now = .zero,
+        },
+        &snapshot_changed,
+    );
+    publication.release();
+    publication_owned = false;
+    const selected = (try store.drainOneForDetachTrackingSnapshotChange(
+        opened.handle,
+        .zero,
+        1,
+        &snapshot_changed,
+    )).?;
+    try std.testing.expectEqual(publication, selected.shared_publication.?);
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(allocator);
+    var detached = try detachTransmissionWithSharedPublication(
+        &bytes,
+        &properties,
+        allocator,
+        selected.transmission,
+        .exactly_once,
+        selected.shared_publication,
+    );
+    defer detached.deinit();
+    try std.testing.expectEqual(.qos0_publish, detached.kind);
+    try store.completeQoS0Transmission(
+        opened.handle,
+        route_id,
+        detached.packet_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        publication.references.load(.acquire),
+    );
+    try std.testing.expectEqualStrings(
+        "shared/qos0",
+        detached.transmission.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "qos0-payload",
+        detached.transmission.publish.payload,
+    );
 }
 
 pub fn connectionSubscriberId(

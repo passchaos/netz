@@ -5787,6 +5787,31 @@ proxy evidence for the entire suite.
    broker-only selection sidecar or a lower transport boundary. Full results
    are recorded in
    [the rejected shared-Publication detach evidence](evidence/mqtt_shared_publication_detach_rejected/2026-10-30.json).
+   The accepted follow-up keeps `PublishTransmission` unchanged. A broker-only
+   one-item Session drain returns the shared `Publication` as a sidecar, while
+   ordinary drains use a comptime-separated implementation with no owner
+   branch. Detach copies property descriptors, retains the sidecar, and keeps
+   Topic Name, payload and variable-length property values borrowed through the
+   unlocked synchronous write. Restored, ordinary and partially shared-property
+   messages retain the existing deep copy. Three fixed-binary serial sets at
+   10,000, 40,000 and 100,000 measured durable QoS 2 publishes reduced broker
+   instructions by 0.59%, 0.57% and 0.58% at paired medians. The 100,000-message
+   decision set also improved cycles 0.45%, throughput 0.47% and p50 1.18%; p99
+   was neutral. Five-shape controls reduced instructions in every shape, by
+   0.94% for fanout, 1.41% for balanced 32x32 and 4.84% for 4-KiB payloads;
+   timing and sampled RSS remained workload-noisy and receive no broad claim.
+   A matching profile reduced `memcpyFast` self samples from 1.82% to 1.04%
+   and removed the prior Topic Name/payload copy below Session flush.
+   The refreshed source-locked Mosquitto matrix puts netz at 0.717x/0.962x/
+   1.106x/1.061x/1.044x throughput in serial, publishers-32, fanout-32,
+   balanced-32x32 and large-payload order. All measured broker RSS shapes still
+   trail Mosquitto, and a longer 100,000-message serial comparison measured
+   22,316 versus 33,184 publishes/s, so the serial/RSS gap remains active.
+   Debug and ReleaseFast focused gates pass 217/217, package tests pass 22/22,
+   live-broker fuzz passes 3/3, all 1,825 Mosquitto sequences pass, and commit-
+   log, restart, listener-mount and 40-run external matrix gates pass. Full
+   evidence is recorded in
+   [the shared-Publication sidecar evidence](evidence/mqtt_shared_publication_sidecar/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:
