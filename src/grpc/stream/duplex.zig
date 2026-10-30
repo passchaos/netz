@@ -1,10 +1,9 @@
 //! Step-driven, single-owner gRPC streams over HTTP/2.
 //!
-//! One connection owner serially drives its duplex values. Client streams can
-//! coexist on one HTTP/2 connection; their response events and compression
+//! One connection owner serially drives its duplex values. Client and server
+//! streams can coexist on one HTTP/2 connection; their events and compression
 //! state remain independent. Message callbacks run inline with `read*Event`
-//! and borrow payload only for that callback. Server duplex acceptance still
-//! gives one stream exclusive request-reader ownership.
+//! and borrow payload only for that callback.
 
 const std = @import("std");
 const response_metadata = @import("../response_metadata.zig");
@@ -1339,9 +1338,9 @@ pub const ServerDuplex = struct {
 
     /// Drain the request half after an early terminal response. The cleanup
     /// deadline is intentionally independent of the RPC's `grpc-timeout`,
-    /// which has normally expired before a deadline status is sent. This
-    /// duplex remains the connection's sole frame reader while sibling and
-    /// connection-control frames retain their normal HTTP/2 handling.
+    /// which has normally expired before a deadline status is sent. The
+    /// serial connection owner routes sibling and connection-control frames
+    /// while this duplex drains.
     pub fn drainRequestAfterResponseWithDeadline(
         self: *ServerDuplex,
         cleanup_deadline: std.Io.Clock.Timestamp,

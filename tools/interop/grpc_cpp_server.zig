@@ -4,6 +4,7 @@ const std = @import("std");
 const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
 const finishConnection = @import("grpc_cpp/connection_finish.zig").finish;
+const connection_scaling = @import("grpc_cpp/connection_scaling.zig");
 
 const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
 const half_duplex_service_path =
@@ -55,6 +56,7 @@ const Scenario = enum {
     empty_unary,
     large_unary,
     pick_first_unary,
+    max_concurrent_streams_connection_scaling,
     half_duplex,
     slow_consumer,
     rpc_soak,
@@ -88,6 +90,8 @@ pub fn main(init: std.process.Init) !void {
         .max_body_bytes = 4 * 1024 * 1024,
         .initial_window_size = 512 * 1024,
         .initial_connection_window_size = 2 * 1024 * 1024,
+        .max_concurrent_streams = if (scenario ==
+            .max_concurrent_streams_connection_scaling) 2 else null,
         .handshake_timeout = .fromSeconds(5),
     };
     const keepalive_enforcement: ?netz.grpc.ServerKeepAliveEnforcementPolicy =
@@ -160,6 +164,21 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             "netz grpc server completed: scenario={s} transport={s} " ++
                 "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+            .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
+        );
+        return;
+    }
+    if (scenario == .max_concurrent_streams_connection_scaling) {
+        try connection_scaling.serve(
+            allocator,
+            tls_enabled,
+            &clear_server,
+            &tls_server,
+        );
+        std.debug.print(
+            "netz grpc server completed: scenario={s} transport={s} " ++
+                "client_io=grpc-cpp-posix-event-engine " ++
+                "server_io=zio-std-io\n",
             .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
         );
         return;
@@ -1179,6 +1198,7 @@ fn serveScenario(
         .empty_unary,
         .large_unary,
         .pick_first_unary,
+        .max_concurrent_streams_connection_scaling,
         .client_streaming,
         .server_streaming,
         => unreachable,

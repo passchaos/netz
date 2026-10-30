@@ -305,6 +305,7 @@ responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
 `empty_unary`, `large_unary`, `pick_first_unary`, `rpc_soak`, `channel_soak`,
+`max_concurrent_streams_connection_scaling`,
 `half_duplex`,
 `slow_consumer`, `empty_stream`,
 `cancel_after_begin`,
@@ -371,6 +372,22 @@ runs require the explicit `endpoint_order=0->1` marker; TLS additionally keeps
 certificate verification and `h2` ALPN. The runner never has both external
 servers available during phase one, so success cannot be explained by choosing
 B initially or by constructing a replacement channel.
+The official max-concurrent-streams connection-scaling case now runs in the
+same reverse gate. Netz advertises `SETTINGS_MAX_CONCURRENT_STREAMS=2`; the
+upstream client applies
+`connectionScaling.maxConnectionsPerSubchannel=2`, opens three live
+`FullDuplexCall` RPCs, and waits for one response before starting each next
+RPC. The first two responses carry the same real client TCP endpoint from one
+Netz connection, while the third carries a different endpoint from the second
+connection. All three requests strictly require
+`fill_peer_socket_address=BoolValue(true)`, remain open until the client
+half-closes them together, and finish with OK. The HTTP/2 server routes both
+live duplex handles on connection A through one serialized frame reader,
+including predecoded sibling HPACK and queued DATA, rather than spawning a
+second transport reader. Both h2c and certificate-verified TLS pass, bringing
+the reverse matrix to twenty-five scenarios per transport. Machine-readable
+evidence is recorded in
+`docs/evidence/grpc_cpp_connection_scaling/2026-10-30.json`.
 The half-duplex case sends all four canonical response-size requests before
 half-closing, then requires the peer to emit the four responses in order. Both
 netz and C++ server paths therefore prove response production begins only

@@ -138,6 +138,11 @@ PY
   if [[ -n "$additional_metadata" ]]; then
     client_args+=(--additional_metadata="$additional_metadata")
   fi
+  if [[ "$client_scenario" == max_concurrent_streams_connection_scaling ]]; then
+    client_args+=(
+      '--service_config_json={"connectionScaling":{"maxConnectionsPerSubchannel": 2}}'
+    )
+  fi
   if [[ "$scenario" == rpc_soak || "$scenario" == channel_soak ]]; then
     client_args+=(
       --soak_iterations=100
@@ -245,6 +250,7 @@ for transport in h2c tls; do
     empty_unary \
     large_unary \
     pick_first_unary \
+    max_concurrent_streams_connection_scaling \
     ping_pong \
     half_duplex \
     slow_consumer \
@@ -275,4 +281,4 @@ for transport in h2c tls; do
     'authorization:Bearer interop-token'
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large pick_first=100-stable-server-id rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large pick_first=100-stable-server-id connection_scaling=2-streams+1@2-connections rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

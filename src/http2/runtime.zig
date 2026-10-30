@@ -11,6 +11,7 @@ const flow_output = @import("runtime/flow/output.zig");
 const outbound_headers = @import("runtime/headers/connection.zig");
 const client_authority = @import("runtime/client/authority.zig");
 const client_duplex_owner = @import("runtime/duplex/client_owner.zig");
+const DuplexOwners = @import("runtime/duplex/owners.zig").Owners;
 const duplex_wake = @import("runtime/duplex/wake.zig");
 pub const ClientDuplexPumpEvent = client_duplex_owner.PumpEvent;
 const header_output = @import("runtime/headers/output.zig");
@@ -43,6 +44,7 @@ test {
     _ = @import("runtime/stream/peer_termination_tests.zig");
     _ = client_duplex_owner;
     _ = @import("runtime/duplex/client_tests.zig");
+    _ = @import("runtime/duplex/server_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
     _ = @import("runtime/ping_probe_tests.zig");
     _ = @import("runtime/ping_enforcement_tests.zig");
@@ -3990,7 +3992,7 @@ pub const Connection = struct {
     /// Duplex handles are driven serially by one connection owner. Ordinary
     /// aggregate readers remain excluded while any duplex handle is active.
     duplex_reader_active: bool = false,
-    client_duplex_owners: client_duplex_owner.Owners = .{},
+    duplex_owners: DuplexOwners = .{},
     /// User callbacks may borrow decoded headers or DATA backed by the active
     /// read operation. Reentering any receive path from such a callback would
     /// advance the shared frame reader and invalidate that borrow. Sending on
@@ -4236,7 +4238,7 @@ pub const Connection = struct {
             self.local_goaway_last_stream_id == null and
             self.active_local_streams.items.len == 0 and
             self.active_peer_streams.items.len == 0 and
-            self.client_duplex_owners.count() == 0 and
+            self.duplex_owners.count() == 0 and
             self.pending_requests.items.len == self.pending_request_head and
             self.pending_application_frames.items.len ==
                 self.pending_application_frame_head and
@@ -4330,6 +4332,14 @@ pub const Connection = struct {
             .tls_server => |connection| connection.negotiatedAlpn(),
             .tcp => null,
         };
+    }
+
+    /// Return the remote socket endpoint captured when this transport was
+    /// connected or accepted. TLS retains the same underlying TCP stream, so
+    /// this value is available without a syscall or allocation for both h2c
+    /// and encrypted connections.
+    pub fn peerAddress(self: *const Connection) net.IpAddress {
+        return self.stream.socket.address;
     }
 
     pub fn negotiatedTlsProtocol(
@@ -10480,6 +10490,7 @@ pub const Connection = struct {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server or
             (self.duplex_reader_active and
+                self.duplex_owners.count() == 0 and
                 !self.pending_duplex_request_head.hasValue()))
         {
             return error.UnexpectedFrame;
@@ -10491,7 +10502,7 @@ pub const Connection = struct {
                 if (err != error.Timeout) {
                     self.pending_duplex_request_head.deinit(self.allocator);
                     self.cancelPeerRequest(stream_id);
-                    self.duplex_reader_active = false;
+                    self.refreshDuplexReaderActive();
                 }
                 return err;
             }).?;
@@ -10503,6 +10514,37 @@ pub const Connection = struct {
             );
         }
         while (true) {
+            if (self.duplex_owners.count() != 0) {
+                if (try self.acceptQueuedDuplexRequest()) |stream| {
+                    return stream;
+                }
+                var frame = try self.readOwnedFrameForDuplexWithDeadline(
+                    deadline,
+                );
+                var frame_owned = true;
+                defer if (frame_owned) frame.deinit(self.allocator);
+                if (try self.handleConnectionFrameUntil(
+                    frame.frame,
+                    deadline,
+                )) continue;
+                if (frame.frame.header.frame_type == .goaway) continue;
+                const stream_id = frame.frame.header.stream_id;
+                const initial_headers =
+                    frame.frame.header.frame_type == .headers and
+                    !self.pending_duplex_sibling_header.hasValue() and
+                    (stream_id > self.last_peer_client_stream_id or
+                        self.gracefulPreadmittedIndex(stream_id) != null);
+                if (initial_headers) {
+                    if (try self.acceptDuplexRequestFrameUntil(
+                        frame.frame,
+                        deadline,
+                    )) |stream| return stream;
+                    continue;
+                }
+                try self.queueDuplexSiblingFrameUntil(frame);
+                frame_owned = false;
+                continue;
+            }
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
@@ -10510,45 +10552,149 @@ pub const Connection = struct {
             if (frame.frame.header.frame_type != .headers) {
                 return error.UnexpectedFrame;
             }
-
-            const stream_id = frame.frame.header.stream_id;
-            const admission = try self.claimPeerRequestStream(stream_id);
-            if (admission != .admitted) {
-                try self.refusePeerRequestStreamUntil(
-                    stream_id,
-                    frame.frame,
-                    deadline,
-                    admission == .refused_reset_sent,
-                );
-                continue;
-            }
-            self.duplex_reader_active = true;
-            const pending_value = DuplexHeaderBlock.init(
-                self,
+            if (try self.acceptDuplexRequestFrameUntil(
                 frame.frame,
-            ) catch |err| {
-                self.cancelPeerRequest(stream_id);
-                self.duplex_reader_active = false;
-                return err;
-            };
-            self.pending_duplex_request_head.put(pending_value);
-            const pending = self.pending_duplex_request_head.getPtr().?;
-            const end_stream = pending.end_stream;
-            const headers = (pending.resumeUntil(self, deadline) catch |err| {
-                if (err != error.Timeout) {
-                    self.pending_duplex_request_head.deinit(self.allocator);
-                    self.cancelPeerRequest(stream_id);
-                    self.duplex_reader_active = false;
-                }
-                return err;
-            }).?;
-            self.pending_duplex_request_head.deinit(self.allocator);
-            return self.finishAcceptedDuplexRequest(
-                stream_id,
-                headers,
-                end_stream,
-            );
+                deadline,
+            )) |stream| return stream;
         }
+    }
+
+    fn acceptDuplexRequestFrameUntil(
+        self: *Connection,
+        first: http2.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!?ServerDuplexStream {
+        const stream_id = first.header.stream_id;
+        const admission = try self.claimPeerRequestStream(stream_id);
+        if (admission != .admitted) {
+            try self.refusePeerRequestStreamUntil(
+                stream_id,
+                first,
+                deadline,
+                admission == .refused_reset_sent,
+            );
+            return null;
+        }
+        self.duplex_reader_active = true;
+        const pending_value = DuplexHeaderBlock.init(self, first) catch |err| {
+            self.cancelPeerRequest(stream_id);
+            self.refreshDuplexReaderActive();
+            return err;
+        };
+        self.pending_duplex_request_head.put(pending_value);
+        const pending = self.pending_duplex_request_head.getPtr().?;
+        const end_stream = pending.end_stream;
+        const headers = (pending.resumeUntil(self, deadline) catch |err| {
+            if (err != error.Timeout) {
+                self.pending_duplex_request_head.deinit(self.allocator);
+                self.cancelPeerRequest(stream_id);
+                self.refreshDuplexReaderActive();
+            }
+            return err;
+        }).?;
+        self.pending_duplex_request_head.deinit(self.allocator);
+        return try self.finishAcceptedDuplexRequest(
+            stream_id,
+            headers,
+            end_stream,
+        );
+    }
+
+    fn acceptQueuedDuplexRequest(
+        self: *Connection,
+    ) Error!?ServerDuplexStream {
+        const stream_id = self.queuedUnclaimedDuplexRequest() orelse
+            return null;
+        var frame = self.popQueuedFrameForStream(stream_id).?;
+        defer frame.deinit(self.allocator);
+        const admission = try self.claimPeerRequestStream(stream_id);
+        const end_stream =
+            (frame.frame.header.flags & flag_end_stream) != 0;
+        const headers = self.takeDeferredHeaderBlock(
+            frame.frame,
+            true,
+            false,
+        ) catch |err| {
+            if (admission == .admitted) {
+                self.cancelPeerRequest(stream_id);
+                self.refreshDuplexReaderActive();
+                return err;
+            }
+            if (err != error.MessageTooLarge or
+                self.aggregate_timeout_unusable or
+                self.serve_read_connection_error != null or
+                self.hpack_decoder.lastDecodeWasCompressionError())
+            {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            }
+            try self.finishPredecodedRefusal(
+                stream_id,
+                admission,
+                .refused_stream,
+            );
+            return null;
+        } orelse return error.UnexpectedFrame;
+        if (admission != .admitted) {
+            defer freeHeaders(self.allocator, headers);
+            const reset_code: http2.ErrorCode = blk: {
+                validateHeaderBlock(headers, .request) catch
+                    break :blk .protocol_error;
+                _ = requestHeaderLookup(headers) catch
+                    break :blk .protocol_error;
+                break :blk .refused_stream;
+            };
+            try self.finishPredecodedRefusal(
+                stream_id,
+                admission,
+                reset_code,
+            );
+            return null;
+        }
+        return try self.finishAcceptedDuplexRequest(
+            stream_id,
+            headers,
+            end_stream,
+        );
+    }
+
+    fn queuedUnclaimedDuplexRequest(self: *Connection) ?u31 {
+        for (self.pending_application_frames.items[self.pending_application_frame_head..]) |entry| {
+            const frame = entry.frame;
+            if (frame.header.frame_type != .headers or
+                !self.deferredHeaderIsDecoded(frame)) continue;
+            if (!self.peerStreamIsActive(frame.header.stream_id) or
+                self.gracefulPreadmittedIndex(frame.header.stream_id) != null)
+            {
+                return frame.header.stream_id;
+            }
+        }
+        if (self.pending_application_overflow.getPtr()) |entry| {
+            const frame = entry.frame;
+            if (frame.header.frame_type == .headers and
+                self.deferredHeaderIsDecoded(frame) and
+                (!self.peerStreamIsActive(frame.header.stream_id) or
+                    self.gracefulPreadmittedIndex(frame.header.stream_id) !=
+                        null))
+            {
+                return frame.header.stream_id;
+            }
+        }
+        return null;
+    }
+
+    fn finishPredecodedRefusal(
+        self: *Connection,
+        stream_id: u31,
+        admission: PeerRequestAdmission,
+        reset_code: http2.ErrorCode,
+    ) Error!void {
+        if (admission == .refused_reset_sent) return;
+        self.writeResetStreamFramePrepared(stream_id, reset_code) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.local_error_reset_streams +|= 1;
     }
 
     fn finishAcceptedDuplexRequest(
@@ -10559,6 +10705,7 @@ pub const Connection = struct {
     ) Error!ServerDuplexStream {
         errdefer freeHeaders(self.allocator, headers);
         errdefer self.cancelPeerRequest(stream_id);
+        errdefer self.refreshDuplexReaderActive();
         try validateHeaderBlock(headers, .request);
         const lookup = try requestHeaderLookup(headers);
         const method = lookup.method orelse return error.MissingPseudoHeader;
@@ -10586,9 +10733,11 @@ pub const Connection = struct {
             protocol,
             request_priority,
         );
+        self.duplex_owners.acquire();
         self.duplex_reader_active = true;
         return .{
             .connection = self,
+            .registered = true,
             .stream_id = stream_id,
             .headers = headers,
             .method = method,
@@ -11609,6 +11758,23 @@ pub const Connection = struct {
         return client_duplex_owner.read(self, stream_id, deadline, client_duplex_hooks);
     }
 
+    fn readOwnedServerDuplexFrameWithDeadline(
+        self: *Connection,
+        stream_id: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!RetainedFrame {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
+        if (self.peekQueuedFrameForStream(stream_id)) |queued| {
+            if (queued.header.frame_type != .headers or
+                self.deferredHeaderIsDecoded(queued))
+            {
+                return self.popQueuedFrameForStream(stream_id).?;
+            }
+        }
+        return self.readOwnedFrameForDuplexWithDeadline(deadline);
+    }
+
     const client_duplex_hooks = .{
         .Error = Error,
         .Frame = RetainedFrame,
@@ -11680,7 +11846,7 @@ pub const Connection = struct {
 
     fn checkClientDuplexPump(self: *const Connection) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
-        if (self.role != .client or self.client_duplex_owners.count() == 0 or self.callback_reader_active) return error.UnexpectedFrame;
+        if (self.role != .client or self.duplex_owners.count() == 0 or self.callback_reader_active) return error.UnexpectedFrame;
     }
 
     fn retainInterruptedClientDuplexFrame(self: *Connection, frame: RetainedFrame) void {
@@ -11775,16 +11941,43 @@ pub const Connection = struct {
 
     /// Number of client duplex handles that still own a live HTTP/2 half.
     pub fn activeClientDuplexCount(self: *const Connection) usize {
-        return self.client_duplex_owners.count();
+        return if (self.role == .client) self.duplex_owners.count() else 0;
+    }
+
+    /// Number of accepted server duplex handles whose request or response
+    /// half is still live. One connection owner must drive these handles
+    /// serially; their input frames are routed by stream ID.
+    pub fn activeServerDuplexCount(self: *const Connection) usize {
+        return if (self.role == .server) self.duplex_owners.count() else 0;
+    }
+
+    fn refreshDuplexReaderActive(self: *Connection) void {
+        self.duplex_reader_active =
+            self.duplex_owners.count() != 0;
     }
 
     fn releaseClientDuplexOwner(self: *Connection, stream_id: u31) void {
         if (self.pending_duplex_sibling_header.getPtr()) |pending| {
             if (pending.header.stream_id == stream_id) self.aggregate_timeout_unusable = true;
         }
-        self.client_duplex_owners.release();
-        self.duplex_reader_active = self.client_duplex_owners.count() != 0;
+        self.duplex_owners.release();
+        self.refreshDuplexReaderActive();
         if (!self.duplex_reader_active and self.pending_duplex_sibling_header.hasValue()) {
+            self.aggregate_timeout_unusable = true;
+        }
+    }
+
+    fn releaseServerDuplexOwner(self: *Connection, stream_id: u31) void {
+        if (self.pending_duplex_sibling_header.getPtr()) |pending| {
+            if (pending.header.stream_id == stream_id) {
+                self.aggregate_timeout_unusable = true;
+            }
+        }
+        self.duplex_owners.release();
+        self.refreshDuplexReaderActive();
+        if (!self.duplex_reader_active and
+            self.pending_duplex_sibling_header.hasValue())
+        {
             self.aggregate_timeout_unusable = true;
         }
     }
@@ -18315,13 +18508,13 @@ pub const Connection = struct {
         while (self.send_connection_window.available() == 0 or
             (try self.sendStreamWindow(stream_id)).available() == 0)
         {
-            var frame = if (self.role == .client and self.client_duplex_owners.count() != 0)
+            var frame = if (self.role == .client and self.duplex_owners.count() != 0)
                 try self.readClientDuplexWireFrame(deadline)
             else
                 try self.readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
-            if (self.role == .client and self.client_duplex_owners.count() != 0) {
+            if (self.role == .client and self.duplex_owners.count() != 0) {
                 try self.validateClientDuplexHeaderSequence(frame.frame, deadline);
             }
             if (try self.handleConnectionFrameUntil(frame.frame, deadline)) continue;
@@ -20050,12 +20243,12 @@ pub const RequestWriter = struct {
     /// The original writer becomes inert and must not be used again.
     pub fn beginDuplex(self: *RequestWriter) Error!ClientDuplexStream {
         if (self.completed or
-            (self.connection.duplex_reader_active and self.connection.client_duplex_owners.count() == 0) or
+            (self.connection.duplex_reader_active and self.connection.duplex_owners.count() == 0) or
             self.connection.callback_reader_active)
         {
             return error.UnexpectedFrame;
         }
-        self.connection.client_duplex_owners.acquire();
+        self.connection.duplex_owners.acquire();
         self.connection.duplex_reader_active = true;
         const duplex = ClientDuplexStream{
             .connection = self.connection,
@@ -21159,7 +21352,7 @@ pub const ClientDuplexStream = struct {
             self.connection.releaseClientDuplexOwner(self.stream_id);
             self.registered = false;
         } else {
-            self.connection.duplex_reader_active = self.connection.client_duplex_owners.count() != 0;
+            self.connection.refreshDuplexReaderActive();
         }
     }
 
@@ -21197,6 +21390,7 @@ pub const DuplexRequestDrainResult = union(enum) {
 /// written between receive steps.
 pub const ServerDuplexStream = struct {
     connection: *Connection,
+    registered: bool = false,
     stream_id: u31,
     headers: []http2.Hpack.HeaderField,
     method: []const u8,
@@ -21225,7 +21419,7 @@ pub const ServerDuplexStream = struct {
             }
         }
         self.pending_header.deinit(self.connection.allocator);
-        self.connection.duplex_reader_active = false;
+        self.releaseOwnership();
         freeHeaders(self.connection.allocator, self.headers);
         self.* = undefined;
     }
@@ -21318,7 +21512,7 @@ pub const ServerDuplexStream = struct {
             self.request_finished_reported = true;
             self.response_finished = true;
             self.released = true;
-            self.connection.duplex_reader_active = false;
+            self.releaseOwnership();
         }
         if (self.pending_header.getPtr()) |pending| {
             if (!pending.decode_complete) self.connection.aggregate_timeout_unusable = true;
@@ -21707,7 +21901,10 @@ pub const ServerDuplexStream = struct {
         }
         while (true) {
             var frame = try self.connection
-                .readOwnedFrameForDuplexWithDeadline(deadline);
+                .readOwnedServerDuplexFrameWithDeadline(
+                self.stream_id,
+                deadline,
+            );
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) {
@@ -21760,7 +21957,11 @@ pub const ServerDuplexStream = struct {
                 self.request_finished = true;
                 return .{ .trailers = trailers };
             }
-            var frame = try self.connection.readOwnedFrameForDuplexWithDeadline(deadline);
+            var frame = try self.connection
+                .readOwnedServerDuplexFrameWithDeadline(
+                self.stream_id,
+                deadline,
+            );
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrameUntil(frame.frame, deadline)) continue;
@@ -21821,6 +22022,27 @@ pub const ServerDuplexStream = struct {
                     if ((frame.frame.header.flags & flag_end_stream) == 0) {
                         return error.UnexpectedFrame;
                     }
+                    if (try self.connection.takeDeferredHeaderBlock(
+                        frame.frame,
+                        true,
+                        false,
+                    )) |trailers| {
+                        errdefer freeHeaders(
+                            self.connection.allocator,
+                            trailers,
+                        );
+                        try validateHeaderBlock(
+                            trailers,
+                            .request_trailers,
+                        );
+                        try validateExpectedContentLength(
+                            self.expected_request_length,
+                            self.request_body_bytes,
+                        );
+                        self.request_finished = true;
+                        self.maybeRelease();
+                        return .{ .trailers = trailers };
+                    }
                     self.pending_header.put(try DuplexHeaderBlock.init(
                         self.connection,
                         frame.frame,
@@ -21866,8 +22088,17 @@ pub const ServerDuplexStream = struct {
     fn release(self: *ServerDuplexStream) void {
         if (self.released) return;
         self.connection.releasePeerStream(self.stream_id);
-        self.connection.duplex_reader_active = false;
+        self.releaseOwnership();
         self.released = true;
+    }
+
+    fn releaseOwnership(self: *ServerDuplexStream) void {
+        if (self.registered) {
+            self.connection.releaseServerDuplexOwner(self.stream_id);
+            self.registered = false;
+        } else {
+            self.connection.refreshDuplexReaderActive();
+        }
     }
 };
 

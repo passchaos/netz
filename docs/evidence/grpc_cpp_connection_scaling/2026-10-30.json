@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "official grpc-cpp max concurrent streams connection scaling",
+  "decision": "accepted",
+  "scope": {
+    "direction": "official grpc-cpp client to netz server",
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "method": "/grpc.testing.TestService/FullDuplexCall",
+    "advertised_max_concurrent_streams": 2,
+    "service_config": {
+      "connectionScaling": {
+        "maxConnectionsPerSubchannel": 2
+      }
+    },
+    "streams": 3,
+    "connections": 2,
+    "placement": "streams 1 and 2 on connection A; stream 3 on connection B",
+    "request": "strict single ResponseParameters with fill_peer_socket_address=BoolValue(true)",
+    "response": "payload-free StreamingOutputCallResponse with real peer_socket_address",
+    "lifecycle": "all three streams remain open through their first response, then the client half-closes all three and requires OK"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ interop_client InteropClient::DoMcsConnectionScaling",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "description": "doc/interop-test-descriptions.md and test/cpp/interop/interop_client.cc"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "bazel": "8.7.0",
+    "bazel_sha256": "bfe9558bd8a2ecfe4841ec46c0dbccb4b469fe22d81f2f859de0de222b3e7ce3",
+    "cc": "/usr/bin/gcc 13.3.0",
+    "cxx": "/usr/bin/g++ 13.3.0",
+    "client_io": "grpc-cpp-posix-event-engine",
+    "server_io": "zio-std-io",
+    "grpc_cpp_client_sha256": "f3c8f9677d96a97499685c1c39e01b7eff7b75412cd01352ef46767582d1c0a3",
+    "grpc_cpp_client_build_id": "1110ce14f6868d70497ae0e09aec3cc4a5f4dc09",
+    "grpc_cpp_client_reused_from_pinned_checkout": true,
+    "source_build_probe": "current PATH selected /nav_env/.pixi/bin/clang without C++ standard headers; the conformance run reused the already-built fixed-revision official client above"
+  },
+  "implementation": {
+    "peer_address": "HTTP/2 Connection.peerAddress and gRPC ServerConnection.peerAddress return the remote endpoint retained by std.Io.net.Stream for both cleartext and TLS",
+    "server_duplex": "movable server duplex handles share one role-specific owner count and one frame reader; sibling HEADERS are HPACK-decoded once and queued DATA is routed by stream id",
+    "layout": "the existing client owner counter is shared by the mutually exclusive client/server connection role, preserving Connection size at 2032 bytes",
+    "fixture": "a dedicated connection-scaling module accepts two connections, serves two live RPCs on A and one on B, and verifies the two real peer endpoints differ",
+    "runner": "max_concurrent_streams_connection_scaling is part of every h2c/TLS reverse matrix"
+  },
+  "results": {
+    "fixture_codec": "16/16 passed",
+    "server_duplex_focused": "129/129 passed",
+    "http2_debug": "922/922 passed",
+    "grpc_debug": "396/396 passed",
+    "package": "22/22 passed",
+    "reverse_matrix": "25 scenarios per transport, 50 total, passed over h2c and TLS",
+    "connection_scaling_h2c": "first two peer addresses equal and third nonempty/different; all three streams finished OK",
+    "connection_scaling_tls": "first two peer addresses equal and third nonempty/different; all three streams finished OK with certificate verification and ALPN h2",
+    "forward_matrix": "netz client to grpc-cpp server complete h2c/TLS matrix plus same-SharedChannel A-to-B failover passed"
+  },
+  "source_sha256": {
+    "src/http2/runtime.zig": "fedc8e10f2302dc82c1bb405e7fda1ea5e2d7cf62a25963c433b713d4beecea4",
+    "src/http2/runtime/duplex/owners.zig": "449eafd1ab7799d2f01978cba7e19526ae49eb8ee72def3dd20e37f4e63312ed",
+    "src/http2/runtime/duplex/server_tests.zig": "8cdc67297715146f92dbf0b9eb1bbd9b7cf8c084c456abf3b4b04c00a6c00c24",
+    "src/grpc/runtime.zig": "4053f58dc3ba42ebf69f3b03970e8eac8d817cfeacc0f4fef98b6199d4a252c0",
+    "src/grpc/stream/duplex.zig": "52228577d1c9f5e1d30782349d8659ce4efeb751943599aceb2db6c36d134f9c",
+    "tools/interop/grpc_cpp/connection_scaling.zig": "4f95e06d3a54ac02a162d1f3386452145d48ef5f76b8efa4ca908931659c9179",
+    "tools/interop/grpc_cpp_messages.zig": "49741178b9c9f46757dcd9e21b52f97f8f660cb2a578fe3104a8a19e2b461f08",
+    "tools/interop/grpc_cpp_server.zig": "0b2f3f2a68b4dce1e54cc67115f67b9ed2d7bc229bb6241e17b3ff471b024b4c",
+    "tools/interop/grpc_cpp_client.sh": "780a89399cafc1eced8654f927ee99de5a6eba660cb6dd8ad33ea12b3087308f"
+  },
+  "verification_commands": [
+    "zig test tools/interop/grpc_cpp_messages.zig -O Debug",
+    "zig build -j1 test-lib -Dtest-filter='HTTP/2' --summary all",
+    "zig build -j1 test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build -j1 test-package --summary all",
+    "GRPC_CPP_INTEROP_CLIENT=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_client zig build -j1 interop-grpc-cpp-client --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build -j1 interop-grpc-cpp --summary all"
+  ],
+  "remaining_gap": "The standardized max-concurrent-streams connection-scaling case is externally covered. Broader repeated and fault-injected multi-connection distributions remain separate stress evidence."
+}

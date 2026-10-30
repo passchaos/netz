@@ -16,6 +16,7 @@ pub const max_payload_size: usize = 512 * 1024;
 pub const max_interval_us: u32 = 5 * 1000 * 1000;
 pub const max_status_message_size: usize = 4 * 1024;
 pub const max_server_id_size: usize = 256;
+pub const max_peer_socket_address_size: usize = 256;
 
 pub const Error = std.mem.Allocator.Error || error{
     DuplicateField,
@@ -520,6 +521,64 @@ pub fn decodeStreamingOutputCallRequest(input: []const u8) Error!RequestOptions 
     }
     if (!payload_seen) return error.MissingPayload;
     return result;
+}
+
+/// Decode the exact request used by the official connection-scaling case:
+/// one response-parameters entry containing only
+/// `fill_peer_socket_address = BoolValue(true)`.
+pub fn decodePeerSocketAddressRequest(input: []const u8) Error!void {
+    var reader = Reader{ .input = input };
+    const tag = try reader.readTag();
+    if (tag.field_number != 2 or tag.wire_type != .length_delimited) {
+        return error.UnsupportedField;
+    }
+    const parameter = try reader.readBytes(8);
+    if (!reader.finished()) return error.UnsupportedField;
+
+    var parameter_reader = Reader{ .input = parameter };
+    const fill_tag = try parameter_reader.readTag();
+    if (fill_tag.field_number != 4 or
+        fill_tag.wire_type != .length_delimited)
+    {
+        return error.UnsupportedField;
+    }
+    if (!try decodeBoolValue(try parameter_reader.readBytes(2)) or
+        !parameter_reader.finished())
+    {
+        return error.InvalidArgument;
+    }
+}
+
+/// Encode a payload-free `StreamingOutputCallResponse` containing the real
+/// client endpoint in field 2 `peer_socket_address`.
+pub fn encodePeerSocketAddressResponseAlloc(
+    allocator: std.mem.Allocator,
+    peer_socket_address: []const u8,
+) Error![]u8 {
+    if (peer_socket_address.len == 0 or
+        peer_socket_address.len > max_peer_socket_address_size)
+    {
+        return error.InvalidArgument;
+    }
+    if (!std.unicode.utf8ValidateSlice(peer_socket_address)) {
+        return error.InvalidUtf8;
+    }
+    const encoded = try allocator.alloc(
+        u8,
+        try lengthDelimitedFieldLen(peer_socket_address.len),
+    );
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(2, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, peer_socket_address.len);
+    @memcpy(
+        encoded[cursor..][0..peer_socket_address.len],
+        peer_socket_address,
+    );
+    cursor += peer_socket_address.len;
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
 }
 
 /// Encode a canonical `StreamingOutputCallResponse` containing a zero-filled
@@ -1341,6 +1400,35 @@ test "encodes canonical streaming response" {
             std.testing.allocator,
             max_payload_size + 1,
         ),
+    );
+}
+
+test "strictly handles peer socket address connection-scaling messages" {
+    try decodePeerSocketAddressRequest(
+        &.{ 0x12, 0x04, 0x22, 0x02, 0x08, 0x01 },
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        decodePeerSocketAddressRequest(
+            &.{ 0x12, 0x02, 0x22, 0x00 },
+        ),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodePeerSocketAddressRequest(
+            &.{ 0x12, 0x04, 0x22, 0x02, 0x08, 0x01, 0x1a, 0x00 },
+        ),
+    );
+
+    const encoded = try encodePeerSocketAddressResponseAlloc(
+        std.testing.allocator,
+        "127.0.0.1:43210",
+    );
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        "\x12\x0f127.0.0.1:43210",
+        encoded,
     );
 }
 

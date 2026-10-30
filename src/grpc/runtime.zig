@@ -750,9 +750,9 @@ pub const ServerConnection = struct {
         );
     }
 
-    /// Accept a bidirectional gRPC call.  The returned value owns the request
-    /// metadata and is the connection's sole frame reader until both halves
-    /// end or it is deinitialized.
+    /// Accept a bidirectional gRPC call. The returned value owns the request
+    /// metadata. Several accepted calls may coexist while one connection
+    /// owner drives their accept/read operations serially.
     pub fn acceptDuplex(
         self: *ServerConnection,
     ) duplex.Error!duplex.ServerDuplex {
@@ -872,6 +872,12 @@ pub const ServerConnection = struct {
 
     pub fn negotiatedAlpn(self: *const ServerConnection) ?[]const u8 {
         return self.connection.negotiatedAlpn();
+    }
+
+    /// Return the client's real TCP endpoint for connection-aware services
+    /// such as the official gRPC interop peer-socket-address response.
+    pub fn peerAddress(self: *const ServerConnection) net.IpAddress {
+        return self.connection.peerAddress();
     }
 
     pub fn peerCertificates(

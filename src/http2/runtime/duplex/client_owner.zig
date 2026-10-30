@@ -9,22 +9,7 @@ pub const PumpEvent = union(enum) {
     wake,
 };
 
-pub const Owners = struct {
-    value: usize = 0,
-
-    pub fn acquire(self: *Owners) void {
-        self.value += 1;
-    }
-
-    pub fn release(self: *Owners) void {
-        std.debug.assert(self.value != 0);
-        self.value -= 1;
-    }
-
-    pub fn count(self: *const Owners) usize {
-        return self.value;
-    }
-};
+pub const Owners = @import("owners.zig").Owners;
 
 pub fn queuedIndex(frames: anytype, start: usize, stream_id: u31) ?usize {
     for (frames[start..], start..) |frame, index| {
