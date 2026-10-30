@@ -615,12 +615,12 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |*tcp| readTcpPacketWithPolicy(
+                .none,
+                true,
                 allocator,
                 tcp,
                 max_packet_size,
-                null,
-                null,
-                null,
+                {},
                 storage,
                 0,
             ),
@@ -656,12 +656,12 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |*tcp| readTcpPacketWithPolicy(
+                .none,
+                true,
                 allocator,
                 tcp,
                 max_packet_size,
-                null,
-                null,
-                null,
+                {},
                 storage,
                 prefix_len,
             ),
@@ -762,12 +762,12 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |*tcp| readTcpPacketWithPolicy(
+                .inactivity_timeout,
+                true,
                 allocator,
                 tcp,
                 max_packet_size,
                 timeout,
-                null,
-                null,
                 storage,
                 0,
             ),
@@ -790,12 +790,12 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |*tcp| readTcpPacketWithPolicy(
+                .inactivity_timeout,
+                true,
                 allocator,
                 tcp,
                 max_packet_size,
                 timeout,
-                null,
-                null,
                 storage,
                 prefix_len,
             ),
@@ -851,11 +851,11 @@ pub const Transport = union(enum) {
     ) Error!OwnedPacket {
         return switch (self.*) {
             .tcp => |*tcp| readTcpPacketWithPolicy(
+                .inactivity_observer,
+                true,
                 allocator,
                 tcp,
                 max_packet_size,
-                null,
-                null,
                 observer,
                 storage,
                 prefix_len,
@@ -1176,13 +1176,13 @@ fn readTcpPacket(
     max_packet_size: usize,
 ) Error!OwnedPacket {
     return readTcpPacketWithPolicy(
+        .none,
+        false,
         allocator,
         tcp,
         max_packet_size,
-        null,
-        null,
-        null,
-        null,
+        {},
+        {},
         0,
     );
 }
@@ -1195,13 +1195,13 @@ fn readTcpPacketWithInactivityTimeout(
 ) Error!OwnedPacket {
     std.debug.assert(timeout.raw.nanoseconds > 0);
     return readTcpPacketWithPolicy(
+        .inactivity_timeout,
+        false,
         allocator,
         tcp,
         max_packet_size,
         timeout,
-        null,
-        null,
-        null,
+        {},
         0,
     );
 }
@@ -1213,31 +1213,59 @@ fn readTcpPacketWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) Error!OwnedPacket {
     return readTcpPacketWithPolicy(
+        .absolute_deadline,
+        false,
         allocator,
         tcp,
         max_packet_size,
-        null,
         deadline,
-        null,
-        null,
+        {},
         0,
     );
 }
 
-fn readTcpPacketWithPolicy(
+const TcpReadPolicy = enum {
+    none,
+    inactivity_timeout,
+    absolute_deadline,
+    inactivity_observer,
+};
+
+fn TcpReadPolicyValue(comptime policy: TcpReadPolicy) type {
+    return switch (policy) {
+        .none => void,
+        .inactivity_timeout => std.Io.Clock.Duration,
+        .absolute_deadline => std.Io.Clock.Timestamp,
+        .inactivity_observer => InactivityObserver,
+    };
+}
+
+fn TcpReadDeadline(comptime policy: TcpReadPolicy) type {
+    return switch (policy) {
+        .inactivity_timeout, .absolute_deadline => std.Io.Clock.Timestamp,
+        .none, .inactivity_observer => void,
+    };
+}
+
+fn TcpCallerStorage(comptime enabled: bool) type {
+    return if (enabled) []u8 else void;
+}
+
+noinline fn readTcpPacketWithPolicy(
+    comptime policy: TcpReadPolicy,
+    comptime has_caller_storage: bool,
     allocator: std.mem.Allocator,
     tcp: *TcpTransport,
     max_packet_size: usize,
-    inactivity_timeout: ?std.Io.Clock.Duration,
-    absolute_deadline: ?std.Io.Clock.Timestamp,
-    inactivity_observer: ?InactivityObserver,
-    caller_storage: ?[]u8,
+    policy_value: TcpReadPolicyValue(policy),
+    caller_storage: TcpCallerStorage(has_caller_storage),
     owned_prefix_len: usize,
 ) Error!OwnedPacket {
-    var deadline = if (inactivity_timeout) |timeout|
-        inactivityDeadline(tcp.io, timeout)
-    else
-        absolute_deadline;
+    var deadline: TcpReadDeadline(policy) = switch (policy) {
+        .inactivity_timeout => inactivityDeadline(tcp.io, policy_value),
+        .absolute_deadline => policy_value,
+        .none, .inactivity_observer => {},
+    };
     var parsed_fixed: ?mqtt.FixedHeader = null;
 
     while (tcp.packet == null) {
@@ -1245,7 +1273,8 @@ fn readTcpPacketWithPolicy(
         const frame = (try parsePacketFraming(buffered)) orelse {
             tcp.compactBuffered();
             std.debug.assert(tcp.input_end < tcp.input.len);
-            tcp.input_end += try readTcpSomeWithDeadline(
+            tcp.input_end += try readTcpSome(
+                policy == .inactivity_timeout or policy == .absolute_deadline,
                 tcp,
                 tcp.input[tcp.input_end..],
                 deadline,
@@ -1254,7 +1283,8 @@ fn readTcpPacketWithPolicy(
         };
         const packet_len = frame.packet_len;
         if (packet_len > max_packet_size) return error.PacketTooLarge;
-        if (caller_storage) |storage| {
+        if (has_caller_storage) {
+            const storage = caller_storage;
             // Terminal diagnostics can be retained after a decoder's local
             // allocation failure. Own their bytes before consuming read-ahead
             // so they never outlive a caller's temporary storage.
@@ -1268,7 +1298,8 @@ fn readTcpPacketWithPolicy(
                     // temporary storage or allocating a resumable packet.
                     tcp.compactBuffered();
                     std.debug.assert(tcp.input_end < packet_len);
-                    tcp.input_end += try readTcpSomeWithDeadline(
+                    tcp.input_end += try readTcpSome(
+                        policy == .inactivity_timeout or policy == .absolute_deadline,
                         tcp,
                         tcp.input[tcp.input_end..packet_len],
                         deadline,
@@ -1299,7 +1330,7 @@ fn readTcpPacketWithPolicy(
         tcp.packet_prefix_len = allocated.prefix_len;
         tcp.packet_read = copy_len;
         parsed_fixed = frame.fixed;
-        if (inactivity_timeout) |timeout| {
+        if (policy == .inactivity_timeout) {
             if (frame.fixed.remaining_len > keep_alive_reader.progress_threshold and
                 copy_len < packet_len)
             {
@@ -1307,33 +1338,34 @@ fn readTcpPacketWithPolicy(
                 // body. Preserve the pre-read-ahead policy: once its header
                 // establishes a large packet, body progress starts a fresh
                 // inactivity window.
-                deadline = inactivityDeadline(tcp.io, timeout);
+                deadline = inactivityDeadline(tcp.io, policy_value);
             }
-        } else if (inactivity_observer) |observer| {
+        } else if (policy == .inactivity_observer) {
             if (frame.fixed.remaining_len > keep_alive_reader.progress_threshold and
                 copy_len < packet_len)
             {
-                observer.renew();
+                policy_value.renew();
             }
         }
     }
 
     const packet = tcp.packet.?;
     while (tcp.packet_read < packet.len) {
-        if (inactivity_timeout) |timeout| {
+        if (policy == .inactivity_timeout) {
             if (packet.len - tcp.packet_read >
                 keep_alive_reader.progress_threshold)
             {
-                deadline = inactivityDeadline(tcp.io, timeout);
+                deadline = inactivityDeadline(tcp.io, policy_value);
             }
-        } else if (inactivity_observer) |observer| {
+        } else if (policy == .inactivity_observer) {
             if (packet.len - tcp.packet_read >
                 keep_alive_reader.progress_threshold)
             {
-                observer.renew();
+                policy_value.renew();
             }
         }
-        const count = try readTcpSomeWithDeadline(
+        const count = try readTcpSome(
+            policy == .inactivity_timeout or policy == .absolute_deadline,
             tcp,
             packet[tcp.packet_read..],
             deadline,
@@ -1356,17 +1388,18 @@ fn readTcpPacketWithPolicy(
     };
 }
 
-fn readTcpSomeWithDeadline(
+noinline fn readTcpSome(
+    comptime has_deadline: bool,
     tcp: *TcpTransport,
     buffer: []u8,
-    deadline: ?std.Io.Clock.Timestamp,
+    deadline: if (has_deadline) std.Io.Clock.Timestamp else void,
 ) Error!usize {
-    const count = if (deadline) |value|
+    const count = if (has_deadline)
         try stream_io.readSomeWithDeadline(
             tcp.io,
             tcp.stream,
             buffer,
-            value,
+            deadline,
         )
     else blk: {
         var bufs = [_][]u8{buffer};

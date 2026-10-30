@@ -1,0 +1,216 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "MQTT TCP receive-policy specialization without read-ahead growth",
+  "decision": "accepted",
+  "baseline": {
+    "head": "32e56d5847139b2adea42f9bf80c9e02c3e291a7",
+    "broker_sha256": "e47e8dca5f14ab32e32441f27526646e04859425018620f94e7ab01cfa1c7ceb",
+    "driver_sha256": "7ba9ef928560ceeda6827334b68fd5315e143d1efa158d9af0b012e55c6a1857",
+    "tcp_read_ahead_bytes": 448,
+    "packet_storage_bytes": 128
+  },
+  "read_shape_probe": {
+    "method": "AArch64 uprobe on mqtt.runtime.packet_transport.readTcpSomeWithDeadline in the fixed baseline broker",
+    "workload": {
+      "publishers": 1,
+      "subscribers": 1,
+      "qos": 2,
+      "session_expiry_seconds": 3600,
+      "publisher_window": 1,
+      "payload_bytes": 256,
+      "warmup_publishes": 5000,
+      "measured_publishes": 100000
+    },
+    "tcp_read_calls": 420005,
+    "expected_control_packets": "105000 each of PUBLISH, PUBREL, subscriber PUBREC and subscriber PUBCOMP, plus two CONNECT packets, one SUBSCRIBE and two DISCONNECT packets",
+    "result": "Exactly one transport read per inbound MQTT packet. The 282-byte PUBLISH and 4-byte QoS 2 acknowledgements already fit the 448-byte request; increasing read-ahead cannot reduce serial reads."
+  },
+  "candidate": {
+    "broker_sha256": "f58ecf8e6d4392c3db0f100681ffd47e7fc486ff841b825e57b8b3abc21e2041",
+    "source_sha256": {
+      "src/mqtt/runtime/packet_transport.zig": "4c6811df03e63571b80d0820d2ac9fefd10a6e1b49bc1285c40f5be920e65957"
+    },
+    "design": "Keep one TCP packet assembly implementation while specializing the mutually exclusive none, inactivity-timeout, absolute-deadline and inactivity-observer policies and caller-storage presence at compile time. Keep packet assembly and transport reads noinline so specialization does not inflate EventReceive.read.",
+    "semantic_changes": false,
+    "connection_layout_changes": false,
+    "read_ahead_changes": false,
+    "allocation_changes": false
+  },
+  "code_generation": {
+    "baseline_text_bytes": 7804851,
+    "candidate_text_bytes": 7813291,
+    "text_delta_bytes": 8440,
+    "event_reader_code_bytes": {
+      "baseline": 3768,
+      "candidate": 3632
+    },
+    "event_reader_stack_bytes": {
+      "baseline": 752,
+      "candidate": 768
+    },
+    "managed_observer_policy_stack_bytes": {
+      "baseline_shared_policy": 688,
+      "candidate_specialization": 400
+    },
+    "untimed_tcp_read_stack_bytes": {
+      "baseline_optional_deadline": 272,
+      "candidate_no_deadline": 64
+    },
+    "deep_managed_receive_stack_delta_bytes": -480
+  },
+  "rejected_inline_variant": {
+    "broker_sha256": "8fd66d7a1c2a04a79302caa1aace073367d77d6e8a7f719440711d4e56ac61b7",
+    "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T181500Z-inline-serial-100k",
+    "results_sha256": "f613bed9481dcf04e465a6ff21c4d0a70e518e026f123620e7465db7022df435",
+    "pairs": 4,
+    "event_reader_code_bytes": 13416,
+    "event_reader_stack_bytes": 1184,
+    "candidate_over_baseline_paired_median": {
+      "publishes_per_second": 0.999428,
+      "p50": 1.035079,
+      "p99": 1.019142,
+      "cycles": 1.016323,
+      "instructions": 0.992572
+    },
+    "reason": "Inlining removed instructions but enlarged the hot reader by 9648 code bytes and 432 stack bytes, regressing cycles and latency. The retained implementation explicitly prevents this inlining."
+  },
+  "benchmark_method": {
+    "client_cpu": 0,
+    "broker_cpu": 1,
+    "schedule": "order-alternated fixed-binary pairs",
+    "qos": 2,
+    "session_expiry_seconds": 3600,
+    "perf_events": [
+      "cycles:u",
+      "instructions:u"
+    ],
+    "completion_rule": "Every arm must report complete=true with the exact delivery count and checksum."
+  },
+  "benchmarks": {
+    "serial_100k": {
+      "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T183000Z-noinline-serial-100k",
+      "artifact_bytes": 13923,
+      "aggregate_file_hash_digest": "81d334adb4f71bbca959abdab1eeb9b06a013227a219e0e6aeaf21f7cdb03608",
+      "results_sha256": "5eed52b2a4138bf6aa3ac1aef2672a351f743e1932d4f8f1c9c37b8bf3a1c3b6",
+      "pairs": 4,
+      "warmup_publishes": 5000,
+      "measured_publishes": 100000,
+      "measured_deliveries": 100000,
+      "payload_bytes": 256,
+      "publisher_window": 1,
+      "checksum": 25725000,
+      "candidate_over_baseline_paired_median": {
+        "publishes_per_second": 0.99934976,
+        "p50": 0.95479945,
+        "p99": 0.99610820,
+        "cycles": 0.96756392,
+        "instructions": 0.98793452
+      },
+      "cycles_candidate_wins": 4,
+      "instructions_candidate_wins": 4
+    },
+    "publishers_32_100k": {
+      "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T190000Z-publishers32-100k",
+      "artifact_bytes": 14043,
+      "aggregate_file_hash_digest": "168860823c406113d3e0e55ef9ba8536eb4a9e3a3ba69a82ffbd0c371e226c9f",
+      "results_sha256": "8d1364ace30f212da52833849493fc4725e61366906d23a23145d2e4c8c66644",
+      "pairs": 4,
+      "warmup_publishes": 5000,
+      "measured_publishes": 100000,
+      "measured_deliveries": 100000,
+      "payload_bytes": 64,
+      "publisher_window": 4,
+      "checksum": 5565000,
+      "candidate_over_baseline_paired_median": {
+        "publishes_per_second": 1.00128535,
+        "p50": 0.99464846,
+        "p99": 0.99869694,
+        "cycles": 0.98723612,
+        "instructions": 0.99132972
+      },
+      "cycles_candidate_wins": 4,
+      "instructions_candidate_wins": 4
+    },
+    "fanout_32_10k": {
+      "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T184500Z-concurrent-controls",
+      "artifact_bytes": 20857,
+      "aggregate_file_hash_digest": "a218ab130c6a3cd33319c1c82074b638c60739da518add942e1e7ff9d608d5e3",
+      "results_sha256": "e8d64f29772e64cb809ef3f2ca4f97b3af3408965fffe8ba6aadd01e4218f61a",
+      "pairs": 3,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "measured_deliveries": 320000,
+      "payload_bytes": 64,
+      "publisher_window": 4,
+      "checksum": 18656000,
+      "candidate_over_baseline_paired_median": {
+        "publishes_per_second": 1.01772817,
+        "p50": 0.98945428,
+        "p99": 0.96971042,
+        "cycles": 0.93123529,
+        "instructions": 0.98899363
+      },
+      "cycles_candidate_wins": 3,
+      "instructions_candidate_wins": 3
+    },
+    "balanced_32x32_10k": {
+      "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T191500Z-balanced-large-controls",
+      "artifact_bytes": 21051,
+      "aggregate_file_hash_digest": "28304c36f76ee46b0b8ca86c00f9cc336895851f77282fbcf52e62670ebe4e7f",
+      "results_sha256": "503d1480d9864da9d6e8877fade7fb917a031fec4c694871e12ee1bae2c475d9",
+      "pairs": 3,
+      "warmup_publishes": 1000,
+      "measured_publishes": 10000,
+      "measured_deliveries": 320000,
+      "payload_bytes": 64,
+      "publisher_window": 4,
+      "checksum": 18656000,
+      "candidate_over_baseline_paired_median": {
+        "publishes_per_second": 1.01468241,
+        "p50": 0.97530643,
+        "p99": 0.97815476,
+        "cycles": 0.94336250,
+        "instructions": 0.99029408
+      },
+      "cycles_candidate_wins": 2,
+      "instructions_candidate_wins": 3
+    },
+    "large_payload_100k": {
+      "artifact": "zig-out/mqtt-receive-policy-specialization-ab/20261030T193000Z-large-100k",
+      "artifact_bytes": 14147,
+      "aggregate_file_hash_digest": "2f0094045cfe11c6735b64c12f11226e46d4eb5daca7281e13a43d23816b7c1a",
+      "results_sha256": "df0a6406cb72e44d93aeeda1657dded1686c338c9f1461e90a22802056d3e94d",
+      "pairs": 4,
+      "warmup_publishes": 5000,
+      "measured_publishes": 100000,
+      "measured_deliveries": 400000,
+      "payload_bytes": 4096,
+      "publisher_window": 16,
+      "checksum": 102900000,
+      "candidate_over_baseline_paired_median": {
+        "publishes_per_second": 1.00084752,
+        "p50": 0.99657124,
+        "p99": 1.00556383,
+        "cycles": 0.98774426,
+        "instructions": 1.00179045
+      },
+      "cycles_candidate_wins": 3,
+      "instructions_candidate_wins": 2,
+      "short_sample_audit": "The preceding 10000-publish three-pair control reported a 3.87% instruction regression. Extending to 100000 publishes made throughput neutral, cycles 1.23% lower and instructions mixed at +0.18%; both records are retained rather than discarding the unfavorable short sample."
+    }
+  },
+  "correctness": {
+    "focused_tests": [
+      "zig build test-lib -Dtest-filter='TCP packet'",
+      "zig build test-lib -Dtest-filter='TCP externally managed inactivity'",
+      "zig build test-lib -Dtest-filter='MQTT broker event borrows caller storage'",
+      "zig build test-lib -Dtest-filter='QoS 2'",
+      "zig build test-lib -Dtest-filter='QoS2'"
+    ],
+    "broad_test": "zig build test-lib -Dtest-filter='MQTT'",
+    "mosquitto_wire_vectors": "294/294 passed",
+    "mosquitto_packet_sequences": "1825/1825 passed"
+  },
+  "conclusion": "The 448-byte read-ahead already achieves one read per serial control packet. The retained optimization removes impossible receive-policy and optional-deadline branches without changing framing, ownership, timeout renewal, allocation, layout or read count. It improves fixed broker instructions in serial and the three concurrency shapes, improves cycles in the long serial, publishers-32 and large-payload controls, and preserves the complete protocol gates."
+}

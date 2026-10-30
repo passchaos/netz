@@ -5894,6 +5894,35 @@ proxy evidence for the entire suite.
    by concurrent shapes or select a distinct implementation outside the packet
    hot path. Full rows are in
    [the rejected single-route evidence](evidence/mqtt_pubrel_single_route_lock_rejected/2026-10-30.json).
+   A receive-path audit then measured the existing 448-byte TCP read-ahead
+   before changing it. A uprobe on the fixed baseline broker counted exactly
+   420,005 transport reads for 5,000 warmup plus 100,000 measured durable
+   serial QoS 2 publishes: one read for each 282-byte PUBLISH and each 4-byte
+   PUBREL/PUBREC/PUBCOMP, plus the five connection/subscription control
+   packets. Larger read-ahead therefore cannot reduce this workload's read or
+   io_uring-operation count. Instead, TCP packet assembly now specializes its
+   mutually exclusive plain, inactivity-timeout, absolute-deadline and managed-
+   observer policies, plus caller-storage presence, at compile time. The
+   assembly and read helpers remain explicitly out of line: an inlined
+   prototype cut instructions but expanded `EventReceive.read` from 3,768 to
+   13,416 code bytes, grew its stack from 752 to 1,184 bytes, and regressed
+   serial cycles 1.63% plus p50/p99 3.51%/1.91%. The retained form reduces that
+   reader to 3,632 code bytes, leaves every connection layout and the 448/128-
+   byte read-ahead/caller buffers unchanged, and removes optional-deadline
+   state from the untimed managed path.
+
+   Fixed-binary QoS 2 controls measured candidate/baseline instructions and
+   cycles at 0.9879/0.9676 for serial 100k, 0.9913/0.9872 for publishers-32
+   100k, 0.9890/0.9312 for fanout-32, and 0.9903/0.9434 for balanced-32x32.
+   Throughput was neutral for serial and publishers-32 and improved 1.77%/
+   1.47% for fanout/balanced. A short 4-KiB control initially reported an
+   unfavorable 3.87% instruction move; the retained 100k follow-up made
+   throughput neutral, cycles 1.23% lower, and instructions mixed at +0.18%.
+   Both results remain in the evidence. Complete MQTT tests, focused TCP
+   fragmentation/timeout/borrow tests, 294 Mosquitto wire vectors, and all
+   1,825 source-locked packet sequences pass. Full raw rows, hashes, code-size
+   and stack-frame evidence are in
+   [the receive-policy specialization evidence](evidence/mqtt_receive_policy_specialization/2026-10-30.json).
 3. Expand the source-hash-locked process gate beyond its current 294 curated
    scenarios. The strict broker configuration adapter now locks twenty-nine
    upstream process sources:
