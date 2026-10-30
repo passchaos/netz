@@ -90,6 +90,14 @@ Origin policy, negotiates WT-Available-Protocols/WT-Protocol, and returns
 stream-scoped 400, 403, or 405 rejection where admission fails. Invalid
 requests do not retire healthy sibling streams.
 
+`connectAttemptWith{Timeout,Deadline}` preserves a complete non-2xx response
+for application policy: status, response headers, bounded DATA and trailers
+remain owned until `deinit`. `requireAccepted` transfers an accepted Session
+and otherwise returns `SessionRejected` without destroying the inspection
+surface. Accepted Sessions retain their response headers after that transfer.
+On the server, `PendingSession.rejectWith{Timeout,Deadline}` sends status,
+headers, body and trailers under the caller's single original budget.
+
 WebTransport-Init is parsed as an RFC 8941 Dictionary across all field lines.
 Known `u`, `bl`, and `br` members require non-negative Integers, unknown valid
 members and parameters are ignored, duplicate keys use the final member, and
@@ -120,8 +128,9 @@ pass 22/22 and the HTTP/2 connection state-model target passes all three tests.
 The complete Session driver filter passes 157/157 in Debug and ReleaseFast;
 package checks pass 23/23 and the parser fuzz gate passes 2/2. Its authenticated
 TLS loopback tests exchange both stream directions, datagrams, flow-control
-updates, reset, stop, drain, close, application protocols, and explicit
-WebTransport-Init credit. A second regression proves 400 rejections for invalid
-CONNECT metadata and Init syntax preserve a succeeding sibling Session.
+updates, reset, stop, drain, close, application protocols, accepted response
+metadata, and explicit WebTransport-Init credit. A second regression preserves
+a complete 429 response entity, proves 400 rejections for invalid CONNECT
+metadata and Init syntax, and then accepts a succeeding sibling Session.
 Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.

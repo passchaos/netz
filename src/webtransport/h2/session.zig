@@ -27,6 +27,8 @@ pub const Session = struct {
     deferred_event: ?Event = null,
     delivered_storage: std.ArrayList(u8) = .empty,
     options: Options,
+    response: ?http2.runtime.ExtendedConnectAttempt = null,
+    response_allocator: std.mem.Allocator = undefined,
 
     pub fn init(allocator: std.mem.Allocator, tunnel: http2.runtime.Tunnel, receive_limits: model.Limits, send_limits: model.Limits, options: Options) Error!Session {
         if (options.max_payload < 4 or options.max_payload > std.math.maxInt(usize) - 16) return error.CapsuleTooLarge;
@@ -43,6 +45,7 @@ pub const Session = struct {
         self.queued.deinit(self.allocator);
         self.state.deinit();
         if (self.selected_protocol) |value| self.allocator.free(value);
+        if (self.response) |*response| response.deinit(self.response_allocator);
         self.* = undefined;
     }
     pub fn unreliableDelivery(_: Session) bool {
@@ -50,6 +53,15 @@ pub const Session = struct {
     }
     pub fn streamIndependence(_: Session) bool {
         return false;
+    }
+    pub fn responseStatus(self: Session) ?u16 {
+        return if (self.response) |response| response.status else null;
+    }
+    pub fn responseHeader(self: Session, name: []const u8) ?[]const u8 {
+        return if (self.response) |response| response.responseHeader(name) else null;
+    }
+    pub fn responseHeaders(self: Session) []const http2.Hpack.HeaderField {
+        return if (self.response) |response| response.headers else &.{};
     }
 
     fn fail(self: *Session, deadline: std.Io.Clock.Timestamp) void {

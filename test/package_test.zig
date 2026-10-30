@@ -180,8 +180,12 @@ test "public WebTransport exact initial quotas allow data only after a decoded g
 test "public WebTransport HTTP2 Session exposes typed Init and bounded operations" {
     const h2 = netz.webtransport.h2;
     try std.testing.expect(@hasDecl(h2.runtime, "connectWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime, "connectAttemptWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime, "readRequestWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime, "acceptWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime.PendingSession, "rejectWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime.ConnectAttempt, "requireAccepted"));
+    try std.testing.expect(@hasDecl(h2.Session, "responseHeader"));
     inline for (&.{
         "sendStreamWithTimeout",
         "sendDatagramWithTimeout",

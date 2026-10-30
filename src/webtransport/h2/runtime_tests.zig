@@ -36,6 +36,7 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
             defer pending.deinit(allocator);
             var session = try wt.runtime.acceptWithTimeout(allocator, &connection, pending, .{
                 .protocols = .{ .values = &.{"echo"}, .required = true },
+                .headers = &.{.{ .name = "x-session", .value = "accepted" }},
                 .initial_receive_stream_data = .{ .uni = 4096, .bidi_local = 4100, .bidi_remote = 4200 },
             }, .fromSeconds(3));
             defer session.deinit();
@@ -87,6 +88,8 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
     }, .fromSeconds(3));
     defer session.deinit();
     try std.testing.expectEqualStrings("echo", session.selected_protocol.?);
+    try std.testing.expectEqual(@as(?u16, 200), session.responseStatus());
+    try std.testing.expectEqualStrings("accepted", session.responseHeader("x-session").?);
     try std.testing.expectEqual(@as(u64, 4096), session.state.send_limit.uni_data);
     try std.testing.expectEqual(@as(u64, 3096), session.state.receive_limit.uni_data);
     try std.testing.expect(!session.unreliableDelivery());
@@ -213,12 +216,20 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
             var connection = try self.server.acceptWithTimeout(.fromSeconds(3));
             defer connection.close();
             try std.testing.expectError(error.InvalidConnect, wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3)));
+            var rejected = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
+            defer rejected.deinit(allocator);
+            try rejected.rejectWithTimeout(&connection, .{
+                .status = 429,
+                .headers = &.{.{ .name = "retry-after", .value = "7" }},
+                .body = "try later",
+                .trailers = &.{.{ .name = "x-rejection", .value = "complete" }},
+            }, .fromSeconds(3));
             var malformed = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
             defer malformed.deinit(allocator);
             try std.testing.expectError(error.InvalidWebTransportInit, wt.runtime.acceptWithTimeout(allocator, &connection, malformed, .{}, .fromSeconds(3)));
             var pending = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
             defer pending.deinit(allocator);
-            var session = try wt.runtime.acceptWithTimeout(allocator, &connection, pending, .{}, .fromSeconds(3));
+            var session = try wt.runtime.acceptWithTimeout(allocator, &connection, pending, .{ .headers = &.{.{ .name = "x-sibling", .value = "healthy" }} }, .fromSeconds(3));
             defer session.deinit();
             const closed = (try session.receiveWithTimeout(.fromSeconds(3))).closed;
             try std.testing.expectEqual(@as(u32, 5), closed.code);
@@ -243,6 +254,16 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
     defer invalid_connect.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 400), invalid_connect.status);
     try std.testing.expect(!invalid_connect.accepted());
+    var rejected = try wt.runtime.connectAttemptWithTimeout(allocator, &connection, .{ .path = "/policy", .authority = "localhost" }, .fromSeconds(3));
+    defer rejected.deinit();
+    try std.testing.expect(!rejected.accepted());
+    try std.testing.expectEqual(@as(u16, 429), rejected.status());
+    try std.testing.expectEqualStrings("7", rejected.responseHeader("retry-after").?);
+    try std.testing.expectEqualStrings("try later", rejected.body());
+    try std.testing.expectEqual(@as(usize, 1), rejected.trailers().len);
+    try std.testing.expectEqualStrings("x-rejection", rejected.trailers()[0].name);
+    try std.testing.expectEqualStrings("complete", rejected.trailers()[0].value);
+    try std.testing.expectError(error.SessionRejected, rejected.requireAccepted());
     var invalid_init = try connection.openExtendedConnectAttemptWithTimeout(.{
         .method = "CONNECT",
         .protocol = "webtransport",
@@ -254,8 +275,18 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
     defer invalid_init.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 400), invalid_init.status);
     try std.testing.expect(!invalid_init.accepted());
-    var session = try wt.runtime.connectWithTimeout(allocator, &connection, .{ .path = "/healthy", .authority = "localhost" }, .fromSeconds(3));
+    var accepted = try wt.runtime.connectAttemptWithTimeout(allocator, &connection, .{ .path = "/healthy", .authority = "localhost" }, .fromSeconds(3));
+    var accepted_owned = true;
+    defer if (accepted_owned) accepted.deinit();
+    try std.testing.expect(accepted.accepted());
+    try std.testing.expectEqual(@as(u16, 200), accepted.status());
+    try std.testing.expectEqualStrings("healthy", accepted.responseHeader("x-sibling").?);
+    try std.testing.expectEqual(@as(usize, 0), accepted.body().len);
+    try std.testing.expectEqual(@as(usize, 0), accepted.trailers().len);
+    var session = try accepted.requireAccepted();
+    accepted_owned = false;
     defer session.deinit();
+    try std.testing.expectEqualStrings("healthy", session.responseHeader("x-sibling").?);
     try session.closeWithTimeout(5, "healthy sibling", .fromSeconds(3));
     try std.testing.expect((try session.receiveWithTimeout(.fromSeconds(3))) == .closed);
     try task.await(io);

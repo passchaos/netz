@@ -1934,7 +1934,8 @@ now provides the draft-15 wire codec, bounded incremental reader,
 virtual-stream and flow-control state, acknowledged SETTINGS snapshots, and an
 owning TLS `h2` Extended CONNECT Session driver. Client and server APIs cover
 strict multi-line RFC 8941 WebTransport-Init negotiation, application protocol
-selection, Origin policy, typed rejection, streams, reliable datagrams,
+selection, Origin policy, complete non-2xx response attempts and server
+rejection entities, streams, reliable datagrams,
 reset/stop, credit, drain/close, exporter contexts, bounded event retention,
 and resumable deadline-owned output. Authenticated loopback regressions cover
 the complete exchange and prove malformed request streams do not poison a
