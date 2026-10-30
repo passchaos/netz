@@ -1929,16 +1929,23 @@ QPACK or truncated DATA remains a connection error. These policies live under
 
 ## Remaining gaps
 
-The [HTTP/2 Capsule protocol foundation](webtransport_http2_capsules.md) now
-provides draft-15 virtual STREAM/FIN, RESET_STREAM with Reliable Size,
-STOP_SENDING and per-stream flow-control wire types, plus an incremental
-bounded parser across HTTP DATA fragments. Independent wire vectors and the
-parser fuzz gate cover this layer. HTTP/2 virtual-stream state, SETTINGS ACK
-snapshots and the complete Extended CONNECT runtime were the next phase.
-Virtual-stream state and acknowledged SETTINGS snapshots are now implemented
-and covered by state plus real TCP update/failed-submission regressions. The
-complete HTTP/2 Extended CONNECT session driver remains implementation work;
-the current native Session runtime continues to use HTTP/3.
+The [HTTP/2 Capsule protocol implementation](webtransport_http2_capsules.md)
+now provides the draft-15 wire codec, bounded incremental reader,
+virtual-stream and flow-control state, acknowledged SETTINGS snapshots, and an
+owning TLS `h2` Extended CONNECT Session driver. Client and server APIs cover
+strict multi-line RFC 8941 WebTransport-Init negotiation, application protocol
+selection, Origin policy, typed rejection, streams, reliable datagrams,
+reset/stop, credit, drain/close, exporter contexts, bounded event retention,
+and resumable deadline-owned output. Authenticated loopback regressions cover
+the complete exchange and prove malformed request streams do not poison a
+healthy sibling Session.
+
+HTTP/2 still lacks an independent draft-15 implementation or browser/proxy
+interop gate comparable to the HTTP/3 Chrome, Firefox, Safari, and wtransport
+matrix. It also does not yet have the connection-owning pooled endpoint layer
+available to the production HTTP/3 runtime; callers currently own one HTTP/2
+Connection and its Session scheduling. These are the remaining HTTP/2 evidence
+and higher-level orchestration gaps rather than missing core Session behavior.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

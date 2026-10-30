@@ -97,6 +97,14 @@ pub fn skipOptionalWhitespace(value: []const u8, cursor: *usize) void {
 }
 
 pub fn consumeParameters(value: []const u8, cursor: *usize) Error!void {
+    return consumeParametersVersion(value, cursor, true);
+}
+
+pub fn consumeParameters8941(value: []const u8, cursor: *usize) Error!void {
+    return consumeParametersVersion(value, cursor, false);
+}
+
+fn consumeParametersVersion(value: []const u8, cursor: *usize, rfc9651: bool) Error!void {
     while (cursor.* < value.len and value[cursor.*] == ';') {
         cursor.* += 1;
         while (cursor.* < value.len and value[cursor.*] == ' ') {
@@ -105,9 +113,38 @@ pub fn consumeParameters(value: []const u8, cursor: *usize) Error!void {
         try consumeKey(value, cursor);
         if (cursor.* < value.len and value[cursor.*] == '=') {
             cursor.* += 1;
-            try consumeBareItem(value, cursor);
+            try consumeBareItemVersion(value, cursor, rfc9651);
         }
     }
+}
+
+/// Validate one Item or Inner List without constructing a value model.
+pub fn consumeMember(value: []const u8, cursor: *usize) Error!void {
+    return consumeMemberVersion(value, cursor, true);
+}
+
+/// Validate an RFC 8941 Item or Inner List. RFC 9651 Date and Display String
+/// values are deliberately rejected for fields that normatively use RFC 8941.
+pub fn consumeMember8941(value: []const u8, cursor: *usize) Error!void {
+    return consumeMemberVersion(value, cursor, false);
+}
+
+fn consumeMemberVersion(value: []const u8, cursor: *usize, rfc9651: bool) Error!void {
+    if (cursor.* < value.len and value[cursor.*] == '(') {
+        cursor.* += 1;
+        while (true) {
+            while (cursor.* < value.len and value[cursor.*] == ' ') cursor.* += 1;
+            if (cursor.* == value.len) return error.InvalidStructuredField;
+            if (value[cursor.*] == ')') {
+                cursor.* += 1;
+                break;
+            }
+            try consumeBareItemVersion(value, cursor, rfc9651);
+            try consumeParametersVersion(value, cursor, rfc9651);
+            if (cursor.* == value.len or (value[cursor.*] != ' ' and value[cursor.*] != ')')) return error.InvalidStructuredField;
+        }
+    } else try consumeBareItemVersion(value, cursor, rfc9651);
+    try consumeParametersVersion(value, cursor, rfc9651);
 }
 
 fn consumeKey(value: []const u8, cursor: *usize) Error!void {
@@ -132,15 +169,15 @@ fn isKeyChar(byte: u8) bool {
         byte == '.';
 }
 
-fn consumeBareItem(value: []const u8, cursor: *usize) Error!void {
+fn consumeBareItemVersion(value: []const u8, cursor: *usize, rfc9651: bool) Error!void {
     if (cursor.* >= value.len) return error.InvalidStructuredField;
     return switch (value[cursor.*]) {
         '"' => consumeString(value, cursor),
         ':' => consumeByteSequence(value, cursor),
         '?' => consumeBoolean(value, cursor),
         '-', '0'...'9' => consumeNumber(value, cursor),
-        '@' => consumeDate(value, cursor),
-        '%' => consumeDisplayString(value, cursor),
+        '@' => if (rfc9651) consumeDate(value, cursor) else error.InvalidStructuredField,
+        '%' => if (rfc9651) consumeDisplayString(value, cursor) else error.InvalidStructuredField,
         'A'...'Z', 'a'...'z', '*' => consumeToken(value, cursor),
         else => error.InvalidStructuredField,
     };

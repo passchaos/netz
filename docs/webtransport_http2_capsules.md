@@ -82,10 +82,31 @@ updates preserve the old acknowledged value until ACK and reject overlapping
 unacknowledged SETTINGS transactions. A blocked submission retires connection
 reuse while keeping the old local sent/acknowledged snapshots.
 
-This layer does not yet establish an HTTP/2 WebTransport session. The remaining
-implementation must supply WebTransport-Init parsing, Extended CONNECT
-admission and client/server transport drivers. These requirements remain part
-of the active library goal.
+`webtransport.h2.runtime` now establishes an HTTP/2 WebTransport Session over
+TLS with negotiated `h2`. The client waits for acknowledged
+SETTINGS_ENABLE_CONNECT_PROTOCOL and SETTINGS_WT_ENABLED state before opening
+Extended CONNECT. The server validates HTTPS CONNECT metadata and the existing
+Origin policy, negotiates WT-Available-Protocols/WT-Protocol, and returns
+stream-scoped 400, 403, or 405 rejection where admission fails. Invalid
+requests do not retire healthy sibling streams.
+
+WebTransport-Init is parsed as an RFC 8941 Dictionary across all field lines.
+Known `u`, `bl`, and `br` members require non-negative Integers, unknown valid
+members and parameters are ignored, duplicate keys use the final member, and
+the result takes the greater of the per-Session field and the correct
+acknowledged SETTINGS snapshot. RFC 9651-only Date and Display String values
+remain invalid for this RFC 8941 field. `initial_receive_stream_data` provides
+a typed client/server option for emitting the header without caller-managed
+wire text.
+
+The owning `h2.Session` carries virtual streams, reliable datagrams, DRAIN and
+CLOSE, reset/stop signals, credit updates, and per-Session TLS exporter
+contexts over the CONNECT DATA stream. Payload events remain valid until the
+next public receive call. Flow-control waits retain unrelated events in bounded
+queues, while interrupted writes own their encoded capsule and resume only the
+uncommitted suffix before virtual-stream accounting advances. Deadline and
+relative-timeout forms cover admission, receive, sends, control updates,
+drain, close, and retained-write resumption.
 
 The protocol foundation's Debug and ReleaseFast filters pass 141/141, package
 checks pass 22/22, and the seeded plus deterministic parser fuzz checks pass.
@@ -95,3 +116,12 @@ ReleaseFast. Real TCP tests exchange and update all seven SETTINGS in both
 directions and retain pre-update snapshots across PING/ACK barriers; a
 saturated-socket regression verifies failed-output ownership. Package checks
 pass 22/22 and the HTTP/2 connection state-model target passes all three tests.
+
+The complete Session driver filter passes 157/157 in Debug and ReleaseFast;
+package checks pass 23/23 and the parser fuzz gate passes 2/2. Its authenticated
+TLS loopback tests exchange both stream directions, datagrams, flow-control
+updates, reset, stop, drain, close, application protocols, and explicit
+WebTransport-Init credit. A second regression proves 400 rejections for invalid
+CONNECT metadata and Init syntax preserve a succeeding sibling Session.
+Independent draft-15 implementation or browser/proxy interop remains external
+evidence work; the local gate does not claim that evidence.

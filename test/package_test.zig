@@ -177,6 +177,31 @@ test "public WebTransport exact initial quotas allow data only after a decoded g
     try std.testing.expectEqual(@as(u64, 1), state.sent.data);
 }
 
+test "public WebTransport HTTP2 Session exposes typed Init and bounded operations" {
+    const h2 = netz.webtransport.h2;
+    try std.testing.expect(@hasDecl(h2.runtime, "connectWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime, "readRequestWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime, "acceptWithTimeout"));
+    inline for (&.{
+        "sendStreamWithTimeout",
+        "sendDatagramWithTimeout",
+        "resetStreamWithTimeout",
+        "stopSendingWithTimeout",
+        "grantDataWithTimeout",
+        "grantStreamsWithTimeout",
+        "grantStreamDataWithTimeout",
+        "drainWithTimeout",
+        "closeWithTimeout",
+    }) |decl| try std.testing.expect(@hasDecl(h2.Session, decl));
+    var output: [64]u8 = undefined;
+    const encoded = try h2.init_header.writeInto(&output, .{
+        .uni = 1024,
+        .bidi_local = 2048,
+        .bidi_remote = 4096,
+    });
+    try std.testing.expectEqualStrings("u=1024, bl=2048, br=4096", encoded);
+}
+
 test "public HTTP1 owned heads accept folded metadata without requiring the body" {
     const bytes = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Trace: first\r\n second\r\n\r\n";
     var response = try netz.http1.parseOwnedResponseHead(std.testing.allocator, bytes, .{ .allow_obs_fold = true }, .{ .request_method = .GET });
