@@ -654,3 +654,27 @@ contract without taxing existing callers. Evidence is recorded in
 [the generic duplex evidence](evidence/grpc_duplex_owned_write/2026-10-30.json),
 with the original SharedChannel-only step retained in
 [its earlier evidence](evidence/grpc_shared_owned_write/2026-10-30.json).
+
+## Rejected retained-DATA consumer handoff
+
+Three candidates attempted to move large HTTP/2 `DuplexData` retained-frame
+ownership directly from the Shared endpoint owner to the consumer decoder,
+skipping both frame-to-ring and ring-to-chunk copies. They preserved a copied
+small-DATA ring, exact cross-entry order, the existing bounded byte window and
+consumer-triggered credit. Tests covered a copied five-byte gRPC prefix followed
+by a retained 4-KiB payload, queue OOM ownership, slow-reader sibling progress,
+final-DATA terminal commitment and bounded decoder splits.
+
+All three were rejected by the 0-byte fixed-binary guard. Inline queue/current
+metadata produced a 0.99701x baseline/candidate instruction ratio with 0/8
+wins. Moving all metadata behind a lazy heap pointer improved that to 0.99827x
+but still lost 8/8. Restoring direct small-DATA append and a separate original
+Reader ring path regressed further to 0.99585x, again 0/8, despite neutral wall
+time. No candidate remains in the source tree.
+
+This rules out adding retained-input dispatch to every SharedChannel call. A
+future large-message attempt must preserve Call layout and small-DATA code
+generation, likely by adding segmented ownership below `ClientDuplex` in the
+HTTP/2 transport or selecting a separate large-message implementation. Full
+raw paired rows and binary identities are in
+[the rejected retained-DATA evidence](evidence/grpc_shared_retained_data_rejected/2026-10-30.json).

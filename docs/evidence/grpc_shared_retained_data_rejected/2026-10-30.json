@@ -1,0 +1,747 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "feature": "SharedChannel retained HTTP/2 DATA handoff",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "4b5db9a76c9661a4c387961bace1962782492334",
+    "sha256": "27e3615fe048e628a912bfde53cc4e15f7331369ff9ca1f3da8722165fa42ecb"
+  },
+  "objective": "Move large DuplexData/RetainedFrame ownership from endpoint owner to consumer decoder, eliminating frame->ring and ring->chunk copies while preserving bounded credit and ordering.",
+  "shared_design": {
+    "threshold_bytes": 4096,
+    "retained_max": "max_write_bytes_per_turn",
+    "small_data": "coalesced copied ring",
+    "ordering": "one logical queue of copied-length and retained-frame entries",
+    "credit": "returned when the consumer takes an encoded input chunk, matching the published implementation",
+    "correctness_tests": [
+      "copied five-byte gRPC prefix followed by retained 4096-byte payload",
+      "exact encoded credit",
+      "queue OOM leaves frame ownership with caller",
+      "slow reader sibling progress",
+      "final DATA terminal commitment",
+      "bounded decoder splits"
+    ]
+  },
+  "benchmark_scope": {
+    "cpu": 10,
+    "schedule": "eight alternating AB/BA pairs",
+    "mode": "persistent",
+    "payload_bytes": 0,
+    "warmup": 100,
+    "iterations": 10000,
+    "validation": "full bytes plus peer completion"
+  },
+  "variants": [
+    {
+      "name": "inline_metadata",
+      "hash": "6b2fb5798e508e967433302c473d210d16538e383d1e1433c8586a2ba361299a",
+      "design": "InputChunk ArrayList, ring_len, and current RetainedFrame stored inline in every StreamCall.",
+      "rows": [
+        {
+          "arm": "baseline",
+          "cycles": 276403575,
+          "elapsed": 173629607,
+          "instructions": 359886697,
+          "p50": 17250,
+          "p99": 17574,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 279438050,
+          "elapsed": 176538687,
+          "instructions": 360958333,
+          "p50": 17537,
+          "p99": 17889,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 277459712,
+          "elapsed": 174286971,
+          "instructions": 360983101,
+          "p50": 17315,
+          "p99": 17620,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276172614,
+          "elapsed": 173491877,
+          "instructions": 359973183,
+          "p50": 17241,
+          "p99": 17537,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275701100,
+          "elapsed": 172977970,
+          "instructions": 359893651,
+          "p50": 17186,
+          "p99": 17463,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276736182,
+          "elapsed": 173450744,
+          "instructions": 360979594,
+          "p50": 17232,
+          "p99": 17529,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 277086850,
+          "elapsed": 174203436,
+          "instructions": 360982285,
+          "p50": 17306,
+          "p99": 17630,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275833539,
+          "elapsed": 173471669,
+          "instructions": 359892391,
+          "p50": 17240,
+          "p99": 17528,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276940275,
+          "elapsed": 173792562,
+          "instructions": 359883125,
+          "p50": 17269,
+          "p99": 17520,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276398729,
+          "elapsed": 173318945,
+          "instructions": 360971046,
+          "p50": 17223,
+          "p99": 17537,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276387808,
+          "elapsed": 173442091,
+          "instructions": 360977907,
+          "p50": 17232,
+          "p99": 17574,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 277810132,
+          "elapsed": 177297184,
+          "instructions": 359901593,
+          "p50": 17333,
+          "p99": 17760,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276155580,
+          "elapsed": 174297226,
+          "instructions": 359965033,
+          "p50": 17268,
+          "p99": 17704,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276914084,
+          "elapsed": 173641344,
+          "instructions": 360974693,
+          "p50": 17250,
+          "p99": 17547,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276986505,
+          "elapsed": 174031331,
+          "instructions": 360972591,
+          "p50": 17278,
+          "p99": 17602,
+          "pair": 8
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275971715,
+          "elapsed": 173527753,
+          "instructions": 359892952,
+          "p50": 17241,
+          "p99": 17510,
+          "pair": 8
+        }
+      ],
+      "summary": {
+        "cycles": {
+          "max": 1.0051461170096183,
+          "median": 0.9962979996295572,
+          "min": 0.989140795249609,
+          "pairs": [
+            0.989140795249609,
+            0.995361135529471,
+            0.996259679552853,
+            0.9954768297376796,
+            1.0019592926565155,
+            1.0051461170096183,
+            0.9972608688260146,
+            0.9963363197062616
+          ],
+          "wins": 2
+        },
+        "instructions": {
+          "max": 0.9972029618153868,
+          "median": 0.9970137107314522,
+          "min": 0.9969807548866284,
+          "pairs": [
+            0.9970311365550328,
+            0.9972023122489604,
+            0.9969916775960472,
+            0.9969807548866284,
+            0.9969861266933858,
+            0.9970183382995792,
+            0.9972029618153868,
+            0.9970090831633251
+          ],
+          "wins": 0
+        },
+        "p50": {
+          "max": 1.0058611884865367,
+          "median": 0.99759454813056,
+          "min": 0.9836346011290414,
+          "pairs": [
+            0.9836346011290414,
+            0.995726248917124,
+            0.997330547818013,
+            0.9961862937709464,
+            1.0026708471230332,
+            1.0058611884865367,
+            1.0010434782608697,
+            0.9978585484431068
+          ],
+          "wins": 3
+        },
+        "p99": {
+          "max": 1.01058381700239,
+          "median": 0.9957621273493336,
+          "min": 0.9823914137179272,
+          "pairs": [
+            0.9823914137179272,
+            0.995289443813848,
+            0.9962348108848196,
+            0.9942144072603516,
+            0.9990306209728004,
+            1.01058381700239,
+            1.0089473984156836,
+            0.9947733212134984
+          ],
+          "wins": 2
+        },
+        "throughput": {
+          "max": 1.0222269748812012,
+          "median": 0.9971903492950172,
+          "min": 0.9835215722432556,
+          "pairs": [
+            0.9835215722432556,
+            0.9954380181407824,
+            0.997274303994914,
+            0.995799353808383,
+            1.0027326326040122,
+            1.0222269748812012,
+            1.003777222549026,
+            0.9971063945951204
+          ],
+          "wins": 3
+        }
+      }
+    },
+    {
+      "name": "lazy_heap",
+      "hash": "e997590ea7fe07757337d602c5096e12b6492285b57c50a2d07cf14b4ec20cc4",
+      "design": "Only one InputState pointer stored in StreamCall; queue/current metadata allocated on first retained DATA, but all small DATA still used generic append/read dispatch.",
+      "rows": [
+        {
+          "arm": "baseline",
+          "cycles": 275842580,
+          "elapsed": 173623211,
+          "instructions": 359962980,
+          "p50": 17251,
+          "p99": 17574,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276609324,
+          "elapsed": 173410052,
+          "instructions": 360508058,
+          "p50": 17231,
+          "p99": 17555,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276048170,
+          "elapsed": 173825614,
+          "instructions": 360515263,
+          "p50": 17277,
+          "p99": 17658,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276409412,
+          "elapsed": 173865549,
+          "instructions": 359898417,
+          "p50": 17269,
+          "p99": 17649,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276264507,
+          "elapsed": 174008934,
+          "instructions": 359889892,
+          "p50": 17287,
+          "p99": 17657,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276301635,
+          "elapsed": 173821930,
+          "instructions": 360520263,
+          "p50": 17269,
+          "p99": 17685,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276620493,
+          "elapsed": 174201429,
+          "instructions": 360511103,
+          "p50": 17306,
+          "p99": 17629,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275802797,
+          "elapsed": 173816515,
+          "instructions": 359885805,
+          "p50": 17268,
+          "p99": 17639,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276191705,
+          "elapsed": 174135597,
+          "instructions": 359894689,
+          "p50": 17296,
+          "p99": 17769,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276381356,
+          "elapsed": 174153751,
+          "instructions": 360585369,
+          "p50": 17296,
+          "p99": 18028,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276521220,
+          "elapsed": 173705273,
+          "instructions": 360497839,
+          "p50": 17250,
+          "p99": 17546,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276038982,
+          "elapsed": 173910933,
+          "instructions": 359895597,
+          "p50": 17278,
+          "p99": 17575,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276591105,
+          "elapsed": 174045301,
+          "instructions": 359889176,
+          "p50": 17287,
+          "p99": 17676,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276212832,
+          "elapsed": 174075325,
+          "instructions": 360514606,
+          "p50": 17251,
+          "p99": 17907,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276365218,
+          "elapsed": 173806536,
+          "instructions": 360580236,
+          "p50": 17259,
+          "p99": 18176,
+          "pair": 8
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275762823,
+          "elapsed": 173082944,
+          "instructions": 359906986,
+          "p50": 17186,
+          "p99": 17741,
+          "pair": 8
+        }
+      ],
+      "summary": {
+        "cycles": {
+          "max": 1.0013694982860173,
+          "median": 0.998784930549413,
+          "min": 0.9970439789506124,
+          "pairs": [
+            0.9972280616252834,
+            1.0013086194340648,
+            0.9998656251165506,
+            0.9970439789506124,
+            0.9993138068256674,
+            0.9982560542731584,
+            1.0013694982860173,
+            0.9978202937245164
+          ],
+          "wins": 2
+        },
+        "instructions": {
+          "max": 0.9984880282481786,
+          "median": 0.998265348955278,
+          "min": 0.9980845589993974,
+          "pairs": [
+            0.9984880282481786,
+            0.998288987836834,
+            0.998251496338224,
+            0.9982655236002536,
+            0.9980845589993974,
+            0.9983294157832664,
+            0.9982651743103024,
+            0.9981328704882204
+          ],
+          "wins": 0
+        },
+        "p50": {
+          "max": 1.0020868355457655,
+          "median": 1.0005211650935202,
+          "min": 0.9957703227301696,
+          "pairs": [
+            1.0011606987406418,
+            0.999536956647566,
+            1.0010423301870404,
+            0.9978042297469086,
+            1,
+            1.0016231884057971,
+            1.0020868355457655,
+            0.9957703227301696
+          ],
+          "wins": 4
+        },
+        "p99": {
+          "max": 1.0016527983586003,
+          "median": 0.9989535266760564,
+          "min": 0.9760673415492958,
+          "pairs": [
+            1.0010823127314157,
+            0.9994903160040776,
+            0.998416737348035,
+            1.000567247149583,
+            0.9856334590636788,
+            1.0016527983586003,
+            0.987100016753225,
+            0.9760673415492958
+          ],
+          "wins": 3
+        },
+        "throughput": {
+          "max": 1.0012292193995769,
+          "median": 1.0000627502613113,
+          "min": 0.9958367963791648,
+          "pairs": [
+            1.0012292193995769,
+            1.0002297417456556,
+            1.001075836633502,
+            0.9977904084816664,
+            0.9998957587769672,
+            1.0011839594529752,
+            0.9998275229415772,
+            0.9958367963791648
+          ],
+          "wins": 4
+        }
+      }
+    },
+    {
+      "name": "lazy_heap_fast_path",
+      "hash": "6325c22b225cc7d10cf939e566e35a3df6957058d59c1072e4db2bddfee72b71",
+      "design": "Lazy InputState plus direct small-DATA append and a separated original Reader ring fast path.",
+      "rows": [
+        {
+          "arm": "baseline",
+          "cycles": 276560330,
+          "elapsed": 174327522,
+          "instructions": 359897398,
+          "p50": 17324,
+          "p99": 17630,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276325310,
+          "elapsed": 173629342,
+          "instructions": 361463589,
+          "p50": 17250,
+          "p99": 17602,
+          "pair": 1
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276387972,
+          "elapsed": 173694003,
+          "instructions": 361398787,
+          "p50": 17250,
+          "p99": 17629,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275952188,
+          "elapsed": 173272402,
+          "instructions": 359895560,
+          "p50": 17213,
+          "p99": 17556,
+          "pair": 2
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276730859,
+          "elapsed": 174180013,
+          "instructions": 359896200,
+          "p50": 17296,
+          "p99": 17935,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276822382,
+          "elapsed": 174097784,
+          "instructions": 361392648,
+          "p50": 17287,
+          "p99": 17816,
+          "pair": 3
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276896178,
+          "elapsed": 173764881,
+          "instructions": 361459253,
+          "p50": 17260,
+          "p99": 17658,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276685415,
+          "elapsed": 174047406,
+          "instructions": 359901677,
+          "p50": 17278,
+          "p99": 17879,
+          "pair": 4
+        },
+        {
+          "arm": "baseline",
+          "cycles": 278115017,
+          "elapsed": 175648664,
+          "instructions": 359912003,
+          "p50": 17444,
+          "p99": 18111,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 277114480,
+          "elapsed": 174197354,
+          "instructions": 361390149,
+          "p50": 17298,
+          "p99": 18111,
+          "pair": 5
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276859014,
+          "elapsed": 173887591,
+          "instructions": 361461452,
+          "p50": 17269,
+          "p99": 17907,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 275841077,
+          "elapsed": 174129840,
+          "instructions": 359902101,
+          "p50": 17269,
+          "p99": 18167,
+          "pair": 6
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276575375,
+          "elapsed": 174074802,
+          "instructions": 359897427,
+          "p50": 17287,
+          "p99": 18157,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276728869,
+          "elapsed": 173765256,
+          "instructions": 361389998,
+          "p50": 17259,
+          "p99": 17732,
+          "pair": 7
+        },
+        {
+          "arm": "candidate",
+          "cycles": 276529508,
+          "elapsed": 173943339,
+          "instructions": 361399846,
+          "p50": 17269,
+          "p99": 17797,
+          "pair": 8
+        },
+        {
+          "arm": "baseline",
+          "cycles": 276033396,
+          "elapsed": 173607243,
+          "instructions": 359961321,
+          "p50": 17241,
+          "p99": 17852,
+          "pair": 8
+        }
+      ],
+      "summary": {
+        "cycles": {
+          "max": 1.0036105547425742,
+          "median": 0.9993420822844192,
+          "min": 0.9963232658193314,
+          "pairs": [
+            1.0008505192665846,
+            0.9984232888397908,
+            0.9996693800575708,
+            0.999238837453365,
+            1.0036105547425742,
+            0.9963232658193314,
+            0.9994453271154734,
+            0.9982059346809384
+          ],
+          "wins": 2
+        },
+        "instructions": {
+          "max": 0.996019574950234,
+          "median": 0.9958498748084372,
+          "min": 0.995667085018624,
+          "pairs": [
+            0.995667085018624,
+            0.9958405311415724,
+            0.9958592184753022,
+            0.99569086698688,
+            0.9959098331703558,
+            0.9956859825816226,
+            0.9958699161342036,
+            0.996019574950234
+          ],
+          "wins": 0
+        },
+        "p50": {
+          "max": 1.0084402821135392,
+          "median": 1.000781748064725,
+          "min": 0.997855072463768,
+          "pairs": [
+            1.0042898550724637,
+            0.997855072463768,
+            1.000520622433042,
+            1.001042873696408,
+            1.0084402821135392,
+            1,
+            1.0016223419665102,
+            0.998378597486826
+          ],
+          "wins": 5
+        },
+        "p99": {
+          "max": 1.0239679675163549,
+          "median": 1.0048848989043957,
+          "min": 0.9958590958080435,
+          "pairs": [
+            1.0015907283263266,
+            0.9958590958080435,
+            1.006679389312977,
+            1.0125155736776532,
+            1,
+            1.0145194616630369,
+            1.0239679675163549,
+            1.003090408495814
+          ],
+          "wins": 6
+        },
+        "throughput": {
+          "max": 1.0083314124277685,
+          "median": 1.0015095197755346,
+          "min": 0.9975727371543162,
+          "pairs": [
+            1.0040210945451835,
+            0.9975727371543162,
+            1.0004723150295811,
+            1.001625903913231,
+            1.0083314124277685,
+            1.0013931356378385,
+            1.0017814032973311,
+            0.9980677845904752
+          ],
+          "wins": 6
+        }
+      }
+    }
+  ],
+  "rejection": {
+    "inline_metadata": "instructions ratio 0.99701x, 0/8 wins; cycles 0.99630x and throughput 0.99719x medians.",
+    "lazy_heap": "instructions ratio 0.99827x, 0/8 wins; cycles 0.99878x median.",
+    "lazy_heap_fast_path": "instructions ratio 0.99585x, 0/8 wins despite neutral timing.",
+    "conclusion": "Every Call-layer ownership design produced a deterministic small-message instruction regression. The copy saving cannot justify retaining any candidate."
+  },
+  "restored_state": {
+    "action": "All candidate source and tests were restored to committed 4b5db9a7 state.",
+    "worktree_clean_before_evidence": true
+  },
+  "next_boundary": "A future attempt must preserve Call and small-DATA code generation, likely by exposing segmented ownership below ClientDuplex in the HTTP/2 transport or by a separately selected large-message implementation, not by adding runtime queue dispatch to every SharedChannel call."
+}

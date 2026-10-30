@@ -8818,7 +8818,10 @@ payload, while generic ClientDuplex, ServerDuplex and SharedChannel owned-write
 APIs close that boundary for callers that serialize directly into prefix-
 reserved storage. Borrowed server responses still stage a contiguous message,
 first cross-DATA reassembly remains, and grpc-core retains more general
-segmented `SliceBuffer` ownership.
+segmented `SliceBuffer` ownership. Three attempts to pass retained HTTP/2 DATA
+through a Shared-call queue were rejected after all lost the 0-byte instruction
+guard in 8/8 pairs; future work must preserve the existing Call layout and
+small-DATA path.
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP

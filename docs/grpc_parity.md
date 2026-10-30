@@ -1894,3 +1894,18 @@ timing neutral. Debug and ReleaseFast gRPC filters pass 396/396,
 package tests pass 22/22, and grpc-cpp h2c/TLS passes. Full accepted/rejected
 evidence is recorded in
 `docs/evidence/grpc_duplex_owned_write/2026-10-30.json`.
+
+## Rejected Shared retained-DATA queues
+
+Three owner-to-consumer retained-frame queue designs removed the two
+intermediate large-DATA copies and passed ordering, credit, OOM, terminal and
+slow-reader tests, but every design regressed the 0-byte instruction guard.
+Baseline/candidate medians were 0.99701x for inline metadata, 0.99827x for a
+lazy heap state, and 0.99585x after restoring dedicated small-DATA append/read
+fast paths; all lost 0/8 pairs. Every source change was removed.
+
+The remaining receive-copy boundary therefore cannot be closed by adding a
+runtime queue branch to every Shared call. Follow-up work must live below
+`ClientDuplex` or be selected only for a distinct large-message path while
+leaving Call layout and small-DATA code generation untouched. Evidence is in
+`docs/evidence/grpc_shared_retained_data_rejected/2026-10-30.json`.
