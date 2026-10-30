@@ -1990,6 +1990,21 @@ pub fn build(b: *std.Build) void {
     const grpc_ip_literals_step = b.step("interop-grpc-ip-literals", "Verify numeric gRPC targets, HTTP/2 authority, TLS SNI and IP SAN identity with grpc-js/OpenSSL");
     grpc_ip_literals_step.dependOn(&grpc_ip_literals.step);
 
+    const grpc_connection_race_client = b.addExecutable(.{
+        .name = "netz-grpc-connection-race-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_connection_race/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_connection_race = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_connection_race/run.py" });
+    grpc_connection_race.addArtifactArg(grpc_connection_race_client);
+    if (b.args) |args| grpc_connection_race.addArgs(args);
+    const grpc_connection_race_step = b.step("interop-grpc-connection-race", "Verify gRPC staggered endpoint selection and stalled handshake cleanup with grpc-js over h2c/TLS");
+    grpc_connection_race_step.dependOn(&grpc_connection_race.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

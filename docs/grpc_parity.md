@@ -1985,3 +1985,30 @@ connections and rejects all 80 DNS-only-certificate attempts. Debug and
 ReleaseFast gRPC/address filters pass 414/414, and package checks pass 22/22.
 Detailed rows and source hashes are in
 `docs/evidence/grpc_ip_literals/2026-10-30.json`.
+
+## Staggered ordinary-Channel connection attempts
+
+Ordinary Channel now defaults to grpc-core-style 250 ms overlapping endpoint
+handshakes, with explicit serial opt-out and stable IP-family interleaving.
+Two stalled earlier endpoints cannot prevent a third healthy endpoint from
+progressing. Immediate failures advance without consuming the stagger delay;
+per-endpoint timeout/backoff remains inside the original wait-for-ready RPC
+budget. The winner is sticky, and every losing attempt is canceled and joined
+before its owned connection is released, including a successful result which
+arrives during cancellation. Completed responses retain their allocator and
+remain valid after Channel destruction.
+
+The shared connection competition module also serves TCP/QUIC Happy Eyeballs.
+Explicit concurrency reservations remove unsafe inline async fallback from
+connection and listener-accept races. A separate timed-write fix preserves
+committed bytes while re-arming a concurrent cancellation for subsequent I/O;
+the real handshake cancellation regression previously waited until its full
+operation deadline because that request had been consumed.
+
+The [connection competition gate](grpc_connection_race.md) checks all four
+native phases against an independent peer over h2c and certificate-verified
+TLS 1.2/1.3. Its twelve native cases include three-endpoint fallback, persistent
+reuse, serial opt-out, short deadline cleanup and immediate refusal. The pinned
+grpc-js SDK independently confirms third-endpoint fallback, while its two
+still-live pending sockets after close are recorded separately. Rows and source
+hashes are in `docs/evidence/grpc_connection_race/2026-10-30.json`.

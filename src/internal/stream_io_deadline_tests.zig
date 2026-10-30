@@ -9,6 +9,8 @@ const Observer = struct {
     bytes: [32]u8 = undefined,
     written: usize = 0,
     race_timeout: bool = false,
+    race_cancel: bool = false,
+    begun: std.Io.Event = .unset,
 
     fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
         const self = active;
@@ -17,6 +19,10 @@ const Observer = struct {
         const count = @min(@as(usize, 3), header.len);
         @memcpy(self.bytes[0..count], header[0..count]);
         self.written = count;
+        if (self.race_cancel) {
+            self.begun.set(self.delegate);
+            std.Io.sleep(self.delegate, .fromSeconds(10), .awake) catch {};
+        }
         if (self.race_timeout) std.Io.sleep(self.delegate, .fromMilliseconds(20), .awake) catch {};
         return count;
     }
@@ -66,6 +72,33 @@ test "stream timed socket writer retains a commit racing timeout cancellation" {
     const written = try stream_io.writeSomeWithDeadline(io, dummyStream(), "abc", .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5) }));
     try std.testing.expectEqual(@as(usize, 3), written);
     try std.testing.expectEqualStrings("abc", observer.bytes[0..observer.written]);
+}
+
+test "stream timed socket writer preserves cancellation after committed progress" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const delegate = threaded.io();
+    var observer = Observer{ .delegate = delegate, .race_cancel = true };
+    Observer.active = &observer;
+    var vtable = delegate.vtable.*;
+    vtable.netWrite = Observer.write;
+    const io: std.Io = .{ .userdata = delegate.userdata, .vtable = &vtable };
+    const Caller = struct {
+        io: std.Io,
+        written: usize = 0,
+        never: std.Io.Event = .unset,
+        fn run(self: *@This()) !void {
+            self.written = try stream_io.writeSomeWithDeadline(self.io, dummyStream(), "abcdef", .fromNow(self.io, .{ .raw = .fromSeconds(10), .clock = .awake }));
+            try self.never.waitTimeout(self.io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+        }
+    };
+    var caller = Caller{ .io = io };
+    var task = io.async(Caller.run, .{&caller});
+    defer _ = task.cancel(io) catch {};
+    try observer.begun.wait(delegate);
+    try std.testing.expectError(error.Canceled, task.cancel(io));
+    try std.testing.expectEqual(@as(usize, 3), caller.written);
+    try std.testing.expectEqualStrings("abc", observer.bytes[0..3]);
 }
 
 test "stream timed socket writer reports an abortive TCP peer reset" {

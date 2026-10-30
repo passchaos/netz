@@ -151,6 +151,9 @@ test {
     _ = @import("call/retry_lifecycle_tests.zig");
     _ = @import("channel_tests.zig");
     _ = @import("channel/host_tests.zig");
+    _ = @import("channel/connect_race.zig");
+    _ = @import("channel/connect_race/tests.zig");
+    _ = @import("channel/connect_race/ownership_tests.zig");
     _ = runtime;
     _ = stream;
     _ = health;

@@ -77,7 +77,14 @@ fn writeSomeUntil(
     const wake = select.await() catch |err| {
         select.cancelDiscard();
         if (task.result) |result| {
-            if (result) |count| return count else |_| {}
+            if (result) |count| {
+                // Complete progress can win over cancellation, but consuming
+                // that cancellation here must not let a following handshake
+                // read block indefinitely. Preserve the pending request for
+                // the caller's next cancellation point.
+                if (err == error.Canceled) std.Io.recancel(io);
+                return count;
+            } else |_| {}
         }
         return err;
     };

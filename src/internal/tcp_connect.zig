@@ -606,8 +606,12 @@ fn race(
         } else |_| {},
         .timeout => {},
     };
-    select.async(.connected, connect_fn, args);
-    select.async(.timeout, waitUntil, .{ io, deadline });
+    // Reserve real concurrency for both halves. An inline async fallback can
+    // block the connector or wait out the entire deadline after a connection
+    // has already completed. Socket connect APIs report resource admission
+    // failure through their standard SystemResources error.
+    select.concurrent(.timeout, waitUntil, .{ io, deadline }) catch return error.SystemResources;
+    select.concurrent(.connected, connect_fn, args) catch return error.SystemResources;
     return switch (select.await() catch |err| switch (err) {
         error.Canceled => return error.Canceled,
     }) {

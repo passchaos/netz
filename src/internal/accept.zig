@@ -25,8 +25,10 @@ pub fn withDeadline(
         } else |_| {},
         .timeout => {},
     };
-    select.async(.accepted, net.Server.accept, .{ listener, io });
-    select.async(.timeout, waitUntil, .{ io, deadline });
+    // Acceptance and its timer must overlap even when async fallback would
+    // run inline. Reserve the timer before admitting a socket operation.
+    select.concurrent(.timeout, waitUntil, .{ io, deadline }) catch return error.SystemResources;
+    select.concurrent(.accepted, net.Server.accept, .{ listener, io }) catch return error.SystemResources;
     return switch (try select.await()) {
         .accepted => |result| blk: {
             const stream = try result;

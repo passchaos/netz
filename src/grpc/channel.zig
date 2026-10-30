@@ -10,6 +10,8 @@ const backoff = @import("channel/backoff.zig");
 const connectivity = @import("channel/connectivity.zig");
 const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
+const connect_race = @import("channel/connect_race.zig");
+const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
 const net = std.Io.net;
 
@@ -214,6 +216,16 @@ pub const Options = struct {
     address_resolver: ?AddressResolver = null,
     /// gRPC DNS re-resolution cooldown; failures independently use backoff.
     resolver_min_refresh_interval: std.Io.Duration = .fromSeconds(30),
+    /// Start another endpoint after this delay while earlier handshakes are
+    /// pending. Null selects serial connection attempts. The default follows
+    /// grpc-core pick_first's 250 ms Happy Eyeballs pass.
+    connection_attempt_delay: ?std.Io.Duration = .fromMilliseconds(250),
+
+    pub fn validate(self: Options) error{InvalidChannelOptions}!void {
+        try self.backoff.validate();
+        if (self.resolver_min_refresh_interval.nanoseconds < 0) return error.InvalidChannelOptions;
+        if (self.connection_attempt_delay) |delay| if (delay.nanoseconds <= 0) return error.InvalidChannelOptions;
+    }
 };
 
 const Slot = struct {
@@ -350,6 +362,8 @@ pub const Channel = struct {
     selection_policy: SelectionPolicy,
     backoff_policy: BackoffPolicy,
     shuffle_address_list: bool,
+    connection_attempt_delay: ?std.Io.Duration,
+    connect_allocator: ?*ConnectAllocator = null,
     host_resolution: ?HostResolution = null,
     connectivity_tracker: *connectivity.Tracker,
     selected_index: ?usize = null,
@@ -362,10 +376,7 @@ pub const Channel = struct {
         target: Target,
         options: Options,
     ) Error!Channel {
-        try options.backoff.validate();
-        if (options.resolver_min_refresh_interval.nanoseconds < 0) {
-            return error.InvalidChannelOptions;
-        }
+        try options.validate();
         try target.validate();
         var host_resolution = try HostResolution.init(
             allocator,
@@ -400,6 +411,7 @@ pub const Channel = struct {
                 target.policy(),
             .backoff_policy = options.backoff,
             .shuffle_address_list = options.shuffle_address_list orelse false,
+            .connection_attempt_delay = options.connection_attempt_delay,
             .host_resolution = host_resolution,
             .connectivity_tracker = connectivity_tracker,
         };
@@ -435,6 +447,7 @@ pub const Channel = struct {
         }
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
+        if (self.connect_allocator) |guard| self.allocator.destroy(guard);
         self.connectivity_tracker.release();
         self.* = undefined;
     }
@@ -801,6 +814,7 @@ pub const Channel = struct {
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
         self.exitIdle();
+        errdefer if (!self.hasReadyConnection()) self.setConnectivityState(.transient_failure);
         try self.prepareSlots();
         try self.ensureHostResolution(wait_for_ready, deadline);
         if (self.selection_policy == .round_robin) {
@@ -814,6 +828,41 @@ pub const Channel = struct {
             _ = try self.applyPendingResolution(false);
             var retryable_failure = false;
             const start = self.pickStart();
+            if (self.connection_attempt_delay) |delay| {
+                if (self.slots.len > 1) {
+                    for (0..self.slots.len) |offset| {
+                        const index = (start + offset) % self.slots.len;
+                        if (self.slots[index].connection) |*connection| return self.select(index, connection);
+                    }
+                    var retryable: std.atomic.Value(bool) = .init(false);
+                    if (self.connect_allocator == null) {
+                        const guard = try self.allocator.create(ConnectAllocator);
+                        guard.* = .{ .child = self.allocator, .io = self.io };
+                        self.connect_allocator = guard;
+                    }
+                    const context = ConnectRaceContext{ .channel = self, .deadline = deadline, .retryable = &retryable };
+                    const winner = connect_race.connect(Error, self.allocator, self.io, context, start, delay, deadline, &self.canceled) catch |err| switch (err) {
+                        error.Canceled, error.Timeout, error.OutOfMemory, error.ConcurrencyUnavailable => return err,
+                        else => null,
+                    };
+                    if (winner) |index| {
+                        if (self.canceled.isSet() or deadlineExpired(self.io, deadline)) {
+                            self.slots[index].closeConnection();
+                            return if (self.canceled.isSet()) error.Canceled else error.Timeout;
+                        }
+                        return self.select(index, &self.slots[index].connection.?);
+                    }
+                    retryable_failure = retryable.load(.acquire);
+                    if (self.host_resolution) |*resolution| {
+                        resolution.state.requestRefresh();
+                        retryable_failure = true;
+                    }
+                    self.setConnectivityState(.transient_failure);
+                    if (!wait_for_ready or !retryable_failure) return error.ConnectionUnavailable;
+                    try self.waitForProgress(deadline);
+                    continue;
+                }
+            }
             const pass_deadline = try self.connectDeadline(deadline);
             for (0..self.slots.len) |offset| {
                 const index = (start + offset) % self.slots.len;
@@ -826,6 +875,7 @@ pub const Channel = struct {
                     retryable_failure = true;
                     continue;
                 }
+                self.setConnectivityState(.connecting);
                 slot.connection = slot.endpoint.connect(
                     self.allocator,
                     self.io,
@@ -892,6 +942,18 @@ pub const Channel = struct {
             self.setConnectivityState(.transient_failure);
         }
     }
+
+    const ConnectRaceContext = @import("channel/connect_race/context.zig").Context(Channel, Error, .{
+        .may_attempt = slotMayAttempt,
+        .publish = setConnectivityState,
+        .connect_deadline = connectDeadline,
+        .connect_endpoint = Endpoint.connect,
+        .expired = deadlineExpired,
+        .retryable_endpoint = Endpoint.retryable,
+        .schedule_backoff = scheduleBackoff,
+        .reset_backoff = Slot.resetBackoff,
+        .close = Slot.closeConnection,
+    });
 
     fn pickStart(self: *const Channel) usize {
         return switch (self.selection_policy) {

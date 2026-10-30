@@ -1,0 +1,195 @@
+{
+  "reference": "grpc-js-1.14.0",
+  "node": "v26.10.0",
+  "rows": [
+    {
+      "mode": "h2c",
+      "client": "grpc-js",
+      "stalled": [
+        1,
+        1
+      ],
+      "rpcs": 2,
+      "pendingAfterReferenceClose": 2
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "h2c",
+      "phase": "stagger",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        1,
+        1
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "h2c",
+      "phase": "ordered",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "h2c",
+      "phase": "deadline",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "h2c",
+      "phase": "immediate",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        0,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "mode": "tls12",
+      "client": "grpc-js",
+      "stalled": [
+        1,
+        1
+      ],
+      "rpcs": 2,
+      "pendingAfterReferenceClose": 2
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls12",
+      "phase": "stagger",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        1,
+        1
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls12",
+      "phase": "ordered",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls12",
+      "phase": "deadline",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls12",
+      "phase": "immediate",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        0,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "mode": "tls13",
+      "client": "grpc-js",
+      "stalled": [
+        1,
+        1
+      ],
+      "rpcs": 2,
+      "pendingAfterReferenceClose": 2
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls13",
+      "phase": "stagger",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        1,
+        1
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls13",
+      "phase": "ordered",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls13",
+      "phase": "deadline",
+      "rpcs": 0,
+      "client": "netz",
+      "stalled": [
+        1,
+        0
+      ],
+      "allSocketsRetired": true
+    },
+    {
+      "io": "zio-std-io",
+      "mode": "tls13",
+      "phase": "immediate",
+      "rpcs": 2,
+      "client": "netz",
+      "stalled": [
+        0,
+        0
+      ],
+      "allSocketsRetired": true
+    }
+  ],
+  "source_sha256": {
+    "src/internal/connection_race.zig": "ad9ed98a0518f60b465a1f5c992fba352d91a4179605ef5f93d19c83ef42090d",
+    "src/internal/happy_eyeballs.zig": "716a1f4b05a7eea66c63bfd2c95599bd7ae4ccc554d106a36fe5b5b2a99c9cb0",
+    "src/internal/tcp_connect.zig": "33dd9888517ecdfc232d726369feb02ddc3a857ddb46db70467dbb4af492d30d",
+    "src/internal/accept.zig": "a259b3a3251627909a2eb7dabb76338e31103aa7b799cf2ca355cc0f57e16db6",
+    "src/internal/stream_io/timed_write.zig": "b2c338d2732272dfd91d9e9c32962e80a11060d629eca703c96ccda6a407c3b9",
+    "src/grpc/channel.zig": "e9513b7ee0f84707e3fa0545d0811b1af777f00342c4d54491db76a610a7701a",
+    "src/grpc/channel/connect_race.zig": "f7ff734849236b687f284d3cbbc3890cb5c245d30f3992eb2d2a82454277a260",
+    "src/grpc/channel/connect_race/context.zig": "87892e663f9b7bcf5d6d83be7319cd5eba9b94bf8d270aeb347cf239468a8f38",
+    "src/grpc/channel/connect_race/allocator.zig": "d982612b74751eafe6dffc6869ae0309a0a366ca121ea39cadee1796c67eafee",
+    "tools/interop/grpc_connection_race/client.zig": "90e26694c17545c4c1f189272506d32e3ec30b572b6795a948762ee206f0504a",
+    "tools/interop/grpc_connection_race/peer.js": "87586c39c94e1935331592156850095c320bbd748cff763d177871b0a26f8d7a",
+    "tools/interop/grpc_connection_race/run.py": "7271d61aa7154b9196fb793d614afc3dabec51613610a7a42efdac32d4d7fe8a"
+  },
+  "reference_source_sha256": "7bec812850bb38317e8ffa477d809d21744577102f03c21f15d34a1c95867f18"
+}
