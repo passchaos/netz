@@ -135,10 +135,20 @@ metadata and Init syntax, and then accepts a succeeding sibling Session.
 Independent draft-15 implementation or browser/proxy interop remains external
 evidence work; the local gate does not claim that evidence.
 
-The multiplexing transport follow-up passes 167/167 focused Debug tests and
-133/133 targeted ReleaseFast tests. The production h2c connection fuzz gate
+The multiplexing transport and Session adapter pass 168/168 focused Debug tests
+and 134/134 targeted ReleaseFast tests. The production h2c connection fuzz gate
 passes 3/3, and the independent bidirectional Hyper matrix passes all 9 build
 steps across h2c and TLS while exercising multiplexing, cancellation, flow
 control, GOAWAY, pooling, trailers, redirects, and TLS KeyUpdate. Hyper does not
 implement draft-15 WebTransport, so this proves the shared HTTP/2 router stayed
 interoperable; it is not presented as independent WebTransport evidence.
+
+`webtransport.h2.runtime.connectDuplexWith{Timeout,Deadline}` and the matching
+attempt forms now promote those routed HTTP/2 handles into the same owning
+`h2.Session` state machine used by blocking tunnels. Accepted response metadata,
+WebTransport-Init, application protocols, resumable Capsule writes, virtual
+stream flow control, DATAGRAM, CLOSE and exporter contexts remain shared rather
+than duplicated. Non-2xx duplex attempts retain the complete bounded response
+entity. Multiple Sessions on one connection may be driven serially; each read
+routes sibling frames through the connection owner and later delivers them to
+the correct Session without a second socket reader.

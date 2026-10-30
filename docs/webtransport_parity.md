@@ -1948,11 +1948,16 @@ matrix. The HTTP/2 connection now exposes
 for a pooled endpoint: multiple CONNECT request/response halves register with
 the existing single-owner duplex router, retain out-of-order HPACK and DATA by
 stream ID, and share one connection without per-handle socket reads. The
-WebTransport adapter does not yet promote those duplex handles into its
-connection-owning pooled endpoint, so callers still own one blocking HTTP/2
-Connection and its Session scheduling. That adapter and independent interop are
-the remaining HTTP/2 orchestration/evidence gaps rather than missing core
-Session behavior.
+WebTransport adapter now promotes those handles through
+`connectDuplexWith{Timeout,Deadline}` and matching attempt APIs. Accepted
+Sessions reuse the complete Capsule/virtual-stream state machine, while
+rejections retain status, headers, bounded body and trailers. A real TLS test
+drives two accepted Sessions plus one rejected attempt on one connection,
+forces reverse sibling Capsule order, and completes independent CLOSE/FIN.
+Callers must still serialize Session operations and own the HTTP/2 Connection;
+the remaining orchestration gap is a connection-owning background endpoint
+with stable handles, command wakeup, capacity and shutdown policy. Independent
+draft-15 interop also remains open.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

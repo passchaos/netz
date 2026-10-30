@@ -192,11 +192,14 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     const h2 = netz.webtransport.h2;
     try std.testing.expect(@hasDecl(h2.runtime, "connectWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime, "connectAttemptWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime, "connectDuplexWithTimeout"));
+    try std.testing.expect(@hasDecl(h2.runtime, "connectDuplexAttemptWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime, "readRequestWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime, "acceptWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime.PendingSession, "rejectWithTimeout"));
     try std.testing.expect(@hasDecl(h2.runtime.ConnectAttempt, "requireAccepted"));
     try std.testing.expect(@hasDecl(h2.Session, "responseHeader"));
+    try std.testing.expect(@hasDecl(h2.Session, "multiplexed"));
     inline for (&.{
         "sendStreamWithTimeout",
         "sendDatagramWithTimeout",

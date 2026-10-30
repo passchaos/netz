@@ -291,3 +291,138 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
     try std.testing.expect((try session.receiveWithTimeout(.fromSeconds(3))) == .closed);
     try task.await(io);
 }
+
+test "WebTransport HTTP2 duplex Sessions route rejection and sibling capsules" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate: [tls.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate, tls.certificate_base64);
+    const key = try tls.serverKeyPair();
+    var server = try http2.runtime.TlsServer.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .identity = .{ .certificate_chain = &.{&certificate}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } } },
+        .protocol_policy = .tls13_only,
+        .limits = .{ .enable_connect_protocol = true, .webtransport = credit },
+    });
+    defer server.deinit();
+    const Peer = struct {
+        server: *http2.runtime.TlsServer,
+
+        fn start(stream: *http2.runtime.ServerDuplexStream, status: u16, headers: []const http2.Hpack.HeaderField, before: std.Io.Clock.Timestamp) !void {
+            try std.testing.expectEqualStrings("CONNECT", stream.method);
+            try std.testing.expectEqualStrings("webtransport", stream.protocol.?);
+            try stream.startResponseWithDeadline(.{ .status = status, .headers = headers, .request_method = "CONNECT", .extended_connect = true }, before);
+        }
+
+        fn readDatagram(stream: *http2.runtime.ServerDuplexStream, expected: []const u8, before: std.Io.Clock.Timestamp) !void {
+            while (true) {
+                var event = try stream.readRequestEventWithDeadline(before);
+                defer event.deinit(allocator);
+                switch (event) {
+                    .data => |data| {
+                        const parsed = try wt.Capsule.parse(data.data);
+                        try std.testing.expectEqual(data.data.len, parsed.consumed);
+                        try std.testing.expectEqualStrings(expected, parsed.capsule.datagram);
+                        return;
+                    },
+                    .finished => return error.TestUnexpectedResult,
+                    .trailers, .reset => return error.TestUnexpectedResult,
+                }
+            }
+        }
+
+        fn readClose(stream: *http2.runtime.ServerDuplexStream, expected_code: u32, expected_reason: []const u8, before: std.Io.Clock.Timestamp) !void {
+            while (true) {
+                var event = try stream.readRequestEventWithDeadline(before);
+                defer event.deinit(allocator);
+                switch (event) {
+                    .data => |data| {
+                        const parsed = try wt.Capsule.parse(data.data);
+                        try std.testing.expectEqual(data.data.len, parsed.consumed);
+                        try std.testing.expectEqual(expected_code, parsed.capsule.close_session.code);
+                        try std.testing.expectEqualStrings(expected_reason, parsed.capsule.close_session.reason);
+                        return;
+                    },
+                    .finished => return error.TestUnexpectedResult,
+                    .trailers, .reset => return error.TestUnexpectedResult,
+                }
+            }
+        }
+
+        fn writeCapsule(stream: *http2.runtime.ServerDuplexStream, capsule: wt.Capsule, before: std.Io.Clock.Timestamp) !void {
+            var storage: [256]u8 = undefined;
+            const bytes = try capsule.writeInto(&storage);
+            const result = try stream.writeResponseWithDeadline(bytes, before);
+            try std.testing.expectEqual(bytes.len, result.written);
+        }
+
+        fn run(self: *@This()) !void {
+            var connection = try self.server.acceptWithTimeout(.fromSeconds(3));
+            defer connection.close();
+            var rejected = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
+            defer rejected.deinit();
+            try start(&rejected, 429, &.{
+                .{ .name = "content-length", .value = "5" },
+                .{ .name = "retry-after", .value = "9" },
+            }, deadline(connection.io));
+            _ = try rejected.writeResponseWithDeadline("later", deadline(connection.io));
+            try rejected.finishResponseTrailersWithDeadline(&.{.{ .name = "x-rejected", .value = "complete" }}, deadline(connection.io));
+            try std.testing.expect((try rejected.drainRequestAfterResponseWithDeadline(deadline(connection.io))) == .finished);
+
+            var a = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
+            defer a.deinit();
+            try std.testing.expectEqualStrings("/a", a.path);
+            try start(&a, 200, &.{.{ .name = "x-session", .value = "a" }}, deadline(connection.io));
+            var b = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
+            defer b.deinit();
+            try std.testing.expectEqualStrings("/b", b.path);
+            try start(&b, 200, &.{.{ .name = "x-session", .value = "b" }}, deadline(connection.io));
+
+            try readDatagram(&a, "to-a", deadline(connection.io));
+            try readDatagram(&b, "to-b", deadline(connection.io));
+            try writeCapsule(&b, .{ .datagram = "from-b" }, deadline(connection.io));
+            try writeCapsule(&a, .{ .datagram = "from-a" }, deadline(connection.io));
+
+            try readClose(&a, 1, "a", deadline(connection.io));
+            try std.testing.expect((try a.readRequestEventWithDeadline(deadline(connection.io))) == .finished);
+            _ = try a.finishResponseWithDeadline(deadline(connection.io));
+            try readClose(&b, 2, "b", deadline(connection.io));
+            try std.testing.expect((try b.readRequestEventWithDeadline(deadline(connection.io))) == .finished);
+            _ = try b.finishResponseWithDeadline(deadline(connection.io));
+        }
+    };
+    var peer = Peer{ .server = &server };
+    var task = io.async(Peer.run, .{&peer});
+    defer _ = task.cancel(io) catch {};
+    var connection = try http2.runtime.Client.connectTlsAddressWithTimeout(allocator, io, server.address(), "localhost", "localhost", .{ .enable_connect_protocol = true, .webtransport = credit }, .{
+        .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() },
+        .protocol_policy = .tls13_only,
+    }, .fromSeconds(3));
+    defer connection.close();
+
+    var rejected = try wt.runtime.connectDuplexAttemptWithTimeout(allocator, &connection, .{ .path = "/reject", .authority = "localhost" }, .fromSeconds(3));
+    defer rejected.deinit();
+    try std.testing.expect(!rejected.accepted());
+    try std.testing.expectEqual(@as(u16, 429), rejected.status());
+    try std.testing.expectEqualStrings("9", rejected.responseHeader("retry-after").?);
+    try std.testing.expectEqualStrings("later", rejected.body());
+    try std.testing.expectEqualStrings("complete", rejected.trailers()[0].value);
+
+    var a = try wt.runtime.connectDuplexWithTimeout(allocator, &connection, .{ .path = "/a", .authority = "localhost" }, .fromSeconds(3));
+    defer a.deinit();
+    var b = try wt.runtime.connectDuplexWithTimeout(allocator, &connection, .{ .path = "/b", .authority = "localhost" }, .fromSeconds(3));
+    defer b.deinit();
+    try std.testing.expect(a.multiplexed());
+    try std.testing.expect(b.multiplexed());
+    try std.testing.expectEqualStrings("a", a.responseHeader("x-session").?);
+    try std.testing.expectEqualStrings("b", b.responseHeader("x-session").?);
+    try b.sendDatagramWithTimeout("to-b", .fromSeconds(3));
+    try a.sendDatagramWithTimeout("to-a", .fromSeconds(3));
+    try std.testing.expectEqualStrings("from-a", (try next(&a)).datagram);
+    try std.testing.expectEqualStrings("from-b", (try next(&b)).datagram);
+    try a.closeWithTimeout(1, "a", .fromSeconds(3));
+    try b.closeWithTimeout(2, "b", .fromSeconds(3));
+    try std.testing.expect((try next(&a)) == .closed);
+    try std.testing.expect((try next(&b)) == .closed);
+    try task.await(io);
+}
