@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "grpc-core-compatible weighted_round_robin endpoint selection",
+  "decision": "accepted",
+  "scope": {
+    "channels": [
+      "single-owner grpc.Channel with per-RPC ORCA",
+      "background grpc.SharedChannel with per-RPC or OOB ORCA"
+    ],
+    "weight": "qps / (utilization + eps / qps * errorUtilizationPenalty)",
+    "scheduler": "grpc-core static-stride scaling with unknown-weight mean substitution, 10x upper cap, 1% lower bound and independent RR fallback",
+    "lifecycle": [
+      "blackout",
+      "expiration",
+      "transport-replacement reset",
+      "cached weightUpdatePeriod snapshots",
+      "membership retirement"
+    ],
+    "ordinary_oob_boundary": "a single-owner Channel cannot safely drive a background OOB stream and therefore uses RR fallback when enableOobLoadReport is true; SharedChannel owns that mode"
+  },
+  "reference": {
+    "implementation": "grpc-core weighted_round_robin and StaticStrideScheduler",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "files": [
+      "src/core/load_balancing/weighted_round_robin/weighted_round_robin.cc",
+      "src/core/load_balancing/weighted_round_robin/weighted_round_robin.h",
+      "src/core/load_balancing/weighted_round_robin/static_stride_scheduler.cc",
+      "src/core/load_balancing/weighted_round_robin/static_stride_scheduler.h"
+    ]
+  },
+  "implementation": {
+    "service_config": "all grpc-core fields and defaults are parsed; weightUpdatePeriod is clamped to 100 ms; custom utilization metric names are owned for the Channel lifetime",
+    "ordinary_channel": "every physical transparent or configured retry re-enters endpoint selection, computes grpc-timeout after readiness, and consumes the selected endpoint's per-RPC report",
+    "shared_channel": "worker weight mutation and scheduler reads share the channel mutex; a static-stride sequence advances only when the selected worker claims the RPC",
+    "snapshot_safety": "rebuild allocation reserves before replacing the prior scheduler, resolver replacement invalidates stable pointers, and disconnect generations reject stale snapshots",
+    "fallback": "zero/expired weights, fewer than two available endpoints, allocation failure and OOB-without-owner retain deterministic READY-only RR admission"
+  },
+  "results": {
+    "focused_debug": "144/144 passed",
+    "grpc_debug": "432/432 passed",
+    "focused_release_fast": "142/142 passed",
+    "package": "26/26 passed",
+    "ordinary_per_rpc_distribution": "two real HTTP/2 endpoints completed 200 measured unary RPCs with endpoint weights 1:3; the higher-weight endpoint received more than 2x and less than 4x the lower-weight count",
+    "ordinary_expiration_fallback": "after reports stopped and the 2-second expiration elapsed, 40 real unary RPCs split exactly 20/20",
+    "ordinary_retry_repick": "a trailers-only UNAVAILABLE from endpoint A caused physical attempt two to select endpoint B with grpc-previous-rpc-attempts=1",
+    "shared_oob_distribution": "two real SharedChannel endpoints completed the same 200-RPC 1:3 bound and exact 40-RPC expiration fallback",
+    "official_regression_matrix": "grpc-cpp h2c, certificate-verified TLS and both pick-first failover paths passed; 9/9 build steps succeeded"
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "00ce1b7ba1168c6878b327bd12c1883638a0e92b21d31bad5eb45b0186509832",
+    "src/grpc/channel.zig": "1eb5039a3a24f34a5e1eeeefad93e8de84586a7f24b746ea4adfc2dd5d0587ad",
+    "src/grpc/channel/weighted_round_robin.zig": "aeb8e8e4d51489fab3d51042ea5f84d0e4321229e306e8964cc54b97825d2e30",
+    "src/grpc/channel/weighted_round_robin_tests.zig": "bf41cf7a1fcf6c9d4d5f1b5e12befb22b5b4bc85aa551faea2c692c2a4125e2d",
+    "src/grpc/channel/shared/state.zig": "f8a74b4e094f8c08662711f543e3d7aa9c42e07e52c275da1a6005c04af0c502",
+    "src/grpc/channel/shared/worker.zig": "fdc6e87d6c79ecc2d83780ef38df26544141c06fb3bfe3212bf407b975c1d5ea",
+    "src/grpc/mod.zig": "72008f01c36fab860b98337f61900ce6808e6c3038ba983c2bf55770a4bdd1ed",
+    "src/grpc/service_config.zig": "391df942b54e9fd8e65ec1ed2c67f8811efa624d9727c93b4bcfa99352423ebc",
+    "docs/grpc_parity.md": "8c36b35757e328d00125bae6efd7a132f8df3861f8cc8fa245ca0455db1dd648"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='weighted round robin' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='Channel weighted round robin' -Dtest-filter='Channel retry repicks' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "Weighted round robin is covered for ordinary and shared channels. Composite priority, weighted-target and xDS control-plane policies remain separate work."
+}

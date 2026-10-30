@@ -1,11 +1,15 @@
 const std = @import("std");
-const orca = @import("../../orca.zig");
-const service_config = @import("../../service_config.zig");
+const orca = @import("../orca.zig");
+const service_config = @import("../service_config.zig");
 
 const max_scaled: u64 = std.math.maxInt(u16);
 
 pub const Scheduler = struct {
-    const Entry = struct { worker: *anyopaque, weight: u16 };
+    const Entry = struct {
+        worker: *anyopaque,
+        weight: u16,
+        generation: u64,
+    };
     entries: std.ArrayList(Entry) = .empty,
     next_update_ns: i96 = 0,
 
@@ -22,13 +26,30 @@ pub const Scheduler = struct {
         self.next_update_ns = 0;
     }
 
-    pub fn rebuild(self: *Scheduler, allocator: std.mem.Allocator, workers: anytype, now_ns: i96, config: service_config.WeightedRoundRobinConfig) std.mem.Allocator.Error!void {
+    pub fn invalidate(self: *Scheduler) void {
+        self.entries.clearRetainingCapacity();
+        self.next_update_ns = 0;
+    }
+
+    pub fn rebuild(
+        self: *Scheduler,
+        allocator: std.mem.Allocator,
+        workers: anytype,
+        now_ns: i96,
+        config: service_config.WeightedRoundRobinConfig,
+        comptime readyFn: anytype,
+    ) std.mem.Allocator.Error!void {
         var ready: usize = 0;
         var nonzero: usize = 0;
         var sum: f64 = 0;
         var maximum: f64 = 0;
-        for (workers) |worker| {
-            if (!worker.eligible or worker.published != .ready) continue;
+        for (0..workers.len) |index| {
+            const item = workers[index];
+            const worker = switch (@typeInfo(@TypeOf(item))) {
+                .pointer => item,
+                else => &workers[index],
+            };
+            if (!readyFn(worker)) continue;
             ready += 1;
             const value = worker.wrr_weight.usable(now_ns, config);
             if (value > 0) {
@@ -51,20 +72,38 @@ pub const Scheduler = struct {
         const scale = @as(f64, @floatFromInt(max_scaled)) / maximum;
         const scaled_mean: u16 = @intFromFloat(@round(scale * mean));
         const lower: u16 = @max(1, @as(u16, @intFromFloat(@round(@as(f64, @floatFromInt(scaled_mean)) * 0.01))));
-        for (workers) |worker| {
-            if (!worker.eligible or worker.published != .ready) continue;
+        for (0..workers.len) |index| {
+            const item = workers[index];
+            const worker = switch (@typeInfo(@TypeOf(item))) {
+                .pointer => item,
+                else => &workers[index],
+            };
+            if (!readyFn(worker)) continue;
             const raw = worker.wrr_weight.usable(now_ns, config);
             const scaled: u16 = if (raw == 0) scaled_mean else @max(lower, @as(u16, @intFromFloat(@round(@min(raw, maximum) * scale))));
-            self.entries.appendAssumeCapacity(.{ .worker = worker, .weight = scaled });
+            self.entries.appendAssumeCapacity(.{
+                .worker = worker,
+                .weight = scaled,
+                .generation = worker.wrr_weight.generation,
+            });
         }
         self.next_update_ns = now_ns + config.weight_update_period.nanoseconds;
     }
 
-    pub fn pick(self: *Scheduler, comptime Worker: type, sequence: *u32) ?*Worker {
+    pub fn pick(
+        self: *Scheduler,
+        comptime Worker: type,
+        sequence: *u32,
+        comptime availableFn: anytype,
+    ) ?*Worker {
         var available: usize = 0;
         for (self.entries.items) |entry| {
             const worker: *Worker = @ptrCast(@alignCast(entry.worker));
-            if (worker.eligible and worker.published == .ready and worker.capacity != 0) {
+            if (entry.generation != worker.wrr_weight.generation) {
+                self.next_update_ns = 0;
+                continue;
+            }
+            if (availableFn(worker)) {
                 available += 1;
                 if (available > 1) break;
             }
@@ -77,7 +116,11 @@ pub const Scheduler = struct {
             const generation = current / @as(u32, @intCast(self.entries.items.len));
             const entry = self.entries.items[index];
             const worker: *Worker = @ptrCast(@alignCast(entry.worker));
-            if (!worker.eligible or worker.published != .ready or worker.capacity == 0) continue;
+            if (entry.generation != worker.wrr_weight.generation) {
+                self.next_update_ns = 0;
+                continue;
+            }
+            if (!availableFn(worker)) continue;
             const mod = (@as(u64, entry.weight) * generation + @as(u64, index) * (max_scaled / 2)) % max_scaled;
             if (mod >= max_scaled - entry.weight) return worker;
         }
@@ -88,6 +131,7 @@ pub const Weight = struct {
     value: f64 = 0,
     non_empty_since_ns: ?i96 = null,
     last_update_ns: ?i96 = null,
+    generation: u64 = 0,
 
     pub fn update(self: *Weight, report: orca.LoadReport, now_ns: i96, config: service_config.WeightedRoundRobinConfig) void {
         const utilization = reportUtilization(report, config.metric_names);
@@ -116,6 +160,7 @@ pub const Weight = struct {
 
     pub fn disconnected(self: *Weight) void {
         self.non_empty_since_ns = null;
+        self.generation +%= 1;
     }
 };
 
@@ -147,7 +192,7 @@ fn metric(metrics: []const orca.Metric, name: []const u8) f64 {
 test "gRPC weighted round robin follows ORCA weights and lifecycle" {
     const Fake = struct {
         eligible: bool = true,
-        published: @import("../connectivity.zig").State = .ready,
+        published: @import("connectivity.zig").State = .ready,
         capacity: usize = 1,
         wrr_weight: Weight = .{},
     };
@@ -160,29 +205,74 @@ test "gRPC weighted round robin follows ORCA weights and lifecycle" {
     a.wrr_weight.update(.{ .rps_fractional = 1, .cpu_utilization = 1 }, 0, config);
     b.wrr_weight.update(.{ .rps_fractional = 3, .cpu_utilization = 1 }, 0, config);
     const workers = [_]*Fake{ &a, &b };
+    const Adapter = struct {
+        fn ready(worker: *Fake) bool {
+            return worker.eligible and worker.published == .ready;
+        }
+        fn available(worker: *Fake) bool {
+            return ready(worker) and worker.capacity != 0;
+        }
+    };
     var scheduler: Scheduler = .{};
     defer scheduler.deinit(std.testing.allocator);
-    try scheduler.rebuild(std.testing.allocator, &workers, 1, config);
+    try scheduler.rebuild(
+        std.testing.allocator,
+        &workers,
+        1,
+        config,
+        Adapter.ready,
+    );
     var sequence: u32 = 0;
     var counts = [_]usize{ 0, 0 };
     for (0..4000) |_| {
-        const selected = scheduler.pick(Fake, &sequence).?;
+        const selected = scheduler.pick(Fake, &sequence, Adapter.available).?;
         counts[@intFromBool(selected == &b)] += 1;
     }
     try std.testing.expect(counts[1] > counts[0] * 2);
     try std.testing.expect(counts[1] < counts[0] * 4);
+    a.wrr_weight.disconnected();
+    scheduler.next_update_ns = 123;
+    const before_disconnect_fallback = sequence;
+    try std.testing.expect(scheduler.pick(
+        Fake,
+        &sequence,
+        Adapter.available,
+    ) == null);
+    try std.testing.expectEqual(before_disconnect_fallback, sequence);
+    try std.testing.expectEqual(@as(i96, 0), scheduler.next_update_ns);
+    a.wrr_weight.update(
+        .{ .rps_fractional = 1, .cpu_utilization = 1 },
+        2,
+        config,
+    );
+    try scheduler.rebuild(
+        std.testing.allocator,
+        &workers,
+        2,
+        config,
+        Adapter.ready,
+    );
     b.capacity = 0;
     const before_fallback = sequence;
-    try std.testing.expect(scheduler.pick(Fake, &sequence) == null);
+    try std.testing.expect(scheduler.pick(
+        Fake,
+        &sequence,
+        Adapter.available,
+    ) == null);
     try std.testing.expectEqual(before_fallback, sequence);
     b.capacity = 1;
     try scheduler.rebuild(
         std.testing.allocator,
         &workers,
-        10 * std.time.ns_per_s,
+        10 * std.time.ns_per_s + 2,
         config,
+        Adapter.ready,
     );
-    try std.testing.expect(scheduler.pick(Fake, &sequence) == null);
+    try std.testing.expect(scheduler.pick(
+        Fake,
+        &sequence,
+        Adapter.available,
+    ) == null);
 
     a.wrr_weight.disconnected();
     try std.testing.expectEqual(@as(f64, 0), a.wrr_weight.usable(20, config));

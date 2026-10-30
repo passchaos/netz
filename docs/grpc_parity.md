@@ -52,6 +52,17 @@ existing HTTP/2 runtime:
   report clones plus explicit `unavailable`, `unimplemented`, and `shutdown`
   lifecycle states; slow consumers coalesce gauges instead of growing an
   unbounded queue,
+- grpc-core-compatible `weighted_round_robin` service config and endpoint
+  selection. Both Channel forms consume per-RPC ORCA reports by default;
+  SharedChannel can instead own one OOB report stream per endpoint. The weight
+  is QPS divided by utilization plus the configured error penalty, custom
+  utilization metrics use the maximum positive sample before application/CPU
+  fallback, and blackout/expiration restart across transport replacement. A
+  cached static-stride scheduler substitutes the nonzero mean for unknown
+  weights, caps outliers at 10x the mean, floors known weights at 1%, and falls
+  back to RR when fewer than two usable endpoints remain. Ordinary Channel
+  retries re-enter the picker for every physical attempt instead of staying on
+  the first connection,
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length. A caller-buffer constructor emits the
@@ -565,9 +576,11 @@ reset race from closing with unread upload bytes.
    ORCA per-RPC and long-lived OOB reports are covered in both grpc-cpp
    directions. SharedChannel now performs automatic per-endpoint OOB admission,
    latest-value consumer fan-out, UNIMPLEMENTED isolation and reconnect across
-   transport replacement while preserving its single frame owner. Cross-
-   endpoint aggregation and load-balancing policies that consume these metrics
-   remain application-selected rather than silently changing endpoint picks.
+   transport replacement while preserving its single frame owner. Standard
+   `weighted_round_robin` now consumes these metrics across endpoints with
+   grpc-core's static-stride, blackout, expiration and RR-fallback semantics.
+   Additional composite/xDS policies remain explicit integration work rather
+   than being silently inferred from ORCA metrics.
 
 Machine-readable SharedChannel ORCA evidence is recorded in
 `docs/evidence/grpc_cpp_shared_orca_oob/2026-10-31.json`.
@@ -1003,11 +1016,19 @@ healthy siblings, and a non-retryable endpoint remains disabled until
 
 Top-level service config now accepts the standard ordered
 `loadBalancingConfig` list plus deprecated `loadBalancingPolicy`, chooses the
-first supported `pick_first` or `round_robin` entry, and supports
-`pick_first.shuffleAddressList`. Explicit Channel options override service
-config. Real two-server tests prove stable ordered pick-first selection,
-READY-only A/B/A/B round robin over persistent connections, and endpoint-local
-backoff that does not reattempt or block a healthy sibling.
+first supported `pick_first`, `round_robin`, or `weighted_round_robin` entry,
+and supports `pick_first.shuffleAddressList`. WRR owns all grpc-core fields,
+including the 100-ms minimum weight-update period and custom utilization names.
+Explicit Channel options override service config. Real two-server tests prove
+stable ordered pick-first selection, READY-only A/B/A/B round robin over
+persistent connections, endpoint-local backoff that does not reattempt or block
+a healthy sibling, 1:3 per-RPC and OOB WRR distributions, exact RR fallback
+after weight expiration, and physical retry re-picking. Ordinary Channel owns
+custom metric names beyond the parsed config lifetime; OOB mode deliberately
+falls back to RR there because a single-owner Channel cannot safely drive a
+background stream, while SharedChannel supplies that ownership.
+Machine-readable WRR evidence is recorded in
+`docs/evidence/grpc_weighted_round_robin/2026-10-31.json`.
 
 Hostname Channel targets now resolve every unique system A/AAAA address through
 a background polling worker; callers may inject the same allocator-owned,
@@ -1271,8 +1292,11 @@ Connection attempts begin on the first call or explicit `connect()`. Endpoint
 workers connect in parallel and expose independent health-derived connectivity
 through `watchEndpointConnectivity`. `pick_first` stays with a ready selected
 endpoint, while `round_robin` advances across ready endpoints with available
-concurrency credit. Connection and health retries use the existing gRPC
-backoff defaults. Each hostname source has an independent background resolver,
+concurrency credit. `weighted_round_robin` applies per-RPC or OOB endpoint
+weights through the shared static-stride scheduler; a choice is committed only
+when its selected worker claims the queued RPC, so competing worker wakeups
+cannot consume one another's sequence. Connection and health retries use the
+existing gRPC backoff defaults. Each hostname source has an independent background resolver,
 including hostname entries mixed with static endpoints in a resolved target.
 Every physical address preserves the original logical authority, TLS server
 name, certificate-verification policy and transport limits.

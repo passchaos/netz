@@ -441,7 +441,7 @@ pub fn unaryCallWithRetryUnderDeadline(connection: *http2.runtime.Connection, al
 /// Retry orchestration uses this entry point so every attempt inherits the
 /// original RPC budget while advertising its remaining budget and attempt
 /// number on the wire. `previous_attempts` is omitted for the first attempt.
-fn unaryCallAttempt(
+pub fn unaryCallAttempt(
     connection: *http2.runtime.Connection,
     allocator: std.mem.Allocator,
     options: UnaryCallOptions,

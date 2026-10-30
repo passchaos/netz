@@ -7,7 +7,8 @@ const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
-const weighted_round_robin = @import("weighted_round_robin.zig");
+const weighted_round_robin = @import("../weighted_round_robin.zig");
+const orca = @import("../../orca.zig");
 const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
@@ -318,6 +319,28 @@ pub const State = struct {
         self.recomputeLocked();
         if (changed) self.wakeAllLocked();
     }
+    pub fn updateWrr(
+        self: *State,
+        worker: *Worker,
+        report: orca.LoadReport,
+        oob: bool,
+    ) void {
+        self.lock();
+        defer self.unlock();
+        const config = self.wrr_config orelse return;
+        if (config.enable_oob_load_report != oob) return;
+        worker.wrr_weight.update(
+            report,
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+            config,
+        );
+    }
+    pub fn disconnectWrr(self: *State, worker: *Worker) void {
+        self.lock();
+        defer self.unlock();
+        worker.wrr_weight.disconnected();
+        self.wrr_scheduler.next_update_ns = 0;
+    }
     pub fn recomputeLocked(self: *State) void {
         const aggregate = self.aggregateLocked();
         self.tracker.setState(aggregate);
@@ -415,13 +438,18 @@ pub const State = struct {
                         self.workers.items,
                         now,
                         config,
+                        wrrReady,
                     ) catch {};
                 }
                 // Endpoint tasks race to claim the shared queue. Only consume
                 // a stride choice when its selected endpoint owns this claim;
                 // otherwise a non-selected task could discard every pick.
                 var sequence = self.wrr_sequence;
-                if (self.wrr_scheduler.pick(Worker, &sequence)) |worker| {
+                if (self.wrr_scheduler.pick(
+                    Worker,
+                    &sequence,
+                    wrrAvailable,
+                )) |worker| {
                     if (worker == claimant) self.wrr_sequence = sequence;
                     return worker;
                 }
@@ -445,6 +473,12 @@ pub const State = struct {
             }
         }
         return null;
+    }
+    fn wrrReady(worker: *Worker) bool {
+        return worker.eligible and worker.published == .ready;
+    }
+    fn wrrAvailable(worker: *Worker) bool {
+        return wrrReady(worker) and worker.capacity != 0;
     }
     pub fn claim(self: *State, worker: *Worker) ?*Job {
         self.lock();

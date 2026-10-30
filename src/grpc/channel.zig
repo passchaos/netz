@@ -2,6 +2,8 @@
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
+const retry = @import("call/retry.zig");
+const orca = @import("orca.zig");
 const service_config = @import("service_config.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
@@ -11,6 +13,7 @@ const connectivity = @import("channel/connectivity.zig");
 const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
+const weighted_round_robin = @import("channel/weighted_round_robin.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
 const net = std.Io.net;
@@ -235,10 +238,12 @@ const Slot = struct {
     consecutive_failures: usize = 0,
     next_attempt_at_ns: ?i96 = null,
     disabled: bool = false,
+    wrr_weight: weighted_round_robin.Weight = .{},
 
     fn closeConnection(self: *Slot) void {
         if (self.connection) |*connection| connection.close();
         self.connection = null;
+        self.wrr_weight.disconnected();
     }
 
     fn resetBackoff(self: *Slot) void {
@@ -369,6 +374,10 @@ pub const Channel = struct {
     connectivity_tracker: *connectivity.Tracker,
     selected_index: ?usize = null,
     next_pick_index: usize = 0,
+    wrr_config: ?service_config.WeightedRoundRobinConfig = null,
+    wrr_metric_names: ?[][]u8 = null,
+    wrr_sequence: u32 = 0,
+    wrr_scheduler: weighted_round_robin.Scheduler = .{},
     canceled: std.Io.Event = .unset,
 
     pub fn init(
@@ -439,7 +448,16 @@ pub const Channel = struct {
         if (resolved.shuffle_address_list == null and balancing.configured) {
             resolved.shuffle_address_list = balancing.shuffle_address_list;
         }
-        return init(allocator, io, target, resolved);
+        var result = try init(allocator, io, target, resolved);
+        errdefer result.deinit();
+        if (result.selection_policy == .weighted_round_robin and
+            balancing.policy == .weighted_round_robin)
+        {
+            try result.setWeightedRoundRobinConfig(
+                balancing.weighted_round_robin,
+            );
+        }
+        return result;
     }
 
     pub fn deinit(self: *Channel) void {
@@ -449,6 +467,11 @@ pub const Channel = struct {
         }
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
+        self.wrr_scheduler.deinit(self.allocator);
+        if (self.wrr_metric_names) |names| {
+            for (names) |name| self.allocator.free(name);
+            self.allocator.free(names);
+        }
         if (self.connect_allocator) |guard| self.allocator.destroy(guard);
         self.connectivity_tracker.release();
         self.* = undefined;
@@ -706,29 +729,48 @@ pub const Channel = struct {
         resolved: service_config.ResolvedUnary,
     ) Error!call.UnaryResponse {
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        var options = resolved.options;
+        options.wait_for_ready = resolved.wait_for_ready;
+        return retry.runWithDeadline(
+            self,
+            self.allocator,
+            options,
+            resolved.retry_policy,
+            deadline,
+            unaryAttempt,
+        );
+    }
+
+    fn unaryAttempt(
+        self: *Channel,
+        allocator: std.mem.Allocator,
+        options: call.UnaryCallOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        _: ?wire.Timeout,
+        previous_attempts: ?u8,
+    ) Error!call.UnaryResponse {
         const ready_connection = try self.ready(
-            resolved.wait_for_ready,
+            options.wait_for_ready orelse false,
             deadline,
         );
-        const response = if (resolved.retry_policy) |policy|
-            call.unaryCallWithRetryUnderDeadline(
-                ready_connection.connection,
-                self.allocator,
-                resolved.options,
-                policy,
-                deadline,
-            )
-        else
-            call.unaryCallUnderDeadline(
-                ready_connection.connection,
-                self.allocator,
-                resolved.options,
-                deadline,
-            );
-        return response catch |err| {
+        const timeout_header: ?wire.Timeout = if (deadline) |absolute| blk: {
+            const remaining = absolute.durationFromNow(self.io).raw;
+            if (remaining.nanoseconds <= 0) return error.Timeout;
+            break :blk try wire.Timeout.fromDuration(remaining);
+        } else null;
+        var response = call.unaryCallAttempt(
+            ready_connection.connection,
+            allocator,
+            options,
+            deadline,
+            timeout_header,
+            previous_attempts,
+        ) catch |err| {
             self.retireAfterOperationError(ready_connection.index, err);
             return err;
         };
+        self.observeWrr(ready_connection.index, &response);
+        return response;
     }
 
     pub fn startStreaming(
@@ -819,6 +861,13 @@ pub const Channel = struct {
         errdefer if (!self.hasReadyConnection()) self.setConnectivityState(.transient_failure);
         try self.prepareSlots();
         try self.ensureHostResolution(wait_for_ready, deadline);
+        if (self.selection_policy == .weighted_round_robin and
+            self.wrr_config != null)
+        {
+            if (self.pickReadyWeighted()) |ready_connection| {
+                return ready_connection;
+            }
+        }
         if (self.selection_policy != .pick_first) {
             if (self.pickReadyRoundRobin()) |ready_connection| {
                 return ready_connection;
@@ -974,6 +1023,30 @@ pub const Channel = struct {
         return null;
     }
 
+    fn pickReadyWeighted(self: *Channel) ?ReadyConnection {
+        const config = self.wrr_config orelse return null;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now >= self.wrr_scheduler.next_update_ns) {
+            self.wrr_scheduler.rebuild(
+                self.allocator,
+                self.slots,
+                now,
+                config,
+                wrrSlotReady,
+            ) catch {};
+        }
+        const slot = self.wrr_scheduler.pick(
+            Slot,
+            &self.wrr_sequence,
+            wrrSlotReady,
+        ) orelse return null;
+        for (self.slots, 0..) |*candidate, index| {
+            if (candidate != slot) continue;
+            return self.selectWeighted(index, &slot.connection.?);
+        }
+        unreachable;
+    }
+
     fn select(
         self: *Channel,
         index: usize,
@@ -985,6 +1058,65 @@ pub const Channel = struct {
             self.next_pick_index = (index + 1) % self.slots.len;
         }
         return .{ .index = index, .connection = connection };
+    }
+
+    fn selectWeighted(
+        self: *Channel,
+        index: usize,
+        connection: *http2.runtime.Connection,
+    ) ReadyConnection {
+        self.selected_index = index;
+        self.setConnectivityState(.ready);
+        return .{ .index = index, .connection = connection };
+    }
+
+    fn observeWrr(
+        self: *Channel,
+        index: usize,
+        response: *const call.UnaryResponse,
+    ) void {
+        const config = self.wrr_config orelse return;
+        if (config.enable_oob_load_report) return;
+        const transport = response.transport orelse return;
+        if (orca.fromMetadataAlloc(
+            self.allocator,
+            transport.headers,
+            transport.trailers,
+        )) |owned_optional| {
+            if (owned_optional) |owned_value| {
+                var owned = owned_value;
+                defer owned.deinit();
+                self.slots[index].wrr_weight.update(
+                    owned.report,
+                    std.Io.Clock.awake.now(self.io).nanoseconds,
+                    config,
+                );
+            }
+        } else |_| {}
+    }
+
+    fn setWeightedRoundRobinConfig(
+        self: *Channel,
+        config: service_config.WeightedRoundRobinConfig,
+    ) std.mem.Allocator.Error!void {
+        if (config.metric_names.len == 0) {
+            self.wrr_config = config;
+            return;
+        }
+        const names = try self.allocator.alloc([]u8, config.metric_names.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (names[0..initialized]) |name| self.allocator.free(name);
+            self.allocator.free(names);
+        }
+        for (config.metric_names, names) |name, *owned| {
+            owned.* = try self.allocator.dupe(u8, name);
+            initialized += 1;
+        }
+        var retained = config;
+        retained.metric_names = names;
+        self.wrr_metric_names = names;
+        self.wrr_config = retained;
     }
 
     fn noteWarmedConnection(self: *Channel, index: usize) void {
@@ -1143,6 +1275,7 @@ pub const Channel = struct {
             }
         }
         for (old_slots) |*slot| slot.closeConnection();
+        self.wrr_scheduler.invalidate();
         self.allocator.free(old_slots);
         self.slots = replacement;
         self.selected_index = selected;
@@ -1338,6 +1471,11 @@ fn slotMayAttempt(slot: *Slot, io: std.Io) bool {
     if (target > std.Io.Clock.awake.now(io).nanoseconds) return false;
     slot.next_attempt_at_ns = null;
     return true;
+}
+
+fn wrrSlotReady(slot: *Slot) bool {
+    const connection = if (slot.connection) |*value| value else return false;
+    return connection.isReusable();
 }
 
 fn callDeadline(

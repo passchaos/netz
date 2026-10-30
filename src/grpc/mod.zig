@@ -163,6 +163,7 @@ test {
     _ = @import("call/refused_retry_tests.zig");
     _ = @import("call/retry_lifecycle_tests.zig");
     _ = @import("channel_tests.zig");
+    _ = @import("channel/weighted_round_robin_tests.zig");
     _ = @import("channel/host_tests.zig");
     _ = @import("channel/connect_race.zig");
     _ = @import("channel/connect_race/tests.zig");
