@@ -36,6 +36,8 @@ pub const State = struct {
     orca_oob: ?orca_config.Config = null,
     tracker: *connectivity.Tracker,
     policy: channel.SelectionPolicy,
+    weighted_target: ?WeightedTarget = null,
+    weighted_target_selected: ?*Worker = null,
     head: ?*Job = null,
     tail: ?*Job = null,
     queued: usize = 0,
@@ -61,6 +63,7 @@ pub const State = struct {
     outlier_next_evaluation_ns: ?i96 = null,
 
     pub const Worker = @import("worker.zig").Worker(State);
+    pub const WeightedTarget = @import("weighted_target.zig").Runtime(State);
     pub const Source = @import("source.zig").Source(Worker);
     pub const Membership = @import("membership.zig").Membership(State);
     pub const Resolution = @import("resolution.zig").Resolution(State);
@@ -122,6 +125,7 @@ pub const State = struct {
         self.workers.deinit(self.allocator);
         self.wrr_scheduler.deinit(self.allocator);
         self.ring_hash_ring.deinit(self.allocator);
+        if (self.weighted_target) |*runtime| runtime.deinit();
         for (self.sources) |*source| source.deinit(self.allocator);
         self.allocator.free(self.sources);
         if (self.config) |*config| config.deinit();
@@ -348,6 +352,9 @@ pub const State = struct {
         self.evaluateOutliersLocked();
         if (self.closed) return .shutdown;
         if (!self.demand) return .idle;
+        if (self.weighted_target) |*runtime| {
+            return runtime.aggregate(self);
+        }
         var connecting = false;
         for (self.workers.items) |worker| {
             if (worker.retired) continue;
@@ -452,6 +459,10 @@ pub const State = struct {
         self.wrr_scheduler.remove(worker);
         self.ring_hash_dirty = true;
         if (self.selected == worker) self.selected = null;
+        if (self.weighted_target_selected == worker) {
+            self.weighted_target_selected = null;
+        }
+        if (self.weighted_target) |*runtime| runtime.remove(worker);
         if (self.least_request_selected == worker) {
             self.least_request_selected = null;
         }
@@ -495,6 +506,15 @@ pub const State = struct {
     }
     fn pickLocked(self: *State, claimant: *Worker) Error!?*Worker {
         self.evaluateOutliersLocked();
+        if (self.weighted_target) |*runtime| {
+            if (self.weighted_target_selected) |selected| {
+                if (runtime.available(self, selected)) return selected;
+                self.weighted_target_selected = null;
+            }
+            const selected = runtime.pick(self) orelse return null;
+            self.weighted_target_selected = selected;
+            return selected;
+        }
         if (self.policy == .pick_first) {
             if (self.selected) |worker| if (worker.eligible and worker.published == .ready) {
                 return if (worker.capacity != 0) worker else null;
@@ -757,6 +777,10 @@ pub const State = struct {
         if (self.policy == .least_request) {
             worker.outstanding_requests += 1;
             self.least_request_selected = null;
+        }
+        if (self.weighted_target) |*runtime| {
+            runtime.commit(self, worker);
+            self.weighted_target_selected = null;
         }
         self.selected = picked;
         var count: usize = 0;

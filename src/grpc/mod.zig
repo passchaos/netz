@@ -187,6 +187,7 @@ test {
     _ = @import("channel_tests.zig");
     _ = @import("channel/outlier_detection_tests.zig");
     _ = @import("channel/weighted_round_robin_tests.zig");
+    _ = @import("channel/shared/weighted_target_tests.zig");
     _ = @import("channel/least_request_channel_tests.zig");
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("channel/proxy_tests.zig");

@@ -650,6 +650,24 @@ also exposed and fixed a pre-existing SharedChannel leak when a State initialize
 returned before cleanup ownership was installed. Parser evidence is recorded in
 `docs/evidence/grpc_weighted_target_parser/2026-10-31.json`.
 
+SharedChannel now executes the first production subset of that tree: arbitrary
+nested weighted targets whose leaves are `pick_first` or `round_robin`.
+Every background endpoint owner leaves IDLE concurrently. Parent state follows
+grpc-core precedence (READY, CONNECTING, IDLE, TRANSIENT_FAILURE), and only
+READY children enter the weighted random range. A selected leaf remains stable
+until its exact worker claims the queued job; child round-robin advances only
+after that claim, so racing endpoint tasks cannot consume or bias picks.
+Pick-first child pointers are cleared before worker destruction, nested runtime
+allocation is transactional, empty/no-ready child sets fail rather than falling
+back to an unrelated endpoint, and a high-weight unavailable child contributes
+zero probability. A real three-server test proves nested 1:3 target weighting
+while the two endpoints below the low-weight child alternate exactly; another
+keeps all traffic on a weight-1 READY child while a weight-100 sibling remains
+unavailable. Least-request, ring-hash, WRR, outlier children and ordinary
+Channel remain explicit initialization errors, so this is still not a broad
+weighted-target completion claim. Evidence is recorded in
+`docs/evidence/grpc_shared_weighted_target_core/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper

@@ -34,6 +34,20 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
     const balancing = if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{};
+    var weighted_target = if (balancing.policy == .weighted_target)
+        State.WeightedTarget.init(
+            allocator,
+            balancing.root orelse return error.InvalidSharedOptions,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidSharedOptions,
+        }
+    else
+        null;
+    var weighted_target_transferred = false;
+    errdefer if (!weighted_target_transferred) if (weighted_target) |*runtime| {
+        runtime.deinit();
+    };
     const requested_orca = options.orca_oob orelse if (balancing.policy == .weighted_round_robin and
         balancing.weighted_round_robin.enable_oob_load_report) @import("../../orca/oob.zig").ClientOptions{
         .report_interval = balancing.weighted_round_robin.oob_reporting_period,
@@ -67,7 +81,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             .least_request => channel.SelectionPolicy.least_request,
             .ring_hash => channel.SelectionPolicy.ring_hash,
             .weighted_round_robin => channel.SelectionPolicy.weighted_round_robin,
-            .weighted_target => return error.InvalidSharedOptions,
+            .weighted_target => channel.SelectionPolicy.weighted_target,
         } else if (target == .resolved) target.resolved.policy else .pick_first),
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
         .keepalive_interval_ns = .init(if (options.keepalive) |keepalive|
@@ -79,6 +93,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             balancing.weighted_round_robin
         else
             null,
+        .weighted_target = weighted_target,
         .least_request_config = balancing.least_request,
         .ring_hash_config = balancing.ring_hash,
         .outlier_config = balancing.outlier_detection,
@@ -91,6 +106,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         else
             null,
     };
+    weighted_target_transferred = true;
     state_initialized = true;
     transferred = true;
     errdefer {

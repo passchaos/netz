@@ -72,6 +72,7 @@ pub const SelectionPolicy = enum {
     least_request,
     ring_hash,
     weighted_round_robin,
+    weighted_target,
 };
 
 pub const ConnectivityState = connectivity.State;
@@ -622,6 +623,9 @@ pub const Channel = struct {
         }
         const selection_policy = options.selection_policy orelse
             target.policy();
+        if (selection_policy == .weighted_target) {
+            return error.InvalidChannelOptions;
+        }
         const slot_count = if (host_resolution != null)
             0
         else switch (target) {
@@ -757,7 +761,9 @@ pub const Channel = struct {
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
         var resolved = options;
-        if (resolved.selection_policy == null and balancing.configured) {
+        if (resolved.selection_policy == null and balancing.configured and
+            !(composite_owned and balancing.policy == .weighted_target))
+        {
             resolved.selection_policy = switch (balancing.policy) {
                 .pick_first => .pick_first,
                 .round_robin => .round_robin,
@@ -1481,6 +1487,7 @@ pub const Channel = struct {
         return switch (self.selection_policy) {
             .pick_first => self.selected_index orelse 0,
             .round_robin, .least_request, .weighted_round_robin => self.next_pick_index,
+            .weighted_target => unreachable,
             .ring_hash => 0,
         };
     }

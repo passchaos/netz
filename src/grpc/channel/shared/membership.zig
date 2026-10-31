@@ -52,6 +52,9 @@ pub fn Membership(comptime State: type) type {
             worker.orca_tracker.shutdown();
             state.wrr_scheduler.remove(worker);
             if (state.selected == worker) state.selected = null;
+            if (state.weighted_target_selected == worker) {
+                state.weighted_target_selected = null;
+            }
             if (state.least_request_selected == worker) {
                 state.least_request_selected = null;
             }
