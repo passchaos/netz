@@ -90,7 +90,11 @@ is external wire evidence rather than two netz adapters sharing a codec.
 The benchmark runner now carries its selected QUIC version through both
 implementations, the request metadata, and every config/result/completion
 record; the checker rejects a v1/v2 mismatch instead of accepting a successful
-v1 run requested as v2.
+v1 run requested as v2. A fresh 2026-11-01 run passed both QUIC v1 and v2 in
+both directions with certificate verification, Origin/subprotocol, masked
+fragmented text, no-context-takeover compression, Ping/Pong, reciprocal
+KeyUpdate and echoed Close 1000/`done`; see
+`docs/evidence/websocket_h3_quic_go/2026-11-01.json`.
 
 `zig build interop-websocket-chrome -Doptimize=ReleaseFast` now drives Chrome's
 native browser WebSocket API against the HTTP/1 runtime. The first connection

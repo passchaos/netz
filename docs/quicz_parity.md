@@ -36,6 +36,11 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=4 --verbose
 ```
 
+A fresh 2026-11-01 `interop-http3-tquic` run passed GET, byte Range, POST,
+ORIGIN, connection reuse, and both-direction two-phase GOAWAY(4) drain with
+Retry disabled and forced; see
+`docs/evidence/http3_tquic/2026-11-01.json`.
+
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
 headers, Version Negotiation, Retry parsing and integrity verification, typed
 and untyped transport parameters, owned and caller-storage frame parsing,
