@@ -676,9 +676,25 @@ returned by every unary and streaming completion/error path; sibling targets
 never influence it. A two-runner real-server regression keeps a 20 ms RPC
 outstanding on one endpoint, verifies the fast sibling receives more than
 twice its traffic under `choiceCount:10`, and checks every worker counter is
-zero after all 100 calls. Ring-hash, WRR, outlier children and ordinary Channel
-remain explicit initialization errors. Evidence is recorded in
+zero after all 100 calls. At that milestone ring-hash, WRR, outlier children
+and ordinary Channel remained explicit initialization errors. Evidence is recorded in
 `docs/evidence/grpc_shared_weighted_target_least_request/2026-10-31.json`.
+
+Shared weighted targets now execute child-local `ring_hash_experimental` as
+well. Request hashes are deliberately computed only after the READY weighted
+child is selected, because each child may own a different explicit attribute or
+metadata-header policy. Unary jobs retain cloned metadata; streaming jobs read
+their retained stream options, so header precedence and missing-header random
+fallback remain identical across RPC shapes. Each leaf builds a grpc-core
+ketama ring only from logical sources under its hierarchical prefix, collapses
+exact duplicates while summing weights, invalidates on resolver membership
+promotion/worker retirement, sticks explicit hashes to a connecting primary,
+and walks clockwise past a failed primary. A real three-source test proves
+header-over-explicit precedence for both unary and duplex calls, exact `a_0`/
+`b_0` routing, a failed `c_0` primary reaching a healthy successor, and four
+configured endpoints collapsing to three logical owners. WRR, outlier children
+and ordinary Channel remain explicit initialization errors. Evidence is in
+`docs/evidence/grpc_shared_weighted_target_ring_hash/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

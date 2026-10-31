@@ -7,6 +7,8 @@ const std = @import("std");
 const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const least_request = @import("../least_request.zig");
+const ring_hash = @import("../ring_hash.zig");
+const ring_support = @import("weighted_target/ring_hash.zig");
 
 pub fn Runtime(comptime State: type) type {
     return struct {
@@ -18,10 +20,14 @@ pub fn Runtime(comptime State: type) type {
         const BuildError = std.mem.Allocator.Error || error{
             InvalidSharedOptions,
         };
+        const PickError = BuildError || error{MissingRequestHash};
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin, least_request },
+            policy: enum { pick_first, round_robin, least_request, ring_hash },
             least_request_config: least_request.Config = .{},
+            ring_hash_config: ring_hash.Config = .{},
+            ring: ring_hash.Ring = .{},
+            ring_dirty: bool = true,
             selected: ?*Worker = null,
             next_pick: usize = 0,
         };
@@ -64,8 +70,8 @@ pub fn Runtime(comptime State: type) type {
             return self.aggregateNode(self.root, state);
         }
 
-        pub fn pick(self: *Self, state: *State) ?*Worker {
-            return self.pickNode(self.root, state);
+        pub fn pick(self: *Self, state: *State, job: anytype) PickError!?*Worker {
+            return self.pickNode(self.root, state, job);
         }
 
         pub fn commit(self: *Self, state: *State, worker: *Worker) void {
@@ -82,6 +88,14 @@ pub fn Runtime(comptime State: type) type {
 
         pub fn remove(self: *Self, worker: *Worker) void {
             self.removeNode(self.root, worker);
+        }
+
+        pub fn invalidateRings(self: *Self) void {
+            self.invalidateNodeRings(self.root);
+        }
+
+        pub fn usesRing(self: *Self, path: []const []const u8) bool {
+            return self.pathUsesRing(self.root, path);
         }
 
         pub fn available(
@@ -102,6 +116,10 @@ pub fn Runtime(comptime State: type) type {
                 .pick_first => self.buildLeaf(path, .pick_first),
                 .round_robin => self.buildLeaf(path, .round_robin),
                 .least_request => |config_value| self.buildLeastRequest(
+                    path,
+                    config_value,
+                ),
+                .ring_hash => |config_value| self.buildRingHash(
                     path,
                     config_value,
                 ),
@@ -135,6 +153,16 @@ pub fn Runtime(comptime State: type) type {
         ) BuildError!*Node {
             const node = try self.buildLeaf(path, .least_request);
             node.kind.leaf.least_request_config = config;
+            return node;
+        }
+
+        fn buildRingHash(
+            self: *Self,
+            path: []const []const u8,
+            config: ring_hash.Config,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .ring_hash);
+            node.kind.leaf.ring_hash_config = config;
             return node;
         }
 
@@ -175,7 +203,7 @@ pub fn Runtime(comptime State: type) type {
 
         fn destroy(self: *Self, node: *Node) void {
             switch (node.kind) {
-                .leaf => {},
+                .leaf => |*leaf| leaf.ring.deinit(self.allocator),
                 .weighted => |weighted| {
                     for (weighted.children) |child| self.destroy(child.node);
                     self.allocator.free(weighted.children);
@@ -250,9 +278,14 @@ pub fn Runtime(comptime State: type) type {
                 .transient_failure;
         }
 
-        fn pickNode(self: *Self, node: *Node, state: *State) ?*Worker {
+        fn pickNode(
+            self: *Self,
+            node: *Node,
+            state: *State,
+            job: anytype,
+        ) PickError!?*Worker {
             return switch (node.kind) {
-                .leaf => |*leaf| self.pickLeaf(node, leaf, state),
+                .leaf => |*leaf| self.pickLeaf(node, leaf, state, job),
                 .weighted => |weighted| blk: {
                     var total: u64 = 0;
                     for (weighted.children) |child| {
@@ -271,7 +304,11 @@ pub fn Runtime(comptime State: type) type {
                             continue;
                         }
                         if (selected < child.weight) {
-                            break :blk self.pickNode(child.node, state);
+                            break :blk try self.pickNode(
+                                child.node,
+                                state,
+                                job,
+                            );
                         }
                         selected -= child.weight;
                     }
@@ -285,8 +322,8 @@ pub fn Runtime(comptime State: type) type {
             node: *Node,
             leaf: *Leaf,
             state: *State,
-        ) ?*Worker {
-            _ = self;
+            job: anytype,
+        ) PickError!?*Worker {
             if (leaf.policy == .pick_first) {
                 if (leaf.selected) |selected| {
                     if (workerMatches(state, selected, node.path) and
@@ -296,6 +333,9 @@ pub fn Runtime(comptime State: type) type {
             }
             if (leaf.policy == .least_request) {
                 return pickLeastRequest(node, leaf, state);
+            }
+            if (leaf.policy == .ring_hash) {
+                return try self.pickRingHash(node, leaf, state, job);
             }
             var count: usize = 0;
             for (state.workers.items) |worker| {
@@ -438,6 +478,50 @@ pub fn Runtime(comptime State: type) type {
                 }
             }
             return selected;
+        }
+
+        fn pickRingHash(
+            self: *Self,
+            node: *Node,
+            leaf: *Leaf,
+            state: *State,
+            job: anytype,
+        ) PickError!?*Worker {
+            return ring_support.pick(
+                self.allocator,
+                self,
+                node,
+                leaf,
+                state,
+                job,
+            );
+        }
+
+        fn invalidateNodeRings(self: *Self, node: *Node) void {
+            switch (node.kind) {
+                .leaf => |*leaf| if (leaf.policy == .ring_hash) {
+                    leaf.ring_dirty = true;
+                },
+                .weighted => |weighted| for (weighted.children) |child| {
+                    self.invalidateNodeRings(child.node);
+                },
+            }
+        }
+
+        fn pathUsesRing(
+            self: *Self,
+            node: *Node,
+            path: []const []const u8,
+        ) bool {
+            if (!pathMatches(path, node.path)) return false;
+            return switch (node.kind) {
+                .leaf => |leaf| leaf.policy == .ring_hash,
+                .weighted => |weighted| for (weighted.children) |child| {
+                    if (pathMatches(path, child.node.path)) {
+                        return self.pathUsesRing(child.node, path);
+                    }
+                } else false,
+            };
         }
 
         fn workerMatches(

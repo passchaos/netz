@@ -465,6 +465,7 @@ pub const State = struct {
         worker.tracker.setState(.shutdown);
         self.wrr_scheduler.remove(worker);
         self.ring_hash_dirty = true;
+        if (self.weighted_target) |*runtime| runtime.invalidateRings();
         if (self.selected == worker) self.selected = null;
         if (self.weighted_target_selected == worker) {
             self.weighted_target_selected = null;
@@ -518,7 +519,10 @@ pub const State = struct {
                 if (runtime.available(self, selected)) return selected;
                 self.weighted_target_selected = null;
             }
-            const selected = runtime.pick(self) orelse return null;
+            const selected = try runtime.pick(
+                self,
+                self.head orelse return null,
+            ) orelse return null;
             self.weighted_target_selected = selected;
             return selected;
         }

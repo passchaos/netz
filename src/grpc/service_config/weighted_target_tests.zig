@@ -193,10 +193,6 @@ test "gRPC SharedChannel weighted target rejects unsupported child runtimes" {
     for ([_][]const u8{
         \\{"loadBalancingConfig":[{"weighted_target_experimental":{
         \\ "targets":{"a":{"weight":1,"childPolicy":[
-        \\  {"ring_hash_experimental":{}}]}}}}]}
-        ,
-        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
-        \\ "targets":{"a":{"weight":1,"childPolicy":[
         \\  {"weighted_round_robin":{}}]}}}}]}
         ,
         \\{"loadBalancingConfig":[{"weighted_target_experimental":{

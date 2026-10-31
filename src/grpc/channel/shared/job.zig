@@ -92,6 +92,16 @@ pub const Job = struct {
         wake.retain();
         std.debug.assert(self.owner_wake.swap(wake, .release) == null);
     }
+    pub fn requestHash(
+        self: *const Job,
+        io: std.Io,
+        config: ring_hash.Config,
+    ) error{MissingRequestHash}!ring_hash.RequestHash {
+        if (self.stream) |stream| {
+            return ring_hash.requestHash(io, config, stream.options);
+        }
+        return ring_hash.requestHash(io, config, self.options);
+    }
     pub fn abandon(self: *Job) bool {
         return self.completion.cmpxchgStrong(.waiting, .abandoned, .acq_rel, .acquire) == null;
     }

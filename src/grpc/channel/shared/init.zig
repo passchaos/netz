@@ -118,6 +118,11 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const count = switch (target) {
         .resolved => |resolved| if (state.policy == .ring_hash)
             ring_hash.uniqueEndpointCount(resolved.endpoints)
+        else if (state.policy == .weighted_target)
+            weightedTargetEndpointCount(
+                &state.weighted_target.?,
+                resolved.endpoints,
+            )
         else if (state.policy == .least_request)
             least_request.exactUniqueCount(resolved.endpoints)
         else
@@ -135,6 +140,37 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     var source_index: usize = 0;
     for (0..if (target == .resolved) target.resolved.endpoints.len else 1) |index| {
         if (target == .resolved and state.policy == .ring_hash) {
+            const endpoint = target.resolved.endpoints[index];
+            for (sources[0..source_index]) |*source| {
+                if (!ring_hash.sameEndpointIdentity(
+                    source.endpoint,
+                    endpoint,
+                )) continue;
+                source.ring_hash_weight = std.math.add(
+                    u32,
+                    source.ring_hash_weight,
+                    ring_hash.endpointWeight(endpoint),
+                ) catch return error.InvalidSharedOptions;
+                break;
+            } else {
+                sources[source_index] = try State.Source.init(
+                    allocator,
+                    io,
+                    endpoint,
+                    options.channel,
+                );
+                initialized += 1;
+                has_host = has_host or
+                    sources[source_index].resolver != null;
+                source_index += 1;
+            }
+            continue;
+        }
+        if (target == .resolved and state.policy == .weighted_target and
+            state.weighted_target.?.usesRing(
+                target.resolved.endpoints[index].hierarchicalPath(),
+            ))
+        {
             const endpoint = target.resolved.endpoints[index];
             for (sources[0..source_index]) |*source| {
                 if (!ring_hash.sameEndpointIdentity(
@@ -221,4 +257,24 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         }
     }
     return state;
+}
+
+fn weightedTargetEndpointCount(
+    runtime: *State.WeightedTarget,
+    endpoints: []const channel.Endpoint,
+) usize {
+    var count: usize = 0;
+    for (endpoints, 0..) |endpoint, index| {
+        if (!runtime.usesRing(endpoint.hierarchicalPath())) {
+            count += 1;
+            continue;
+        }
+        for (endpoints[0..index]) |prior| {
+            if (runtime.usesRing(prior.hierarchicalPath()) and
+                ring_hash.sameEndpointIdentity(prior, endpoint)) break;
+        } else {
+            count += 1;
+        }
+    }
+    return count;
 }

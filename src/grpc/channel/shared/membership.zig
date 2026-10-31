@@ -79,6 +79,7 @@ pub fn Membership(comptime State: type) type {
             source.current = pending;
             source.pending = null;
             state.ring_hash_dirty = true;
+            if (state.weighted_target) |*runtime| runtime.invalidateRings();
             for (pending) |worker| worker.eligible = true;
             for (old) |worker| if (!contains(pending, worker)) retireLocked(state, worker);
             state.allocator.free(old);

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "ring-hash child policy inside SharedChannel weighted_target",
+  "decision": "accepted",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "ring_hash_experimental",
+    "ring": "grpc-core-compatible weighted ketama over child-local logical sources",
+    "rpc_shapes": [
+      "unary",
+      "duplex"
+    ]
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "contracts": [
+      "weighted_target selects one READY child before delegating to its picker",
+      "each ring-hash child owns independent ring size and request-hash-header configuration",
+      "metadata hash overrides the explicit request-hash attribute",
+      "a missing configured header uses random fallback",
+      "explicit hashes stick to a pending primary and walk clockwise past a failed primary"
+    ]
+  },
+  "implementation": {
+    "hash_timing": "Job computes the request hash only after the weighted child is selected, using that leaf configuration",
+    "ownership": "unary uses cloned Job metadata and streaming uses retained StreamCall options",
+    "logical_sources": "the ring contains only sources under the leaf hierarchical prefix",
+    "duplicates": "exact endpoint duplicates collapse before worker creation and their ring weights are summed",
+    "membership": "ring snapshots invalidate on source promotion and worker retirement",
+    "routing": "leaf-local ketama selection maps local ring ordinals back to parent source indices",
+    "fallback": "TRANSIENT_FAILURE sources are skipped clockwise; CONNECTING or saturated explicit primaries remain sticky"
+  },
+  "native_case": {
+    "configured_endpoints": 4,
+    "logical_sources": 3,
+    "ready_servers": [
+      "a",
+      "b"
+    ],
+    "failed_primary": "c",
+    "assertions": [
+      "x-shard a_0 overrides an explicit b_0 attribute and routes to a",
+      "x-shard b_0 overrides an explicit a_0 attribute and routes to b",
+      "x-shard c_0 walks from failed c to a healthy clockwise successor",
+      "duplex x-shard b_0 uses the retained streaming metadata and routes to b",
+      "two duplicate a endpoints with weights 1 and 2 produce one logical owner"
+    ]
+  },
+  "results": {
+    "ring_hash_network": "143/143 passed",
+    "complete_grpc_debug": "491/491 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared/job.zig": "a3ca60a80c3bd2c9ac8ee8ec38d41ef3edb270b64301661b8173ba6138e90734",
+    "src/grpc/channel/shared/weighted_target.zig": "2407efad1e59b56a264af85f82343a732cb06fe0b5e58dadafe301ce96181408",
+    "src/grpc/channel/shared/weighted_target/ring_hash.zig": "a16f6d3ec453444d23a17bac496aa4709eec84e4ddb097ba3015bf1c45986f57",
+    "src/grpc/channel/shared/weighted_target/ring_hash_tests.zig": "c59ccd2c81c7bc8d0285bb003e5e98e38f809241bb0bca9acb6f905655751fb4",
+    "src/grpc/channel/shared/weighted_target/test_support.zig": "ecf6d992098079e193850b4d61828142a7d2a181ddb79e604e44feb7ad5fc8fa",
+    "src/grpc/channel/shared/state.zig": "20324d30e2f416e2ca9d5e1784bc6ee880cc0e47eefdbdbc91f5e69f9516c1e7",
+    "src/grpc/channel/shared/membership.zig": "c0faa7235d29b8dbcdf0f1b358b3aa3d99732012a7a4691b15f7c9e5f502c225",
+    "src/grpc/channel/shared/init.zig": "7774cec6d94f6afdf184cb178ea369db6dacf1c92ec955626d309962e02dc56e",
+    "src/grpc/service_config/weighted_target_tests.zig": "91762b4557cdff31085774ff75a14eacc7106af9ba14516d6eb059d9c3e9fcee",
+    "src/grpc/mod.zig": "14ea3c4a359a923bfc8be49267a3e80dea2ff0da7d0ada774bfd6c18115dad9f",
+    "docs/grpc_parity.md": "292359943ed7539df9b705586c3d2ab2b32e846e2f6156b346ecfb020500b8ef"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel weighted target ring hash' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "weighted-round-robin, outlier children, resolver churn, and ordinary Channel remain before broad weighted_target completion"
+}
