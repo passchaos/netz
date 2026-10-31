@@ -39673,6 +39673,8 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
         connection.active_peer_index.deinit(std.testing.allocator);
+        connection.locally_reset_streams.deinit(std.testing.allocator);
+        connection.locally_reset_stream_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }

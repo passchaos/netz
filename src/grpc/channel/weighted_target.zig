@@ -737,7 +737,7 @@ fn pathMatches(
 
 test "ordinary weighted target runtime deep copy is allocation transactional" {
     const FakeSlot = struct {};
-    const leaf = service_config.LoadBalancingNode.round_robin;
+    const leaf = service_config.LoadBalancingNode{ .round_robin = {} };
     const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
         .choice_count = 4,
     } };
@@ -796,15 +796,29 @@ test "ordinary weighted target least request is child local" {
     const FakeConnection = struct {
         ready: bool = true,
 
-        fn isReusable(self: *@This()) bool {
+        pub fn isReusable(self: *@This()) bool {
             return self.ready;
         }
     };
-    const FakeEndpoint = struct {
-        path: []const []const u8,
+    const FakeTarget = struct {
+        address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) },
+        host: []const u8 = "localhost",
+        port: u16 = 1,
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
+    };
+    const FakeEndpoint = union(enum) {
+        cleartext_ip: FakeTarget,
+        cleartext_host: FakeTarget,
+        tls_host: FakeTarget,
+        tls_address: FakeTarget,
+        custom: FakeTarget,
 
-        fn hierarchicalPath(self: *const @This()) []const []const u8 {
-            return self.path;
+        pub fn hierarchicalPath(self: *const @This()) []const []const u8 {
+            return switch (self.*) {
+                inline else => |target| target.hierarchical_path,
+            };
         }
     };
     const FakeWeightedOutlier = struct {
@@ -820,6 +834,7 @@ test "ordinary weighted target least request is child local" {
         least_request_enabled: bool = false,
         weighted_target_ejected: bool = false,
         weighted_outliers: []FakeWeightedOutlier = &.{},
+        wrr_weight: weighted_round_robin.Weight = .{},
     };
     const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
         .choice_count = 10,
@@ -836,11 +851,11 @@ test "ordinary weighted target least request is child local" {
     const sibling_path = [_][]const u8{"sibling"};
     var slots = [_]FakeSlot{
         .{
-            .endpoint = .{ .path = &least_path },
+            .endpoint = .{ .custom = .{ .hierarchical_path = &least_path } },
             .outstanding_requests = 100,
         },
-        .{ .endpoint = .{ .path = &least_path } },
-        .{ .endpoint = .{ .path = &sibling_path } },
+        .{ .endpoint = .{ .custom = .{ .hierarchical_path = &least_path } } },
+        .{ .endpoint = .{ .custom = .{ .hierarchical_path = &sibling_path } } },
     };
     var runtime = try Runtime(FakeSlot).init(std.testing.allocator, &root);
     defer runtime.deinit();
@@ -865,11 +880,25 @@ test "ordinary weighted target least request is child local" {
 }
 
 test "ordinary weighted target outlier membership is allocation transactional" {
-    const FakeEndpoint = struct {
-        path: []const []const u8,
+    const FakeTarget = struct {
+        address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) },
+        host: []const u8 = "localhost",
+        port: u16 = 1,
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
+    };
+    const FakeEndpoint = union(enum) {
+        cleartext_ip: FakeTarget,
+        cleartext_host: FakeTarget,
+        tls_host: FakeTarget,
+        tls_address: FakeTarget,
+        custom: FakeTarget,
 
-        fn hierarchicalPath(self: *const @This()) []const []const u8 {
-            return self.path;
+        pub fn hierarchicalPath(self: *const @This()) []const []const u8 {
+            return switch (self.*) {
+                inline else => |target| target.hierarchical_path,
+            };
         }
     };
     const FakeState = struct {
@@ -881,8 +910,9 @@ test "ordinary weighted target outlier membership is allocation transactional" {
         least_request_enabled: bool = false,
         weighted_target_ejected: bool = false,
         weighted_outliers: []FakeState = &.{},
+        wrr_weight: weighted_round_robin.Weight = .{},
     };
-    const leaf = service_config.LoadBalancingNode.round_robin;
+    const leaf = service_config.LoadBalancingNode{ .round_robin = {} };
     const nested_wrapper = service_config.LoadBalancingNode{
         .outlier_detection = .{ .config = .{}, .child = &leaf },
     };
@@ -912,8 +942,8 @@ test "ordinary weighted target outlier membership is allocation transactional" {
             second_path: []const []const u8,
         ) !void {
             var slots = [_]FakeSlot{
-                .{ .endpoint = .{ .path = first_path } },
-                .{ .endpoint = .{ .path = second_path } },
+                .{ .endpoint = .{ .custom = .{ .hierarchical_path = first_path } } },
+                .{ .endpoint = .{ .custom = .{ .hierarchical_path = second_path } } },
             };
             defer for (&slots) |*slot| if (slot.weighted_outliers.len != 0) {
                 allocator.free(slot.weighted_outliers);

@@ -760,7 +760,7 @@ test "SharedChannel weighted target runtime construction is transactional" {
     const FakeState = struct {
         const Worker = struct {};
     };
-    const leaf = service_config.LoadBalancingNode.round_robin;
+    const leaf = service_config.LoadBalancingNode{ .round_robin = {} };
     const nested_targets = [_]service_config.WeightedTargetConfig.Target{.{
         .name = "inner",
         .weight = 2,
