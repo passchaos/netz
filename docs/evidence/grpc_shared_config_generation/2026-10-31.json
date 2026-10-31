@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "reference-counted SharedChannel service-config generations",
+  "decision": "accepted dynamic-update ownership prerequisite",
+  "scope": {
+    "owner": "grpc.runtime.SharedChannel retained State",
+    "readers": ["unary admission", "duplex admission", "endpoint worker creation"],
+    "publication": "future atomic generation exchange"
+  },
+  "contracts": [
+    "parsed arena ownership outlives every borrowed method-policy value",
+    "a reader can retain one immutable generation without taking the admission mutex",
+    "future publication can wait for the short reader epoch before releasing the old State reference",
+    "configured timeout and cancellation retain priority over channel-close observation",
+    "retained Sender handles release the final generation with retained State destruction"
+  ],
+  "implementation": {
+    "generation": "allocator-owned ServiceConfig plus atomic reference count",
+    "state_pointer": "atomic optional generation pointer",
+    "reader_epoch": "atomic reader count surrounds load plus retain",
+    "resolution": "unary and stream policy resolution borrow only their retained immutable generation",
+    "worker": "new endpoint owners read the published generation instead of a movable optional value",
+    "admission": "no new mutex acquisition occurs before the existing deadline-aware lock"
+  },
+  "negative_boundary": {
+    "dynamic_update_api": false,
+    "canonical_source_inventory": false,
+    "removed_child_retention": false,
+    "silent_completion_claim": false
+  },
+  "results": {
+    "generation_unit": "137/137 passed",
+    "admission_deadlines": "143/143 passed",
+    "shared_channel": "161/161 passed",
+    "complete_grpc_debug": "503/503 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared/config_generation.zig": "86b924b36141e1585bf5de30aadaa28ddd8ed50a2b60c807cb4fe9c84503ce71",
+    "src/grpc/channel/shared/init.zig": "b4dcdf1de4ee20ad5474ac6b41438b861c5f8d35871b572fd2b2b5c09c42f90b",
+    "src/grpc/channel/shared/state.zig": "cfc484529fe3adf98184627c5ce78ae4ad1b0374420462915c4ef402257db710",
+    "src/grpc/channel/shared/membership.zig": "de019813cdef17c0f6fdac147400cc3e975d035abe42f3de54d9a8c4a34cfc50",
+    "src/grpc/channel/shared/stream/open.zig": "ee626005007571686ed0633f9bebe4ce252d1b333733ea7c8767f287d0420844",
+    "docs/grpc_parity.md": "810687387782238090aba0b7f42db20272766f0faf9cac5b3a54c2c0e5f65f48"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC shared config generation' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC shared admission' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "atomic update API, policy-independent canonical sources and grpc-core 15-minute child retention remain"
+}

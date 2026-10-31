@@ -10,6 +10,7 @@ const Options = @import("options.zig").Options;
 const orca_config = @import("orca/config.zig");
 const least_request = @import("../least_request.zig");
 const ring_hash = @import("../ring_hash.zig");
+const ConfigGeneration = @import("config_generation.zig").Generation;
 
 pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!*State {
     if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.max_buffered_stream_bytes == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
@@ -59,6 +60,12 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     errdefer if (!transferred) if (owned_orca) |*config_value| config_value.deinit();
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
+    const config_generation = if (config) |value|
+        try ConfigGeneration.create(allocator, value)
+    else
+        null;
+    config = null;
+    errdefer if (!transferred) if (config_generation) |value| value.release();
     const state = try allocator.create(State);
     var state_initialized = false;
     errdefer if (!state_initialized) allocator.destroy(state);
@@ -71,7 +78,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .allocator = allocator,
         .io = io,
         .options = retained,
-        .config = config,
+        .config = .init(config_generation),
         .health_service = owned_name,
         .orca_oob = owned_orca,
         .tracker = tracker,

@@ -858,6 +858,17 @@ an `a` slot belongs to wrapper indexes 0 and 1 but not 2, while a `b` slot
 belongs only to index 2. Evidence is in
 `docs/evidence/grpc_ordinary_weighted_target_outlier/2026-10-31.json`.
 
+SharedChannel service-config ownership is now generation-based in preparation
+for live updates. State publishes one reference-counted immutable parsed arena;
+unary and streaming admission enter a short atomic reader epoch, retain the
+current generation, resolve method policy outside the mutex, and release it
+only after all borrowed timeout/retry/hedging data has been consumed. Endpoint worker creation
+also borrows the published generation rather than a movable optional value.
+This removes the use-after-free boundary that a future atomic config swap would
+otherwise create for concurrent senders. It does not yet expose a dynamic
+update API or claim grpc-core's 15-minute removed-child retention. Evidence is
+in `docs/evidence/grpc_shared_config_generation/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper

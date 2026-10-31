@@ -19,8 +19,8 @@ pub fn Membership(comptime State: type) type {
             options.selection_policy = .pick_first;
             options.shuffle_address_list = false;
             const target = state.sources[source_index].target(address);
-            var owner = if (state.config) |*config|
-                try channel.Channel.initWithServiceConfigChild(allocator, state.io, target, options, config)
+            var owner = if (state.config.load(.acquire)) |config|
+                try channel.Channel.initWithServiceConfigChild(allocator, state.io, target, options, &config.config)
             else
                 try channel.Channel.init(allocator, state.io, target, options);
             errdefer owner.deinit();

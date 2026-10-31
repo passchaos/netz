@@ -4,6 +4,7 @@ const channel = @import("../../channel.zig");
 const call = @import("../../call.zig");
 const health = @import("../../health.zig");
 const service_config = @import("../../service_config.zig");
+const ConfigGeneration = @import("config_generation.zig").Generation;
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
@@ -31,7 +32,8 @@ pub const State = struct {
     sources: []Source = &.{},
     shuffle_addresses: bool = false,
     resolution_changed: std.Io.Event = .unset,
-    config: ?service_config.ServiceConfig = null,
+    config: std.atomic.Value(?*ConfigGeneration) = .init(null),
+    config_readers: std.atomic.Value(usize) = .init(0),
     health_service: ?[]u8 = null,
     orca_oob: ?orca_config.Config = null,
     tracker: *connectivity.Tracker,
@@ -128,7 +130,7 @@ pub const State = struct {
         if (self.weighted_target) |*runtime| runtime.deinit();
         for (self.sources) |*source| source.deinit(self.allocator);
         self.allocator.free(self.sources);
-        if (self.config) |*config| config.deinit();
+        if (self.config.load(.acquire)) |config| config.release();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
         self.tracker.release();
@@ -138,6 +140,14 @@ pub const State = struct {
     pub fn lock(self: *State) void {
         self.mutex.lockUncancelable(self.io);
         self.pruneAbandonedLocked();
+    }
+
+    pub fn retainConfig(self: *State) ?*ConfigGeneration {
+        _ = self.config_readers.fetchAdd(1, .acq_rel);
+        const generation = self.config.load(.acquire);
+        if (generation) |config| _ = config.retain();
+        _ = self.config_readers.fetchSub(1, .acq_rel);
+        return generation;
     }
     pub fn unlock(self: *State) void {
         // A departure can race the owner's last notification. Check once
@@ -921,8 +931,12 @@ pub const State = struct {
         }
     }
     pub fn unary(self: *State, options: call.UnaryCallOptions, explicit_retry: ?call.RetryPolicy, explicit_hedging: ?call.HedgingPolicy, entered: std.Io.Timestamp) Error!call.UnaryResponse {
+        const config_generation = self.retainConfig();
+        defer if (config_generation) |config| config.release();
         var resolved: service_config.ResolvedUnary = .{ .options = options, .retry_policy = null, .hedging_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
-        if (self.config) |*config| resolved = try config.resolveUnary(options);
+        if (config_generation) |config| {
+            resolved = try config.config.resolveUnary(options);
+        }
         if (explicit_retry) |policy| {
             resolved.retry_policy = policy;
             resolved.hedging_policy = null;
@@ -931,9 +945,8 @@ pub const State = struct {
             resolved.hedging_policy = policy;
             resolved.retry_policy = null;
         }
-        // Service configuration is immutable after construction and remains
-        // owned by this retained State. Resolve it before lock admission so a
-        // configured timeout bounds that first wait as well.
+        // Resolve against one retained immutable generation. A later dynamic
+        // publication may swap State.config without invalidating this call.
         const deadline: ?std.Io.Clock.Timestamp = if (resolved.options.timeout) |timeout| .{ .raw = entered.addDuration(timeout.duration()), .clock = .awake } else null;
         try self.lockBefore(deadline);
         const closed = self.closed;
