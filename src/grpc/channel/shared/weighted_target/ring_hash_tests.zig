@@ -44,6 +44,10 @@ test "gRPC SharedChannel weighted target ring hash owns hash and fallback" {
     var client_live = true;
     defer if (client_live) client.deinit();
     try std.testing.expectEqual(@as(usize, 3), client.endpointCount());
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        client.configuredEndpointCount(),
+    );
     try client.connectWithTimeout(.fromSeconds(5));
     var a_watch = client.watchEndpointConnectivity(0).?;
     defer a_watch.deinit();

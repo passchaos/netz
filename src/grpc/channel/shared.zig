@@ -157,6 +157,11 @@ pub const SharedChannel = struct {
     pub fn endpointCount(self: SharedChannel) usize {
         return self.state.endpointCount();
     }
+    /// Full configured resolver inventory before the active policy derives
+    /// logical/deduplicated endpoint owners.
+    pub fn configuredEndpointCount(self: SharedChannel) usize {
+        return self.state.configuredEndpointCount();
+    }
     pub fn selectionPolicy(self: SharedChannel) channel.SelectionPolicy {
         return self.state.selectionPolicy();
     }

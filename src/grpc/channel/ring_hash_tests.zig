@@ -125,6 +125,10 @@ test "gRPC SharedChannel ring hash uses configured metadata and deduplicates end
         client.selectionPolicy(),
     );
     try std.testing.expectEqual(@as(usize, 2), client.endpointCount());
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        client.configuredEndpointCount(),
+    );
     try client.connectWithTimeout(.fromSeconds(3));
     var sender = client.sender();
     defer sender.deinit();

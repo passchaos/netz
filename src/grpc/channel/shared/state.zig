@@ -29,6 +29,7 @@ pub const State = struct {
     mutex: std.Io.Mutex = .init,
     group: std.Io.Group = .init,
     workers: std.ArrayList(*Worker) = .empty,
+    canonical_endpoints: []channel.Endpoint = &.{},
     sources: []Source = &.{},
     shuffle_addresses: bool = false,
     resolution_changed: std.Io.Event = .unset,
@@ -130,6 +131,7 @@ pub const State = struct {
         if (self.weighted_target) |*runtime| runtime.deinit();
         for (self.sources) |*source| source.deinit(self.allocator);
         self.allocator.free(self.sources);
+        self.allocator.free(self.canonical_endpoints);
         if (self.config.load(.acquire)) |config| config.release();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
@@ -192,6 +194,12 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         return self.endpointCountLocked();
+    }
+
+    pub fn configuredEndpointCount(self: *State) usize {
+        self.lock();
+        defer self.unlock();
+        return if (self.closed) 0 else self.canonical_endpoints.len;
     }
     pub fn endpointCountWithDeadline(self: *State, deadline: std.Io.Clock.Timestamp) Error!usize {
         try self.lockBefore(deadline);

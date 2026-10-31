@@ -869,6 +869,20 @@ otherwise create for concurrent senders. It does not yet expose a dynamic
 update API or claim grpc-core's 15-minute removed-child retention. Evidence is
 in `docs/evidence/grpc_shared_config_generation/2026-10-31.json`.
 
+SharedChannel now also retains a policy-independent canonical endpoint
+inventory in original resolver order. The active `sources` array remains the
+current policy's derived owner set, so existing ring identity collapse,
+endpoint watches and picker cardinality do not change. The new
+`configuredEndpointCount()` reports the complete input: a top-level ring case
+keeps three configured endpoints while exposing two logical owners, and a
+weighted-target ring keeps four while exposing three. Future live updates can
+therefore rebuild ring, RR or other source layouts without guessing members
+that a prior policy destructively collapsed. Endpoint-internal strings,
+connector contexts and TLS/proxy options retain the public Channel target
+lifetime contract; the inventory owns the endpoint value array itself.
+Evidence is in
+`docs/evidence/grpc_shared_canonical_sources/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper

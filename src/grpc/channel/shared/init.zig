@@ -66,6 +66,25 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         null;
     config = null;
     errdefer if (!transferred) if (config_generation) |value| value.release();
+    const canonical_count = switch (target) {
+        .resolved => |resolved| resolved.endpoints.len,
+        else => 1,
+    };
+    const canonical_endpoints = try allocator.alloc(
+        channel.Endpoint,
+        canonical_count,
+    );
+    errdefer if (!transferred) allocator.free(canonical_endpoints);
+    for (canonical_endpoints, 0..) |*endpoint, index| {
+        endpoint.* = switch (target) {
+            .resolved => |resolved| resolved.endpoints[index],
+            .cleartext_ip => |value| .{ .cleartext_ip = value },
+            .cleartext_host => |value| .{ .cleartext_host = value },
+            .tls_host => |value| .{ .tls_host = value },
+            .tls_address => |value| .{ .tls_address = value },
+            .custom => |value| .{ .custom = value },
+        };
+    }
     const state = try allocator.create(State);
     var state_initialized = false;
     errdefer if (!state_initialized) allocator.destroy(state);
@@ -79,6 +98,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .io = io,
         .options = retained,
         .config = .init(config_generation),
+        .canonical_endpoints = canonical_endpoints,
         .health_service = owned_name,
         .orca_oob = owned_orca,
         .tracker = tracker,

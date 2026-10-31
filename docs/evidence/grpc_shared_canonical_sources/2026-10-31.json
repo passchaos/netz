@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "policy-independent SharedChannel canonical endpoint inventory",
+  "decision": "accepted dynamic-update ownership prerequisite",
+  "contracts": [
+    "State owns a copy of the complete configured endpoint value array in original resolver order",
+    "active sources retain the existing policy-specific logical owner layout",
+    "configuredEndpointCount reports the complete inventory while endpointCount reports active logical owners",
+    "endpoint internal strings, connector contexts and TLS/proxy options retain the existing Channel target lifetime contract",
+    "State destruction releases the canonical endpoint array including constructor failure paths"
+  ],
+  "cases": {
+    "top_level_ring_hash": {
+      "configured_endpoints": 3,
+      "logical_owners": 2
+    },
+    "weighted_target_ring_hash": {
+      "configured_endpoints": 4,
+      "logical_owners": 3
+    }
+  },
+  "results": {
+    "shared_channel_and_mqtt_qos2_debug_bundle": "220/220 passed",
+    "public_package_debug": "26/26 passed",
+    "format_and_diff": "passed",
+    "release_fast_bundle": "151/152 passed; the top-level ring metadata test crashed with SIGSEGV on two runs",
+    "pre_change_ring_metadata_release_fast": "142/143 passed at e4d08b18; the same test failed with InvalidMetadata when run directly under gdb",
+    "post_pull_debug_bundle": "220/220 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared.zig": "74076b3c020f489c6992eb4bff7bc66a34daa4aae3c6c69106c22493f8ca7612",
+    "src/grpc/channel/shared/init.zig": "ddee4b0c1c7d25e76f5bee0d3990fe80ea5a42f521cdd8343a42267676b63dd3",
+    "src/grpc/channel/shared/state.zig": "2d5c73ffd143cb9b394b98a301fc2a4bebde5c8903d24a21232e797681620557",
+    "src/grpc/channel/ring_hash_tests.zig": "173f11ac21edeccb96dfe66d37504b5131e2314e99d8086aa3f1683708873573",
+    "src/grpc/channel/shared/weighted_target/ring_hash_tests.zig": "043f58bfcb110d291b63cc1bb2c2c33cc5a560d48022c6789ac092db95f89ce4",
+    "docs/grpc_parity.md": "c747cf7dcd01d826f5a75fdb84a754ff063cdf75503aa7b69c72776c8e69546f"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel' -Dtest-filter='gRPC shared' -Dtest-filter='QoS 2 store' -Dtest-filter='broker routes inbound QoS 2' -Dtest-filter='MQTT released QoS 2' -Dtest-filter='MQTT durable QoS 2' --summary all",
+    "zig build test-package fuzz-mqtt-bridge-qos2 --summary all (test-package passed; the supplemental MQTT fuzz compile failed with a pre-existing error independently reproduced at e4d08b18)",
+    "zig fmt --check src/grpc/channel/ring_hash_tests.zig src/grpc/channel/shared.zig src/grpc/channel/shared/init.zig src/grpc/channel/shared/state.zig src/grpc/channel/shared/weighted_target/ring_hash_tests.zig src/mqtt/broker.zig src/mqtt/broker/qos2.zig",
+    "git diff --check",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC SharedChannel ring hash' -Dtest-filter='gRPC SharedChannel weighted target ring hash' -Dtest-filter='gRPC shared channel constructor' -Dtest-filter='QoS 2 store' -Dtest-filter='broker routes inbound QoS 2' -Dtest-filter='MQTT released QoS 2' -Dtest-filter='MQTT durable QoS 2' --summary all"
+  ],
+  "remaining_gap": "live configuration update API and grpc-core removed-child retention remain",
+  "verification_limitations": {
+    "release_fast_ring_metadata": "The existing headerRequest test helper returns metadata backed by a temporary array. The pre-change test fails with InvalidMetadata; the candidate crashes while cloning that metadata. The helper is unchanged except for the configured-endpoint count assertion.",
+    "mqtt_bridge_qos2_fuzz": "Compilation fails because src/mqtt/runtime/network_endpoint.zig omits ConcurrencyUnavailable from its error set. The same four compiler errors were reproduced in a clean e4d08b18 worktree."
+  }
+}
