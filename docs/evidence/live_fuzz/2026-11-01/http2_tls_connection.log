@@ -1,0 +1,12 @@
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-http2-tls-connection success
++- run test 3 pass (3 total) 2s MaxRSS:31M
+   +- compile test Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:30M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:30M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

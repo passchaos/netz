@@ -1358,7 +1358,9 @@ the input selects text/binary, contiguous/sliced/fragmented/deadline sends,
 owned/caller-buffer receives, and interleaved Ping/Pong. The H2 path
 additionally traverses SETTINGS negotiation, DATA framing, and stream/
 connection flow control; H3 traverses the TLS handshake, peer SETTINGS, QUIC
-packet protection and STREAM transport. Their lockstep model fixes message
+packet protection and STREAM transport. A fresh 2026-11-01 run passed
+`fuzz-websocket-h3-context` at 3/3; see
+`docs/evidence/live_fuzz/2026-11-01.json`. Their lockstep model fixes message
 cardinality and applies a five-second bound to every read, so fuzz input cannot
 manufacture a peer wait. HTTP/1 loopback tests also cover its opt-in
 takeover handshake, bidirectional history, compression fallback, API mixing,

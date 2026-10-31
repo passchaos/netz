@@ -3,14 +3,22 @@
     "zig build fuzz-http3-connection --summary all",
     "zig build fuzz-webtransport-endpoint --summary all",
     "zig build fuzz-quic-connection --summary all",
-    "zig build fuzz-mqtt-live-broker --summary all"
+    "zig build fuzz-mqtt-live-broker --summary all",
+    "zig build fuzz-mqtt-tls-live-broker --summary all",
+    "zig build fuzz-http2-tls-connection --summary all",
+    "zig build fuzz-http1-tls-connection --summary all",
+    "zig build fuzz-websocket-h3-context --summary all"
   ],
   "date": "2026-11-01",
   "log_dir": "2026-11-01",
   "results": {
+    "fuzz-http1-tls-connection": "3/3 tests passed",
+    "fuzz-http2-tls-connection": "3/3 tests passed",
     "fuzz-http3-connection": "3/3 tests passed",
     "fuzz-mqtt-live-broker": "3/3 tests passed",
+    "fuzz-mqtt-tls-live-broker": "3/3 tests passed",
     "fuzz-quic-connection": "3/3 tests passed",
+    "fuzz-websocket-h3-context": "3/3 tests passed",
     "fuzz-webtransport-endpoint": "3/3 tests passed"
   },
   "status": "passed"

@@ -2944,7 +2944,10 @@ mutates bidirectional traffic-key updates between HTTP/2 operations. The
 dedicated `fuzz-http3-connection` target covers authenticated QUIC/TLS HTTP/3
 connection state: complete and streaming bodies, request and response trailers,
 reversed multiplexed responses, cancellation, HEAD body suppression, and
-terminal two-phase GOAWAY.
+terminal two-phase GOAWAY. Fresh 2026-11-01 runs passed
+`fuzz-http1-tls-connection`, `fuzz-http2-tls-connection` and
+`fuzz-http3-connection` at 3/3 each; see
+`docs/evidence/live_fuzz/2026-11-01.json`.
 
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may
