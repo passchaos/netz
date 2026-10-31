@@ -6,6 +6,7 @@
 const std = @import("std");
 const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
+const least_request = @import("../least_request.zig");
 
 pub fn Runtime(comptime State: type) type {
     return struct {
@@ -19,7 +20,8 @@ pub fn Runtime(comptime State: type) type {
         };
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin },
+            policy: enum { pick_first, round_robin, least_request },
+            least_request_config: least_request.Config = .{},
             selected: ?*Worker = null,
             next_pick: usize = 0,
         };
@@ -70,6 +72,14 @@ pub fn Runtime(comptime State: type) type {
             self.commitNode(self.root, state, worker);
         }
 
+        pub fn finishOutstanding(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+        ) void {
+            self.finishOutstandingNode(self.root, state, worker);
+        }
+
         pub fn remove(self: *Self, worker: *Worker) void {
             self.removeNode(self.root, worker);
         }
@@ -91,6 +101,10 @@ pub fn Runtime(comptime State: type) type {
             return switch (config.*) {
                 .pick_first => self.buildLeaf(path, .pick_first),
                 .round_robin => self.buildLeaf(path, .round_robin),
+                .least_request => |config_value| self.buildLeastRequest(
+                    path,
+                    config_value,
+                ),
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
                     path,
@@ -111,6 +125,16 @@ pub fn Runtime(comptime State: type) type {
                 .path = owned_path,
                 .kind = .{ .leaf = .{ .policy = policy } },
             };
+            return node;
+        }
+
+        fn buildLeastRequest(
+            self: *Self,
+            path: []const []const u8,
+            config: least_request.Config,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .least_request);
+            node.kind.leaf.least_request_config = config;
             return node;
         }
 
@@ -270,6 +294,9 @@ pub fn Runtime(comptime State: type) type {
                     leaf.selected = null;
                 }
             }
+            if (leaf.policy == .least_request) {
+                return pickLeastRequest(node, leaf, state);
+            }
             var count: usize = 0;
             for (state.workers.items) |worker| {
                 if (workerMatches(state, worker, node.path)) count += 1;
@@ -302,6 +329,10 @@ pub fn Runtime(comptime State: type) type {
         ) void {
             switch (node.kind) {
                 .leaf => |*leaf| {
+                    if (leaf.policy == .least_request) {
+                        worker.outstanding_requests += 1;
+                        return;
+                    }
                     if (leaf.policy != .round_robin) return;
                     var ordinal: usize = 0;
                     var count: usize = 0;
@@ -326,6 +357,36 @@ pub fn Runtime(comptime State: type) type {
             }
         }
 
+        fn finishOutstandingNode(
+            self: *Self,
+            node: *Node,
+            state: *State,
+            worker: *Worker,
+        ) void {
+            switch (node.kind) {
+                .leaf => |leaf| {
+                    if (leaf.policy != .least_request) return;
+                    std.debug.assert(worker.outstanding_requests != 0);
+                    worker.outstanding_requests -= 1;
+                },
+                .weighted => |weighted| {
+                    for (weighted.children) |child| {
+                        if (!pathMatches(
+                            state.sources[worker.source_index]
+                                .endpoint.hierarchicalPath(),
+                            child.node.path,
+                        )) continue;
+                        self.finishOutstandingNode(
+                            child.node,
+                            state,
+                            worker,
+                        );
+                        return;
+                    }
+                },
+            }
+        }
+
         fn removeNode(self: *Self, node: *Node, worker: *Worker) void {
             switch (node.kind) {
                 .leaf => |*leaf| {
@@ -337,6 +398,46 @@ pub fn Runtime(comptime State: type) type {
                     }
                 },
             }
+        }
+
+        fn pickLeastRequest(
+            node: *Node,
+            leaf: *const Leaf,
+            state: *State,
+        ) ?*Worker {
+            var available_count: usize = 0;
+            for (state.workers.items) |worker| {
+                if (workerMatches(state, worker, node.path) and
+                    workerAvailable(state, worker))
+                {
+                    available_count += 1;
+                }
+            }
+            if (available_count == 0) return null;
+            var seed: u64 = undefined;
+            state.io.random(std.mem.asBytes(&seed));
+            var prng = std.Random.DefaultPrng.init(seed);
+            const random = prng.random();
+            var selected: ?*Worker = null;
+            for (0..leaf.least_request_config.choice_count) |_| {
+                var ordinal = random.uintLessThan(usize, available_count);
+                const sampled = for (state.workers.items) |worker| {
+                    if (!workerMatches(state, worker, node.path) or
+                        !workerAvailable(state, worker))
+                    {
+                        continue;
+                    }
+                    if (ordinal == 0) break worker;
+                    ordinal -= 1;
+                } else unreachable;
+                if (selected == null or
+                    sampled.outstanding_requests <
+                        selected.?.outstanding_requests)
+                {
+                    selected = sampled;
+                }
+            }
+            return selected;
         }
 
         fn workerMatches(

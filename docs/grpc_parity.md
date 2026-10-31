@@ -663,10 +663,22 @@ back to an unrelated endpoint, and a high-weight unavailable child contributes
 zero probability. A real three-server test proves nested 1:3 target weighting
 while the two endpoints below the low-weight child alternate exactly; another
 keeps all traffic on a weight-1 READY child while a weight-100 sibling remains
-unavailable. Least-request, ring-hash, WRR, outlier children and ordinary
-Channel remain explicit initialization errors, so this is still not a broad
+unavailable. At that milestone ring-hash, WRR, outlier children and ordinary
+Channel remained explicit initialization errors, so it was not a broad
 weighted-target completion claim. Evidence is recorded in
 `docs/evidence/grpc_shared_weighted_target_core/2026-10-31.json`.
+
+Shared weighted targets now also execute gRFC A48 least-request leaves. Each
+leaf samples only READY workers under its consumed hierarchical prefix, keeps
+its own configured choice count, and compares child-local outstanding RPCs.
+The counter increments only after the selected worker claims the job and is
+returned by every unary and streaming completion/error path; sibling targets
+never influence it. A two-runner real-server regression keeps a 20 ms RPC
+outstanding on one endpoint, verifies the fast sibling receives more than
+twice its traffic under `choiceCount:10`, and checks every worker counter is
+zero after all 100 calls. Ring-hash, WRR, outlier children and ordinary Channel
+remain explicit initialization errors. Evidence is recorded in
+`docs/evidence/grpc_shared_weighted_target_least_request/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

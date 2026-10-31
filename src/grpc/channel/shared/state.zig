@@ -319,6 +319,13 @@ pub const State = struct {
         self.wakeAllLocked();
     }
     pub fn finishOutstandingLocked(self: *State, worker: anytype) void {
+        if (comptime @TypeOf(worker) == *Worker) {
+            if (self.weighted_target) |*runtime| {
+                runtime.finishOutstanding(self, worker);
+                self.wakeAllLocked();
+                return;
+            }
+        }
         if (self.policy != .least_request) return;
         std.debug.assert(worker.outstanding_requests != 0);
         worker.outstanding_requests -= 1;

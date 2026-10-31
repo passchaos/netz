@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "least-request child policy inside SharedChannel weighted_target",
+  "decision": "accepted",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "least_request_experimental",
+    "ownership": "SharedChannel background endpoint workers",
+    "completion": "unary and streaming success/error terminal paths"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "contracts": [
+      "weighted_target delegates one selected READY child picker",
+      "least-request samples choiceCount READY endpoints with replacement",
+      "outstanding counts are policy-instance-local",
+      "the count includes claimed work before stream materialization and returns at terminal completion"
+    ]
+  },
+  "implementation": {
+    "subset": "least-request sees only workers under the child node hierarchical prefix",
+    "sampling": "power-of-N samples READY workers with available HTTP2 stream capacity",
+    "comparison": "the sampled worker with the smallest child-local outstanding count wins",
+    "claim": "outstanding increments only after the selected worker claims the queued job",
+    "completion": "State.finishOutstandingLocked delegates real workers to the weighted runtime and decrements on unary and streaming terminal paths",
+    "isolation": "sibling weighted targets do not contribute workers or counters",
+    "test_seam": "comptime worker-type guarding preserves minimal stream terminal-deadline test doubles"
+  },
+  "native_case": {
+    "servers": [
+      "20 ms slow endpoint",
+      "non-delayed fast endpoint"
+    ],
+    "configuration": "one weight-1 target with least_request choiceCount 10",
+    "concurrency": "two rolling callers, 50 RPCs each",
+    "assertions": [
+      "all 100 RPCs complete",
+      "fast endpoint receives more than twice the slow endpoint traffic",
+      "every worker outstanding counter returns to zero"
+    ]
+  },
+  "results": {
+    "least_request_network": "143/143 passed",
+    "complete_grpc_debug": "490/490 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared/weighted_target.zig": "552907849f2c2c28ddffbf2dd064e875768d751aa089bff9ca42755e0f83faef",
+    "src/grpc/channel/shared/weighted_target_tests.zig": "c7390f6f2fcc0393e32f602cce0ee00fe7378eb800ef17ad081f43655f316191",
+    "src/grpc/channel/shared/state.zig": "f169cde2226a67c0cb83ab65e073888a8aa93a8f0c70de1c6c0e2270e84e8545",
+    "src/grpc/service_config/weighted_target_tests.zig": "e2f7cd18b9b64f0452f9d95fc1cc59df71823c3d9a2ba07f9e0e16060dcdbc70",
+    "docs/grpc_parity.md": "48f397574d43e1a9091554190c78fd06386e4cf8d80f493639f98d98c4788483"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel weighted target least request' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "ring-hash, weighted-round-robin, outlier children, membership churn, and ordinary Channel remain before broad weighted_target completion"
+}
