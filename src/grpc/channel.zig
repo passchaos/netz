@@ -24,6 +24,7 @@ const net = std.Io.net;
 
 pub const BackoffPolicy = backoff.Policy;
 pub const AddressResolver = resolver.AddressResolver;
+pub const HttpConnectProxy = http2.runtime.HttpConnectProxy;
 
 pub const Error = streaming.Error || resolver.Error || error{
     InvalidChannelOptions,
@@ -90,6 +91,10 @@ pub const Endpoint = union(enum) {
         port: u16,
         limits: http2.runtime.Limits = .{},
         tls: http2.runtime.TlsConnectOptions = .{},
+        /// Optional HTTP/1.1 CONNECT hop. The proxy resolves `host`; TLS SNI,
+        /// certificate identity, :authority, and gRPC metadata remain bound
+        /// to the origin.
+        proxy: ?HttpConnectProxy = null,
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
     },
@@ -133,15 +138,27 @@ pub const Endpoint = union(enum) {
                 target.limits,
                 deadline,
             ),
-            .tls_host => |target| http2.runtime.Client.connectTlsHostWithDeadline(
-                allocator,
-                io,
-                target.host,
-                target.port,
-                target.limits,
-                target.tls,
-                deadline,
-            ),
+            .tls_host => |target| if (target.proxy) |proxy|
+                http2.runtime.Client.connectTlsHostViaProxyWithDeadline(
+                    allocator,
+                    io,
+                    target.host,
+                    target.port,
+                    proxy,
+                    target.limits,
+                    target.tls,
+                    deadline,
+                )
+            else
+                http2.runtime.Client.connectTlsHostWithDeadline(
+                    allocator,
+                    io,
+                    target.host,
+                    target.port,
+                    target.limits,
+                    target.tls,
+                    deadline,
+                ),
             .tls_address => |target| http2.runtime.Client.connectTlsAddressWithDeadline(
                 allocator,
                 io,
@@ -309,6 +326,7 @@ const HostResolution = struct {
         target: Target,
         options: Options,
     ) Error!?HostResolution {
+        if (target == .tls_host and target.tls_host.proxy != null) return null;
         const host: []const u8, const port: u16, var transport = switch (target) {
             .cleartext_host => |value| .{
                 value.host,
@@ -442,7 +460,11 @@ pub const Channel = struct {
             options,
         );
         errdefer if (host_resolution) |*value| value.deinit(allocator);
-        if (options.address_resolver != null and host_resolution == null) {
+        const proxy_resolves_origin = target == .tls_host and
+            target.tls_host.proxy != null;
+        if (options.address_resolver != null and host_resolution == null and
+            !proxy_resolves_origin)
+        {
             return error.InvalidChannelOptions;
         }
         const selection_policy = options.selection_policy orelse

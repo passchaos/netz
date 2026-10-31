@@ -134,6 +134,7 @@ pub const ChannelAddressResolver = runtime.ChannelAddressResolver;
 pub const ChannelOptions = runtime.ChannelOptions;
 pub const ChannelBackoffPolicy = runtime.ChannelBackoffPolicy;
 pub const ChannelCustomConnector = runtime.ChannelCustomConnector;
+pub const ChannelHttpConnectProxy = runtime.ChannelHttpConnectProxy;
 pub const CleartextServerOptions = runtime.CleartextServerOptions;
 pub const ServerKeepAliveEnforcementPolicy =
     runtime.ServerKeepAliveEnforcementPolicy;
@@ -178,6 +179,7 @@ test {
     _ = @import("channel/weighted_round_robin_tests.zig");
     _ = @import("channel/least_request_channel_tests.zig");
     _ = @import("channel/ring_hash_tests.zig");
+    _ = @import("channel/proxy_tests.zig");
     _ = @import("service_config/least_request_tests.zig");
     _ = @import("service_config/ring_hash_tests.zig");
     _ = @import("service_config/hedging_tests.zig");

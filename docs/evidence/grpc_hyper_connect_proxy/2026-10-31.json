@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRPC TLS channels through authenticated HTTP CONNECT proxy",
+  "decision": "accepted",
+  "scope": {
+    "owners": [
+      "single-owner grpc.runtime.Channel",
+      "background grpc.SharedChannel"
+    ],
+    "proxy": "HTTP/1.1 CONNECT with caller-owned headers and limits",
+    "origin_transport": "certificate-verified TLS 1.3 with mandatory h2 ALPN",
+    "routing": "optional CONNECT tunnel_authority independent from TLS and gRPC origin identity"
+  },
+  "reference": {
+    "grpc_core": {
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "source_clean": true,
+      "files": {
+        "src/core/handshaker/http_connect/http_connect_client_handshaker.cc": "46dc9294a3674efd13301b1e5a31830b8123e2dcf88f6c7b56db83c6b00bfc7c",
+        "src/core/handshaker/http_connect/http_proxy_mapper.cc": "0488cb60ad1a5c9a842752f3660ebb81b98ece4908b04b840ba4b824bb2adef0"
+      }
+    },
+    "hyper": {
+      "revision": "084473f728f9d07b3be5845475aa2f62ed9ff579",
+      "implementation": "independent Hyper/Tokio one-shot CONNECT proxy"
+    },
+    "observed_contract": [
+      "CONNECT proxy routing precedes the origin HTTP/2 handshake",
+      "proxy authentication belongs only to the HTTP/1.1 CONNECT request",
+      "origin TLS identity and HTTP authority remain independent from the proxy address",
+      "one caller budget covers proxy connection, CONNECT, TLS, ALPN, HTTP/2 bootstrap, and RPC readiness",
+      "a tunneled HTTP/2 connection remains reusable for later gRPC streams"
+    ]
+  },
+  "implementation": {
+    "endpoint": "tls_host accepts an optional ChannelHttpConnectProxy; proxied host endpoints bypass local origin DNS in ordinary and SharedChannel resolver setup",
+    "tunnel_authority": "HttpConnectProxy optionally overrides only the CONNECT authority while connectTlsStream retains the requested host and origin authority",
+    "identity": "TLS SNI, certificate verification, default :authority, exporter ownership, gRPC metadata, backoff, and picker identity remain origin-bound",
+    "credentials": "proxy request headers are consumed by HTTP/1.1 CONNECT and cannot enter the origin HPACK field block",
+    "deadline": "connectTlsHostViaProxyWithDeadline preserves the original awake-clock deadline across every setup layer",
+    "reuse": "ordinary and background channels retain their existing persistent HTTP/2 ownership above the tunnel",
+    "resolver": "an optional caller resolver may coexist with a proxied host but is not invoked for the proxy-resolved origin"
+  },
+  "native_cases": [
+    "exact localhost:port CONNECT authority and Basic proxy authentication",
+    "certificate-pinned TLS 1.3 and h2 through the accepted tunnel",
+    "exact origin authority and Proxy-Authorization absence at the gRPC request",
+    "ordinary Channel unary RPC",
+    "SharedChannel unary RPC through a second authenticated tunnel",
+    "two successful proxy accepts with complete ownership cleanup"
+  ],
+  "process_case": {
+    "client": "Netz SharedChannel",
+    "proxy": "Hyper HTTP/1.1 CONNECT server on Tokio",
+    "origin": "pinned grpc-cpp TLS interoperability server",
+    "assertions": [
+      "CONNECT authority is localhost:dynamic-port",
+      "TLS identity is foo.test.google.fr",
+      "certificate verification and h2 ALPN succeed",
+      "proxy authentication is required and isolated",
+      "two canonical UnaryCall RPCs reuse one tunneled connection",
+      "request and response protobuf payload sizes are independently validated"
+    ]
+  },
+  "results": {
+    "focused_debug": "143/143 passed",
+    "grpc_debug": "471/471 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_hyper_release_fast": "10/10 build steps passed",
+    "runtime_identity": "client_io=zio-std-io proxy_io=hyper-tokio server_io=grpc-cpp-posix-event-engine"
+  },
+  "source_sha256": {
+    "build.zig": "80b818c7ec383353a547b92a28cc0c107f8c2cb54f4f61c87863891806251264",
+    "src/http2/runtime.zig": "57737f20327686491efb0e112f1046482eb0b44d28384d972af7b74c4fad0b4b",
+    "src/grpc/channel.zig": "7cf6296374434e6218699e6a39ac720da9cf25b3d1bfc84ed811870a4e5e4bca",
+    "src/grpc/channel/shared/init.zig": "89a4bb5d935d29c2af4cd41e56685ed3680bbc8b0c677a6aef1660b60e295cfc",
+    "src/grpc/channel/shared/source.zig": "2f1c29d8ba939eb6c600db89429924e22e581710af9d865a62169b648f77e1f4",
+    "src/grpc/runtime.zig": "4a50ce3a0b8582fd764b30a2b58b51d10613ebb3a855f19c03114a6a6803aa36",
+    "src/grpc/mod.zig": "b659547f2fc4fcb988985beb95c7e4b5c740b32c7eee78d176fc700a3841c2d8",
+    "src/grpc/channel/proxy_tests.zig": "f941c39e508b4cdfef907b6c75510e22ec8e1be7529a6684b18010c67452acb4",
+    "test/package_test.zig": "81369c02d27332940fac65eb936a00302a8bd9da3d3487973aa687bd4b6a24cc",
+    "tools/interop/grpc_hyper_proxy_client.zig": "6e26e6477fea03a499efb8189cce550c7ba160115ca3de0bee53718f7b1d7645",
+    "tools/interop/grpc_cpp.sh": "a1555e4374d7ef5ee39e3c24745051c9827e576f8cc334c107e7c8f401da382d",
+    "tools/hyper_http2_flow/src/bin/interop_proxy.rs": "35b86802d812f7c7cb7b6b7b4982a83902fa3eb3437f256633ba8bd359ef30f4",
+    "tools/hyper_http2_flow/Cargo.toml": "0b4b7212b40b4e61b2dd950be4d689d5b83389f703c07f10e069522b9c31d130"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC Channels preserve origin identity' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server TMPDIR=/nav_env/Temp/netz-grpc-tmp zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "explicit authenticated HTTP CONNECT is complete; automatic grpc_proxy/https_proxy/no_proxy environment mapping, PAC, and SOCKS policy remain separate configuration work"
+}

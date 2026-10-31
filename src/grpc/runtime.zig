@@ -45,6 +45,7 @@ pub const ChannelAddressResolver = channel.AddressResolver;
 pub const ChannelOptions = channel.Options;
 pub const ChannelBackoffPolicy = channel.BackoffPolicy;
 pub const ChannelCustomConnector = channel.CustomConnector;
+pub const ChannelHttpConnectProxy = channel.HttpConnectProxy;
 
 pub const ClientOptions = struct {
     limits: http2.runtime.Limits = .{},

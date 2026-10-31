@@ -3,6 +3,10 @@ set -euo pipefail
 
 client=${1:?netz grpc-cpp client executable path}
 pick_first_failover=${2:?netz grpc-cpp pick-first failover executable path}
+proxy_client=${3:?netz grpc Hyper proxy client executable path}
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+hyper_manifest="$repo_root/tools/hyper_http2_flow/Cargo.toml"
+hyper_proxy="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-http-connect-proxy"
 grpc_root=${GRPC_ROOT:-"$HOME/Work/grpc"}
 expected_grpc_commit=03d65cc67c450ccbb58a8a45627c4da83a886ccd
 bazel_bin=${BAZEL:-}
@@ -16,11 +20,16 @@ case_timeout=${GRPC_CPP_CASE_TIMEOUT:-120s}
 work=$(mktemp -d)
 server_pid=
 client_pid=
+proxy_pid=
 
 cleanup() {
   if [[ -n "$client_pid" ]]; then
     kill "$client_pid" 2>/dev/null || true
     wait "$client_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$proxy_pid" ]]; then
+    kill "$proxy_pid" 2>/dev/null || true
+    wait "$proxy_pid" 2>/dev/null || true
   fi
   if [[ -n "$server_pid" ]]; then
     kill -INT "$server_pid" 2>/dev/null || true
@@ -57,6 +66,17 @@ if ! command -v timeout >/dev/null 2>&1; then
   echo 'timeout not found; required to bound the external gate' >&2
   exit 127
 fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo 'cargo not found; required to build independent Hyper CONNECT proxy' >&2
+  exit 127
+fi
+if [[ ! -x "$proxy_client" ]]; then
+  echo "netz gRPC Hyper proxy client is not executable: $proxy_client" >&2
+  exit 127
+fi
+cargo build --release --offline --locked \
+  --manifest-path "$hyper_manifest" \
+  --bin netz-hyper-http-connect-proxy
 
 if [[ -z "$server" ]]; then
   if [[ ! -f "$grpc_root/test/cpp/interop/interop_server.cc" ]]; then
@@ -218,6 +238,38 @@ grep -Fq \
   'netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large orca=per-rpc+oob shared_orca=oob-background+fanout rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client-tls.log"
 cat "$work/client-tls.log"
+
+proxy_port=$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+"$hyper_proxy" "$proxy_port" >"$work/hyper-proxy.log" 2>&1 &
+proxy_pid=$!
+for _ in $(seq 1 200); do
+  if grep -Fq 'Hyper CONNECT proxy listening' "$work/hyper-proxy.log"; then
+    break
+  fi
+  if ! kill -0 "$proxy_pid" 2>/dev/null; then
+    echo 'Hyper CONNECT proxy exited before readiness' >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+timeout "$case_timeout" "$proxy_client" "$port" "$ca_file" "$proxy_port" \
+  >"$work/proxy-client.log" 2>&1
+wait "$proxy_pid"
+proxy_pid=
+grep -Fq \
+  "netz gRPC tunneled grpc-cpp TLS through Hyper CONNECT proxy: rpcs=2 tunnel_authority=localhost:$port tls_identity=foo.test.google.fr certificate_verified=true alpn=h2 proxy_authorization=isolated connection_reused=true client_io=zio-std-io proxy_io=hyper-tokio server_io=grpc-cpp-posix-event-engine" \
+  "$work/proxy-client.log"
+grep -Fq \
+  "Hyper CONNECT proxy tunneled netz TLS HTTP/2: authority=localhost:$port proxy_authorization=true client_io=zio-std-io proxy_io=hyper-tokio" \
+  "$work/hyper-proxy.log"
+cat "$work/proxy-client.log"
+cat "$work/hyper-proxy.log"
 
 kill -INT "$server_pid" 2>/dev/null || true
 wait "$server_pid" 2>/dev/null || true

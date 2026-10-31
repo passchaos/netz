@@ -756,6 +756,41 @@ SharedChannel. The pinned grpc-core `//test/core/load_balancing:ring_hash_test`
 also passes independently. Evidence is recorded in
 `docs/evidence/grpc_ring_hash/2026-10-31.json`.
 
+## HTTP CONNECT proxy channels
+
+TLS gRPC host endpoints now accept an explicit `ChannelHttpConnectProxy` for
+both ordinary Channel and SharedChannel. The proxy owns DNS and TCP routing to
+the tunnel target; the client does not run its origin resolver first. One
+absolute attempt deadline spans proxy URI resolution, proxy TCP, HTTP/1.1
+CONNECT, authenticated origin TLS with mandatory `h2` ALPN, HTTP/2 bootstrap,
+and the gRPC request.
+
+Proxy request options, including `Proxy-Authorization`, are consumed only by
+CONNECT and never enter the origin HTTP/2 header block. TLS SNI, certificate
+verification, default `:authority`, exporter ownership, gRPC metadata and
+connection pooling remain bound to the requested origin host and port. An
+optional `tunnel_authority` independently selects the proxy-side route. This
+supports a local/service-discovery CONNECT target while authenticating a
+different DNS identity, without changing `/etc/hosts` or weakening hostname
+verification.
+
+Proxy endpoints remain one logical Channel endpoint: ordinary calls and
+SharedChannel workers both reuse the tunneled HTTP/2 connection, preserve
+retry/backoff and picker semantics, and allow a caller-supplied address
+resolver to coexist without accidentally resolving the origin locally.
+Malformed proxy responses, authentication refusal, timeout, cancellation and
+socket failures retain the existing HTTP/2 proxy error and ownership paths.
+
+Native TLS tests inspect exact CONNECT authority/authentication, perform real
+certificate-pinned `h2` gRPC through the accepted tunnel, assert exact origin
+authority, reject proxy-credential leakage, and cover both Channel owners. The
+process gate then runs two canonical unary RPCs from Netz through an independent
+Hyper/Tokio CONNECT proxy into the pinned grpc-cpp TLS server. It verifies
+separate `localhost:<port>` tunnel routing, `foo.test.google.fr` TLS identity,
+certificate validation, `h2`, credential isolation and connection reuse.
+Evidence is recorded in
+`docs/evidence/grpc_hyper_connect_proxy/2026-10-31.json`.
+
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial
 response could first exhaust that deadline trying to return connection credit.

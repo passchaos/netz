@@ -224,6 +224,11 @@ pub const RedirectOptions = struct {
 /// Proxy headers are scoped to CONNECT and are never forwarded to the origin.
 pub const HttpConnectProxy = struct {
     uri: []const u8,
+    /// Optional CONNECT authority independent from the authenticated origin.
+    /// This supports proxy-side routing/service discovery while TLS SNI,
+    /// certificate identity, default :authority, and exporter ownership stay
+    /// bound to the requested host and port.
+    tunnel_authority: ?[]const u8 = null,
     options: http1_runtime.ProxyOptions = .{},
     limits: http1_runtime.Limits = .{},
 };
@@ -2506,7 +2511,7 @@ pub const Client = struct {
             allocator,
             io,
             proxy.uri,
-            authority,
+            proxy.tunnel_authority orelse authority,
             proxy.options,
             proxy.limits,
         );
@@ -2545,7 +2550,7 @@ pub const Client = struct {
             allocator,
             io,
             proxy.uri,
-            authority,
+            proxy.tunnel_authority orelse authority,
             proxy.options,
             proxy.limits,
             deadline,

@@ -20,6 +20,12 @@ pub fn Source(comptime Worker: type) type {
 
         const Self = @This();
         pub fn init(allocator: std.mem.Allocator, io: std.Io, endpoint: channel.Endpoint, options: channel.Options) channel.Error!Self {
+            if (endpoint == .tls_host and endpoint.tls_host.proxy != null) {
+                return .{
+                    .endpoint = endpoint,
+                    .ring_hash_weight = ring_hash.endpointWeight(endpoint),
+                };
+            }
             const host, const port, const push = switch (endpoint) {
                 .cleartext_host => |v| .{ v.host, v.port, v.limits.enable_push },
                 .tls_host => |v| .{ v.host, v.port, v.limits.enable_push },
@@ -84,15 +90,18 @@ pub fn Source(comptime Worker: type) type {
                     .ring_hash_key = v.ring_hash_key,
                     .ring_hash_weight = self.ring_hash_weight,
                 } },
-                .tls_host => |v| .{ .tls_address = .{
-                    .address = address.?,
-                    .tls_host = v.host,
-                    .authority = self.authority.?,
-                    .limits = v.limits,
-                    .tls = v.tls,
-                    .ring_hash_key = v.ring_hash_key,
-                    .ring_hash_weight = self.ring_hash_weight,
-                } },
+                .tls_host => |v| if (v.proxy != null)
+                    .{ .tls_host = v }
+                else
+                    .{ .tls_address = .{
+                        .address = address.?,
+                        .tls_host = v.host,
+                        .authority = self.authority.?,
+                        .limits = v.limits,
+                        .tls = v.tls,
+                        .ring_hash_key = v.ring_hash_key,
+                        .ring_hash_weight = self.ring_hash_weight,
+                    } },
                 .cleartext_ip => |v| .{ .cleartext_ip = v },
                 .tls_address => |v| .{ .tls_address = v },
                 .custom => |v| .{ .custom = v },

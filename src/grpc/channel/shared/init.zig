@@ -160,7 +160,17 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         source_index += 1;
     }
     std.debug.assert(source_index == sources.len);
-    if (options.channel.address_resolver != null and !has_host) return error.InvalidChannelOptions;
+    var proxy_resolves_origin = false;
+    for (sources) |source| {
+        proxy_resolves_origin = proxy_resolves_origin or
+            (source.endpoint == .tls_host and
+                source.endpoint.tls_host.proxy != null);
+    }
+    if (options.channel.address_resolver != null and !has_host and
+        !proxy_resolves_origin)
+    {
+        return error.InvalidChannelOptions;
+    }
     if (state.shuffle_addresses) {
         var remaining = sources.len;
         while (remaining > 1) {
