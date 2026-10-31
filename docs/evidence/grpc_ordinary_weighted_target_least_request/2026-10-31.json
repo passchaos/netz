@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "least-request child policy inside ordinary Channel weighted_target",
+  "decision": "accepted bounded single-owner runtime support",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "least_request_experimental",
+    "targets": "static resolved endpoints",
+    "ownership": "single-owner grpc.runtime.Channel",
+    "completion": "unary and streaming success/error terminal paths"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "contracts": [
+      "weighted_target chooses only READY children and delegates to the selected child picker",
+      "least-request samples choiceCount READY endpoints with replacement",
+      "outstanding counts cannot cross hierarchical child-policy boundaries",
+      "a claimed count returns on construction failure or terminal completion"
+    ]
+  },
+  "implementation": {
+    "configuration": "the recursive runtime retains each least-request choiceCount beyond ServiceConfig lifetime",
+    "membership": "only reusable slots under the leaf hierarchical prefix enter the candidate set",
+    "sampling": "power-of-N sampling reuses the shared gRFC A48 picker and permits duplicate samples",
+    "comparison": "the sampled matching slot with the smallest outstanding request count wins",
+    "isolation": "runtime slot configuration enables counting only for endpoints owned by a least-request leaf",
+    "unary_lifecycle": "beginRequest increments before materialization and defer returns the count on all outcomes",
+    "stream_lifecycle": "stream creation retains local cleanup ownership until an exactly-once completion observer accepts it",
+    "reconciliation": "replacement slots are classified again before later picks"
+  },
+  "native_cases": [
+    "a deterministic child-local picker gives one matching slot 100 outstanding requests and leaves its sibling at zero",
+    "more than 4000 of 4096 power-of-10 picks choose the low-load matching sibling",
+    "an equally idle slot under a different target receives zero picks and is not marked for least-request counting",
+    "two real h2c endpoints remain reachable through a choiceCount-10 child across 200 sequential RPCs",
+    "ServiceConfig is destroyed immediately after ordinary Channel initialization",
+    "recursive runtime construction including a least-request leaf passes every induced allocation failure"
+  ],
+  "negative_boundary": {
+    "unsupported_leaves": [
+      "ring_hash_experimental",
+      "weighted_round_robin",
+      "outlier_detection_experimental"
+    ],
+    "hostname_targets": "ordinary weighted-target remains limited to static resolved endpoints",
+    "silent_fallback": false
+  },
+  "results": {
+    "ordinary_least_request_network": "145/145 passed",
+    "child_local_picker": "137/137 passed",
+    "runtime_allocation_sweep": "137/137 passed",
+    "complete_grpc_debug": "498/498 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/weighted_target.zig": "31ccff1c8563ce7fda853462339bb110e72a27ff6971636c15639f7d312e6f3c",
+    "src/grpc/channel/weighted_target_tests.zig": "11bfccd950a2fca202d0065efebf9c8cb4c95985a639365787f0e624132b2ca4",
+    "src/grpc/channel.zig": "828d338e8cd13df724320bc0a9722dc09204469e5cb95a9b1dfb13e6129d71dd",
+    "src/grpc/service_config/weighted_target_tests.zig": "54fc0e4737fec9f595a10666aa65a0c7a9d5cff274e2ed846b816e6e06671389",
+    "src/grpc/channel/least_request.zig": "85cfe46c9e1fe5fefe8f4397f3f863fe85894407b86a1a6c140c623a3899fcaa",
+    "docs/grpc_parity.md": "64be0d1adaab79327d2b8a40bde031698b74f82efcb5bc2a99b25a7f2e2ed77b"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='ordinary weighted target least request' --summary all",
+    "zig build test-lib -Dtest-filter='ordinary weighted target runtime deep copy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "ordinary ring-hash, WRR, outlier, hostname runtime support and dynamic service-config child retention remain before broad parity"
+}

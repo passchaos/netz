@@ -788,6 +788,7 @@ pub const Channel = struct {
                 balancing.root orelse return error.InvalidChannelOptions,
             );
             result.selection_policy = .weighted_target;
+            result.weighted_target_runtime.?.configureSlots(result.slots);
         }
         if (result.selection_policy == .weighted_round_robin and
             balancing.policy == .weighted_round_robin)
@@ -1202,7 +1203,8 @@ pub const Channel = struct {
             routing_hash,
         );
         self.beginRequest(ready_connection.index);
-        var owns_request = self.selection_policy == .least_request;
+        var owns_request = self.slots[ready_connection.index]
+            .least_request_enabled;
         defer if (owns_request) self.finishRequest(ready_connection.index);
         var writer = streaming.startClientUnderDeadline(
             ready_connection.connection,
@@ -1257,7 +1259,8 @@ pub const Channel = struct {
             routing_hash,
         );
         self.beginRequest(ready_connection.index);
-        var owns_request = self.selection_policy == .least_request;
+        var owns_request = self.slots[ready_connection.index]
+            .least_request_enabled;
         defer if (owns_request) self.finishRequest(ready_connection.index);
         var stream = duplex.startDuplexUnderDeadline(
             ready_connection.connection,
@@ -1899,6 +1902,9 @@ pub const Channel = struct {
         self.wrr_scheduler.invalidate();
         self.allocator.free(old_slots);
         self.slots = replacement;
+        if (self.weighted_target_runtime) |*runtime| {
+            runtime.configureSlots(self.slots);
+        }
         if (self.selection_policy == .ring_hash) {
             self.rebuildRing() catch |err| {
                 self.ring_hash_ring.deinit(self.allocator);

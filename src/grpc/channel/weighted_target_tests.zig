@@ -84,6 +84,83 @@ test "gRPC ordinary weighted target warms and delegates nested ready children" {
     try b_peer.await(io);
 }
 
+test "gRPC ordinary weighted target executes child least request" {
+    const call_count = 200;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer a_server.deinit();
+    var b_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer b_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var a_peer = io.async(Peer.run, .{ &a_server, &stop, "a", null });
+    defer _ = a_peer.cancel(io) catch {};
+    var b_peer = io.async(Peer.run, .{ &b_server, &stop, "b", null });
+    defer _ = b_peer.cancel(io) catch {};
+    const path = [_][]const u8{"least"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{
+            .address = a_server.address(),
+            .hierarchical_path = &path,
+        } },
+        .{ .cleartext_ip = .{
+            .address = b_server.address(),
+            .hierarchical_path = &path,
+        } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
+        \\ "targets":{"least":{"weight":1,"childPolicy":[
+        \\  {"least_request_experimental":{"choiceCount":10}}]}}
+        \\ }}]}
+    );
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .connection_attempt_delay = .fromMilliseconds(100) },
+        &config,
+    );
+    config.deinit();
+    var client_live = true;
+    defer if (client_live) client.deinit();
+    var counts = [_]usize{ 0, 0 };
+    for (0..call_count) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        const payload = response.message.?.payload;
+        const index: usize = if (std.mem.eql(u8, payload, "a"))
+            0
+        else if (std.mem.eql(u8, payload, "b"))
+            1
+        else
+            return error.UnexpectedBackend;
+        counts[index] += 1;
+    }
+    try std.testing.expect(counts[0] > call_count / 5);
+    try std.testing.expect(counts[1] > call_count / 5);
+    client.deinit();
+    client_live = false;
+    stop.set(io);
+    try a_peer.await(io);
+    try b_peer.await(io);
+}
+
 test "gRPC ordinary weighted target excludes unavailable heavy child" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

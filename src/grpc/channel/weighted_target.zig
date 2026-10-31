@@ -1,10 +1,11 @@
 //! Recursive weighted_target runtime for the single-owner Channel.
 //!
-//! The initial executable subset supports nested weighted targets with
-//! pick-first and round-robin leaves. Configuration strings are deep-copied so
-//! the caller may destroy ServiceConfig immediately after Channel init.
+//! The executable subset supports nested weighted targets with pick-first,
+//! round-robin, and least-request leaves. Configuration strings are
+//! deep-copied so the caller may destroy ServiceConfig immediately after
+//! Channel init.
 const std = @import("std");
-const http2 = @import("../../http2/mod.zig");
+const least_request = @import("least_request.zig");
 const service_config = @import("../service_config.zig");
 
 pub fn Runtime(comptime Slot: type) type {
@@ -24,7 +25,8 @@ pub fn Runtime(comptime Slot: type) type {
         };
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin },
+            policy: enum { pick_first, round_robin, least_request },
+            least_request_config: least_request.Config = .{},
             selected: ?usize = null,
             next_pick: usize = 0,
         };
@@ -64,6 +66,15 @@ pub fn Runtime(comptime Slot: type) type {
             return self.aggregate(self.root, slots) == .ready;
         }
 
+        pub fn configureSlots(self: *Self, slots: []Slot) void {
+            for (slots) |*slot| {
+                slot.least_request_enabled = self.pathUsesLeastRequest(
+                    self.root,
+                    slot.endpoint.hierarchicalPath(),
+                );
+            }
+        }
+
         fn build(
             self: *Self,
             config: *const service_config.LoadBalancingNode,
@@ -72,6 +83,10 @@ pub fn Runtime(comptime Slot: type) type {
             return switch (config.*) {
                 .pick_first => self.buildLeaf(path, .pick_first),
                 .round_robin => self.buildLeaf(path, .round_robin),
+                .least_request => |config_value| self.buildLeastRequest(
+                    path,
+                    config_value,
+                ),
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
                     path,
@@ -92,6 +107,16 @@ pub fn Runtime(comptime Slot: type) type {
                 .path = owned_path,
                 .kind = .{ .leaf = .{ .policy = policy } },
             };
+            return node;
+        }
+
+        fn buildLeastRequest(
+            self: *Self,
+            path: []const []const u8,
+            config: least_request.Config,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .least_request);
+            node.kind.leaf.least_request_config = config;
             return node;
         }
 
@@ -149,7 +174,7 @@ pub fn Runtime(comptime Slot: type) type {
             io: std.Io,
         ) ?usize {
             return switch (node.kind) {
-                .leaf => |*leaf| pickLeaf(node.path, leaf, slots),
+                .leaf => |*leaf| pickLeaf(node.path, leaf, slots, io),
                 .weighted => |children| blk: {
                     var total: u64 = 0;
                     for (children) |child| {
@@ -233,6 +258,7 @@ pub fn Runtime(comptime Slot: type) type {
             path: []const []const u8,
             leaf: *Leaf,
             slots: []Slot,
+            io: std.Io,
         ) ?usize {
             if (leaf.policy == .pick_first) {
                 if (leaf.selected) |selected| {
@@ -243,6 +269,14 @@ pub fn Runtime(comptime Slot: type) type {
                         )) return selected;
                     leaf.selected = null;
                 }
+            }
+            if (leaf.policy == .least_request) {
+                return pickLeastRequest(
+                    path,
+                    leaf.least_request_config,
+                    slots,
+                    io,
+                );
             }
             var count: usize = 0;
             for (slots) |slot| {
@@ -274,6 +308,57 @@ pub fn Runtime(comptime Slot: type) type {
                 }
             }
             return null;
+        }
+
+        fn pickLeastRequest(
+            path: []const []const u8,
+            config: least_request.Config,
+            slots: []Slot,
+            io: std.Io,
+        ) ?usize {
+            const Context = struct {
+                slots: []Slot,
+                path: []const []const u8,
+
+                fn available(context: *@This(), index: usize) bool {
+                    const slot = &context.slots[index];
+                    return pathMatches(
+                        slot.endpoint.hierarchicalPath(),
+                        context.path,
+                    ) and slotReady(slot);
+                }
+
+                fn outstanding(context: *@This(), index: usize) usize {
+                    return context.slots[index].outstanding_requests;
+                }
+            };
+            var seed: u64 = undefined;
+            io.random(std.mem.asBytes(&seed));
+            var context = Context{ .slots = slots, .path = path };
+            return least_request.pickIndex(
+                &context,
+                slots.len,
+                config,
+                seed,
+                Context.available,
+                Context.outstanding,
+            );
+        }
+
+        fn pathUsesLeastRequest(
+            self: *Self,
+            node: *Node,
+            path: []const []const u8,
+        ) bool {
+            if (!pathMatches(path, node.path)) return false;
+            return switch (node.kind) {
+                .leaf => |leaf| leaf.policy == .least_request,
+                .weighted => |children| for (children) |child| {
+                    if (pathMatches(path, child.node.path)) {
+                        return self.pathUsesLeastRequest(child.node, path);
+                    }
+                } else false,
+            };
         }
 
         fn slotReady(slot: *Slot) bool {
@@ -320,6 +405,9 @@ fn pathMatches(
 test "ordinary weighted target runtime deep copy is allocation transactional" {
     const FakeSlot = struct {};
     const leaf = service_config.LoadBalancingNode.round_robin;
+    const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
+        .choice_count = 4,
+    } };
     const nested_targets = [_]service_config.WeightedTargetConfig.Target{.{
         .name = "inner",
         .weight = 1,
@@ -331,6 +419,7 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
     const targets = [_]service_config.WeightedTargetConfig.Target{
         .{ .name = "a", .weight = 1, .child = &leaf },
         .{ .name = "b", .weight = 3, .child = &nested },
+        .{ .name = "least", .weight = 2, .child = &least_leaf },
     };
     const root = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &targets,
@@ -349,4 +438,66 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
         Harness.run,
         .{&root},
     );
+}
+
+test "ordinary weighted target least request is child local" {
+    const FakeConnection = struct {
+        ready: bool = true,
+
+        fn isReusable(self: *@This()) bool {
+            return self.ready;
+        }
+    };
+    const FakeEndpoint = struct {
+        path: []const []const u8,
+
+        fn hierarchicalPath(self: *const @This()) []const []const u8 {
+            return self.path;
+        }
+    };
+    const FakeSlot = struct {
+        endpoint: FakeEndpoint,
+        connection: ?FakeConnection = .{},
+        disabled: bool = false,
+        next_attempt_at_ns: ?i96 = null,
+        outstanding_requests: usize = 0,
+        least_request_enabled: bool = false,
+    };
+    const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
+        .choice_count = 10,
+    } };
+    const targets = [_]service_config.WeightedTargetConfig.Target{.{
+        .name = "least",
+        .weight = 1,
+        .child = &least_leaf,
+    }};
+    const root = service_config.LoadBalancingNode{ .weighted_target = .{
+        .targets = &targets,
+    } };
+    const least_path = [_][]const u8{"least"};
+    const sibling_path = [_][]const u8{"sibling"};
+    var slots = [_]FakeSlot{
+        .{
+            .endpoint = .{ .path = &least_path },
+            .outstanding_requests = 100,
+        },
+        .{ .endpoint = .{ .path = &least_path } },
+        .{ .endpoint = .{ .path = &sibling_path } },
+    };
+    var runtime = try Runtime(FakeSlot).init(std.testing.allocator, &root);
+    defer runtime.deinit();
+    runtime.configureSlots(&slots);
+    try std.testing.expect(slots[0].least_request_enabled);
+    try std.testing.expect(slots[1].least_request_enabled);
+    try std.testing.expect(!slots[2].least_request_enabled);
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var low_load_picks: usize = 0;
+    for (0..4096) |_| {
+        const picked = runtime.pick(&slots, threaded.io()).?;
+        try std.testing.expect(picked != 2);
+        low_load_picks += @intFromBool(picked == 1);
+    }
+    try std.testing.expect(low_load_picks > 4000);
 }

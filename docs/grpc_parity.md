@@ -753,22 +753,40 @@ Evidence is recorded in
 
 The single-owner Channel now executes the first weighted-target runtime subset
 for static resolved endpoints: arbitrary nested weighted targets with
-`pick_first` and `round_robin` leaves. Unlike SharedChannel it has no background
-endpoint owners, so each RPC performs bounded composite warming before the
-pick. Every reachable child is established within the caller's absolute
-deadline, while each blackholed child is capped by the configured connection
-attempt delay instead of consuming the whole RPC budget. Selection then uses
-only READY children and delegates to child-local sticky/round-robin state.
+`pick_first`, `round_robin` and `least_request_experimental` leaves. Unlike
+SharedChannel it has no background endpoint owners, so each RPC performs
+bounded composite warming before the pick. Every reachable child is established
+within the caller's absolute deadline, while each blackholed child is capped by
+the configured connection attempt delay instead of consuming the whole RPC
+budget. Selection then uses only READY children and delegates to child-local
+picker state.
 
 The runtime deep-copies every target path element; applications may destroy the
 ServiceConfig immediately after Channel initialization. A real three-server
 test does so, then proves nested 1:3 parent weighting and exact alternation
 below the low-weight child across 400 RPCs. Another keeps all traffic on a
 weight-1 healthy child while a weight-100 sibling remains unavailable. Runtime
-construction passes every induced allocation failure. Least-request, ring-hash,
-WRR and outlier leaves remain explicit ordinary-Channel initialization errors,
-so broad support still belongs to SharedChannel. Evidence is recorded in
+construction passes every induced allocation failure. Ring-hash, WRR and
+outlier leaves remain explicit ordinary-Channel initialization errors, so broad
+support still belongs to SharedChannel. Evidence is recorded in
 `docs/evidence/grpc_ordinary_weighted_target_core/2026-10-31.json`.
+
+The ordinary least-request leaf keeps its configured `choiceCount`, samples
+with replacement only from reusable slots below its hierarchical target path,
+and compares outstanding counts that no sibling target can observe. Matching
+slots are marked when the recursive runtime is installed and after address
+reconciliation. Unary calls return the count on every response/error path;
+streaming and duplex calls transfer it to the existing exactly-once completion
+observer, including stream-construction failure and terminal error cleanup.
+
+A deterministic runtime case gives one matching slot 100 outstanding calls,
+leaves its matching sibling idle and adds an equally idle slot from a different
+target. More than 4000 of 4096 power-of-10 picks select the low-load matching
+sibling and none escape into the other target. A real two-server test destroys
+ServiceConfig immediately after initialization and completes 200 RPCs through
+the least-request child, with both READY endpoints remaining reachable after
+each sequential completion returns its count. Evidence is in
+`docs/evidence/grpc_ordinary_weighted_target_least_request/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

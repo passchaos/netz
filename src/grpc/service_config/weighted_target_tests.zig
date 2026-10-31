@@ -145,7 +145,8 @@ test "gRPC weighted target runtime is selected by both channel owners" {
     const json =
         \\{"loadBalancingConfig":[{"weighted_target_experimental":{
         \\ "targets":{"a":{"weight":1,
-        \\  "childPolicy":[{"round_robin":{}}]}}}}]}
+        \\  "childPolicy":[{"least_request_experimental":{
+        \\   "choiceCount":4}}]}}}}]}
     ;
     var config = try service_config.ServiceConfig.parse(
         std.testing.allocator,
