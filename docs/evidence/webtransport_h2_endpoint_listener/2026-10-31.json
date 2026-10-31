@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "listener-owned multi-connection WebTransport over HTTP/2 manager",
+  "decision": "accepted",
+  "scope": {
+    "transport": "draft-ietf-webtrans-http2-15 Capsule protocol over certificate-verified TLS with h2 ALPN",
+    "ownership": "one EndpointListener owns the HTTP/2 listener, bounded connection slots, per-connection EndpointServer owners and a bounded cross-connection pending-request ring",
+    "handles": "composite connection and Session generations prevent stale handles after connection-slot reuse",
+    "operations": [
+      "accept and reject pending CONNECT",
+      "DATAGRAM send and receive",
+      "virtual stream open, send, consume, retire, reset and stop",
+      "Session flow-control grants",
+      "drain and close",
+      "TLS exporter keying material"
+    ],
+    "cleartext_boundary": "h2c transport ownership is allowed, but WebTransport Session admission requires encrypted transport and returns EncryptionRequired before opening CONNECT"
+  },
+  "implementation": {
+    "acceptance": "configurable concurrent accept workers reserve fixed connection slots before TCP/TLS/HTTP2 handshake ownership",
+    "backpressure": "a fixed pending-request ring blocks only the producing connection worker when full",
+    "failure_isolation": "one connection stopping removes only its generation, wakes capacity admission and leaves sibling endpoint workers active",
+    "shutdown": "listener close requests every EndpointServer to stop, joins manager workers, closes the owned listener and preserves retained pending requests until they observe EndpointClosed",
+    "allocation": "construction, connection adoption and partial accept-worker startup have transactional ownership; a fail-first allocation sweep verifies cleanup",
+    "structure": "the public facade, ownership core, public routing runtime and real-network tests live under the endpoint_listener module boundary"
+  },
+  "results": {
+    "focused_debug": "143/143 passed",
+    "http2_webtransport_debug": "169/169 passed",
+    "webtransport_debug": "749/749 passed",
+    "focused_release_fast": "143/143 passed",
+    "package": "26/26 passed",
+    "tls_multi_connection": "two connections were admitted in either arrival order, exchanged independently routed DATAGRAMs, and connection B survived connection A shutdown",
+    "generation_reuse": "a third TLS connection reused A's bounded slot with a different generation and completed admission and DATAGRAM delivery",
+    "retained_pending_shutdown": "a pending request retained across listener destruction returned EndpointClosed without a leak or stale access",
+    "h2c_security": "a cleartext owner completed HTTP/2 setup while WebTransport CONNECT returned EncryptionRequired with zero local request streams",
+    "slow_handshake_isolation": "one silent TCP peer held a reserved TLS handshake slot while a second accept worker completed an authenticated WebTransport Session within the original 3-second deadline",
+    "hyper_http2_regression": "independent Hyper h2c/TLS client and server matrix passed all 9/9 build steps, including multiplexing, cancellation, GOAWAY, pooling, redirects and TLS KeyUpdate"
+  },
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_listener.zig": "61a73bb93cae074f6bb9ab137547d4a372d04d32999b62331dd44e1ab234b8d0",
+    "src/webtransport/h2/endpoint_listener/core.zig": "a1ab3ed442892071aa3043990bd21d36aca69426d13904bef91b94da64a9ce89",
+    "src/webtransport/h2/endpoint_listener/runtime.zig": "418dcbdb60544edd16db573511f548c6337b7f8c1f06e0ff051263995207bee8",
+    "src/webtransport/h2/endpoint_listener/tests.zig": "ead33e85046598dc65ea8a738c67433f463b288db5daa97cbec1bd816f561339",
+    "src/webtransport/h2/endpoint_server.zig": "d3b444e6e7ef21d552ef9c9bdc70eb9c93e6c88d0c26ddfa7376687925e37d17",
+    "src/webtransport/h2/mod.zig": "6be6385273496638080e22c5fff92f5e0162c8626ef82b27932c8b2247a494c4",
+    "test/package_test.zig": "143c6356f6be4cc268cb1a5af83bf43ea1ab04dad1ce8b39abaa60dd51c241ed",
+    "docs/webtransport_parity.md": "2604b952e5e6f1cfd559bd30ad0cbde4171bc36f4ada5b3d4db35986baf32788"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2 EndpointListener' --summary all",
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='WebTransport HTTP2 EndpointListener' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http2-hyper-client -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "No independent draft-15 WebTransport-over-HTTP2 browser or proxy implementation is available in the local reference set; automatic EndpointClient reconnection also remains separate work."
+}

@@ -494,6 +494,14 @@ pub const EndpointServer = struct {
         return self.exportKeyingMaterialWithDeadline(handle, label, context, length, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
 
+    /// Request endpoint shutdown without releasing this owning handle. This
+    /// lets a listener manager stop transport progress while retained pending
+    /// requests keep the endpoint allocation alive long enough to observe the
+    /// terminal EndpointClosed state.
+    pub fn requestShutdown(self: EndpointServer) void {
+        self.state.close();
+    }
+
     pub fn deinit(self: *EndpointServer) void {
         const state = self.state;
         state.close();

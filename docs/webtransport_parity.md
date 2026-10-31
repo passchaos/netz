@@ -1975,13 +1975,36 @@ their exact owners. Its TLS regression covers a complete 429 entity, two live
 Sessions, capacity rejection, virtual streams, DATAGRAM, CLOSE/FIN, generation
 reuse, exporter separation and shutdown with a live Session.
 
-Both endpoints now also provide h2c and TLS connection constructors. One
-caller-owned absolute deadline spans TCP/DNS, TLS authentication/ALPN, HTTP/2
-SETTINGS and endpoint worker admission; direct `init` remains available for an
-already negotiated connection and has explicit transfer-on-entry ownership.
+`h2.EndpointListener` now owns the HTTP/2 listener and a bounded set of those
+per-connection EndpointServer owners. Concurrent accept workers prevent one
+slow handshake from blocking every new peer. A fixed connection table and
+pending-request ring bound live transport and admission storage; queue pressure
+backpressures only the producing connection. Composite handles carry both
+connection and Session generations, so a disconnected slot can be reused
+without reviving an older Session. All DATAGRAM, virtual-stream, flow-control,
+drain/close and exporter operations route through the exact connection owner.
+Listener shutdown requests every endpoint to stop before joining its workers;
+a retained pending request remains memory-safe and observes EndpointClosed.
+A real TLS regression admits two connections in either arrival order, routes
+independent DATAGRAMs, closes one while its sibling continues, reuses the slot
+with a higher generation for a third connection, and closes with one retained
+pending request. Allocation-failure sweeps cover listener construction and
+partial accept-worker startup. A separate real-socket test holds one TLS worker
+on a silent TCP peer and requires another worker to finish an authenticated
+Session within the original three-second deadline.
+Machine-readable evidence is recorded in
+`docs/evidence/webtransport_h2_endpoint_listener/2026-10-31.json`.
 
-The remaining HTTP/2 orchestration work is above the single-connection layer:
-a listener-owned multi-connection manager and optional automatic client
+The endpoint owners can adopt h2c connections for transport testing, but
+draft-15 Session admission still requires encrypted transport with negotiated
+`h2`; a focused cleartext regression requires EncryptionRequired before a
+CONNECT stream is opened. Successful WebTransport Session tests therefore use
+certificate-verified TLS. One caller-owned absolute deadline spans TCP/DNS,
+TLS authentication/ALPN, HTTP/2 SETTINGS and endpoint worker admission; direct
+`init` remains available for an already negotiated connection and has explicit
+transfer-on-entry ownership.
+
+The remaining HTTP/2 orchestration work is an optional automatic client
 reconnection policy. Independent draft-15 browser/proxy interop also remains
 open.
 

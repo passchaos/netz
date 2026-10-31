@@ -22,6 +22,13 @@ pub const EndpointServer = endpoint_server.EndpointServer;
 pub const EndpointServerOptions = endpoint_server.Options;
 pub const PendingSessionHandle = endpoint_server.PendingHandle;
 pub const EndpointPendingRequest = endpoint_server.PendingRequest;
+pub const endpoint_listener = @import("endpoint_listener.zig");
+pub const EndpointListener = endpoint_listener.EndpointListener;
+pub const EndpointListenerOptions = endpoint_listener.Options;
+pub const ListenerConnectionHandle = endpoint_listener.ConnectionHandle;
+pub const ListenerSessionHandle = endpoint_listener.Handle;
+pub const ListenerAccepted = endpoint_listener.Accepted;
+pub const ListenerPendingRequest = endpoint_listener.PendingRequest;
 
 test {
     _ = capsule;
@@ -31,4 +38,5 @@ test {
     _ = @import("session_write_tests.zig");
     _ = endpoint_client;
     _ = endpoint_server;
+    _ = endpoint_listener;
 }

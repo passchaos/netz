@@ -312,6 +312,22 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "removeWithTimeout",
         "exportKeyingMaterialWithTimeout",
     }) |decl| try std.testing.expect(@hasDecl(h2.EndpointServer, decl));
+    try std.testing.expect(@hasDecl(h2, "EndpointListener"));
+    try std.testing.expect(@hasDecl(h2, "ListenerConnectionHandle"));
+    try std.testing.expect(@hasDecl(h2, "ListenerSessionHandle"));
+    try std.testing.expect(@hasDecl(h2, "ListenerAccepted"));
+    inline for (&.{
+        "initServer",
+        "initTlsServer",
+        "receiveRequestWithTimeout",
+        "sendDatagramWithTimeout",
+        "receiveWithTimeout",
+        "openStreamWithTimeout",
+        "sendStreamWithTimeout",
+        "closeWithTimeout",
+        "removeWithTimeout",
+        "exportKeyingMaterialWithTimeout",
+    }) |decl| try std.testing.expect(@hasDecl(h2.EndpointListener, decl));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectAddressWithTimeout(std.testing.allocator, undefined, undefined, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectHostWithTimeout(std.testing.allocator, undefined, "localhost", 80, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsAddressWithTimeout(std.testing.allocator, undefined, undefined, "localhost", "localhost", .{}, .{}, .{}, .zero));
