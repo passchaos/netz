@@ -169,6 +169,7 @@ test {
     _ = @import("call/retry_lifecycle_tests.zig");
     _ = @import("call/per_attempt_timeout_tests.zig");
     _ = @import("channel_tests.zig");
+    _ = @import("channel/outlier_detection_tests.zig");
     _ = @import("channel/weighted_round_robin_tests.zig");
     _ = @import("channel/host_tests.zig");
     _ = @import("channel/connect_race.zig");

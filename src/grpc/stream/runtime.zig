@@ -16,6 +16,7 @@ const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
 const codec = @import("codec.zig");
+const completion = @import("completion.zig");
 const web = @import("../web.zig");
 
 pub const Error = call.Error || codec.Error || web.Error || error{
@@ -66,8 +67,10 @@ pub const ClientWriter = struct {
     accepted_encodings: compression.AlgorithmSet,
     max_message_size: usize,
     deadline: ?std.Io.Clock.Timestamp = null,
+    completion_observer: ?*completion.Observer = null,
 
     pub fn deinit(self: *ClientWriter) void {
+        self.finishCompletion(false);
         self.transport.deinit();
         self.* = undefined;
     }
@@ -155,6 +158,7 @@ pub const ClientWriter = struct {
     /// Cancel both halves with HTTP/2 CANCEL. This is idempotent once the
     /// transport has reached a terminal state.
     pub fn cancel(self: *ClientWriter) Error!void {
+        defer self.finishCompletion(false);
         try self.transport.cancel(.cancel);
     }
 
@@ -200,7 +204,10 @@ pub const ClientWriter = struct {
             self.transport.completed = true;
             switch (err) {
                 error.StreamReset => return try self.takeResetResponse(),
-                else => return err,
+                else => {
+                    self.finishCompletion(false);
+                    return err;
+                },
             }
         };
         errdefer response.deinit(self.allocator);
@@ -208,15 +215,20 @@ pub const ClientWriter = struct {
             // The HTTP/2 reader has already released the transport stream at
             // END_STREAM, so only the gRPC framing error remains to surface.
             // No reset can be sent after this point.
+            self.finishCompletion(false);
             return err;
         };
-        const result = try parseResponseTerminal(
+        const result = parseResponseTerminal(
             self.allocator,
             response.status,
             response.headers,
             response.trailers,
             bridge.encoding,
-        );
+        ) catch |err| {
+            self.finishCompletion(false);
+            return err;
+        };
+        self.finishCompletion(result.status == .ok);
         return .{
             .allocator = self.allocator,
             .transport = response,
@@ -230,6 +242,7 @@ pub const ClientWriter = struct {
 
     fn cancelAfterDeadline(self: *ClientWriter) void {
         self.transport.cancel(.cancel) catch {};
+        self.finishCompletion(false);
     }
 
     fn takeResetResponse(self: *ClientWriter) Error!Response {
@@ -239,7 +252,23 @@ pub const ClientWriter = struct {
         // fallback cancellation now that the peer's terminal state is owned
         // by the typed gRPC response.
         self.transport.completed = true;
-        return resetResponse(self.allocator, reset);
+        const response = try resetResponse(self.allocator, reset);
+        self.finishCompletion(false);
+        return response;
+    }
+
+    pub fn setCompletionObserver(
+        self: *ClientWriter,
+        observer: *completion.Observer,
+    ) void {
+        std.debug.assert(self.completion_observer == null);
+        self.completion_observer = observer;
+    }
+
+    fn finishCompletion(self: *ClientWriter, success: bool) void {
+        const observer = self.completion_observer orelse return;
+        self.completion_observer = null;
+        observer.finish(success);
     }
 };
 

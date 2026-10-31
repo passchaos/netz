@@ -632,11 +632,32 @@ through B, observes A transition READY -> TRANSIENT_FAILURE, requires two later
 calls to use B, then observes A return to READY and receive the next call. A
 separate shared-duplex regression proves a streaming UNAVAILABLE terminal also
 drives ejection. Parser/evaluator and runtime focused tests pass 145/145; the
-complete gRPC Debug gate passes 445/445. Ordinary `Channel` currently rejects
-this Shared-owned composite policy with `InvalidChannelOptions` instead of
-silently ignoring it; integrating completion ownership for returned ordinary
-stream handles remains explicit follow-up work. Evidence is recorded in
+complete gRPC Debug gate passes 445/445. That SharedChannel checkpoint and its
+then-explicit ordinary-Channel boundary are recorded in
 `docs/evidence/grpc_shared_outlier_detection/2026-10-31.json`.
+
+Ordinary Channel now closes that follow-up boundary. Each stable endpoint slot
+retains the same detector state across DNS reconciliation. Physical unary
+attempts record completion immediately; sequential `ClientWriter` and
+`ClientDuplex` carry one lazily allocated completion observer that records the
+first parsed terminal, typed reset, cancellation, fatal receive failure or
+abandoning deinit exactly once. Channels without outlier config allocate no
+observer and do not touch counters. Observer lifetime remains inside the
+Channel's existing rule that returned stream handles cannot outlive their
+owning Channel.
+
+Ready selection, weighted selection, connection races and fail-fast checks all
+exclude ejected slots without closing their transport. A wait-for-ready call
+includes the next evaluation in its existing timer wait; a later call also
+performs lazy evaluation, so an idle single-owner Channel restores endpoints
+before its next pick. Resolver replacement moves detector state with a matched
+slot and starts new addresses cleanly.
+
+Real h2c regressions cover unary A-fails/B-serves/ejection/restoration plus
+sequential and duplex UNAVAILABLE terminals, fail-fast ConnectionUnavailable
+and aggregate TRANSIENT_FAILURE. Combined ordinary/Shared parser, evaluator
+and runtime focused coverage passes 147/147. Evidence is recorded in
+`docs/evidence/grpc_channel_outlier_detection/2026-10-31.json`.
 
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial

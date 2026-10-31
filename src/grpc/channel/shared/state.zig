@@ -300,10 +300,11 @@ pub const State = struct {
         self.wakeAllLocked();
     }
     pub fn observeOutlierLocked(
-        _: *State,
+        self: *State,
         worker: anytype,
         success: bool,
     ) void {
+        if (self.outlier_config == null) return;
         if (comptime @hasField(@TypeOf(worker.*), "outlier")) {
             worker.outlier.record(success);
         }
@@ -524,11 +525,14 @@ pub const State = struct {
     fn wrrAvailable(worker: *Worker) bool {
         return wrrReady(worker) and worker.capacity != 0;
     }
-    fn outlierEndpoint(worker: *Worker) *outlier_detection.Endpoint {
-        return &worker.outlier;
+    fn outlierEndpoint(
+        workers: []const *Worker,
+        index: usize,
+    ) *outlier_detection.Endpoint {
+        return &workers[index].outlier;
     }
-    fn outlierEligible(worker: *Worker) bool {
-        return !worker.retired;
+    fn outlierEligible(workers: []const *Worker, index: usize) bool {
+        return !workers[index].retired;
     }
     fn evaluateOutliersLocked(self: *State) void {
         const config = self.outlier_config orelse return;
@@ -539,6 +543,7 @@ pub const State = struct {
             self.io,
             config,
             self.workers.items,
+            self.workers.items.len,
             now,
             outlierEndpoint,
             outlierEligible,

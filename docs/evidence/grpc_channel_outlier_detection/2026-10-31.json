@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "ordinary gRPC Channel outlier detection completion ownership",
+  "decision": "accepted",
+  "scope": {
+    "calls": [
+      "every physical unary attempt",
+      "sequential ClientWriter completion",
+      "step-driven ClientDuplex completion"
+    ],
+    "terminal_sources": [
+      "parsed OK and non-OK gRPC status",
+      "typed HTTP/2 reset",
+      "explicit cancellation",
+      "fatal receive or framing failure",
+      "abandoning writer or duplex deinit"
+    ],
+    "lifetime": "returned streaming handles retain completion only while their owning ordinary Channel and slot remain valid, matching the existing Channel lifetime contract"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ outlier detection picker SubchannelCallTracker",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "files": [
+      "src/core/load_balancing/outlier_detection/outlier_detection.cc",
+      "test/core/load_balancing/outlier_detection_test.cc"
+    ],
+    "observed_contract": "one tracker is attached to each completed child pick and records status exactly once when that physical call finishes"
+  },
+  "implementation": {
+    "observer": "ClientWriter and ClientDuplex carry one nullable pointer; an observer allocation occurs only when ordinary Channel has an enabled outlier policy",
+    "exactly_once": "terminal, reset, cancellation, fatal error, and deinit clear the pointer before invoking and destroying the observer",
+    "unary": "unary attempts record immediately before retry policy decides whether to replay",
+    "resolver": "matched DNS slots move their detector state with the live connection; new addresses start with clean buckets",
+    "selection": "round-robin, weighted selection, connection racing, ready probes, and fail-fast checks exclude ejected slots without closing their transport",
+    "timing": "wait-for-ready includes the next evaluation deadline and later calls lazily evaluate before picking an idle ordinary Channel"
+  },
+  "native_cases": [
+    "ordinary unary endpoint A returns UNAVAILABLE and is ejected before B is connected",
+    "two calls during ejection use B and the first post-duration call returns to A",
+    "sequential ClientWriter UNAVAILABLE terminal drives fail-fast ConnectionUnavailable and aggregate TRANSIENT_FAILURE",
+    "ClientDuplex UNAVAILABLE terminal drives the same transition",
+    "ordinary and Shared detectors share success-rate, failure-percentage, max-percent, multiplier, and unejection evaluator coverage"
+  ],
+  "results": {
+    "focused_debug": "147/147 passed",
+    "grpc_debug": "446/446 passed without leaks",
+    "package": "26/26 passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
+    "external_boundary": "grpc-cpp is a transport and picker regression gate; deterministic ordinary outlier behavior is proven by native real-endpoint tests"
+  },
+  "source_sha256": {
+    "src/grpc/stream/completion.zig": "b0de043ed89ef37cf7cece1a72bd5437bf014620f39c69bf76e557b83d976373",
+    "src/grpc/stream/runtime.zig": "bd5d1be9cf019301882424002b75351c80eb03e2b44ba643fc538e61cb18963b",
+    "src/grpc/stream/duplex.zig": "e0fa1d4108720241d9dcaebd774385aa50a8b48565b0f8d989d21402aac37b69",
+    "src/grpc/channel/outlier_detection.zig": "16b59aa65b7d0286ec8aa6755520c9fe25005a637e0a8b1a41b9aa4ca2d34dc9",
+    "src/grpc/channel.zig": "576eca8176c10760b22a8ce611b0a3731a453fc56c3ea8aa223face77b854ec5",
+    "src/grpc/channel/outlier_detection_tests.zig": "90b72ceb2aa5be9adf163a9c7e38dd3986296b099359155c1833f47f1961019d",
+    "src/grpc/channel/shared/state.zig": "386eb5afbb311683cafd42aa654c3813cd30b330cda939e77a2fa3b16a70bc81",
+    "src/grpc/channel/shared/outlier_detection_tests.zig": "94477ac4fcdee28f20ac468beabdc4eae309f1deab136b84c4d0a7924c6569c5",
+    "src/grpc/mod.zig": "c5cc41a80d2dd9b871a1f06ba94795b0cd95f182a407f760b82378cdf63a7900"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='outlier detection' -Dtest-filter='ordinary Channel observes' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "other xDS composite policies and control-plane resource discovery remain separate integration work"
+}

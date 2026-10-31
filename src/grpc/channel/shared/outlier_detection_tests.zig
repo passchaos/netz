@@ -5,27 +5,6 @@ const shared = @import("../shared.zig");
 
 const allocator = std.testing.allocator;
 
-test "gRPC ordinary Channel rejects Shared-owned outlier policy" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var config = try grpc.ServiceConfig.parse(allocator,
-        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
-        \\ "failurePercentageEjection":{},
-        \\ "childPolicy":[{"round_robin":{}}]}}]}
-    );
-    defer config.deinit();
-    try std.testing.expectError(
-        error.InvalidChannelOptions,
-        grpc.Channel.initWithServiceConfig(
-            allocator,
-            threaded.io(),
-            .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
-            .{},
-            &config,
-        ),
-    );
-}
-
 test "gRPC SharedChannel outlier detection ejects and restores a failing endpoint" {
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,

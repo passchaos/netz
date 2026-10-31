@@ -74,7 +74,8 @@ pub const Endpoint = struct {
 pub fn evaluate(
     io: std.Io,
     config: Config,
-    items: anytype,
+    context: anytype,
+    count: usize,
     now_ns: i96,
     comptime endpoint: anytype,
     comptime eligible: anytype,
@@ -85,10 +86,10 @@ pub fn evaluate(
     var success_candidates: usize = 0;
     var success_sum: f64 = 0;
     var failure_candidates: usize = 0;
-    for (items) |item| {
-        if (!eligible(item)) continue;
+    for (0..count) |index| {
+        if (!eligible(context, index)) continue;
         total_hosts += 1;
-        const state = endpoint(item);
+        const state = endpoint(context, index);
         state.rotate();
         ejected_hosts += @intFromBool(state.isEjected());
         const rate = state.successRate() orelse continue;
@@ -115,9 +116,9 @@ pub fn evaluate(
             const mean = success_sum /
                 @as(f64, @floatFromInt(success_candidates));
             var variance: f64 = 0;
-            for (items) |item| {
-                if (!eligible(item)) continue;
-                const state = endpoint(item);
+            for (0..count) |index| {
+                if (!eligible(context, index)) continue;
+                const state = endpoint(context, index);
                 if (state.volume() < policy.request_volume) continue;
                 const rate = state.successRate() orelse continue;
                 variance += std.math.pow(f64, rate - mean, 2);
@@ -125,9 +126,9 @@ pub fn evaluate(
             variance /= @as(f64, @floatFromInt(success_candidates));
             const threshold = mean - std.math.sqrt(variance) *
                 @as(f64, @floatFromInt(policy.stdev_factor)) / 1000;
-            for (items) |item| {
-                if (!eligible(item)) continue;
-                const state = endpoint(item);
+            for (0..count) |index| {
+                if (!eligible(context, index)) continue;
+                const state = endpoint(context, index);
                 if (state.volume() < policy.request_volume) continue;
                 const rate = state.successRate() orelse continue;
                 if (rate < threshold and
@@ -146,9 +147,9 @@ pub fn evaluate(
         if (failure_candidates != 0 and
             failure_candidates >= policy.minimum_hosts)
         {
-            for (items) |item| {
-                if (!eligible(item)) continue;
-                const state = endpoint(item);
+            for (0..count) |index| {
+                if (!eligible(context, index)) continue;
+                const state = endpoint(context, index);
                 if (state.isEjected() or
                     state.volume() < policy.request_volume) continue;
                 const rate = state.successRate() orelse continue;
@@ -164,9 +165,9 @@ pub fn evaluate(
             }
         }
     }
-    for (items) |item| {
-        if (!eligible(item)) continue;
-        changed = endpoint(item).maybeUneject(config, now_ns) or changed;
+    for (0..count) |index| {
+        if (!eligible(context, index)) continue;
+        changed = endpoint(context, index).maybeUneject(config, now_ns) or changed;
     }
     return changed;
 }
@@ -189,11 +190,11 @@ fn enforced(io: std.Io, percentage: u32) bool {
 test "gRPC outlier detection rotates success rate and failure buckets" {
     const Item = struct { endpoint: Endpoint = .{}, eligible: bool = true };
     const Access = struct {
-        fn endpoint(item: *Item) *Endpoint {
-            return &item.endpoint;
+        fn endpoint(items: []const *Item, index: usize) *Endpoint {
+            return &items[index].endpoint;
         }
-        fn eligible(item: *Item) bool {
-            return item.eligible;
+        fn eligible(items: []const *Item, index: usize) bool {
+            return items[index].eligible;
         }
     };
     var items = [_]Item{ .{}, .{}, .{} };
@@ -218,6 +219,7 @@ test "gRPC outlier detection rotates success rate and failure buckets" {
         undefined,
         success,
         &pointers,
+        pointers.len,
         10,
         Access.endpoint,
         Access.eligible,
@@ -228,6 +230,7 @@ test "gRPC outlier detection rotates success rate and failure buckets" {
         undefined,
         success,
         &pointers,
+        pointers.len,
         2 * std.time.ns_per_s + 11,
         Access.endpoint,
         Access.eligible,
@@ -248,6 +251,7 @@ test "gRPC outlier detection rotates success rate and failure buckets" {
         undefined,
         failure,
         &pointers,
+        pointers.len,
         100,
         Access.endpoint,
         Access.eligible,

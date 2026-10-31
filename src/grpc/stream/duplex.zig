@@ -15,6 +15,7 @@ const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
 const codec = @import("codec.zig");
+const completion = @import("completion.zig");
 const client_receive = @import("duplex/client_receive.zig");
 const outbound_ownership = @import("duplex/outbound_ownership.zig");
 const sequential = @import("runtime.zig");
@@ -195,8 +196,10 @@ pub const ClientDuplex = struct {
     receive_state: ReceiveState = .active,
     receive_mode: ReceiveMode = .unselected,
     deadline: ?std.Io.Clock.Timestamp = null,
+    completion_observer: ?*completion.Observer = null,
 
     pub fn deinit(self: *ClientDuplex) void {
+        self.finishCompletion(false);
         if (self.decoder) |*decoder| decoder.deinit();
         if (self.response_head) |*head| head.deinit(self.allocator);
         if (self.pending_message) |*pending| pending.deinit(self.allocator);
@@ -481,6 +484,7 @@ pub const ClientDuplex = struct {
         }
         self.discardReceiveState();
         self.receive_state = .failed;
+        self.finishCompletion(false);
         try self.transport.reset(code);
     }
 
@@ -743,6 +747,7 @@ pub const ClientDuplex = struct {
             self.response_encoding,
         );
         self.response_head = null;
+        self.finishCompletion(parsed.status == .ok);
         return .{
             .allocator = self.allocator,
             .head = head,
@@ -764,6 +769,7 @@ pub const ClientDuplex = struct {
             reset_value.error_code,
         );
         self.response_head = null;
+        self.finishCompletion(false);
         return .{
             .allocator = self.allocator,
             .head = head,
@@ -791,6 +797,7 @@ pub const ClientDuplex = struct {
         if (self.receive_state == .failed) return;
         self.discardReceiveState();
         self.receive_state = .failed;
+        self.finishCompletion(false);
         self.transport.reset(code) catch {};
     }
 
@@ -802,6 +809,20 @@ pub const ClientDuplex = struct {
         self.pending_terminal = null;
         if (self.response_head) |*head| head.deinit(self.allocator);
         self.response_head = null;
+    }
+
+    pub fn setCompletionObserver(
+        self: *ClientDuplex,
+        observer: *completion.Observer,
+    ) void {
+        std.debug.assert(self.completion_observer == null);
+        self.completion_observer = observer;
+    }
+
+    fn finishCompletion(self: *ClientDuplex, success: bool) void {
+        const observer = self.completion_observer orelse return;
+        self.completion_observer = null;
+        observer.finish(success);
     }
 };
 
