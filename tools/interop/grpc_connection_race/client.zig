@@ -1,7 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const Mode = enum { h2c, tls12, tls13 };
-const Phase = enum { stagger, ordered, deadline, immediate };
+const Phase = enum { stagger, ordered, deadline, immediate, shared_reset };
 const allocator = std.heap.c_allocator;
 
 fn refuse(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: std.Io.Clock.Timestamp) netz.http2.runtime.Error!netz.http2.runtime.Connection {
@@ -36,14 +36,14 @@ pub fn main(init: std.process.Init) !void {
         .deadline => endpoints[0..2],
         else => &endpoints,
     };
-    var channel = try netz.grpc.Channel.init(allocator, io, .{ .resolved = .{ .endpoints = selected } }, .{
+    var channel = if (phase != .shared_reset) try netz.grpc.Channel.init(allocator, io, .{ .resolved = .{ .endpoints = selected } }, .{
         .connection_attempt_delay = switch (phase) {
             .ordered => null,
             .immediate => .fromSeconds(5),
             else => .fromMilliseconds(250),
         },
-    });
-    defer channel.deinit();
+    }) else null;
+    defer if (channel) |*value| value.deinit();
     const metadata = [_]netz.http2.Hpack.HeaderField{ .{ .name = "x-fixture-client", .value = "netz" }, .{ .name = "x-fixture-phase", .value = args[2] } };
     const options: netz.grpc.call.UnaryCallOptions = .{
         .path = "/fixture.Race/Unary",
@@ -58,19 +58,21 @@ pub fn main(init: std.process.Init) !void {
         }, .unit = .millisecond },
     };
     var rpcs: usize = 0;
-    if (phase == .ordered or phase == .deadline) {
-        try std.testing.expectError(error.Timeout, channel.unary(options));
-        try std.testing.expectEqual(netz.grpc.ChannelConnectivityState.transient_failure, channel.connectivityState());
+    if (phase == .shared_reset) {
+        rpcs = try @import("shared_backoff.zig").run(allocator, io, endpoints[2], options);
+    } else if (phase == .ordered or phase == .deadline) {
+        try std.testing.expectError(error.Timeout, channel.?.unary(options));
+        try std.testing.expectEqual(netz.grpc.ChannelConnectivityState.transient_failure, channel.?.connectivityState());
     } else {
         for (0..2) |_| {
-            var response = try channel.unary(options);
+            var response = try channel.?.unary(options);
             defer response.deinit();
             try std.testing.expectEqual(netz.grpc.Status.ok, response.status);
             try std.testing.expectEqualStrings("pong", response.message.?.payload);
             rpcs += 1;
         }
-        try std.testing.expectEqual(@as(?usize, if (phase == .stagger) 2 else 1), channel.selected_index);
-        if (mode != .h2c) try std.testing.expectEqualStrings("h2", channel.negotiatedAlpn().?);
+        try std.testing.expectEqual(@as(?usize, if (phase == .stagger) 2 else 1), channel.?.selected_index);
+        if (mode != .h2c) try std.testing.expectEqualStrings("h2", channel.?.negotiatedAlpn().?);
     }
     var buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(io, &buffer);

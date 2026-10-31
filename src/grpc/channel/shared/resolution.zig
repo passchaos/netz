@@ -70,9 +70,12 @@ pub fn Resolution(comptime State: type) type {
                 const demand = state.demand;
                 const requested = source.refresh_requested;
                 source.refresh_requested = false;
+                const reset_backoff = source.backoff_reset_requested;
+                source.backoff_reset_requested = false;
                 source.wake.reset();
                 state.unlock();
                 if (demand) {
+                    if (reset_backoff) retry_at = null;
                     if (retry_at) |until| if (until.durationFromNow(state.io).raw.nanoseconds > 0) {
                         source.wake.waitTimeout(state.io, .{ .deadline = until }) catch |err| {
                             if (err == error.Canceled) return error.Canceled;
@@ -90,7 +93,7 @@ pub fn Resolution(comptime State: type) type {
                         continue;
                     };
                     retry_at = null;
-                    if (!started and requested) resolver.requestRefresh();
+                    if (reset_backoff) resolver.resetBackoff() else if (!started and requested) resolver.requestRefresh();
                 }
                 if (resolver.takePublished()) |published| {
                     var failure: ?anyerror = null;

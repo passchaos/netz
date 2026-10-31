@@ -15,6 +15,7 @@ pub fn Source(comptime Worker: type) type {
         pending: ?[]*Worker = null,
         wake: std.Io.Event = .unset,
         refresh_requested: bool = false,
+        backoff_reset_requested: bool = false,
         generation: u64 = 0,
         last_error: ?anyerror = null,
 

@@ -1546,6 +1546,21 @@ Scheduled backoff survives a shorter caller deadline, successful SETTINGS
 resets it, and `resetConnectionBackoff` permits an explicit immediate retry.
 `cancelWaits` interrupts backoff without racing the sole connection owner.
 
+SharedChannel now exposes the same explicit reset through
+`resetConnectionBackoff` and its timeout/deadline forms. State admission only
+posts coalesced commands to endpoint and resolver owners; each owner clears
+its own scheduled retry and resets the underlying Channel/resolver backoff.
+This also bypasses the DNS refresh throttle after explicit recovery. Healthy
+HTTP/2 connections remain reusable, an in-progress connection attempt retains
+its original deadline, and idle channels acquire no new connection demand.
+Closed channels and canceled/expired admission report their original error
+before commands are posted. Adjacent real TCP tests use a 60-second retry
+delay to distinguish an explicit reset from automatic recovery, and cover a
+healthy sibling, failed DNS, an in-progress attempt, idle demand and admission.
+The independent HTTP/2 matrix additionally checks shared-owner recovery,
+two-RPC reuse and full socket retirement over h2c, TLS 1.2 and TLS 1.3.
+Evidence is in `docs/evidence/grpc_shared_backoff_reset/2026-10-31.json`.
+
 Wait-for-ready is not an RPC replay policy. Once an RPC reaches a connection,
 transport failure returns to that caller; the broken channel connection is
 retired and a later call may reconnect. Existing transparent REFUSED_STREAM

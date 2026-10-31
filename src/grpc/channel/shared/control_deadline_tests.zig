@@ -38,6 +38,7 @@ test "gRPC shared control-plane admission obeys State and Tracker deadlines" {
     state.io = .{ .userdata = base.userdata, .vtable = &table };
     state.mutex.lockUncancelable(base);
     try std.testing.expectError(error.Timeout, retained.connectWithTimeout(.fromMilliseconds(1)));
+    try std.testing.expectError(error.Timeout, retained.resetConnectionBackoffWithTimeout(.fromMilliseconds(1)));
     try std.testing.expectError(error.Timeout, retained.endpointCountWithTimeout(.fromMilliseconds(1)));
     try std.testing.expectError(error.Timeout, retained.watchEndpointConnectivityWithTimeout(0, .fromMilliseconds(1)));
     try std.testing.expectEqual(@as(usize, 0), state_probe.unbounded_waits);

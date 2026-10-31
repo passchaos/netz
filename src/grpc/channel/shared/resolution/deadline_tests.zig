@@ -2,7 +2,7 @@ const std = @import("std");
 const shared = @import("../../shared.zig");
 const resolver = @import("../../resolver.zig");
 
-const Operation = enum { request, refresh };
+const Operation = enum { request, refresh, reset_backoff };
 
 fn exerciseAdmission(operation: Operation) !void {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .unlimited });
@@ -39,7 +39,7 @@ fn exerciseAdmission(operation: Operation) !void {
             } else self.base.vtable.futexWaitUncancelable(userdata, pointer, expected);
         }
     };
-    const canceled = operation == .request;
+    const canceled = operation != .refresh;
     var probe = Probe{ .base = base, .mutex = &state.mutex, .cancel = canceled };
     var table = base.vtable.*;
     table.futexWait = Probe.wait;
@@ -51,6 +51,7 @@ fn exerciseAdmission(operation: Operation) !void {
     switch (operation) {
         .request => try std.testing.expectError(error.Canceled, state.requestNameResolution()),
         .refresh => try std.testing.expectError(error.Timeout, state.refreshNameResolution(.fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(1) }))),
+        .reset_backoff => try std.testing.expectError(error.Canceled, (shared.SharedChannel{ .state = state }).resetConnectionBackoff()),
     }
     try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
     try std.testing.expect(!state.mutex.tryLock());
@@ -66,6 +67,7 @@ fn exerciseAdmission(operation: Operation) !void {
 test "gRPC shared name resolution admission obeys deadline and cancellation" {
     try exerciseAdmission(.request);
     try exerciseAdmission(.refresh);
+    try exerciseAdmission(.reset_backoff);
 }
 
 test "gRPC shared name resolution refresh bounds post-wake State reacquisition" {

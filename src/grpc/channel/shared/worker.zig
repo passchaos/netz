@@ -47,6 +47,7 @@ pub fn Worker(comptime State: type) type {
         health_failures: usize = 0,
         connect_failures: usize = 0,
         connect_at: ?std.Io.Clock.Timestamp = null,
+        backoff_reset_requested: std.atomic.Value(bool) = .init(false),
         health_at: ?std.Io.Clock.Timestamp = null,
         keep_alive: keepalive.Driver = .{},
         goaway_keepalive_applied: bool = false,
@@ -170,6 +171,11 @@ pub fn Worker(comptime State: type) type {
         fn tick(self: *Self) !void {
             const demand = self.parent.needsConnection(self);
             const retiring = self.parent.isRetired(self);
+            if (!retiring and self.backoff_reset_requested.swap(false, .acq_rel)) {
+                self.connect_at = null;
+                self.connect_failures = 0;
+                self.owner.resetConnectionBackoff();
+            }
             if (retiring) {
                 self.dropWatch();
                 self.dropOrca();

@@ -175,6 +175,19 @@ pub const SharedChannel = struct {
     pub fn requestNameResolution(self: SharedChannel) Error!void {
         return self.state.requestNameResolution();
     }
+    /// Retry failed endpoint connections and name resolution immediately.
+    /// Healthy connections and in-progress attempt deadlines are preserved;
+    /// resetting an idle channel does not create connection demand.
+    pub fn resetConnectionBackoff(self: SharedChannel) Error!void {
+        return @import("shared/backoff_control.zig").reset(self.state, null);
+    }
+    pub fn resetConnectionBackoffWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!void {
+        return @import("shared/backoff_control.zig").reset(self.state, deadline);
+    }
+    pub fn resetConnectionBackoffWithTimeout(self: SharedChannel, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetConnectionBackoffWithDeadline(.fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
     pub fn refreshNameResolutionWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
         return self.state.refreshNameResolution(deadline);
     }
@@ -197,6 +210,7 @@ test {
     _ = @import("shared/retirement_tests.zig");
     _ = @import("shared/job_tests.zig");
     _ = @import("shared/control_deadline_tests.zig");
+    _ = @import("shared/backoff_tests.zig");
     _ = @import("shared/keepalive_tests.zig");
     _ = @import("shared/keepalive_throttle_tests.zig");
     _ = @import("shared/resolution/tests.zig");

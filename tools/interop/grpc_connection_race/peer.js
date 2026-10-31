@@ -79,14 +79,14 @@ async function matrix(executable, mode, key, cert, caPath) {
     }
     assert.deepEqual(accepts,[1,1]);assert.equal(sessions.length,1);assert.equal(sessions[0].requests,2);
     rows.push({mode,client:'grpc-js',stalled:[...accepts],rpcs:2,pendingAfterReferenceClose});
-    for(const phase of ['stagger','ordered','deadline','immediate']){
+    for(const phase of ['stagger','ordered','deadline','immediate','shared_reset']){
       const before=[...accepts],sessionsBefore=sessions.length;
       const result=await run(executable,[mode,phase,...ports.map(String),caPath],{timeout:15000,maxBuffer:1024*1024});
       await retire();if(failure)throw failure;
-      const record=JSON.parse(result.stdout);const rpcs=phase==='stagger'||phase==='immediate'?2:0;
+      const record=JSON.parse(result.stdout);const rpcs=phase==='stagger'||phase==='immediate'||phase==='shared_reset'?2:0;
       assert.deepEqual(record,{io:'zio-std-io',mode,phase,rpcs});
       const attempted=accepts.map((value,i)=>value-before[i]);
-      assert.deepEqual(attempted,phase==='stagger'?[1,1]:phase==='immediate'?[0,0]:[1,0]);
+      assert.deepEqual(attempted,phase==='stagger'?[1,1]:phase==='immediate'||phase==='shared_reset'?[0,0]:[1,0]);
       assert.equal(sessions.length-sessionsBefore,rpcs?1:0);
       if(rpcs)assert.equal(sessions.at(-1).requests,2);
       rows.push({...record,client:'netz',stalled:attempted,allSocketsRetired:true});

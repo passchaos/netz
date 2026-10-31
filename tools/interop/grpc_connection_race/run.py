@@ -33,6 +33,7 @@ def main():
         record = json.loads(result.stdout)
         repo = root.parents[2]
         sources = ["src/internal/connection_race.zig", "src/internal/happy_eyeballs.zig", "src/internal/tcp_connect.zig", "src/internal/accept.zig", "src/internal/stream_io/timed_write.zig", "src/grpc/channel.zig", "src/grpc/channel/connect_race.zig", "src/grpc/channel/connect_race/context.zig", "src/grpc/channel/connect_race/allocator.zig", "tools/interop/grpc_connection_race/client.zig", "tools/interop/grpc_connection_race/peer.js", "tools/interop/grpc_connection_race/run.py"]
+        sources += ["src/grpc/channel/shared.zig", "src/grpc/channel/shared/backoff_control.zig", "src/grpc/channel/shared/worker.zig", "src/grpc/channel/shared/source.zig", "src/grpc/channel/shared/resolution.zig", "tools/interop/grpc_connection_race/shared_backoff.zig"]
         record["source_sha256"] = {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in sources}
         record["reference_source_sha256"] = hashlib.sha256((sdk / "node_modules/@grpc/grpc-js/build/src/load-balancer-pick-first.js").read_bytes()).hexdigest()
         if args.output:
