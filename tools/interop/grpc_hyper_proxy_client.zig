@@ -11,10 +11,9 @@ const response_size: usize = 31_415;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) return error.InvalidArgument;
+    if (args.len != 3) return error.InvalidArgument;
     const origin_port = try parsePort(args[1]);
     if (!std.Io.Dir.path.isAbsolute(args[2])) return error.InvalidArgument;
-    const proxy_port = try parsePort(args[3]);
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
@@ -27,12 +26,6 @@ pub fn main(init: std.process.Init) !void {
         io,
         std.Io.Clock.real.now(io),
         args[2],
-    );
-    var proxy_uri_buffer: [64]u8 = undefined;
-    const proxy_uri = try std.fmt.bufPrint(
-        &proxy_uri_buffer,
-        "http://127.0.0.1:{d}",
-        .{proxy_port},
     );
     var tunnel_authority_buffer: [64]u8 = undefined;
     const tunnel_authority = try std.fmt.bufPrint(
@@ -47,10 +40,11 @@ pub fn main(init: std.process.Init) !void {
         .initial_connection_window_size = 1024 * 1024,
         .handshake_timeout = .fromSeconds(5),
     };
-    var client = try netz.grpc.SharedChannel.init(
+    var proxy_target = try netz.grpc.ChannelTlsHostProxyTarget.initEnviron(
         allocator,
-        io,
-        .{ .tls_host = .{
+        init.minimal.environ,
+        .{ .tunnel_authority = tunnel_authority },
+        .{
             .host = "foo.test.google.fr",
             .port = origin_port,
             .limits = limits,
@@ -58,15 +52,19 @@ pub fn main(init: std.process.Init) !void {
                 .bundle = &ca_bundle,
                 .lock = &ca_lock,
             } },
-            .proxy = .{
-                .uri = proxy_uri,
-                .tunnel_authority = tunnel_authority,
-                .options = .{ .headers = &.{.{
-                    .name = "Proxy-Authorization",
-                    .value = "Basic aHlwZXItcHJveHk=",
-                }} },
-            },
-        } },
+        },
+    );
+    defer proxy_target.deinit();
+    if (proxy_target.decision == null or
+        proxy_target.decision.? != .proxy or
+        proxy_target.decision.?.proxy.source != .grpc_proxy)
+    {
+        return error.InvalidProxyPolicy;
+    }
+    var client = try netz.grpc.SharedChannel.init(
+        allocator,
+        io,
+        proxy_target.target,
         .{ .disable_health_check = true },
     );
     defer client.deinit();

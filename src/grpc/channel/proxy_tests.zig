@@ -7,7 +7,7 @@ const tls_testing = @import("../../tls/testing.zig");
 
 const allocator = std.testing.allocator;
 
-test "gRPC Channels preserve origin identity and isolate HTTP proxy credentials" {
+test "gRPC Channels map environment proxy and isolate HTTP proxy credentials" {
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
@@ -56,31 +56,46 @@ test "gRPC Channels preserve origin identity and isolate HTTP proxy credentials"
     var proxy_uri_buffer: [64]u8 = undefined;
     const proxy_uri = try std.fmt.bufPrint(
         &proxy_uri_buffer,
-        "http://127.0.0.1:{d}",
+        "http://grpc%2Dproxy@127.0.0.1:{d}",
         .{proxy_listener.socket.address.getPort()},
     );
-    const endpoint = grpc.ChannelEndpoint{ .tls_host = .{
-        .host = "localhost",
-        .port = origin.address().getPort(),
-        .tls = .{
-            .server_verifier = .{
-                .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1(),
+    var target = try grpc.ChannelTlsHostProxyTarget.init(
+        allocator,
+        .{
+            .grpc_proxy = proxy_uri,
+            .https_proxy = "http://unused-https-proxy.invalid:8080",
+            .http_proxy = "http://unused-http-proxy.invalid:8080",
+            .no_grpc_proxy = "direct-only.invalid",
+            .no_proxy = "localhost",
+        },
+        .{},
+        .{
+            .host = "localhost",
+            .port = origin.address().getPort(),
+            .tls = .{
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1(),
+                },
+                .protocol_policy = .tls13_only,
             },
-            .protocol_policy = .tls13_only,
         },
-        .proxy = .{
-            .uri = proxy_uri,
-            .options = .{ .headers = &.{.{
-                .name = "Proxy-Authorization",
-                .value = "Basic Z3JwYy1wcm94eQ==",
-            }} },
-        },
-    } };
+    );
+    defer target.deinit();
+    try std.testing.expect(target.decision.? == .proxy);
+    try std.testing.expectEqual(
+        grpc.ChannelProxySource.grpc_proxy,
+        target.decision.?.proxy.source,
+    );
+    try std.testing.expect(std.mem.find(
+        u8,
+        target.decision.?.proxy.uri,
+        "grpc%2Dproxy",
+    ) == null);
 
     var ordinary = try channel.Channel.init(
         allocator,
         io,
-        .{ .tls_host = endpoint.tls_host },
+        target.target,
         .{},
     );
     defer ordinary.deinit();
@@ -91,7 +106,7 @@ test "gRPC Channels preserve origin identity and isolate HTTP proxy credentials"
     var background = try shared.SharedChannel.init(
         allocator,
         io,
-        .{ .tls_host = endpoint.tls_host },
+        target.target,
         .{},
     );
     defer background.deinit();
@@ -102,6 +117,37 @@ test "gRPC Channels preserve origin identity and isolate HTTP proxy credentials"
     try std.testing.expectEqualStrings("origin-shared", second.message.?.payload);
     try peer_task.await(io);
     try std.testing.expectEqual(@as(usize, 2), peer.accepts);
+}
+
+test "explicit gRPC endpoint proxy overrides automatic proxy policy" {
+    var target = try grpc.ChannelTlsHostProxyTarget.init(
+        allocator,
+        .{ .grpc_proxy = "https://unsupported-environment-proxy.invalid" },
+        .{ .explicit_uri = "https://unsupported-policy-proxy.invalid" },
+        .{
+            .host = "origin.example",
+            .port = 443,
+            .proxy = .{ .uri = "http://explicit-endpoint.proxy:8080" },
+        },
+    );
+    defer target.deinit();
+    try std.testing.expectEqual(@as(?grpc.ChannelProxyDecision, null), target.decision);
+    try std.testing.expectEqualStrings(
+        "http://explicit-endpoint.proxy:8080",
+        target.target.tls_host.proxy.?.uri,
+    );
+
+    var process_target = try grpc.ChannelTlsHostProxyTarget.initEnviron(
+        allocator,
+        std.testing.environ,
+        .{ .enabled = false },
+        .{ .host = "origin.example", .port = 443 },
+    );
+    defer process_target.deinit();
+    try std.testing.expectEqual(
+        grpc.ChannelProxyDirectReason.disabled,
+        process_target.decision.?.direct.reason,
+    );
 }
 
 fn request(message: []const u8) grpc.UnaryCallOptions {

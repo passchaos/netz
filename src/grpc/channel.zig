@@ -18,6 +18,7 @@ const weighted_round_robin = @import("channel/weighted_round_robin.zig");
 const least_request = @import("channel/least_request.zig");
 const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
+const proxy_policy = @import("channel/proxy_policy.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
 const net = std.Io.net;
@@ -25,6 +26,12 @@ const net = std.Io.net;
 pub const BackoffPolicy = backoff.Policy;
 pub const AddressResolver = resolver.AddressResolver;
 pub const HttpConnectProxy = http2.runtime.HttpConnectProxy;
+pub const ProxyEnvironment = proxy_policy.Environment;
+pub const ProxyPolicy = proxy_policy.Policy;
+pub const ProxyDecision = proxy_policy.Decision;
+pub const ProxySource = proxy_policy.ProxySource;
+pub const ProxyBypassSource = proxy_policy.BypassSource;
+pub const ProxyDirectReason = proxy_policy.DirectReason;
 
 pub const Error = streaming.Error || resolver.Error || error{
     InvalidChannelOptions,
@@ -245,6 +252,82 @@ pub const Target = union(enum) {
     fn validate(self: Target) error{InvalidChannelOptions}!void {
         if (self.count() == 0) return error.InvalidChannelOptions;
         for (0..self.count()) |index| try self.endpoint(index).validate();
+    }
+};
+
+/// Owns automatic proxy-policy material for one TLS host target. Keep this
+/// value alive for at least as long as every Channel using `target`; `deinit`
+/// invalidates the borrowed URI and CONNECT-header slices inside that target.
+///
+/// A caller-supplied `tls_host.proxy` is already a complete explicit transport
+/// override and therefore takes precedence without consulting the policy or
+/// environment. As with `Endpoint`, caller-provided extra header values,
+/// resolver contexts, and `tunnel_authority` remain borrowed for this target's
+/// lifetime.
+pub const TlsHostProxyTarget = struct {
+    target: Target,
+    decision: ?ProxyDecision,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        environment: ProxyEnvironment,
+        policy: ProxyPolicy,
+        tls_host: @FieldType(Endpoint, "tls_host"),
+    ) proxy_policy.Error!TlsHostProxyTarget {
+        if (tls_host.proxy != null) return .{
+            .target = .{ .tls_host = tls_host },
+            .decision = null,
+        };
+
+        var decision = try policy.resolve(
+            allocator,
+            environment,
+            tls_host.host,
+            tls_host.port,
+        );
+        errdefer decision.deinit();
+        var configured = tls_host;
+        configured.proxy = decision.httpConnectProxy();
+        return .{
+            .target = .{ .tls_host = configured },
+            .decision = decision,
+        };
+    }
+
+    pub fn initMap(
+        allocator: std.mem.Allocator,
+        map: *const std.process.Environ.Map,
+        policy: ProxyPolicy,
+        tls_host: @FieldType(Endpoint, "tls_host"),
+    ) proxy_policy.Error!TlsHostProxyTarget {
+        return init(
+            allocator,
+            ProxyEnvironment.fromMap(map),
+            policy,
+            tls_host,
+        );
+    }
+
+    /// Convenience boundary for applications whose Zig 0.16 `main` receives
+    /// `std.process.Init`; the environment is snapshotted only for selection.
+    pub fn initEnviron(
+        allocator: std.mem.Allocator,
+        environ: std.process.Environ,
+        policy: ProxyPolicy,
+        tls_host: @FieldType(Endpoint, "tls_host"),
+    ) (proxy_policy.Error || std.process.Environ.CreateMapError)!TlsHostProxyTarget {
+        if (tls_host.proxy != null) return .{
+            .target = .{ .tls_host = tls_host },
+            .decision = null,
+        };
+        var map = try std.process.Environ.createMap(environ, allocator);
+        defer map.deinit();
+        return initMap(allocator, &map, policy, tls_host);
+    }
+
+    pub fn deinit(self: *TlsHostProxyTarget) void {
+        if (self.decision) |*decision| decision.deinit();
+        self.* = undefined;
     }
 };
 

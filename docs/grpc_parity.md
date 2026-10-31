@@ -765,6 +765,36 @@ absolute attempt deadline spans proxy URI resolution, proxy TCP, HTTP/1.1
 CONNECT, authenticated origin TLS with mandatory `h2` ALPN, HTTP/2 bootstrap,
 and the gRPC request.
 
+`ChannelTlsHostProxyTarget` additionally provides grpc-core-compatible
+automatic mapping without hiding process-global reads inside connection setup.
+Its pure `ChannelProxyPolicy` accepts an injected `ChannelProxyEnvironment`;
+`initMap` consumes a caller-owned `std.process.Environ.Map`, while
+`initEnviron` explicitly snapshots the `std.process.Init.minimal.environ`
+received by Zig 0.16 applications. A fully specified endpoint `proxy` wins
+first, then `ChannelProxyPolicy.explicit_uri`, `grpc_proxy`, `https_proxy`, and
+`http_proxy`. A present empty value disables proxying and suppresses every
+lower-priority source, matching grpc-core's channel-argument/environment
+contract.
+
+Only cleartext `http://` proxy URIs are accepted. Percent-decoded URI userinfo
+becomes one RFC 7617 `Proxy-Authorization: Basic ...` field; credentials are
+removed from the canonical transport URI and replace any older proxy-auth field
+without disturbing other CONNECT-only headers. Malformed URIs, unsupported
+schemes, invalid hosts, and malformed percent escapes are returned as explicit
+configuration errors instead of grpc-core's log-and-silently-connect-direct
+fallback. The owning target publishes a `ChannelProxyDecision` with the chosen
+source or the exact direct reason (`disabled`, `not_configured`, `empty_proxy`,
+or `bypassed`) for startup diagnostics.
+
+Bypass selection prefers a present `no_grpc_proxy` over `no_proxy`, including
+when the former is empty. Entries ignore surrounding ASCII whitespace and empty
+items; matching is case-insensitive for exact domains and boundary-aware
+subdomains, with an optional leading dot. IPv4 and IPv6 literals also support
+validated CIDR prefixes without DNS. Invalid CIDR entries are ignored exactly
+as in grpc-core. The mapper is available only for TLS host endpoints, so Unix,
+VSock, pre-resolved address and custom connectors cannot be accidentally
+rerouted. PAC and SOCKS remain outside this HTTP CONNECT policy.
+
 Proxy request options, including `Proxy-Authorization`, are consumed only by
 CONNECT and never enter the origin HTTP/2 header block. TLS SNI, certificate
 verification, default `:authority`, exporter ownership, gRPC metadata and
@@ -783,13 +813,18 @@ socket failures retain the existing HTTP/2 proxy error and ownership paths.
 
 Native TLS tests inspect exact CONNECT authority/authentication, perform real
 certificate-pinned `h2` gRPC through the accepted tunnel, assert exact origin
-authority, reject proxy-credential leakage, and cover both Channel owners. The
-process gate then runs two canonical unary RPCs from Netz through an independent
-Hyper/Tokio CONNECT proxy into the pinned grpc-cpp TLS server. It verifies
+authority, reject proxy-credential leakage, and cover both Channel owners.
+Those tests now select the proxy from injected `grpc_proxy` while placing
+conflicting lower-priority and bypass variables around it. The process gate
+likewise snapshots its real process environment, maps a userinfo credential
+from `grpc_proxy`, and then runs
+two canonical unary RPCs from Netz through an independent Hyper/Tokio CONNECT
+proxy into the pinned grpc-cpp TLS server. It verifies
 separate `localhost:<port>` tunnel routing, `foo.test.google.fr` TLS identity,
 certificate validation, `h2`, credential isolation and connection reuse.
 Evidence is recorded in
-`docs/evidence/grpc_hyper_connect_proxy/2026-10-31.json`.
+`docs/evidence/grpc_hyper_connect_proxy/2026-10-31.json` and
+`docs/evidence/grpc_proxy_policy/2026-10-31.json`.
 
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial

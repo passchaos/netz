@@ -135,6 +135,13 @@ pub const ChannelOptions = runtime.ChannelOptions;
 pub const ChannelBackoffPolicy = runtime.ChannelBackoffPolicy;
 pub const ChannelCustomConnector = runtime.ChannelCustomConnector;
 pub const ChannelHttpConnectProxy = runtime.ChannelHttpConnectProxy;
+pub const ChannelProxyEnvironment = runtime.ChannelProxyEnvironment;
+pub const ChannelProxyPolicy = runtime.ChannelProxyPolicy;
+pub const ChannelProxyDecision = runtime.ChannelProxyDecision;
+pub const ChannelProxySource = runtime.ChannelProxySource;
+pub const ChannelProxyBypassSource = runtime.ChannelProxyBypassSource;
+pub const ChannelProxyDirectReason = runtime.ChannelProxyDirectReason;
+pub const ChannelTlsHostProxyTarget = runtime.ChannelTlsHostProxyTarget;
 pub const CleartextServerOptions = runtime.CleartextServerOptions;
 pub const ServerKeepAliveEnforcementPolicy =
     runtime.ServerKeepAliveEnforcementPolicy;
@@ -180,6 +187,7 @@ test {
     _ = @import("channel/least_request_channel_tests.zig");
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("channel/proxy_tests.zig");
+    _ = @import("channel/proxy_policy_tests.zig");
     _ = @import("service_config/least_request_tests.zig");
     _ = @import("service_config/ring_hash_tests.zig");
     _ = @import("service_config/hedging_tests.zig");

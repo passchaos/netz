@@ -46,6 +46,13 @@ pub const ChannelOptions = channel.Options;
 pub const ChannelBackoffPolicy = channel.BackoffPolicy;
 pub const ChannelCustomConnector = channel.CustomConnector;
 pub const ChannelHttpConnectProxy = channel.HttpConnectProxy;
+pub const ChannelProxyEnvironment = channel.ProxyEnvironment;
+pub const ChannelProxyPolicy = channel.ProxyPolicy;
+pub const ChannelProxyDecision = channel.ProxyDecision;
+pub const ChannelProxySource = channel.ProxySource;
+pub const ChannelProxyBypassSource = channel.ProxyBypassSource;
+pub const ChannelProxyDirectReason = channel.ProxyDirectReason;
+pub const ChannelTlsHostProxyTarget = channel.TlsHostProxyTarget;
 
 pub const ClientOptions = struct {
     limits: http2.runtime.Limits = .{},

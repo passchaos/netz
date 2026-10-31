@@ -258,7 +258,12 @@ for _ in $(seq 1 200); do
   fi
   sleep 0.05
 done
-timeout "$case_timeout" "$proxy_client" "$port" "$ca_file" "$proxy_port" \
+grpc_proxy="http://hyper-proxy@127.0.0.1:$proxy_port" \
+https_proxy="http://unused-https-proxy.invalid:8080" \
+http_proxy="http://unused-http-proxy.invalid:8080" \
+no_grpc_proxy="direct-only.invalid" \
+no_proxy="foo.test.google.fr" \
+timeout "$case_timeout" "$proxy_client" "$port" "$ca_file" \
   >"$work/proxy-client.log" 2>&1
 wait "$proxy_pid"
 proxy_pid=

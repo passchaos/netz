@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRPC automatic HTTP CONNECT proxy policy",
+  "decision": "accepted",
+  "scope": {
+    "endpoint": "TLS host endpoints for ordinary Channel and SharedChannel",
+    "configuration": "explicit endpoint proxy, policy override, injected environment map, or explicit Zig process-environment snapshot",
+    "transport": "HTTP/1.1 CONNECT followed by authenticated TLS with mandatory h2 ALPN",
+    "ownership": "ChannelTlsHostProxyTarget owns canonical URI and generated credentials for the complete channel lifetime"
+  },
+  "reference": {
+    "grpc_core": {
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "source_clean": true,
+      "files": {
+        "src/core/handshaker/http_connect/http_proxy_mapper.cc": "0488cb60ad1a5c9a842752f3660ebb81b98ece4908b04b840ba4b824bb2adef0",
+        "test/core/handshake/http_proxy_mapper_test.cc": "60d53146cb312faeac3e05ae2550cca59b2acfdbc835f45143e1631e4b29ec98"
+      }
+    },
+    "observed_contract": [
+      "explicit channel proxy value precedes grpc_proxy, https_proxy, and http_proxy",
+      "a present empty proxy value disables proxying and suppresses lower-priority sources",
+      "only the http URI scheme is supported and URI userinfo becomes RFC 7617 Basic proxy authorization",
+      "no_grpc_proxy precedes no_proxy even when explicitly empty",
+      "bypass entries support exact and boundary-aware subdomain matching plus IPv4 and IPv6 CIDR",
+      "Unix and VSock targets do not pass through the name proxy mapper"
+    ]
+  },
+  "implementation": {
+    "pure_policy": "ChannelProxyPolicy.resolve consumes a borrowed ChannelProxyEnvironment without reading mutable process-global state",
+    "real_environment": "initEnviron snapshots std.process.Init.minimal.environ through Zig 0.16 std.process.Environ.createMap",
+    "precedence": "explicit endpoint proxy > policy explicit_uri > grpc_proxy > https_proxy > http_proxy",
+    "empty_semantics": "a selected empty explicit or environment value returns an observable empty_proxy direct decision",
+    "bypass": "no_grpc_proxy > no_proxy; ASCII whitespace, empty entries, optional leading dot, case-insensitive exact/subdomain boundaries, IPv4 CIDR, and IPv6 CIDR are covered",
+    "credentials": "strict percent decoding and Basic encoding occur once; credentials are removed from the canonical proxy URI and replace only prior Proxy-Authorization headers",
+    "observability": "direct decisions distinguish disabled, not_configured, empty_proxy, and bypassed while proxy decisions expose the winning source",
+    "failure_semantics": "invalid URI, unsupported scheme, invalid host, and malformed percent escapes fail configuration instead of silently connecting directly",
+    "scope_safety": "the owning factory accepts only TLS host endpoint configuration; address, Unix, VSock, and custom connectors are not implicitly remapped",
+    "identity": "optional tunnel_authority changes only CONNECT routing; origin SNI, certificate verification, :authority, deadline, retry, and picker identity stay origin-bound"
+  },
+  "advantages_over_reference": [
+    "deterministic injected environment view for exhaustive and race-free tests",
+    "explicit configuration errors prevent accidental direct egress after malformed proxy configuration",
+    "owned lifetime wrapper prevents generated URI or authorization slices from expiring beneath a Channel",
+    "structured source and direct-reason telemetry is available without parsing logs",
+    "one explicit process-environment boundary supports Zig applications without hidden global access"
+  ],
+  "native_cases": [
+    "all proxy-source precedence levels and explicit empty suppression",
+    "real process-environment snapshot with proxying disabled",
+    "percent-decoded username and password including encoded at-sign and colon",
+    "credential URI sanitization and Proxy-Authorization replacement while retaining other CONNECT headers",
+    "malformed percent escape, unsupported scheme, invalid URI, and invalid proxy host rejection",
+    "case-insensitive domain, exact domain, subdomain boundary, leading-dot, empty-entry, and whitespace bypass",
+    "no_grpc_proxy presence suppressing a matching no_proxy value",
+    "IPv4 /8, /16, /24, /32 and /0 behavior plus invalid prefix rejection",
+    "IPv6 /64 matching and non-matching families",
+    "ordinary Channel and SharedChannel RPCs through an automatically selected proxy",
+    "exact CONNECT authority and Basic authentication with absence from origin HPACK metadata",
+    "explicit endpoint proxy taking precedence without evaluating invalid automatic settings"
+  ],
+  "process_case": {
+    "client": "Netz SharedChannel using ChannelTlsHostProxyTarget.initEnviron",
+    "environment": "real grpc_proxy with userinfo plus conflicting https_proxy, http_proxy, no_grpc_proxy, and no_proxy values",
+    "proxy": "independent Hyper/Tokio HTTP/1.1 CONNECT process",
+    "origin": "pinned grpc-cpp TLS interoperability server",
+    "assertions": [
+      "grpc_proxy wins over lower-priority proxy variables",
+      "present non-matching no_grpc_proxy suppresses matching no_proxy",
+      "userinfo generates the exact Basic credential required by Hyper",
+      "CONNECT authority is the independent localhost dynamic route",
+      "TLS identity remains foo.test.google.fr with certificate verification and h2 ALPN",
+      "two canonical UnaryCall RPCs reuse one tunneled HTTP/2 connection"
+    ]
+  },
+  "results": {
+    "proxy_policy_debug": "140/140 passed",
+    "native_proxy_debug": "143/143 passed",
+    "complete_grpc_debug": "478/478 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_hyper_release_fast": "10/10 build steps passed",
+    "transient_audit": "one host-load run timed out in the pre-existing connect-race test at 477/478; its isolated gate then passed 141/141 and the unchanged complete gate passed 478/478"
+  },
+  "source_sha256": {
+    "src/grpc/channel/proxy_policy.zig": "1c156c9fce8757ef04c73146d6f00d1df7a013af5fccc644888721812a9a9aa8",
+    "src/grpc/channel/proxy_policy_tests.zig": "58ff95d13deb4774358e74156b5c744db46fd5110ab4879080cc9d43d228be07",
+    "src/grpc/channel.zig": "2c5d25bac053597560a385699a11a686b3a11cbc0e52de36669804316235e92f",
+    "src/grpc/channel/proxy_tests.zig": "560d9cf1c1f05855fd671907fb86736498c988104420fb02d28b9d384d4e1db2",
+    "src/grpc/runtime.zig": "93778312c7948b4219d5187def8c0ae3ba8b9590212b9f3a38dae220ac63e177",
+    "src/grpc/mod.zig": "c25a2b9e52951641e02b95d0e59dca015d5eeb983ff2b3cae8964527725ee3c8",
+    "tools/interop/grpc_hyper_proxy_client.zig": "42396bdcf67374378cb8e0c043a7af238b3164c588f284469caeabf1a10f9a76",
+    "tools/interop/grpc_cpp.sh": "7ef1fbcc1e47b5be5f72ea0678ad930e593751a521bf3ae2a82ffd6cd39823be",
+    "test/package_test.zig": "bea6c157bd13dc0766a516aeefde1c581c62c99ecc33742243b691c1625cc8e3",
+    "docs/grpc_parity.md": "4b4948ec60dd08ecae115308793f7ead647d1c5350bbf0591b5bc88a95bd4925"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC proxy policy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC Channels map environment proxy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC connection competition cancels pending handshakes' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server TMPDIR=/nav_env/Temp/netz-grpc-tmp zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "PAC discovery and SOCKS proxy transports remain separate future policy work; this slice is complete for grpc-core-style HTTP CONNECT name mapping"
+}

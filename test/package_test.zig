@@ -668,6 +668,34 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
+        "ChannelProxyEnvironment",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelProxyPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelProxyDecision",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelProxySource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelProxyBypassSource",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelProxyDirectReason",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "ChannelTlsHostProxyTarget",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
         "WeightedRoundRobinConfig",
     ));
     try std.testing.expect(@hasDecl(
