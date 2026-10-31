@@ -111,7 +111,7 @@ fn Context(
 
         fn ready(self: *@This(), worker: anytype) bool {
             return workerMatches(self.state, worker, self.node.path) and
-                worker.eligible and !worker.retired and
+                worker.eligible and !worker.retired and !worker.source.suspended and
                 worker.published == .ready and
                 !self.runtime.workerEjected(self.state, worker);
         }

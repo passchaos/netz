@@ -109,7 +109,7 @@ pub fn Membership(comptime State: type) type {
         pub fn promoteLocked(state: *State, source_index: usize) void {
             if (state.closed) return;
             const source = state.sources[source_index];
-            if (source.retired) return;
+            if (source.retired or source.suspended) return;
             const pending = source.pending orelse return;
             var old_ready = false;
             for (source.current) |worker| old_ready = old_ready or worker.published == .ready;
@@ -158,7 +158,7 @@ pub fn Membership(comptime State: type) type {
                     std.mem.swap(std.Io.net.IpAddress, &addresses[remaining], &addresses[random % (remaining + 1)]);
                 }
             }
-            if (source.retired) return error.SharedChannelClosed;
+            if (source.retired or source.suspended) return error.SharedChannelClosed;
             const source_index = for (state.sources, 0..) |candidate, index| {
                 if (candidate == source) break index;
             } else return error.SharedChannelClosed;

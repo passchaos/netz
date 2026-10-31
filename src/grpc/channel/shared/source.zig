@@ -10,6 +10,7 @@ pub fn Source(comptime Worker: type) type {
         allocator: std.mem.Allocator,
         refs: std.atomic.Value(usize) = .init(1),
         retired: bool = false,
+        suspended: bool = false,
         activation: std.Io.Event = .unset,
         endpoint: channel.Endpoint,
         ring_hash_weight: u32 = 1,

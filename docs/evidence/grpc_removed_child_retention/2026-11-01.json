@@ -1,0 +1,419 @@
+{
+  "schema": 1,
+  "date": "2026-11-01",
+  "feature": "deactivated weighted-target child retention and reactivation",
+  "decision": "accepted production lifecycle feature",
+  "defaults": {
+    "removed_child_retention_seconds": 900,
+    "max_retained_children": 256
+  },
+  "public_options": [
+    "removed_child_retention",
+    "max_retained_children"
+  ],
+  "public_status": "SharedChannel.retainedChildCount",
+  "contracts": [
+    "retained child pins its policy subtree and old parsed arena independently of active publication",
+    "deactivated source is excluded from application admission and aggregate READY but keeps transport and control ownership",
+    "reactivation before expiration reuses matching source owners and restores compatible policy/outlier state",
+    "cached source lookup preserves distinct duplicate resolver owners",
+    "old active RPC completion and ORCA reports continue while child is inactive",
+    "background timer expires unused child without application polling and retires quiescent connections",
+    "repeated deactivation does not renew expiration; nested reactivation can retain removed descendants separately",
+    "zero retention disables caching; capacity, allocation and manager admission failures preserve old publication",
+    "caller deadline checked after staged manager start aborts manager before cache publication",
+    "channel destruction joins manager and endpoint owners and stops retained resolver callbacks"
+  ],
+  "results": {
+    "complete_grpc_debug": "540/540 passed",
+    "retention_release_fast": "156/156 passed",
+    "public_package": "26/26 passed",
+    "interop": "24 matrix rows passed; h2c/TLS 1.2/TLS 1.3 retained-child A/B/A routing used two physical connections with per-session request counts 2 and 1"
+  },
+  "regressions": {
+    "default": "test confirms the default 900-second configured duration",
+    "reactivation": "A source removed from current inventory returns through its original connection; inactive phase routes only to B",
+    "expiry": "100-ms retained child closes old transport and publishes shutdown without application polling; returning child uses fresh connection",
+    "completion": "active UNAVAILABLE completes while inactive and its failure bucket survives reactivation",
+    "orca": "inactive original OOB stream delivers an updated report; reactivation accepts business RPC without opening a second control stream",
+    "nested": "reactivated parent restores active descendant while another descendant retains its own independent entry",
+    "capacity": "full cache rejects next removal and preserves first child expiration",
+    "allocation": "checkAllAllocationFailures covers cache preparation and published revision rollback",
+    "deadline": "successful 250-ms manager admission under 200-ms caller deadline returns Timeout with no published manager/cache",
+    "empty_map": "all cached READY endpoints remain excluded and aggregate becomes TRANSIENT_FAILURE",
+    "duplicates": "two duplicate RR inputs restore two original owners and preserve per-connection response order",
+    "disabled": "zero duration retires immediately without needing the additional manager concurrency slot"
+  },
+  "source_sha256": {
+    "docs/grpc_parity.md": "40438a045061793f16588fb879096d01489e58e2fc19102dd306e86d3a696337",
+    "src/grpc/channel/shared.zig": "110294f26e67b0dd43c9421a9a2c66488e378c08933e59505cdf95f6360adf11",
+    "src/grpc/channel/shared/init.zig": "af3e223f095a05dbbf8fc218bfa65327060bf9d0ee0b963b1134d2b0aad4f360",
+    "src/grpc/channel/shared/membership.zig": "b7f9de2f3e1bf1aced6c93f52d1bec30f95d56a4eaa0d95cc6b15038705d1554",
+    "src/grpc/channel/shared/options.zig": "71f68cec235f8439073e968dd3a79c655d672fffe054ad89ecbca18a3282100c",
+    "src/grpc/channel/shared/resolution.zig": "42bacca22b4454b77e28beaf1cf70681828a815033c11caf5b5829de4d791e3c",
+    "src/grpc/channel/shared/retention/admission_tests.zig": "3198144598a0089354da886b7cc61f8dd185b50c12f62402df2adee753e7590c",
+    "src/grpc/channel/shared/retention/cache.zig": "9c44f48f8d53892ffca775d47d860c0449ae55a885f8b0aa8a45b5c3442df89e",
+    "src/grpc/channel/shared/retention/completion_tests.zig": "c4b5bcdb1e93cb0c239fade1fa2a3c41ceb10702a711707489bb042b20adb5a7",
+    "src/grpc/channel/shared/retention/control_tests.zig": "2dc2975ebbee0602c823f9fa449fa0c06e3b32ec15121e6a9e6551d3a5d33557",
+    "src/grpc/channel/shared/retention/deadline_tests.zig": "58fc7765dfc0adeb2298f98acfb8dbc8c1f8a44dc39c420a55c91a922444f937",
+    "src/grpc/channel/shared/retention/duplicate_tests.zig": "43d10f5092a0b796b8a330c17a1b0ec8edb552163203dc3daff1a9fffa5698f7",
+    "src/grpc/channel/shared/retention/lifecycle_tests.zig": "9d3679baf30e3852118af16d9888c99a9ce7ca8ad913b86813fcbd86b58a6169",
+    "src/grpc/channel/shared/retention/manager.zig": "99d287a9a1cc4355f97409a77336ab7c31bf18339b8f9911f36bfeb63aa4ed1b",
+    "src/grpc/channel/shared/retention/nested_tests.zig": "6f151590324720db8ff0531cd55e2cb44b28ae1650a29c74960fc427217fca80",
+    "src/grpc/channel/shared/retention/plan.zig": "0250b37a184bff1366c2fbca60477fafc756dfce8b24e187cdad1f78b0312209",
+    "src/grpc/channel/shared/retention/test_support.zig": "de37e4f741650c50eb3f1a561577538bc70752c5cf8d2845515be76ea1123b98",
+    "src/grpc/channel/shared/retention/tests.zig": "3c655ad7fd4d109c311b9341505bfd3ffbc72fea62fd86f98465e2d2078c3306",
+    "src/grpc/channel/shared/source.zig": "b02dbb848f26ab4392a231e232a894d36cb24f6dc862b6a955404d95253325a1",
+    "src/grpc/channel/shared/state.zig": "a404ef037b6f679f494d8bf6550b8bcbc11a1f74c6b9a5fe2517462095f3434f",
+    "src/grpc/channel/shared/update/prepare.zig": "d10121226533960b9c52709fc520bd564ad6f8acd859708ba942e839d6141fcb",
+    "src/grpc/channel/shared/update/publish.zig": "186b4b21594d25a1d7615c5aa8404836156a0233312b7bb0e6d3ef1312e220fd",
+    "src/grpc/channel/shared/weighted_target.zig": "d87ae254f760e70c8f7c4bf1300dd7351e87eed5f44bb6033e5268df6c9e25a9",
+    "src/grpc/channel/shared/weighted_target/outlier.zig": "16df11556fc86cd97ef12a8b93856400fd7844adefbdcaa1b5369d2e7b9e9794",
+    "src/grpc/channel/shared/weighted_target/state_transfer.zig": "ea75f042bef3dbc8f938c3dd80026c12465cd7e7d1bc461f6ecea5291dc40fa5",
+    "src/grpc/channel/shared/weighted_target/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin.zig": "35f23cad7a5bd67ef8a5d14a3dd41e1e7e832f1811b272cb64119b17e561f759",
+    "tools/interop/grpc_connection_race/client.zig": "ffdca9bac2c6a22edb724c5011744c51ade374daa06623ee251ecdaa59e1f364",
+    "tools/interop/grpc_connection_race/peer.js": "cb1dbf25880ebce021309bb91f0d796bcf037c502abe66e50e54c02729a7e5fa",
+    "tools/interop/grpc_connection_race/run.py": "06c761a70a8f0d79525e166d4374bfed75d3c0b375ca32f8aba56e3cd2ad5d05",
+    "tools/interop/grpc_connection_race/shared_retention.zig": "28b64e290c4255e679d4db8115983f84934c409fcdc10c5c9155bad94a8a736f"
+  },
+  "interop": {
+    "reference": "grpc-js-1.14.0",
+    "node": "v26.10.0",
+    "rows": [
+      {
+        "mode": "h2c",
+        "client": "grpc-js",
+        "stalled": [
+          1,
+          1
+        ],
+        "rpcs": 2,
+        "pendingAfterReferenceClose": 2
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "stagger",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          1,
+          1
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "ordered",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "deadline",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "immediate",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "shared_reset",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "shared_update",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "h2c",
+        "phase": "shared_retention",
+        "rpcs": 3,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "mode": "tls12",
+        "client": "grpc-js",
+        "stalled": [
+          1,
+          1
+        ],
+        "rpcs": 2,
+        "pendingAfterReferenceClose": 2
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "stagger",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          1,
+          1
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "ordered",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "deadline",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "immediate",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "shared_reset",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "shared_update",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls12",
+        "phase": "shared_retention",
+        "rpcs": 3,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "mode": "tls13",
+        "client": "grpc-js",
+        "stalled": [
+          1,
+          1
+        ],
+        "rpcs": 2,
+        "pendingAfterReferenceClose": 2
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "stagger",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          1,
+          1
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "ordered",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "deadline",
+        "rpcs": 0,
+        "client": "netz",
+        "stalled": [
+          1,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "immediate",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "shared_reset",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "shared_update",
+        "rpcs": 2,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      },
+      {
+        "io": "zio-std-io",
+        "mode": "tls13",
+        "phase": "shared_retention",
+        "rpcs": 3,
+        "client": "netz",
+        "stalled": [
+          0,
+          0
+        ],
+        "allSocketsRetired": true
+      }
+    ],
+    "source_sha256": {
+      "src/internal/connection_race.zig": "ad9ed98a0518f60b465a1f5c992fba352d91a4179605ef5f93d19c83ef42090d",
+      "src/internal/happy_eyeballs.zig": "716a1f4b05a7eea66c63bfd2c95599bd7ae4ccc554d106a36fe5b5b2a99c9cb0",
+      "src/internal/tcp_connect.zig": "33dd9888517ecdfc232d726369feb02ddc3a857ddb46db70467dbb4af492d30d",
+      "src/internal/accept.zig": "a259b3a3251627909a2eb7dabb76338e31103aa7b799cf2ca355cc0f57e16db6",
+      "src/internal/stream_io/timed_write.zig": "b2c338d2732272dfd91d9e9c32962e80a11060d629eca703c96ccda6a407c3b9",
+      "src/grpc/channel.zig": "e33bbe6b44e048f91705173eac8de1d969af293f05455c7156f8eea16ceacb8b",
+      "src/grpc/channel/connect_race.zig": "f7ff734849236b687f284d3cbbc3890cb5c245d30f3992eb2d2a82454277a260",
+      "src/grpc/channel/connect_race/context.zig": "87892e663f9b7bcf5d6d83be7319cd5eba9b94bf8d270aeb347cf239468a8f38",
+      "src/grpc/channel/connect_race/allocator.zig": "d982612b74751eafe6dffc6869ae0309a0a366ca121ea39cadee1796c67eafee",
+      "tools/interop/grpc_connection_race/client.zig": "ffdca9bac2c6a22edb724c5011744c51ade374daa06623ee251ecdaa59e1f364",
+      "tools/interop/grpc_connection_race/peer.js": "cb1dbf25880ebce021309bb91f0d796bcf037c502abe66e50e54c02729a7e5fa",
+      "tools/interop/grpc_connection_race/run.py": "06c761a70a8f0d79525e166d4374bfed75d3c0b375ca32f8aba56e3cd2ad5d05",
+      "src/grpc/channel/shared.zig": "110294f26e67b0dd43c9421a9a2c66488e378c08933e59505cdf95f6360adf11",
+      "src/grpc/channel/shared/backoff_control.zig": "ee1b11d5feb22e4f60729d91a51a1c1cfe2fded15d05ba5e48e2d9ef2cf9b693",
+      "src/grpc/channel/shared/worker.zig": "b46c1698c360b5fea5b10133b3315485d7a8d105d5b700632a8d6208304e1acd",
+      "src/grpc/channel/shared/source.zig": "b02dbb848f26ab4392a231e232a894d36cb24f6dc862b6a955404d95253325a1",
+      "src/grpc/channel/shared/resolution.zig": "42bacca22b4454b77e28beaf1cf70681828a815033c11caf5b5829de4d791e3c",
+      "tools/interop/grpc_connection_race/shared_backoff.zig": "56285aa9cb6f404b33eaea8d76b7402bdb14644f170080c48f673b6a93f3ed63",
+      "src/grpc/channel/shared/update.zig": "189b19151248307ae248b441062fe4f3c4e546eeb58245f0991d5f2c1e533955",
+      "src/grpc/channel/shared/update/prepare.zig": "d10121226533960b9c52709fc520bd564ad6f8acd859708ba942e839d6141fcb",
+      "src/grpc/channel/shared/update/publish.zig": "186b4b21594d25a1d7615c5aa8404836156a0233312b7bb0e6d3ef1312e220fd",
+      "src/grpc/channel/shared/worker_settings.zig": "c78ba41b02574c2c8938226d7b1c47b35d3f2944d5a187069f9773002f957be8",
+      "src/grpc/channel/shared/layout.zig": "87615904c7f0d6a4d0f14515c380adcaec4ce937b133c3fe8e6614bc17bcc819",
+      "src/grpc/channel/shared/config_generation.zig": "2185c761b17943f0d67ea1ec6c049c1e1b6a6383bb69e2f1f2e3f93d4c318e84",
+      "tools/interop/grpc_connection_race/shared_update.zig": "e30363cfa06365cda2553d53a6b7ae120890ec89e6f95eabc937a316a1bbfaf0",
+      "src/grpc/channel/shared/weighted_target/state_transfer.zig": "ea75f042bef3dbc8f938c3dd80026c12465cd7e7d1bc461f6ecea5291dc40fa5",
+      "src/grpc/channel/shared/weighted_target.zig": "d87ae254f760e70c8f7c4bf1300dd7351e87eed5f44bb6033e5268df6c9e25a9",
+      "src/grpc/channel/shared/state.zig": "a404ef037b6f679f494d8bf6550b8bcbc11a1f74c6b9a5fe2517462095f3434f",
+      "src/grpc/channel/shared/weighted_target/outlier.zig": "16df11556fc86cd97ef12a8b93856400fd7844adefbdcaa1b5369d2e7b9e9794",
+      "src/grpc/channel/shared/retention/cache.zig": "9c44f48f8d53892ffca775d47d860c0449ae55a885f8b0aa8a45b5c3442df89e",
+      "src/grpc/channel/shared/retention/plan.zig": "0250b37a184bff1366c2fbca60477fafc756dfce8b24e187cdad1f78b0312209",
+      "src/grpc/channel/shared/retention/manager.zig": "99d287a9a1cc4355f97409a77336ab7c31bf18339b8f9911f36bfeb63aa4ed1b",
+      "src/grpc/channel/shared/weighted_target/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
+      "tools/interop/grpc_connection_race/shared_retention.zig": "28b64e290c4255e679d4db8115983f84934c409fcdc10c5c9155bad94a8a736f"
+    },
+    "reference_source_sha256": "7bec812850bb38317e8ffa477d809d21744577102f03c21f15d34a1c95867f18"
+  },
+  "interop_artifact_sha256": "5421cf7805fa314c78f249d9af57e0a0739af3c8233505f37b65d53d81c30547",
+  "reference": {
+    "checkout": "/nav_env/Work/grpc",
+    "commit": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_source_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "role": "deactivation weight zero, delayed removal, timer cancellation and named child update lifecycle source reference"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC retained child' --summary all",
+    "zig build test-package interop-grpc-connection-race --summary all -- --output zig-out/grpc-retained-child/2026-11-01-final.json",
+    "git diff --check"
+  ],
+  "completion_boundary": "This completes retained-child lifecycle delivery, not overall HTTP/WebSocket/WebTransport/MQTT/gRPC industry superiority; broader conformance, xDS and performance evidence still require work."
+}

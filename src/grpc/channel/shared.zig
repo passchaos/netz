@@ -184,6 +184,11 @@ pub const SharedChannel = struct {
         defer self.state.unlock();
         return self.state.config_revision;
     }
+    pub fn retainedChildCount(self: SharedChannel) usize {
+        self.state.lock();
+        defer self.state.unlock();
+        return self.state.retention.count;
+    }
     pub fn endpointCountWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
         return self.state.endpointCountWithDeadline(deadline);
     }
@@ -231,6 +236,7 @@ test {
     _ = @import("shared/control_deadline_tests.zig");
     _ = @import("shared/backoff_tests.zig");
     _ = @import("shared/update/tests.zig");
+    _ = @import("shared/retention/tests.zig");
     _ = @import("shared/keepalive_tests.zig");
     _ = @import("shared/keepalive_throttle_tests.zig");
     _ = @import("shared/resolution/tests.zig");

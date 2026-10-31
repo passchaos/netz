@@ -4,6 +4,7 @@ const State = @import("../state.zig").State;
 const Prepared = @import("prepare.zig").Prepared;
 const Settings = @import("../worker_settings.zig").Settings;
 const Outlier = @import("../../outlier_detection.zig").Endpoint;
+const RetentionPlan = @import("../retention/plan.zig").Plan;
 const Transfer = @import("../weighted_target/state_transfer.zig").Plan(State.WeightedTarget);
 
 const Change = struct {
@@ -19,16 +20,23 @@ fn contains(sources: []const *State.Source, source: *State.Source) bool {
 
 pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Timestamp) State.Failure!void {
     const allocator = state.allocator;
+    var transfer = try Transfer.init(allocator, if (state.weighted_target) |*runtime| runtime else null, if (prepared.weighted) |*runtime| runtime else null);
+    defer transfer.deinit();
+    var retention = try RetentionPlan.init(state, if (prepared.weighted) |*runtime| runtime else null, &transfer);
+    defer retention.deinit();
+    const active = try allocator.alloc(bool, prepared.sources.len);
+    defer allocator.free(active);
     const weights = try allocator.alloc(u32, prepared.sources.len);
     defer allocator.free(weights);
     const added = try allocator.alloc(bool, prepared.sources.len);
     defer allocator.free(added);
-    for (prepared.sources, weights, added, 0..) |*candidate, *weight, *is_added, index| {
+    for (prepared.sources, weights, added, active, 0..) |*candidate, *weight, *is_added, *enabled, index| {
+        enabled.* = if (prepared.weighted) |*runtime| runtime.acceptsPath(candidate.*.endpoint.hierarchicalPath()) else true;
         weight.* = candidate.*.ring_hash_weight;
         const existing = for (state.sources) |old| {
-            if (!contains(prepared.sources[0..index], old) and
+            if (!old.retired and (!old.suspended or state.retention.entryFor(old, retention.now) != null) and !contains(prepared.sources[0..index], old) and
                 @import("../../ring_hash.zig").sameEndpointIdentity(old.endpoint, candidate.*.endpoint)) break old;
-        } else null;
+        } else state.retention.cachedSource(candidate.*.endpoint, retention.now, prepared.sources[0..index]);
         is_added.* = existing == null;
         if (existing) |source| {
             source.retain();
@@ -37,8 +45,6 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         }
     }
     const outlier_count = if (prepared.weighted) |*runtime| runtime.outlierCount() else 0;
-    var transfer = try Transfer.init(allocator, if (state.weighted_target) |*runtime| runtime else null, if (prepared.weighted) |*runtime| runtime else null);
-    defer transfer.deinit();
     var changes: std.ArrayList(Change) = .empty;
     defer changes.deinit(allocator);
     var changes_transferred = false;
@@ -57,13 +63,13 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     var weights_changed = false;
     for (prepared.sources, weights) |source, weight| weights_changed = weights_changed or source.ring_hash_weight != weight;
     for (state.workers.items) |worker| {
-        if (worker.retired or !contains(prepared.sources, worker.source)) continue;
+        if (worker.retired or !contains(prepared.sources, worker.source) or (prepared.weighted != null and !prepared.weighted.?.acceptsPath(worker.source.endpoint.hierarchicalPath()))) continue;
         try changes.ensureUnusedCapacity(allocator, 1);
         const settings = try Settings.create(allocator, prepared.health_service, prepared.orcaFor(worker.source));
         errdefer settings.destroy();
         const outliers = try allocator.alloc(Outlier, outlier_count);
         for (outliers) |*outlier| outlier.* = .{};
-        if (same_config and outliers.len == worker.weighted_outliers.len) @memcpy(outliers, worker.weighted_outliers) else transfer.copyOutliers(worker.source.endpoint.hierarchicalPath(), worker.weighted_outliers, outliers);
+        if (same_config and outliers.len == worker.weighted_outliers.len) @memcpy(outliers, worker.weighted_outliers) else transfer.copyOutliersFrom(worker.source.endpoint.hierarchicalPath(), worker.weighted_outliers, outliers, worker.source.suspended);
         changes.appendAssumeCapacity(.{ .worker = worker, .settings = settings, .outliers = outliers });
     }
     var workers: std.ArrayList(*State.Worker) = .empty;
@@ -83,8 +89,8 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
             source.wake.set(state.io);
         };
     };
-    for (prepared.sources, added, 0..) |source, is_added, index| {
-        if (!is_added or source.resolver != null) continue;
+    for (prepared.sources, added, active, 0..) |source, is_added, enabled, index| {
+        if (!is_added or !enabled or source.resolver != null) continue;
         try workers.ensureUnusedCapacity(allocator, 1);
         source.current = try allocator.alloc(*State.Worker, 1);
         const worker = try State.Membership.prepare(state, source, index, null, prepared.config, outlier_count, prepared.health_service, prepared.orcaFor(source));
@@ -98,8 +104,8 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         try state.group.concurrent(state.io, State.Worker.run, .{worker});
         started += 1;
     }
-    for (prepared.sources, added) |source, is_added| {
-        if (!is_added) continue;
+    for (prepared.sources, added, active) |source, is_added, enabled| {
+        if (!is_added or !enabled) continue;
         if (source.resolver) |resolver| {
             resolver.notifyPublication(&source.wake);
             source.retain();
@@ -109,17 +115,40 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
             };
         }
     }
+    try retention.startManager();
     try state.io.checkCancel();
     if (deadline) |until| _ = try @import("../../../../internal/deadline.zig").usableAwake(state.io, until);
     // No fallible operation follows this boundary. Task owners cannot proceed
     // until activation is signaled after the complete snapshot is installed.
+    retention.commit(prepared);
     const previous_sources = state.sources;
-    for (previous_sources) |source| if (!contains(prepared.sources, source)) {
-        source.retired = true;
+    for (previous_sources) |source| {
+        const present = contains(prepared.sources, source);
+        const enabled = present and (if (prepared.weighted) |*runtime| runtime.acceptsPath(source.endpoint.hierarchicalPath()) else true);
+        if (!enabled) {
+            if (state.retention.entryFor(source, retention.now) != null) source.suspended = true else State.Retention.retireSource(state, source);
+        }
         source.wake.set(state.io);
-    };
+    }
     for (state.workers.items) |worker| {
-        if (!worker.retired and !contains(prepared.sources, worker.source)) State.Membership.retireLocked(state, worker);
+        if (worker.retired) continue;
+        if (!contains(prepared.sources, worker.source)) {
+            if (state.retention.entryFor(worker.source, retention.now) != null) worker.source.suspended = true else State.Retention.retireSource(state, worker.source);
+        }
+    }
+    for (prepared.sources, active) |source, enabled| {
+        if (enabled) {
+            if (source.suspended) {
+                source.refresh_requested = true;
+                source.backoff_reset_requested = true;
+            }
+            source.suspended = false;
+        } else if (state.retention.entryFor(source, retention.now) != null) {
+            source.suspended = true;
+        } else {
+            State.Retention.retireSource(state, source);
+        }
+        source.wake.set(state.io);
     }
     state.sources = prepared.sources;
     prepared.sources = previous_sources;

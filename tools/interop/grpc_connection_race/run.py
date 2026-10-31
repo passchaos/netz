@@ -36,6 +36,7 @@ def main():
         sources += ["src/grpc/channel/shared.zig", "src/grpc/channel/shared/backoff_control.zig", "src/grpc/channel/shared/worker.zig", "src/grpc/channel/shared/source.zig", "src/grpc/channel/shared/resolution.zig", "tools/interop/grpc_connection_race/shared_backoff.zig"]
         sources += ["src/grpc/channel/shared/update.zig", "src/grpc/channel/shared/update/prepare.zig", "src/grpc/channel/shared/update/publish.zig", "src/grpc/channel/shared/worker_settings.zig", "src/grpc/channel/shared/layout.zig", "src/grpc/channel/shared/config_generation.zig", "tools/interop/grpc_connection_race/shared_update.zig"]
         sources += ["src/grpc/channel/shared/weighted_target/state_transfer.zig", "src/grpc/channel/shared/weighted_target.zig", "src/grpc/channel/shared/state.zig", "src/grpc/channel/shared/weighted_target/outlier.zig"]
+        sources += ["src/grpc/channel/shared/retention/cache.zig", "src/grpc/channel/shared/retention/plan.zig", "src/grpc/channel/shared/retention/manager.zig", "src/grpc/channel/shared/weighted_target/tree_query.zig", "tools/interop/grpc_connection_race/shared_retention.zig"]
         record["source_sha256"] = {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in sources}
         record["reference_source_sha256"] = hashlib.sha256((sdk / "node_modules/@grpc/grpc-js/build/src/load-balancer-pick-first.js").read_bytes()).hexdigest()
         if args.output:

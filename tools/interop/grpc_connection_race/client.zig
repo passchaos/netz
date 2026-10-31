@@ -1,7 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const Mode = enum { h2c, tls12, tls13 };
-const Phase = enum { stagger, ordered, deadline, immediate, shared_reset, shared_update };
+const Phase = enum { stagger, ordered, deadline, immediate, shared_reset, shared_update, shared_retention };
 const allocator = std.heap.c_allocator;
 
 fn refuse(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: std.Io.Clock.Timestamp) netz.http2.runtime.Error!netz.http2.runtime.Connection {
@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
         .deadline => endpoints[0..2],
         else => &endpoints,
     };
-    var channel = if (phase != .shared_reset and phase != .shared_update) try netz.grpc.Channel.init(allocator, io, .{ .resolved = .{ .endpoints = selected } }, .{
+    var channel = if (phase != .shared_reset and phase != .shared_update and phase != .shared_retention) try netz.grpc.Channel.init(allocator, io, .{ .resolved = .{ .endpoints = selected } }, .{
         .connection_attempt_delay = switch (phase) {
             .ordered => null,
             .immediate => .fromSeconds(5),
@@ -62,6 +62,8 @@ pub fn main(init: std.process.Init) !void {
         rpcs = try @import("shared_backoff.zig").run(allocator, io, endpoints[2], options);
     } else if (phase == .shared_update) {
         rpcs = try @import("shared_update.zig").run(allocator, io, endpoints[2], options);
+    } else if (phase == .shared_retention) {
+        rpcs = try @import("shared_retention.zig").run(allocator, io, endpoints[2], options);
     } else if (phase == .ordered or phase == .deadline) {
         try std.testing.expectError(error.Timeout, channel.?.unary(options));
         try std.testing.expectEqual(netz.grpc.ChannelConnectivityState.transient_failure, channel.?.connectivityState());

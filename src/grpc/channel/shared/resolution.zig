@@ -6,7 +6,7 @@ pub fn Resolution(comptime State: type) type {
         fn requestLocked(state: *State) State.Failure!void {
             if (state.closed) return error.SharedChannelClosed;
             var found = false;
-            for (state.sources) |source| if (source.resolver != null) {
+            for (state.sources) |source| if (!source.retired and !source.suspended and source.resolver != null) {
                 source.refresh_requested = true;
                 source.wake.set(state.io);
                 found = true;
@@ -53,7 +53,7 @@ pub fn Resolution(comptime State: type) type {
                 var complete = true;
                 var failure: ?anyerror = null;
                 for (sources, generations) |source, generation| {
-                    if (source.retired or source.resolver == null) continue;
+                    if (source.retired or source.suspended or source.resolver == null) continue;
                     if (source.generation == generation) complete = false else if (source.last_error) |err| {
                         failure = err;
                     }
@@ -79,6 +79,12 @@ pub fn Resolution(comptime State: type) type {
                 if (state.closed or source.retired) {
                     state.unlock();
                     return;
+                }
+                if (source.suspended) {
+                    source.wake.reset();
+                    state.unlock();
+                    try source.wake.wait(state.io);
+                    continue;
                 }
                 const demand = state.demand;
                 const requested = source.refresh_requested;

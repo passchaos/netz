@@ -19,6 +19,7 @@ pub const Prepared = struct {
     health_service: ?[]u8 = null,
     orca_oob: ?orca_config.Config = null,
     shuffle: bool,
+    retired_children: ?*State.Retention.Entry = null,
 
     /// Consumes the generation, canonical inventory and explicit ORCA clone.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoints: []channel.Endpoint, resolver_policy: channel.SelectionPolicy, options: Options, config: ?*Generation, orca_override: ?orca_config.Config) State.Failure!Prepared {
@@ -58,6 +59,7 @@ pub const Prepared = struct {
     }
 
     pub fn deinit(self: *Prepared) void {
+        State.Retention.destroyList(self.retired_children);
         for (self.sources) |source| source.release();
         self.allocator.free(self.sources);
         self.allocator.free(self.endpoints);

@@ -102,7 +102,9 @@ fn Context(comptime NodePointer: type, comptime StatePointer: type) type {
 
         fn eligible(self: *@This(), index: usize) bool {
             const worker = self.state.workers.items[index];
+            const retained = if (comptime @hasField(@typeInfo(StatePointer).pointer.child, "retained_mode")) self.state.retained_mode else false;
             return !worker.retired and worker.eligible and
+                worker.source.suspended == retained and
                 workerMatches(self.state, worker, self.node.path);
         }
     };

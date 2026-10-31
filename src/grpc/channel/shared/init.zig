@@ -14,6 +14,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.max_buffered_stream_bytes == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
     if (options.keepalive) |keepalive| try keepalive.validate();
     try options.channel.validate();
+    if (options.removed_child_retention.nanoseconds < 0 or options.max_retained_children == 0) return error.InvalidSharedOptions;
     if (target == .resolved and target.resolved.endpoints.len == 0) {
         return error.InvalidSharedOptions;
     }

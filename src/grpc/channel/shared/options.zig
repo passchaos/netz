@@ -25,4 +25,9 @@ pub const Options = struct {
     /// connection demand and publishes latest-value reports to endpoint
     /// watches across reconnects.
     orca_oob: ?orca_config.Options = null,
+    /// Keep deactivated weighted-target children for grpc-core's 15 minutes.
+    /// Zero disables retention. The capacity rejects updates instead of
+    /// silently evicting a child before its configured lifetime expires.
+    removed_child_retention: std.Io.Duration = .fromSeconds(15 * 60),
+    max_retained_children: usize = 256,
 };

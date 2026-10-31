@@ -1,0 +1,121 @@
+const std = @import("std");
+const support = @import("test_support.zig");
+const grpc = support.grpc;
+const shared = support.shared;
+const allocator = support.allocator;
+
+test "gRPC retained child reactivates its connection outside the current endpoint inventory" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer a.deinit();
+    var b = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer b.deinit();
+    var a_peer = support.Peer{ .server = &a, .authority = "localhost", .reply = "A", .requests = 2 };
+    var b_peer = support.Peer{ .server = &b, .authority = "localhost", .reply = "B", .requests = 1 };
+    var a_task = io.async(support.Peer.run, .{&a_peer});
+    defer _ = a_task.cancel(io) catch {};
+    var b_task = io.async(support.Peer.run, .{&b_peer});
+    defer _ = b_task.cancel(io) catch {};
+    const endpoints = [_]grpc.ChannelEndpoint{ support.endpoint(a.address(), &support.path_a), support.endpoint(b.address(), &support.path_b) };
+    var client = try shared.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &endpoints } }, .{ .service_config_json = support.cfg_a });
+    var live = true;
+    defer if (live) client.deinit();
+    try std.testing.expectEqual(@as(i96, 900 * std.time.ns_per_s), client.state.options.removed_child_retention.nanoseconds);
+    var sender = client.sender();
+    defer sender.deinit();
+    var first = try support.unary(sender);
+    defer first.deinit();
+    try std.testing.expectEqualStrings("A", first.message.?.payload);
+    const original = client.state.sources[0];
+    _ = try client.update(.{ .target = .{ .resolved = .{ .endpoints = endpoints[1..] } }, .service_config = .{ .replace = support.cfg_b } });
+    try std.testing.expectEqual(@as(usize, 1), client.retainedChildCount());
+    try std.testing.expectEqual(@as(usize, 1), client.configuredEndpointCount());
+    try std.testing.expect(original.suspended and !original.retired);
+    var switched = try support.unary(sender);
+    defer switched.deinit();
+    try std.testing.expectEqualStrings("B", switched.message.?.payload);
+    _ = try client.update(.{ .target = .{ .resolved = .{ .endpoints = &endpoints } }, .service_config = .{ .replace = support.cfg_a } });
+    try std.testing.expect(client.state.sources[0] == original);
+    try std.testing.expect(!original.suspended and !original.retired);
+    var restored = try support.unary(sender);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("A", restored.message.?.payload);
+    client.deinit();
+    live = false;
+    try a_task.await(io);
+    try b_task.await(io);
+}
+
+test "gRPC retained child expiry closes the old transport without application polling" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer a.deinit();
+    var b = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer b.deinit();
+    var a_peer = support.Peer{ .server = &a, .authority = "localhost", .reply = "A", .requests = 1 };
+    var b_peer = support.Peer{ .server = &b, .authority = "localhost", .reply = "B", .requests = 1 };
+    var a_task = io.async(support.Peer.run, .{&a_peer});
+    defer _ = a_task.cancel(io) catch {};
+    var b_task = io.async(support.Peer.run, .{&b_peer});
+    defer _ = b_task.cancel(io) catch {};
+    const a_endpoints = [_]grpc.ChannelEndpoint{support.endpoint(a.address(), &support.path_a)};
+    const b_endpoints = [_]grpc.ChannelEndpoint{support.endpoint(b.address(), &support.path_b)};
+    var client = try shared.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &a_endpoints } }, .{ .service_config_json = support.cfg_a, .removed_child_retention = .fromMilliseconds(100) });
+    var live = true;
+    defer if (live) client.deinit();
+    var watch = client.watchEndpointConnectivity(0).?;
+    defer watch.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var first = try support.unary(sender);
+    defer first.deinit();
+    _ = try client.update(.{ .target = .{ .resolved = .{ .endpoints = &b_endpoints } }, .service_config = .{ .replace = support.cfg_b } });
+    while ((try watch.nextWithTimeout(.fromSeconds(3))).state != .shutdown) {}
+    try a_task.await(io);
+    try std.testing.expectEqual(@as(usize, 0), client.retainedChildCount());
+    var current = try support.unary(sender);
+    defer current.deinit();
+    try std.testing.expectEqualStrings("B", current.message.?.payload);
+    // An expired child needs a fresh physical connection when it returns.
+    var again_peer = support.Peer{ .server = &a, .authority = "localhost", .reply = "fresh", .requests = 1 };
+    var again_task = io.async(support.Peer.run, .{&again_peer});
+    defer _ = again_task.cancel(io) catch {};
+    _ = try client.update(.{ .target = .{ .resolved = .{ .endpoints = &a_endpoints } }, .service_config = .{ .replace = support.cfg_a } });
+    var fresh = try support.unary(sender);
+    defer fresh.deinit();
+    try std.testing.expectEqualStrings("fresh", fresh.message.?.payload);
+    client.deinit();
+    live = false;
+    try b_task.await(io);
+    try again_task.await(io);
+}
+
+test "gRPC retained child empty target map excludes cached ready endpoints" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    var peer = support.Peer{ .server = &server, .authority = "localhost", .reply = "ready", .requests = 1 };
+    var task = io.async(support.Peer.run, .{&peer});
+    defer _ = task.cancel(io) catch {};
+    const endpoints = [_]grpc.ChannelEndpoint{support.endpoint(server.address(), &support.path_a)};
+    var client = try shared.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &endpoints } }, .{ .service_config_json = support.cfg_a });
+    var live = true;
+    defer if (live) client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var response = try support.unary(sender);
+    defer response.deinit();
+    _ = try client.update(.{ .service_config = .{ .replace = "{\"loadBalancingConfig\":[{\"weighted_target_experimental\":{\"targets\":{}}}]}" } });
+    try std.testing.expectEqual(@as(usize, 1), client.retainedChildCount());
+    try std.testing.expectEqual(grpc.ChannelConnectivityState.transient_failure, client.connectivityState());
+    try std.testing.expectError(error.ConnectionUnavailable, sender.unary(.{ .path = "/demo.Retention/Unary", .message = "blocked", .wait_for_ready = false }));
+    client.deinit();
+    live = false;
+    try task.await(io);
+}

@@ -19,7 +19,7 @@ const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
 const Job = @import("job.zig").Job;
 pub const Options = @import("options.zig").Options;
-pub const Error = health.WatchError || orca_oob.Error || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
+pub const Error = health.WatchError || orca_oob.Error || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, SharedRetentionFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -44,6 +44,7 @@ pub const State = struct {
     tracker: *connectivity.Tracker,
     policy: channel.SelectionPolicy,
     weighted_target: ?WeightedTarget = null,
+    retention: Retention = .{},
     weighted_target_selected: ?*Worker = null,
     head: ?*Job = null,
     tail: ?*Job = null,
@@ -74,6 +75,7 @@ pub const State = struct {
     pub const Source = @import("source.zig").Source(Worker);
     pub const Membership = @import("membership.zig").Membership(State);
     pub const Resolution = @import("resolution.zig").Resolution(State);
+    pub const Retention = @import("retention/cache.zig").Cache(State);
     pub const Failure = @import("state.zig").Error;
     pub const HedgingStats = hedging_stats.Snapshot;
     pub const StreamCall = @import("stream/call.zig").Call(State);
@@ -133,6 +135,7 @@ pub const State = struct {
         self.wrr_scheduler.deinit(self.allocator);
         self.ring_hash_ring.deinit(self.allocator);
         if (self.weighted_target) |*runtime| runtime.deinit();
+        self.retention.deinit();
         for (self.sources) |source| source.release();
         self.allocator.free(self.sources);
         self.allocator.free(self.canonical_endpoints);
@@ -303,6 +306,7 @@ pub const State = struct {
         self.tracker.setState(.shutdown);
         for (self.workers.items) |worker| worker.tracker.setState(.shutdown);
         self.resolution_changed.set(self.io);
+        self.retention.wake.set(self.io);
         self.wakeAllLocked();
     }
     /// Resolver callbacks borrow target/custom context only until the owning
@@ -316,6 +320,7 @@ pub const State = struct {
             self.unlock();
             if (resolver) |value| value.deinit();
         }
+        self.retention.stopResolution();
     }
     fn finishLocked(self: *State, job: *Job, result: ?call.UnaryResponse, err: ?anyerror) void {
         job.result = result;
@@ -373,6 +378,10 @@ pub const State = struct {
     ) void {
         if (comptime @TypeOf(worker) == *Worker) {
             if (worker.retired) return;
+            if (worker.source.suspended) {
+                self.retention.record(self, worker, success);
+                return;
+            }
             if (self.weighted_target) |*runtime| {
                 runtime.recordOutlier(self, worker, success);
                 return;
@@ -406,7 +415,7 @@ pub const State = struct {
         }
         var connecting = false;
         for (self.workers.items) |worker| {
-            if (worker.retired) continue;
+            if (worker.retired or worker.source.suspended) continue;
             if (worker.eligible and worker.published == .ready) return .ready;
             if (worker.published == .connecting or worker.published == .idle) connecting = true;
         }
@@ -431,7 +440,7 @@ pub const State = struct {
         worker.published = effective_state;
         worker.capacity = effective_capacity;
         worker.tracker.setState(if (self.closed or worker.retired) .shutdown else effective_state);
-        if (!worker.retired) Membership.promoteLocked(self, worker.source_index);
+        if (!worker.retired and !worker.source.suspended) Membership.promoteLocked(self, worker.source_index);
         self.recomputeLocked();
         if (changed) self.wakeAllLocked();
     }
@@ -462,6 +471,7 @@ pub const State = struct {
         worker: *Worker,
     ) ?service_config.WeightedRoundRobinConfig {
         if (worker.retired) return null;
+        if (worker.source.suspended) return self.retention.wrrConfig(self, worker);
         return if (self.weighted_target) |*runtime|
             runtime.wrrConfig(self, worker)
         else
@@ -527,6 +537,7 @@ pub const State = struct {
             break;
         };
         worker.tracker.setState(.shutdown);
+        self.retention.removeWorker(worker);
         self.wrr_scheduler.remove(worker);
         self.ring_hash_dirty = true;
         if (self.weighted_target) |*runtime| runtime.invalidatePickers();
@@ -686,7 +697,7 @@ pub const State = struct {
         return null;
     }
     fn wrrReady(worker: *Worker) bool {
-        return !worker.retired and worker.eligible and worker.published == .ready;
+        return !worker.retired and !worker.source.suspended and worker.eligible and worker.published == .ready;
     }
     fn wrrAvailable(worker: *Worker) bool {
         return wrrReady(worker) and worker.capacity != 0;
@@ -845,7 +856,7 @@ pub const State = struct {
     pub fn claim(self: *State, worker: *Worker) ?*Job {
         self.lock();
         defer self.unlock();
-        if (self.closed or worker.retired or worker.pending_settings != null or self.head == null) return null;
+        if (self.closed or worker.retired or worker.source.suspended or worker.pending_settings != null or self.head == null) return null;
         const picked = self.pickLocked(worker) catch |err| {
             const job = self.head.?;
             self.removeQueuedLocked(job);

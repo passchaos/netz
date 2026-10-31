@@ -9,7 +9,7 @@ pub fn Plan(comptime Runtime: type) type {
 
         const Self = @This();
         const Node = @typeInfo(@FieldType(Runtime, "root")).pointer.child;
-        const Pair = struct { old: *Node, next: *Node };
+        const Pair = struct { old: *Node, next: *Node, retained: bool = false };
 
         pub fn init(allocator: std.mem.Allocator, old: ?*Runtime, next: ?*Runtime) std.mem.Allocator.Error!Self {
             var self = Self{ .allocator = allocator };
@@ -21,7 +21,7 @@ pub fn Plan(comptime Runtime: type) type {
             self.pairs.deinit(self.allocator);
         }
 
-        fn collect(self: *Self, old: *Node, next: *Node) std.mem.Allocator.Error!void {
+        pub fn collect(self: *Self, old: *Node, next: *Node) std.mem.Allocator.Error!void {
             if (!samePath(old.path, next.path)) return;
             if (old.kind == .outlier and next.kind != .outlier) {
                 return self.collect(old.kind.outlier.child, next);
@@ -49,9 +49,18 @@ pub fn Plan(comptime Runtime: type) type {
                 },
             }
         }
+        pub fn collectRetained(self: *Self, old: *Node, next: *Node) std.mem.Allocator.Error!void {
+            const start = self.pairs.items.len;
+            try self.collect(old, next);
+            for (self.pairs.items[start..]) |*pair| pair.retained = true;
+        }
 
         pub fn copyOutliers(self: *const Self, path: []const []const u8, old: []const Outlier, next: []Outlier) void {
+            self.copyOutliersFrom(path, old, next, false);
+        }
+        pub fn copyOutliersFrom(self: *const Self, path: []const []const u8, old: []const Outlier, next: []Outlier, retained: bool) void {
             for (self.pairs.items) |pair| {
+                if (pair.retained != retained) continue;
                 if (pair.next.kind != .outlier or !matches(path, pair.next.path)) continue;
                 const source_index = pair.old.kind.outlier.index;
                 const destination_index = pair.next.kind.outlier.index;

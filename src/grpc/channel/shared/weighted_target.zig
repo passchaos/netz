@@ -58,6 +58,7 @@ pub fn Runtime(comptime State: type) type {
         };
 
         const Node = struct {
+            refs: std.atomic.Value(usize) = .init(1),
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
@@ -82,6 +83,16 @@ pub fn Runtime(comptime State: type) type {
             self.destroy(self.root);
             self.* = undefined;
         }
+        pub fn retainNode(node: *Node) void {
+            _ = node.refs.fetchAdd(1, .monotonic);
+        }
+        pub fn releaseNode(allocator: std.mem.Allocator, node: *Node) void {
+            var owner = Self{ .allocator = allocator, .root = node };
+            owner.destroy(node);
+        }
+        pub fn acceptsPath(self: *const Self, path: []const []const u8) bool {
+            return @import("weighted_target/tree_query.zig").accepts(self.root, path);
+        }
 
         pub fn aggregate(self: *Self, state: *State) connectivity.State {
             return self.aggregateNode(self.root, state);
@@ -105,6 +116,10 @@ pub fn Runtime(comptime State: type) type {
 
         pub fn remove(self: *Self, worker: *Worker) void {
             self.removeNode(self.root, worker);
+        }
+        pub fn removeFromNode(node: *Node, worker: *Worker) void {
+            var owner = Self{ .allocator = undefined, .root = node };
+            owner.removeNode(node, worker);
         }
 
         pub fn invalidatePickers(self: *Self) void {
@@ -333,6 +348,7 @@ pub fn Runtime(comptime State: type) type {
         }
 
         fn destroy(self: *Self, node: *Node) void {
+            if (node.refs.fetchSub(1, .acq_rel) != 1) return;
             switch (node.kind) {
                 .leaf => |*leaf| {
                     leaf.ring.deinit(self.allocator);
@@ -390,7 +406,7 @@ pub fn Runtime(comptime State: type) type {
             var idle = false;
             for (state.workers.items) |worker| {
                 if (!workerMatches(state, worker, node.path) or
-                    worker.retired or !worker.eligible)
+                    worker.retired or worker.source.suspended or !worker.eligible)
                 {
                     continue;
                 }
@@ -722,7 +738,7 @@ pub fn Runtime(comptime State: type) type {
         }
 
         fn workerAvailable(self: *Self, state: *State, worker: *Worker) bool {
-            return worker.eligible and !worker.retired and
+            return worker.eligible and !worker.retired and !worker.source.suspended and
                 worker.published == .ready and worker.capacity != 0 and
                 !self.workerEjected(state, worker);
         }

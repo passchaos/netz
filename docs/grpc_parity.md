@@ -904,9 +904,10 @@ inventory. Queued requests recompute their ring input after a picker change.
 
 Sources are independently reference-counted objects. Unchanged targets reuse
 their resolver, watches, worker and physical connection, including ring-weight
-changes and source-array reorder. Removed sources leave the new picker and
-publish endpoint SHUTDOWN immediately, while their admitted unary and duplex
-work keeps the old source alive until request/response completion. Resolver
+changes and source-array reorder. Removing an endpoint from an active child
+leaves the new picker and publishes endpoint SHUTDOWN immediately, while its
+admitted unary and duplex work keeps the source alive until completion.
+Child deactivation follows the retention lifetime described below. Resolver
 refresh operations similarly retain their original source snapshot across a
 concurrent topology replacement. The owning channel still bounds the lifetime
 of caller-borrowed endpoint strings, TLS/proxy policy and connector context;
@@ -940,8 +941,28 @@ the parent weight, retains weighted distribution, then checks expiration/RR
 fallback. Evidence is in
 `docs/evidence/grpc_shared_child_state/2026-11-01.json`.
 
-grpc-core's 15-minute removed-child cache and policy-state restoration after
-removal/reactivation remain separate unfinished work.
+Removed weighted-target children now retain their complete policy subtree,
+parsed-config generation, sources and connection owners for the default
+15-minute grpc-core interval. Deactivation excludes retained workers from
+application admission and aggregate READY state, while existing RPCs,
+Health/ORCA progress, connection recovery and cached outlier evaluation can
+continue. Returning a compatible hierarchical child before expiration reuses
+those owners and transfers the retained policy state into the new tree. Its
+new resolver inventory still decides which old targets remain eligible.
+
+An independent background owner removes expired children without requiring
+application polling. Expiration publishes endpoint SHUTDOWN, retires control
+streams and closes quiescent transports; admitted unary/duplex work keeps its
+drain boundary. A later return uses fresh owners. Repeated updates that leave
+a child deactivated retain its original deadline. Nested parent reactivation
+can leave newly removed descendants with independent retention timers.
+Zero `removed_child_retention` disables this cache; `max_retained_children`
+defaults to 256 and rejects an over-capacity update before publication.
+Allocation, task-capacity and caller-budget failures preserve the old state.
+`retainedChildCount()` exposes the current cache population. Parent policy
+replacement and owning-channel destruction release all retained resources,
+including resolvers even when Sender references keep closed State alive.
+Evidence is in `docs/evidence/grpc_removed_child_retention/2026-11-01.json`.
 Evidence is in `docs/evidence/grpc_shared_live_update/2026-11-01.json`.
 
 The top-level ring metadata fixture now retains static header storage across
