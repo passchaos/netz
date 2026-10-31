@@ -51,6 +51,10 @@ mixed churn, 16 FIN and 16 reset terminals, exact bytes/checksum/reset mask,
 and deterministic loss/reorder on netz outbound; see
 `docs/evidence/quic_s2n/2026-11-01.json`.
 
+Fresh 2026-11-01 live fuzz gates passed `fuzz-http3-connection`,
+`fuzz-webtransport-endpoint` and `fuzz-quic-connection` at 3/3 tests each; see
+`docs/evidence/live_fuzz/2026-11-01.json`.
+
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
 headers, Version Negotiation, Retry parsing and integrity verification, typed
 and untyped transport parameters, owned and caller-storage frame parsing,

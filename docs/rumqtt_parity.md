@@ -3850,6 +3850,8 @@ checks ordered exact-topic SUBSCRIBE/UNSUBSCRIBE, live QoS 0 publication,
 retained write/replacement/deletion and Retain Handling 0 replay. Explicit
 PINGREQ/PINGRESP barriers prove each expected queue is complete without timing
 sleeps, including a final empty barrier that rejects delayed extra delivery.
+A fresh 2026-11-01 run passed the live broker gate at 3/3; see
+`docs/evidence/live_fuzz/2026-11-01.json`.
 `fuzz-mqtt-tls-live-broker` reuses that exact state oracle with the production
 heterogeneous-listener broker path and three certificate-pinned native TLS 1.3
 clients. It requires `mqtt` ALPN, AES-128-GCM/SHA-256 metadata, and one

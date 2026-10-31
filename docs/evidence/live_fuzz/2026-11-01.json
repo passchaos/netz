@@ -1,0 +1,17 @@
+{
+  "commands": [
+    "zig build fuzz-http3-connection --summary all",
+    "zig build fuzz-webtransport-endpoint --summary all",
+    "zig build fuzz-quic-connection --summary all",
+    "zig build fuzz-mqtt-live-broker --summary all"
+  ],
+  "date": "2026-11-01",
+  "log_dir": "2026-11-01",
+  "results": {
+    "fuzz-http3-connection": "3/3 tests passed",
+    "fuzz-mqtt-live-broker": "3/3 tests passed",
+    "fuzz-quic-connection": "3/3 tests passed",
+    "fuzz-webtransport-endpoint": "3/3 tests passed"
+  },
+  "status": "passed"
+}
