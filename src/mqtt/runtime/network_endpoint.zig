@@ -14,7 +14,7 @@ const address_resolver = @import("../../internal/address_resolver.zig");
 const net = std.Io.net;
 
 pub const Error = net.HostName.ValidateError ||
-    net.HostName.ConnectError || net.IpAddress.ConnectError ||
+    net.HostName.ConnectError || tcp_connect.ResolvedBoundPolicyConnectError ||
     address_resolver.Error || error{
     InvalidAddressConnectPolicy,
     InvalidServerReference,

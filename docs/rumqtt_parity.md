@@ -15,6 +15,14 @@ The production Session/ACK paths retain their baseline behavior.
 
 ## Current feature comparison
 
+Hostname and URI clients now preserve the complete resolved TCP connection
+policy error set, including `ConcurrencyUnavailable` from Happy Eyeballs
+admission. Adjacent public-client regressions exhaust executor capacity across
+ordinary and deadline-owned hostname/URI connects and verify the original
+error without leaking resolver storage. The durable QoS 2 bridge fuzz gate
+compiles and passes again after this error-set repair. Evidence is in
+`docs/evidence/mqtt_connect_concurrency/2026-10-31.json`.
+
 Broker teardown now collects shared Session-writer errors while holding the
 slot writer lock, after any in-flight flush has finished publishing its result
 and before the slot becomes reusable. A writer failure arriving after the

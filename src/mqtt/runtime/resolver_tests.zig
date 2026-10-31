@@ -3,6 +3,75 @@ const runtime = @import("../runtime.zig");
 
 const net = std.Io.net;
 
+test "MQTT URI and hostname connectors preserve exhausted concurrency" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .concurrent_limit = .limited(0),
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Resolver = struct {
+        calls: usize = 0,
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return resolve_allocator.dupe(net.IpAddress, &.{
+                .{ .ip4 = .loopback(1) },
+            });
+        }
+    };
+    var resolver = Resolver{};
+    const options: runtime.ConnectOptions = .{
+        .client_id = "concurrency-mqtt",
+        .address_resolver = .{
+            .context = &resolver,
+            .resolve = Resolver.resolve,
+        },
+        .address_connect_policy = .{ .happy_eyeballs = .{} },
+    };
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    });
+    try std.testing.expectError(error.ConcurrencyUnavailable, runtime.Client.connectHostAttempt(
+        allocator,
+        io,
+        "concurrency.mqtt.test",
+        1883,
+        options,
+    ));
+    try std.testing.expectError(error.ConcurrencyUnavailable, runtime.Client.connectHostAttemptWithDeadline(
+        allocator,
+        io,
+        "concurrency.mqtt.test",
+        1883,
+        options,
+        deadline,
+    ));
+    try std.testing.expectError(error.ConcurrencyUnavailable, runtime.Client.connectUriAttempt(
+        allocator,
+        io,
+        "mqtt://concurrency.mqtt.test",
+        options,
+    ));
+    try std.testing.expectError(error.ConcurrencyUnavailable, runtime.Client.connectUriAttemptWithDeadline(
+        allocator,
+        io,
+        "mqtt://concurrency.mqtt.test",
+        options,
+        deadline,
+    ));
+    try std.testing.expectEqual(@as(usize, 4), resolver.calls);
+}
+
 test "MQTT URI resolver falls back and bypasses IP literals" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

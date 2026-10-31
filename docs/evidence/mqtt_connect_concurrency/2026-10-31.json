@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "MQTT resolved TCP connection policy error preservation",
+  "decision": "accepted correctness and compile repair",
+  "contract": "Hostname and URI connection attempts propagate ConcurrencyUnavailable when Happy Eyeballs cannot admit concurrent work, including absolute-deadline entry points.",
+  "regression": {
+    "executor_concurrent_limit": 0,
+    "public_entry_points": [
+      "connectHostAttempt",
+      "connectHostAttemptWithDeadline",
+      "connectUriAttempt",
+      "connectUriAttemptWithDeadline"
+    ],
+    "resolver_calls": 4,
+    "expected_error": "ConcurrencyUnavailable",
+    "allocator_leak_checks": true
+  },
+  "results": {
+    "mqtt_uri_and_grpc_ring_debug": "148/148 passed",
+    "durable_qos2_bridge_fuzz_debug": "3/3 passed"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='MQTT URI' -Dtest-filter='gRPC SharedChannel ring hash' -Dtest-filter='gRPC SharedChannel weighted target ring hash' --summary all",
+    "zig build fuzz-mqtt-bridge-qos2 --summary all",
+    "git diff --check"
+  ],
+  "source_sha256": {
+    "src/mqtt/runtime/network_endpoint.zig": "7f4483b85df09e34a4546beb3e65fe9d85a7748492383548aea24782e1966c27",
+    "src/mqtt/runtime/resolver_tests.zig": "9f6908f031496822cf86932bd61423878c2714b0db55b0d024c8b2a55db16019",
+    "docs/rumqtt_parity.md": "9de72a5921f15dae6ea0388fcea9a333645f7888a6ad999d340b96bb27d808b2"
+  }
+}
