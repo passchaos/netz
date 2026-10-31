@@ -652,6 +652,11 @@ test "public modules are reachable" {
         "RingHashConfig",
     ));
     try std.testing.expect(@hasDecl(netz.grpc, "ringHash"));
+    try std.testing.expect(@hasDecl(netz.grpc, "HedgingPolicy"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.ServiceConfig,
+        "hedgingPolicy",
+    ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
         "WeightedRoundRobinConfig",

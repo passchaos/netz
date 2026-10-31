@@ -99,7 +99,7 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
         if (!retryableStatus(response, configured)) return response;
         if (configured.throttler) |throttler| if (!throttler.recordFailure()) return response;
         if (attempts >= configured.max_attempts or !retryEligible(response)) return response;
-        const pushback = retryPushback(response);
+        const pushback = responsePushback(response);
         if (pushback == .stop) return response;
         const delay = switch (pushback) {
             .stop => unreachable,
@@ -150,7 +150,7 @@ fn perAttemptDeadline(
     return .{ .deadline = outer, .limited = false };
 }
 
-const RetryPushback = union(enum) {
+pub const Pushback = union(enum) {
     absent,
     stop,
     delay: std.Io.Duration,
@@ -171,7 +171,7 @@ fn retryableStatus(response: UnaryResponse, policy: RetryPolicy) bool {
     return false;
 }
 
-fn retryPushback(response: UnaryResponse) RetryPushback {
+pub fn responsePushback(response: UnaryResponse) Pushback {
     const transport = response.transport orelse return .absent;
     return retryPushbackFields(transport.headers);
 }
@@ -182,7 +182,7 @@ fn retryPushback(response: UnaryResponse) RetryPushback {
 /// value override the server's terminal retry decision.
 fn retryPushbackFields(
     headers: []const http2.Hpack.HeaderField,
-) RetryPushback {
+) Pushback {
     var raw: ?[]const u8 = null;
     for (headers) |field| {
         if (std.mem.eql(u8, field.name, "grpc-retry-pushback-ms")) {
@@ -190,9 +190,19 @@ fn retryPushbackFields(
         }
     }
     const value = raw orelse return .absent;
-    const milliseconds = std.fmt.parseInt(i64, value, 10) catch return .stop;
+    const milliseconds = parsePushbackMilliseconds(value) orelse return .stop;
     if (milliseconds < 0) return .stop;
     return .{ .delay = .fromMilliseconds(milliseconds) };
+}
+
+fn parsePushbackMilliseconds(value: []const u8) ?i32 {
+    if (value.len == 0 or value[0] == '+') return null;
+    const digits = if (value[0] == '-') value[1..] else value;
+    if (digits.len == 0 or (digits.len > 1 and digits[0] == '0')) return null;
+    for (digits) |byte| if (byte < '0' or byte > '9') return null;
+    const parsed = std.fmt.parseInt(i32, value, 10) catch return null;
+    if (parsed == 0 and value[0] == '-') return null;
+    return parsed;
 }
 
 test "gRPC retry pushback uses the final non-repeatable metadata value" {
@@ -216,6 +226,25 @@ test "gRPC retry pushback uses the final non-repeatable metadata value" {
         .value = "invalid",
     }}) == .stop);
     try std.testing.expect(retryPushbackFields(&.{}) == .absent);
+    for ([_][]const u8{
+        "01",
+        "-0",
+        "+1",
+        "2147483648",
+        "-2147483649",
+    }) |value| {
+        try std.testing.expect(retryPushbackFields(&.{.{
+            .name = "grpc-retry-pushback-ms",
+            .value = value,
+        }}) == .stop);
+    }
+    try std.testing.expectEqual(
+        @as(i96, std.math.maxInt(i32) * std.time.ns_per_ms),
+        retryPushbackFields(&.{.{
+            .name = "grpc-retry-pushback-ms",
+            .value = "2147483647",
+        }}).delay.nanoseconds,
+    );
 }
 
 fn cappedBackoff(

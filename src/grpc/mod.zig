@@ -87,6 +87,7 @@ pub const acceptDuplexWithDeadline = stream.acceptDuplexWithDeadline;
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
 pub const RetryPolicy = call.RetryPolicy;
+pub const HedgingPolicy = call.HedgingPolicy;
 pub const RetryThrottler = call.RetryThrottler;
 pub const ServiceConfig = service_config.ServiceConfig;
 pub const ServiceConfigParseOptions = service_config.ParseOptions;
@@ -178,6 +179,7 @@ test {
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("service_config/least_request_tests.zig");
     _ = @import("service_config/ring_hash_tests.zig");
+    _ = @import("service_config/hedging_tests.zig");
     _ = @import("channel/host_tests.zig");
     _ = @import("channel/connect_race.zig");
     _ = @import("channel/connect_race/tests.zig");

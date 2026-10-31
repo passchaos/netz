@@ -834,10 +834,17 @@ pub const State = struct {
             return;
         }
     }
-    pub fn unary(self: *State, options: call.UnaryCallOptions, explicit_retry: ?call.RetryPolicy, entered: std.Io.Timestamp) Error!call.UnaryResponse {
-        var resolved: service_config.ResolvedUnary = .{ .options = options, .retry_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
+    pub fn unary(self: *State, options: call.UnaryCallOptions, explicit_retry: ?call.RetryPolicy, explicit_hedging: ?call.HedgingPolicy, entered: std.Io.Timestamp) Error!call.UnaryResponse {
+        var resolved: service_config.ResolvedUnary = .{ .options = options, .retry_policy = null, .hedging_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
         if (self.config) |*config| resolved = try config.resolveUnary(options);
-        if (explicit_retry) |policy| resolved.retry_policy = policy;
+        if (explicit_retry) |policy| {
+            resolved.retry_policy = policy;
+            resolved.hedging_policy = null;
+        }
+        if (explicit_hedging) |policy| {
+            resolved.hedging_policy = policy;
+            resolved.retry_policy = null;
+        }
         // Service configuration is immutable after construction and remains
         // owned by this retained State. Resolve it before lock admission so a
         // configured timeout bounds that first wait as well.
@@ -848,6 +855,14 @@ pub const State = struct {
         if (closed) return error.SharedChannelClosed;
         if (resolved.options.message.len > resolved.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
         resolved.options.wait_for_ready = resolved.wait_for_ready;
+        if (resolved.hedging_policy) |policy| {
+            return @import("hedging.zig").run(
+                self,
+                resolved.options,
+                policy,
+                deadline,
+            );
+        }
         return retry.runWithDeadline(self, self.allocator, resolved.options, resolved.retry_policy, deadline, attempt);
     }
 };

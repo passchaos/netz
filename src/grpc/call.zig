@@ -307,6 +307,36 @@ pub const RetryPolicy = struct {
     }
 };
 
+/// gRFC A6 unary hedging policy. Multiple attempts may execute application
+/// logic, so callers must use it only for replay-safe methods.
+pub const HedgingPolicy = struct {
+    max_attempts: u8,
+    hedging_delay: std.Io.Duration = .zero,
+    non_fatal_status_codes: []const Status = &.{},
+    throttler: ?*RetryThrottler = null,
+
+    pub fn validate(self: HedgingPolicy) error{InvalidRetryPolicy}!void {
+        if (self.max_attempts < 2 or self.max_attempts > 5 or
+            self.hedging_delay.nanoseconds < 0)
+        {
+            return error.InvalidRetryPolicy;
+        }
+        for (self.non_fatal_status_codes, 0..) |status, index| {
+            if (status == .ok) return error.InvalidRetryPolicy;
+            for (self.non_fatal_status_codes[0..index]) |prior| {
+                if (prior == status) return error.InvalidRetryPolicy;
+            }
+        }
+    }
+
+    pub fn isNonFatal(self: HedgingPolicy, status: Status) bool {
+        for (self.non_fatal_status_codes) |candidate| {
+            if (candidate == status) return true;
+        }
+        return false;
+    }
+};
+
 /// Thread-safe channel-level retry throttle using gRPC's milli-token model.
 ///
 /// `max_tokens` starts full. Every configured retryable failure removes one
@@ -377,6 +407,11 @@ pub const RetryThrottler = struct {
                 return;
             }
         }
+    }
+
+    pub fn hedgingAllowed(self: *const RetryThrottler) bool {
+        return self.milli_tokens.load(.monotonic) >
+            self.max_milli_tokens / 2;
     }
 
     pub fn milliTokens(self: *const RetryThrottler) u64 {

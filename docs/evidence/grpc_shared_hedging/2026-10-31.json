@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRFC A6 concurrent unary hedging on SharedChannel",
+  "decision": "accepted",
+  "scope": {
+    "owner": "grpc.SharedChannel background endpoint workers",
+    "rpc_shape": "replay-safe unary calls",
+    "configuration": [
+      "method/service/default hedgingPolicy",
+      "explicit Sender.unaryWithHedging"
+    ],
+    "explicit_boundaries": [
+      "ordinary single-owner Channel rejects concurrent hedging",
+      "client-streaming, server-streaming, and bidirectional calls reject hedging without a complete replay buffer"
+    ]
+  },
+  "reference": {
+    "specification": "gRFC A6 client retries and hedging",
+    "proposal": "https://github.com/grpc/proposal/blob/master/A6-client-retries.md",
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "files": {
+      "src/core/client_channel/retry_filter.cc": "14b0d9ba4d5b4c629a36d404b022e9495de86a21ba72d6bcd8c155791a880eb8",
+      "src/core/client_channel/retry_service_config.cc": "3a155ed86a22d6df055428e83d5068eedc07446e69b6938a0d0e8d388d14feb6"
+    },
+    "observed_boundary": "the pinned grpc-core C++ retry filter and parser still contain explicit TODOs for implementing hedging; Netz follows normative gRFC A6 semantics and exceeds that local C++ implementation boundary",
+    "normative_contract": [
+      "the original attempt starts immediately and later attempts start after hedgingDelay up to maxAttempts",
+      "a non-fatal response accelerates the next hedge, a fatal or OK response wins, and all losers are canceled",
+      "positive pushback replaces the next delay while malformed or negative pushback stops new hedges",
+      "retry throttling always permits the first attempt and gates later hedges at the half-token threshold",
+      "all attempts share one RPC deadline and the last non-fatal response is returned after exhaustion",
+      "retryPolicy and hedgingPolicy are mutually exclusive"
+    ]
+  },
+  "implementation": {
+    "parser": "owned service config requires maxAttempts >= 2, clamps to 5, accepts absent or zero hedgingDelay, validates unique non-OK nonFatalStatusCodes, and rejects retry/hedging ambiguity",
+    "scheduler": "one bounded std.Io.Select owns at most five attempt tasks plus generation-stamped timers; stale timers are ignored after acceleration or pushback",
+    "attempts": "every physical job advertises remaining grpc-timeout and grpc-previous-rpc-attempts, retains one transparent REFUSED_STREAM recovery, and resolves request hash independently at the physical-attempt boundary",
+    "winner": "OK or fatal completion cancels and joins all outstanding jobs before response ownership returns; loser cancellation reuses SharedChannel stream-scoped RST_STREAM cleanup",
+    "non_fatal": "non-fatal status or configured backend-local UNAVAILABLE-class transport failure accelerates the next attempt; final exhaustion returns the last response or last transport error",
+    "pushback": "retry and hedging share a strict signed-int32 canonical grpc-retry-pushback-ms parser with no plus sign or redundant leading zeros",
+    "throttling": "first attempt always runs; later timers and acceleration require a balance above half; qualifying failures debit one token and an OK winner replenishes tokenRatio",
+    "deadline": "running attempts and pending pushback timers share one awake-clock absolute deadline and cannot renew it",
+    "streaming_boundary": "ordinary Channel and all streaming APIs reject hedging explicitly instead of silently serializing or ignoring the policy"
+  },
+  "native_cases": [
+    "valid/default/clamped hedgingPolicy parsing and owned status arrays",
+    "missing or too-small maxAttempts, malformed delay, OK/duplicate/unknown non-fatal statuses, and retryPolicy conflict",
+    "50 ms delayed second attempt wins on another endpoint and the first endpoint observes exact RST_STREAM CANCEL",
+    "UNAVAILABLE without pushback bypasses a two-second delay immediately",
+    "positive 150 ms pushback replaces the two-second delay",
+    "negative pushback prevents a second endpoint from receiving a request",
+    "pre-exhausted retry throttle prevents a scheduled second hedge",
+    "two non-fatal attempts return the deliberately delayed final response",
+    "backend-local connection errors are separated from OOM and validation failures",
+    "service-config activation, direct API activation, ordinary Channel rejection, and Shared streaming rejection"
+  ],
+  "results": {
+    "focused_debug": "150/150 passed",
+    "grpc_debug": "469/469 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
+    "reference_status": "grpc-core C++ has no complete hedging runner at the pinned revision, so gRFC A6 is normative and real Netz multi-endpoint tests provide the behavioral proof"
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "8f032c560181b0f9d551eab38584a29677551bc81ed2e75eb5b6f09eeb282de3",
+    "src/grpc/call/retry.zig": "8a20293d55d1c6b307c68a9cf59676be1b87bfe261ade7eb0b0a25be1565c553",
+    "src/grpc/channel.zig": "d4fca96ef22f9354d591605e7238eaddf011b0fae19c6b3016e8d95492d40772",
+    "src/grpc/channel/shared.zig": "a88c7ff10632b195bfb91179c00051ba88d8285c7fd04a77884d87a6c206ae42",
+    "src/grpc/channel/shared/state.zig": "207891836afc04f20cdd0463e0d559ffea7f4e6d32ab73efb3c51dc55bf8ce14",
+    "src/grpc/channel/shared/hedging.zig": "b46d7141b984dadc6ff02d94954c1fa8ab88bf4040c88bf6aef36ebd84563ab8",
+    "src/grpc/channel/shared/hedging_tests.zig": "8d0fa098ce9307ff3ae899d7c7ff0296809fcf5b7d04c389efc80ca97bcd5c66",
+    "src/grpc/channel/shared/stream/open.zig": "b7afb12652ed1fb5b31f94fc3288c5e371a7bd73d2bcd3e6a0091de8abf75ff6",
+    "src/grpc/mod.zig": "5dfc2294df4d2427d6903283b93ff39d74179363144bc8e79624a482fdb44596",
+    "src/grpc/service_config.zig": "d9b2056ff24c097218ce87df8ed7d8296c212b686c5d77a22778ce0e4bc09c9c",
+    "src/grpc/service_config/hedging_tests.zig": "e57c04dbd92fbf90d141e23c0b2c6c93a45a3bf782d838430563c94956ba608f",
+    "test/package_test.zig": "9ec05553db2771ffeeff47afeda9fc4df52c39db01f2098b675ed2b61460e979"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='hedging' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server TMPDIR=/nav_env/Temp/netz-grpc-tmp zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "hedging is complete for replay-safe unary calls on the concurrent SharedChannel owner; adding it to ordinary Channel would require changing that type's single-owner contract, and arbitrary streaming RPCs still require an application-defined replay buffer"
+}

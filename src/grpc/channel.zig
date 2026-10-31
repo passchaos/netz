@@ -888,6 +888,7 @@ pub const Channel = struct {
         return self.unaryResolved(.{
             .options = options,
             .retry_policy = null,
+            .hedging_policy = null,
             .wait_for_ready = options.wait_for_ready orelse false,
         });
     }
@@ -900,6 +901,7 @@ pub const Channel = struct {
         return self.unaryResolved(.{
             .options = options,
             .retry_policy = retry_policy,
+            .hedging_policy = null,
             .wait_for_ready = options.wait_for_ready orelse false,
         });
     }
@@ -916,6 +918,7 @@ pub const Channel = struct {
         self: *Channel,
         resolved: service_config.ResolvedUnary,
     ) Error!call.UnaryResponse {
+        if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
         var options = resolved.options;
         options.wait_for_ready = resolved.wait_for_ready;
@@ -977,6 +980,7 @@ pub const Channel = struct {
     ) Error!streaming.ClientWriter {
         return self.startStreamingResolved(.{
             .options = options,
+            .hedging_policy = null,
             .wait_for_ready = options.wait_for_ready orelse false,
         });
     }
@@ -995,6 +999,7 @@ pub const Channel = struct {
         self: *Channel,
         resolved: service_config.ResolvedStreaming,
     ) Error!streaming.ClientWriter {
+        if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
@@ -1032,6 +1037,7 @@ pub const Channel = struct {
     ) Error!duplex.ClientDuplex {
         return self.startDuplexResolved(.{
             .options = options,
+            .hedging_policy = null,
             .wait_for_ready = options.wait_for_ready orelse false,
         });
     }
@@ -1048,6 +1054,7 @@ pub const Channel = struct {
         self: *Channel,
         resolved: service_config.ResolvedStreaming,
     ) Error!duplex.ClientDuplex {
+        if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(

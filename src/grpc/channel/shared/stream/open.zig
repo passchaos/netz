@@ -7,8 +7,9 @@ const Job = @import("../job.zig").Job;
 
 pub fn open(state: anytype, options: streaming.RequestOptions, entered: std.Io.Timestamp) @TypeOf(state.*).Failure!*@TypeOf(state.*).StreamCall {
     const State = @TypeOf(state.*);
-    var resolved: service_config.ResolvedStreaming = .{ .options = options, .wait_for_ready = options.wait_for_ready orelse false };
+    var resolved: service_config.ResolvedStreaming = .{ .options = options, .hedging_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
     if (state.config) |*config| resolved = try config.resolveStreaming(options);
+    if (resolved.hedging_policy != null) return error.InvalidSharedOptions;
     resolved.options.wait_for_ready = resolved.wait_for_ready;
     const deadline: ?std.Io.Clock.Timestamp = if (resolved.options.timeout) |timeout| .{ .raw = entered.addDuration(timeout.duration()), .clock = .awake } else null;
     // This owned service config is immutable for the retained parent State.

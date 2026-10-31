@@ -31,22 +31,30 @@ pub const Sender = struct {
         self.* = undefined;
     }
     pub fn unary(self: Sender, options: call.UnaryCallOptions) Error!call.UnaryResponse {
-        return self.unaryResolved(options, null);
+        return self.unaryResolved(options, null, null);
     }
     pub fn unaryWithRetry(self: Sender, options: call.UnaryCallOptions, policy: call.RetryPolicy) Error!call.UnaryResponse {
-        return self.unaryResolved(options, policy);
+        return self.unaryResolved(options, policy, null);
+    }
+    pub fn unaryWithHedging(self: Sender, options: call.UnaryCallOptions, policy: call.HedgingPolicy) Error!call.UnaryResponse {
+        return self.unaryResolved(options, null, policy);
     }
     pub fn startDuplex(self: Sender, options: streaming.RequestOptions) Error!Duplex {
         const entered = std.Io.Clock.awake.now(self.state.io);
         return .{ .call = try @import("shared/stream/open.zig").open(self.state, options, entered) };
     }
-    fn unaryResolved(self: Sender, options: call.UnaryCallOptions, policy: ?call.RetryPolicy) Error!call.UnaryResponse {
+    fn unaryResolved(self: Sender, options: call.UnaryCallOptions, retry_policy: ?call.RetryPolicy, hedging_policy: ?call.HedgingPolicy) Error!call.UnaryResponse {
         const entered = std.Io.Clock.awake.now(self.state.io);
         if (options.message.len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
         _ = try call.parseRequestMetadata("POST", options.path, &.{ .{ .name = "content-type", .value = "application/grpc" }, .{ .name = "te", .value = "trailers" } });
         try call.validateCustomMetadata(options.metadata);
         try call.validateCustomBinaryMetadata(options.binary_metadata);
-        return self.state.unary(options, policy, entered);
+        return self.state.unary(
+            options,
+            retry_policy,
+            hedging_policy,
+            entered,
+        );
     }
 };
 
@@ -188,4 +196,5 @@ test {
     _ = @import("shared/orca/tests.zig");
     _ = @import("shared/outlier_detection_tests.zig");
     _ = @import("shared/weighted_round_robin_tests.zig");
+    _ = @import("shared/hedging_tests.zig");
 }

@@ -27,6 +27,12 @@ const JsonRetryPolicy = struct {
     perAttemptRecvTimeout: ?[]const u8 = null,
 };
 
+const JsonHedgingPolicy = struct {
+    maxAttempts: ?u32 = null,
+    hedgingDelay: ?[]const u8 = null,
+    nonFatalStatusCodes: ?[]const []const u8 = null,
+};
+
 const JsonMethodConfig = struct {
     name: []const JsonName = &.{},
     timeout: ?[]const u8 = null,
@@ -34,6 +40,7 @@ const JsonMethodConfig = struct {
     maxRequestMessageBytes: ?std.json.Value = null,
     maxResponseMessageBytes: ?std.json.Value = null,
     retryPolicy: ?JsonRetryPolicy = null,
+    hedgingPolicy: ?JsonHedgingPolicy = null,
 };
 
 const JsonServiceConfig = struct {
@@ -140,6 +147,25 @@ const OwnedMethodPolicy = struct {
     max_request_message_bytes: ?u32 = null,
     max_response_message_bytes: ?u32 = null,
     retry_policy: ?OwnedRetryPolicy = null,
+    hedging_policy: ?OwnedHedgingPolicy = null,
+};
+
+const OwnedHedgingPolicy = struct {
+    max_attempts: u8,
+    hedging_delay: std.Io.Duration,
+    non_fatal_status_codes: []const wire.Status,
+
+    fn view(
+        self: OwnedHedgingPolicy,
+        throttler: ?*call.RetryThrottler,
+    ) call.HedgingPolicy {
+        return .{
+            .max_attempts = self.max_attempts,
+            .hedging_delay = self.hedging_delay,
+            .non_fatal_status_codes = self.non_fatal_status_codes,
+            .throttler = throttler,
+        };
+    }
 };
 
 pub const MethodPolicy = struct {
@@ -148,6 +174,7 @@ pub const MethodPolicy = struct {
     max_request_message_bytes: ?u32,
     max_response_message_bytes: ?u32,
     retry_policy: ?call.RetryPolicy,
+    hedging_policy: ?call.HedgingPolicy,
 };
 
 const MethodConfig = struct {
@@ -202,6 +229,9 @@ pub const ServiceConfig = struct {
         const methods = try owned.alloc(MethodConfig, method_count);
         var method_index: usize = 0;
         for (parsed.methodConfig) |config| {
+            if (config.retryPolicy != null and config.hedgingPolicy != null) {
+                return error.InvalidServiceConfig;
+            }
             const policy = OwnedMethodPolicy{
                 .timeout = if (config.timeout) |timeout|
                     try parseDuration(timeout, true)
@@ -220,6 +250,10 @@ pub const ServiceConfig = struct {
                         retry,
                         options.enable_per_attempt_recv_timeout,
                     )
+                else
+                    null,
+                .hedging_policy = if (config.hedgingPolicy) |hedging|
+                    try parseHedgingPolicy(owned, hedging)
                 else
                     null,
             };
@@ -295,6 +329,14 @@ pub const ServiceConfig = struct {
         return policy.retry_policy;
     }
 
+    pub fn hedgingPolicy(
+        self: *ServiceConfig,
+        path: []const u8,
+    ) ?call.HedgingPolicy {
+        const policy = self.methodPolicy(path) orelse return null;
+        return policy.hedging_policy;
+    }
+
     pub fn loadBalancingConfig(self: *const ServiceConfig) LoadBalancingConfig {
         return self.load_balancing;
     }
@@ -360,6 +402,10 @@ pub const ServiceConfig = struct {
                 selected.retry_policy
             else
                 null,
+            .hedging_policy = if (policy) |selected|
+                selected.hedging_policy
+            else
+                null,
             .wait_for_ready = options.wait_for_ready orelse
                 (if (policy) |selected|
                     selected.wait_for_ready orelse false
@@ -398,6 +444,10 @@ pub const ServiceConfig = struct {
         }
         return .{
             .options = resolved,
+            .hedging_policy = if (policy) |selected|
+                selected.hedging_policy
+            else
+                null,
             .wait_for_ready = options.wait_for_ready orelse
                 (if (policy) |selected|
                     selected.wait_for_ready orelse false
@@ -424,11 +474,13 @@ pub const ResolveError = wire.Error || error{Timeout};
 pub const ResolvedUnary = struct {
     options: call.UnaryCallOptions,
     retry_policy: ?call.RetryPolicy,
+    hedging_policy: ?call.HedgingPolicy,
     wait_for_ready: bool,
 };
 
 pub const ResolvedStreaming = struct {
     options: streaming.RequestOptions,
+    hedging_policy: ?call.HedgingPolicy,
     wait_for_ready: bool,
 };
 
@@ -447,6 +499,10 @@ fn resolvedPolicy(
         .max_response_message_bytes = owned.max_response_message_bytes,
         .retry_policy = if (owned.retry_policy) |retry|
             retry.view(throttlerPointer(config))
+        else
+            null,
+        .hedging_policy = if (owned.hedging_policy) |hedging|
+            hedging.view(throttlerPointer(config))
         else
             null,
     };
@@ -906,6 +962,35 @@ fn parseRetryPolicy(
             return error.InvalidServiceConfig,
         .retryable_status_codes = statuses,
         .per_attempt_recv_timeout = per_attempt_recv_timeout,
+    };
+    policy.view(null).validate() catch return error.InvalidServiceConfig;
+    return policy;
+}
+
+fn parseHedgingPolicy(
+    allocator: std.mem.Allocator,
+    json: JsonHedgingPolicy,
+) Error!OwnedHedgingPolicy {
+    const raw_attempts = json.maxAttempts orelse
+        return error.InvalidServiceConfig;
+    if (raw_attempts < 2) return error.InvalidServiceConfig;
+    const statuses_raw = json.nonFatalStatusCodes orelse &.{};
+    const statuses = try allocator.alloc(wire.Status, statuses_raw.len);
+    for (statuses_raw, statuses, 0..) |raw, *status, index| {
+        status.* = parseStatusName(raw) orelse
+            return error.InvalidServiceConfig;
+        if (status.* == .ok) return error.InvalidServiceConfig;
+        for (statuses[0..index]) |prior| {
+            if (prior == status.*) return error.InvalidServiceConfig;
+        }
+    }
+    const policy = OwnedHedgingPolicy{
+        .max_attempts = @intCast(@min(raw_attempts, 5)),
+        .hedging_delay = if (json.hedgingDelay) |delay|
+            try parseDuration(delay, true)
+        else
+            .zero,
+        .non_fatal_status_codes = statuses,
     };
     policy.view(null).validate() catch return error.InvalidServiceConfig;
     return policy;

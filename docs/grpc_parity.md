@@ -139,9 +139,17 @@ existing HTTP/2 runtime:
   backoff and starts the next attempt sequentially. Exhausting attempts returns
   CANCELLED with `retry perAttemptRecvTimeout exceeded`. The shorter attempt
   boundary never replaces the overall wire `grpc-timeout`, and the overall RPC
-  deadline remains authoritative. This does not claim concurrent hedging,
+  deadline remains authoritative. SharedChannel's separate concurrent hedging
+  owner is described below,
+- gRFC A6 `hedgingPolicy` for replay-safe SharedChannel unary calls. The
+  service-config and direct APIs bound attempts to five, share one absolute
+  RPC deadline, delay or immediately accelerate hedges, apply positive and
+  negative server pushback, throttle amplification, return the last non-fatal
+  response after exhaustion, and cancel plus join every losing stream before
+  returning the winner. Ordinary Channel and all streaming shapes reject the
+  policy explicitly instead of silently serializing or ignoring it,
 - owned standard service-config JSON parsing for global `retryThrottling` and
-  method `retryPolicy`, including protobuf Duration strings, canonical status
+  method `retryPolicy` or mutually exclusive `hedgingPolicy`, including protobuf Duration strings, canonical status
   names, gRPC Core's five-attempt clamp, duplicate-selector rejection, and
   exact-method then service then default policy selection. Unknown unrelated
   service-config fields are ignored, and a more-specific config without a
@@ -2258,8 +2266,8 @@ Unary retry policies now implement grpc-core's experimental
 default parser ignores the field; after opt-in, the field must be a positive
 protobuf Duration and can replace the otherwise-required non-empty
 `retryableStatusCodes` list. This follows grpc-core's
-`GRPC_ARG_EXPERIMENTAL_ENABLE_HEDGING` parser gate without claiming its
-concurrent hedging implementation.
+`GRPC_ARG_EXPERIMENTAL_ENABLE_HEDGING` parser gate; it remains a sequential
+attempt timer independent from the concurrent policy below.
 
 The retry driver derives a fresh local attempt deadline after each backoff.
 Timeout cancels the physical HTTP/2 stream, counts as a throttle failure, and
@@ -2286,3 +2294,47 @@ Debug gate passed 440/440, public package checks passed 26/26, and the pinned
 grpc-cpp ReleaseFast h2c/TLS gate passed 9/9 build steps. Detailed reference,
 boundary and command evidence is recorded in
 `docs/evidence/grpc_per_attempt_recv_timeout/2026-10-31.json`.
+
+## Concurrent unary hedging
+
+SharedChannel now implements gRFC A6 `hedgingPolicy` even though the pinned
+grpc-core C++ retry filter still carries explicit hedging TODOs. Configuration
+requires `maxAttempts >= 2`, clamps untrusted values to five, accepts a missing
+or zero `hedgingDelay`, validates optional unique non-OK
+`nonFatalStatusCodes`, and rejects a method entry that also declares
+`retryPolicy`. The same policy is available explicitly through
+`Sender.unaryWithHedging` and public `grpc.HedgingPolicy`.
+
+One bounded `std.Io.Select` owns at most five attempt tasks plus versioned
+timers. The original attempt starts immediately. A current timer launches the
+next copy after `hedgingDelay`; stale timers created before non-fatal
+acceleration or server pushback are generation-invalidated and later ignored.
+Every physical attempt advertises the remaining overall `grpc-timeout` and
+adds `grpc-previous-rpc-attempts`; one uncommitted REFUSED_STREAM recovery
+remains transparent and does not consume a configured hedge.
+
+The first OK or fatal response wins. Returning it cancels and joins every
+outstanding job, which drives SharedChannel's existing stream-scoped CANCEL
+cleanup before application ownership resumes. A non-fatal response launches
+the next pending hedge immediately, unless positive pushback replaces that
+timer or malformed/negative pushback permanently stops new attempts. Already
+running attempts remain eligible to win. When every attempt returns non-fatal,
+the final completion is returned. Backend-local connection errors participate
+as UNAVAILABLE only when that status is configured non-fatal; OOM and local
+validation failures remain immediately fatal.
+
+Retry throttling is shared with sequential retry: the first attempt always
+runs, later timer or accelerated launches require a balance above half, each
+non-fatal completion debits one token, and an OK winner replenishes the
+configured ratio. One logical deadline caps running attempts and pending
+pushback timers; no per-attempt completion or timer can renew it.
+
+The policy is deliberately unary-only because arbitrary client streams lack a
+complete replay buffer. Ordinary Channel rejects it with
+`InvalidChannelOptions`, and SharedChannel streaming entry points return
+`InvalidSharedOptions`, rather than claiming hedging while sending only one
+copy. Real two-endpoint tests cover delayed racing, exact loser RST_STREAM
+CANCEL, immediate non-fatal acceleration, positive and negative pushback,
+pre-exhausted throttling, last-non-fatal selection, service-config activation,
+and both rejection boundaries. Evidence is recorded in
+`docs/evidence/grpc_shared_hedging/2026-10-31.json`.
