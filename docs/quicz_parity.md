@@ -28,6 +28,9 @@ zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":443"; ma=259
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":443"; ma=86400' --verify --expect-status=200 --min-body-bytes=100000 https://cloudflare-quic.com/
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":8443"; ma=86400' --verify --expect-status=200 --min-body-bytes=400 https://quic.tech/
 zig build interop-http3-public -Doptimize=ReleaseFast
+zig build interop-http3-quic-go -Doptimize=ReleaseFast
+zig build interop-http3-tquic -Doptimize=ReleaseFast
+zig build interop-connect-udp-h3 -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=upload --streams=2 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=1 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=4 --verbose
