@@ -292,6 +292,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     inline for (&.{
         "connectAttemptWithTimeout",
         "connectTlsAddressWithTimeout",
+        "connectTlsHostViaProxyWithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",
@@ -302,6 +303,10 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     }) |decl| try std.testing.expect(@hasDecl(h2.EndpointClient, decl));
     try std.testing.expect(@hasDecl(h2, "ReconnectingEndpointClient"));
     try std.testing.expect(@hasDecl(h2, "ReconnectingEndpointTarget"));
+    try std.testing.expect(@hasField(
+        h2.ReconnectingEndpointTarget,
+        "tls_http_proxy",
+    ));
     try std.testing.expect(@hasDecl(h2, "ReconnectingSessionHandle"));
     inline for (&.{
         "connectAttemptWithTimeout",
@@ -346,6 +351,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectHostWithTimeout(std.testing.allocator, undefined, "localhost", 80, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsAddressWithTimeout(std.testing.allocator, undefined, undefined, "localhost", "localhost", .{}, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostWithTimeout(std.testing.allocator, undefined, "localhost", 443, .{}, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostViaProxyWithTimeout(std.testing.allocator, undefined, "localhost", 443, .{ .uri = "http://proxy.invalid" }, .{}, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptTlsConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
 }
@@ -1728,6 +1734,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
         "connectTlsHostWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "HttpConnectProxy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectTlsHostViaProxyWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "connectTlsHostViaProxyWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,

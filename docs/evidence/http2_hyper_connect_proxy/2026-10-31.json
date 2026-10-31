@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "TLS HTTP/2 and WebTransport HTTP/2 through HTTP CONNECT proxies",
+  "decision": "accepted",
+  "scope": {
+    "http2": "Client connectTlsHostViaProxy APIs with relative, absolute, and unbounded entry points",
+    "webtransport": "direct EndpointClient setup and generation-scoped ReconnectingEndpointClient target",
+    "proxy_protocol": "HTTP/1.1 CONNECT carrying raw origin TLS and HTTP/2 after status 200",
+    "deadline": "one awake-clock timestamp spans proxy resolution, TCP, CONNECT, origin TLS/h2 ALPN, HTTP/2 bootstrap, and endpoint admission",
+    "identity": "the proxy resolves the origin authority; TLS identity, SNI, and HTTP/2 authority remain the caller origin",
+    "credentials": "Proxy-Authorization is present only on CONNECT and absent from origin HTTP/2 and WebTransport requests"
+  },
+  "reference": {
+    "implementation": "Hyper HTTP/1.1 CONNECT proxy and HTTP/2 origin",
+    "revision": "084473f728f9d07b3be5845475aa2f62ed9ff579",
+    "source_clean": true,
+    "files": [
+      "/nav_env/Work/hyper/examples/http_proxy.rs",
+      "/nav_env/Work/hyper/src/client/conn/http1.rs",
+      "/nav_env/Work/hyper/src/proto/h2/mod.rs"
+    ],
+    "boundary": "Hyper independently parses CONNECT, authenticates the proxy header, relays opaque TLS bytes, negotiates HTTP/2 at the origin, and rejects a leaked proxy header"
+  },
+  "implementation": {
+    "composition": "HttpConnectProxy owns proxy URI, proxy-only headers, and HTTP/1 limits separately from origin HTTP/2 limits",
+    "ownership": "CONNECT returns one raw stream whose ownership transfers to the TLS/HTTP2 constructor on every return path",
+    "validation": "host and deadline validation plus authority allocation precede proxy network admission",
+    "webtransport_reconnect": "the reconnect target reopens a new CONNECT, TLS, and HTTP/2 generation after transport loss; accepted Sessions are never migrated",
+    "settings_storage": "four WebTransport current and acknowledged SETTINGS snapshots moved behind one lazy connection pointer",
+    "layout": "archived clean HEAD measured Connection at 2176 Debug and 2096 ReleaseFast bytes; accepted code measures 2080 and 2000 while retaining the 48-byte public initial WebTransport limits value"
+  },
+  "native_cases": [
+    "HTTP/2 proxy authentication and exact CONNECT authority",
+    "origin TLS 1.3 authentication, mandatory h2 ALPN, https scheme, and exact authority",
+    "no Proxy-Authorization at the origin",
+    "transaction-safe zero-timeout and authority-allocation failure before proxy I/O",
+    "WebTransport Session and DATAGRAM through a CONNECT tunnel",
+    "first proxy generation closes, old handle becomes stale, second proxy generation completes a new Session",
+    "dynamic WebTransport SETTINGS retain separate submitted and acknowledged snapshots under failed output"
+  ],
+  "results": {
+    "proxy_focused_debug": "150/150 passed",
+    "settings_and_layout_debug": "141/141 passed",
+    "layout_release_fast": "137/137 passed",
+    "http2_webtransport_debug": "1556/1556 passed without leaks",
+    "package": "26/26 passed",
+    "hyper_release_fast": "9/9 build steps passed; h2c, direct TLS, proxied TLS, pool, redirect, cancellation, keepalive, KeyUpdate, and GOAWAY scenarios passed"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "hyper": "1.11.0 at 084473f728f9d07b3be5845475aa2f62ed9ff579",
+    "rust_io": "tokio",
+    "netz_io": "zio-std-io"
+  },
+  "source_sha256": {
+    "src/http2/runtime.zig": "fae0850d91766555fe993fddc67e0d535fa82f95ea79f06fe6d482effc1fc13b",
+    "src/http2/runtime/proxy_tests.zig": "df8bce77e71110a48459599ca84fcac5496dbe302ce0b218acabdd24858e1d1f",
+    "src/http2/runtime/settings/apply.zig": "2418d4252ee9f8c91f48ffc6531e4fa7aaec2bd87a759ef50056a3021dd875cc",
+    "src/http2/runtime/settings/webtransport.zig": "0bb50943a1e9c0684901a17257d20a880b55da0fd3afc7614e835cc5a720e7ac",
+    "src/http2/runtime/settings/webtransport_tests.zig": "1218c20012d89fae156c7ee4f4eebb4609087845fc4cfb7aa1c735b2e003b748",
+    "src/webtransport/h2/endpoint_client.zig": "f919dacdf153408468554668b4b5a251f03e082de9afac16b25a6a80e4ce6de0",
+    "src/webtransport/h2/endpoint_client/reconnecting/core.zig": "3c58dd44f11f97b3093fff282ae38549d4aded82affc7fa8fa5f4d4b50553649",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "0536bd22bebe5988afb8b2ba70d4290cb1ec0c752322ca7144d89c90289ab191",
+    "tools/hyper_http2_flow/Cargo.toml": "0b4b7212b40b4e61b2dd950be4d689d5b83389f703c07f10e069522b9c31d130",
+    "tools/hyper_http2_flow/src/bin/interop_proxy.rs": "35b86802d812f7c7cb7b6b7b4982a83902fa3eb3437f256633ba8bd359ef30f4",
+    "tools/hyper_http2_flow/src/bin/interop_server.rs": "8fd1db6e7e4977860069ffca79c7084ccd09618e198e308db997cd64a07651af",
+    "tools/interop/http2_hyper_client.zig": "68061c281ab53da4d61b3167a8ff72bbca82ace8090865da2d574b3f9ff6c450",
+    "tools/interop/http2_hyper_client.sh": "5b17a13433c5b6926c2fe8d1855990d462d16cb0ce5cc09394483ee77a7b4076",
+    "test/package_test.zig": "623be2a25a9b52385d39038bada28591cada5b8054795aa9467dae4b1771b0d0"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='HTTP CONNECT proxy' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/2 connection keeps optional state compact' -Dtest-filter='WebTransport SETTINGS' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='HTTP/2 connection keeps optional state compact' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/2' -Dtest-filter='WebTransport' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http2-hyper-client -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "independent draft-15 WebTransport-over-HTTP2 browser protocol coverage remains open; this gate independently verifies the proxy and HTTP/2 transport layers"
+}

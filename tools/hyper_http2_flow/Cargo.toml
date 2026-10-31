@@ -16,6 +16,10 @@ name = "netz-hyper-http2-interop-client"
 path = "src/bin/interop_client.rs"
 
 [[bin]]
+name = "netz-hyper-http-connect-proxy"
+path = "src/bin/interop_proxy.rs"
+
+[[bin]]
 name = "netz-h2-push-peer"
 path = "src/bin/push_peer.rs"
 

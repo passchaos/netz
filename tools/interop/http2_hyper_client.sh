@@ -7,9 +7,15 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 manifest="$repo_root/tools/hyper_http2_flow/Cargo.toml"
 server_binary="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-http2-interop-server"
 hyper_client_binary="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-http2-interop-client"
+proxy_binary="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-http-connect-proxy"
 work=$(mktemp -d)
 server_pid=
+proxy_pid=
 cleanup() {
+  if [[ -n "$proxy_pid" ]]; then
+    kill "$proxy_pid" 2>/dev/null || true
+    wait "$proxy_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -59,7 +65,8 @@ EOF
 cargo build --release --offline --locked \
   --manifest-path "$manifest" \
   --bin netz-hyper-http2-interop-server \
-  --bin netz-hyper-http2-interop-client
+  --bin netz-hyper-http2-interop-client \
+  --bin netz-hyper-http-connect-proxy
 
 port=$(free_tcp_port)
 
@@ -249,6 +256,68 @@ grep -Fq \
   "$work/tls-netz-client.log"
 cat "$work/tls-netz-client.log"
 echo 'Hyper TLS HTTP/2 server -> netz client interop passed'
+
+port=$(free_tcp_port)
+proxy_port=$(free_tcp_port)
+"$server_binary" "$port" "$work/cert.pem" "$work/key.pem" \
+  >"$work/tls-proxy-origin.log" 2>&1 &
+server_pid=$!
+wait_for_server "$work/tls-proxy-origin.log" \
+  'Hyper HTTP/2 interop server listening'
+"$proxy_binary" "$proxy_port" >"$work/hyper-proxy.log" 2>&1 &
+proxy_pid=$!
+for _ in $(seq 1 200); do
+  if grep -q 'Hyper CONNECT proxy listening' "$work/hyper-proxy.log" \
+      2>/dev/null; then
+    break
+  fi
+  if ! kill -0 "$proxy_pid" 2>/dev/null; then
+    cat "$work/hyper-proxy.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! grep -q 'Hyper CONNECT proxy listening' "$work/hyper-proxy.log" \
+    2>/dev/null; then
+  echo 'timed out waiting for Hyper CONNECT proxy' >&2
+  cat "$work/hyper-proxy.log" >&2
+  exit 1
+fi
+if ! timeout 10s "$client" "$port" "$work/cert.pem" \
+    --proxy "$proxy_port" >"$work/tls-proxy-client.log" 2>&1; then
+  cat "$work/tls-proxy-client.log" >&2
+  cat "$work/hyper-proxy.log" >&2
+  cat "$work/tls-proxy-origin.log" >&2
+  exit 1
+fi
+if ! wait "$server_pid"; then
+  server_pid=
+  cat "$work/tls-proxy-client.log" >&2
+  cat "$work/hyper-proxy.log" >&2
+  cat "$work/tls-proxy-origin.log" >&2
+  exit 1
+fi
+server_pid=
+if ! wait "$proxy_pid"; then
+  proxy_pid=
+  cat "$work/tls-proxy-client.log" >&2
+  cat "$work/hyper-proxy.log" >&2
+  cat "$work/tls-proxy-origin.log" >&2
+  exit 1
+fi
+proxy_pid=
+grep -Fq \
+  "netz HTTP/2 client tunneled Hyper TLS through Hyper CONNECT proxy: origin=localhost:$port proxy_authorization=isolated deadline=single client_io=zio-std-io proxy_io=hyper-tokio server_io=hyper-tokio" \
+  "$work/tls-proxy-client.log"
+grep -Fq \
+  "Hyper CONNECT proxy tunneled netz TLS HTTP/2: authority=localhost:$port proxy_authorization=true client_io=zio-std-io proxy_io=hyper-tokio" \
+  "$work/hyper-proxy.log"
+grep -Fq \
+  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio' \
+  "$work/tls-proxy-origin.log"
+cat "$work/tls-proxy-client.log"
+cat "$work/hyper-proxy.log"
+echo 'netz TLS HTTP/2 client -> Hyper CONNECT proxy -> Hyper server interop passed'
 
 port=$(free_tcp_port)
 "$server_binary" "$port" "$work/cert.pem" "$work/key.pem" --pool \

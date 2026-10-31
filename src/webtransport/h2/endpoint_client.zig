@@ -289,6 +289,55 @@ pub const EndpointClient = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return connectTlsHostWithDeadline(allocator, io, host, port, limits, tls_options, options, .fromNow(io, .{ .raw = timeout, .clock = .awake }));
     }
+    pub fn connectTlsHostViaProxyWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        proxy: http2.runtime.HttpConnectProxy,
+        limits: http2.runtime.Limits,
+        tls_options: http2.runtime.TlsConnectOptions,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.runtime.Client
+            .connectTlsHostViaProxyWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            proxy,
+            limits,
+            tls_options,
+            deadline,
+        );
+        return init(allocator, connection, options);
+    }
+    pub fn connectTlsHostViaProxyWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        proxy: http2.runtime.HttpConnectProxy,
+        limits: http2.runtime.Limits,
+        tls_options: http2.runtime.TlsConnectOptions,
+        options: Options,
+        timeout: std.Io.Duration,
+    ) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostViaProxyWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            proxy,
+            limits,
+            tls_options,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
 
     fn submit(self: EndpointClient, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
         if (deadline.clock != .awake or deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0) return error.Timeout;

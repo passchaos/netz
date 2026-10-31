@@ -10,17 +10,29 @@ const sibling_response_bytes = 16 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2 or args.len > 4) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 5) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const pool_mode = std.mem.eql(u8, args[args.len - 1], "--pool");
+    const proxy_mode = args.len == 5 and
+        std.mem.eql(u8, args[3], "--proxy");
+    if (args.len == 5 and !proxy_mode) return error.InvalidArgument;
+    const proxy_port = if (proxy_mode)
+        try std.fmt.parseInt(u16, args[4], 10)
+    else
+        0;
+    if (proxy_mode and proxy_port == 0) return error.InvalidArgument;
+    const pool_mode = !proxy_mode and
+        std.mem.eql(u8, args[args.len - 1], "--pool");
     const redirect_mode = std.mem.eql(
         u8,
         args[args.len - 1],
         "--redirect",
     );
     if (pool_mode and redirect_mode) return error.InvalidArgument;
-    const effective_len = args.len - @intFromBool(pool_mode or redirect_mode);
+    const effective_len = if (proxy_mode)
+        3
+    else
+        args.len - @intFromBool(pool_mode or redirect_mode);
     if (effective_len != 2 and effective_len != 3) {
         return error.InvalidArgument;
     }
@@ -74,17 +86,46 @@ pub fn main(init: std.process.Init) !void {
             limits,
         );
     }
-    var connection = if (tls_enabled)
+    var proxy_uri_buffer: [64]u8 = undefined;
+    const proxy_uri = if (proxy_mode)
+        try std.fmt.bufPrint(
+            &proxy_uri_buffer,
+            "http://127.0.0.1:{d}",
+            .{proxy_port},
+        )
+    else
+        "";
+    const tls_options = netz.http2.runtime.TlsConnectOptions{
+        .ca_bundle = if (tls_enabled) .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } else null,
+    };
+    var connection = if (proxy_mode)
+        try netz.http2.runtime.Client.connectTlsHostViaProxyWithTimeout(
+            allocator,
+            io,
+            "localhost",
+            port,
+            .{
+                .uri = proxy_uri,
+                .options = .{ .headers = &.{.{
+                    .name = "Proxy-Authorization",
+                    .value = "Basic aHlwZXItcHJveHk=",
+                }} },
+            },
+            limits,
+            tls_options,
+            .fromSeconds(5),
+        )
+    else if (tls_enabled)
         try netz.http2.runtime.Client.connectTlsHost(
             allocator,
             io,
             "localhost",
             port,
             limits,
-            .{ .ca_bundle = .{
-                .bundle = &ca_bundle,
-                .lock = &ca_lock,
-            } },
+            tls_options,
         )
     else
         try netz.http2.runtime.Client.connect(
@@ -145,6 +186,12 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/2 client interoperated with Hyper: transport={s} alpn={s} status=201 body=14 trailers=1\n",
         .{ if (tls_enabled) "tls" else "h2c", if (tls_enabled) "h2" else "n/a" },
     );
+    if (proxy_mode) {
+        std.debug.print(
+            "netz HTTP/2 client tunneled Hyper TLS through Hyper CONNECT proxy: origin=localhost:{d} proxy_authorization=isolated deadline=single client_io=zio-std-io proxy_io=hyper-tokio server_io=hyper-tokio\n",
+            .{port},
+        );
+    }
 
     // Hyper's connection driver owns the PING/PONG path independently of a
     // request body. Waiting through an idle interval proves the public netz

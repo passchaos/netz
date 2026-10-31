@@ -565,6 +565,7 @@ async fn handle(
     if request.method() != Method::POST
         || request.uri().path_and_query().map(|value| value.as_str()) != Some("/interop?from=netz")
         || request.version() != Version::HTTP_2
+        || request.headers().contains_key("proxy-authorization")
         || request.headers().get("x-netz-request")
             != Some(&HeaderValue::from_static("request-header"))
     {

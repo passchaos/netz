@@ -67,18 +67,47 @@ test "HTTP/2 WebTransport SETTINGS use assigned codepoints and reject invalid ca
     try std.testing.expect(!parsed.enabled);
 }
 
+test "HTTP/2 initial WebTransport quotas stay lazy until SETTINGS acknowledgement" {
+    var connection: runtime.Connection = .{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .webtransport = initial },
+        .awaiting_settings_ack = true,
+    };
+    try std.testing.expectEqualDeep(
+        http2.WebTransportSettings{},
+        connection.localWebTransportSettings(),
+    );
+    try std.testing.expect(connection.webtransport_settings.state == null);
+    connection.awaiting_settings_ack = false;
+    try std.testing.expectEqualDeep(
+        initial,
+        connection.localWebTransportSettings(),
+    );
+    try std.testing.expect(connection.webtransport_settings.state == null);
+}
+
 test "HTTP/2 WebTransport settings update rejects invalid admission without output allocation" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var connection: runtime.Connection = .{ .allocator = failing.allocator(), .io = io, .stream = undefined, .role = .client, .awaiting_settings_ack = true, .local_webtransport_sent = initial, .local_webtransport_acknowledged = initial };
+    var connection: runtime.Connection = .{ .allocator = failing.allocator(), .io = io, .stream = undefined, .role = .client, .limits = .{ .webtransport = initial }, .awaiting_settings_ack = true };
+    try connection.webtransport_settings.prepareLocal(allocator, initial);
+    defer connection.webtransport_settings.deinit(allocator);
     try std.testing.expectError(error.SettingsAckPending, connection.updateWebTransportSettingsWithTimeout(updated, .fromSeconds(1)));
     try std.testing.expectError(error.Timeout, connection.updateWebTransportSettingsWithTimeout(updated, .zero));
     connection.awaiting_settings_ack = false;
     try std.testing.expectError(error.InvalidSetting, connection.updateWebTransportSettingsWithTimeout(updated, .fromSeconds(1)));
     try std.testing.expectEqualDeep(initial, connection.localWebTransportSettings());
-    try std.testing.expectEqualDeep(initial, connection.local_webtransport_sent);
+    try std.testing.expectEqualDeep(
+        initial,
+        connection.webtransport_settings.localSent(
+            connection.limits.webtransport,
+        ),
+    );
     try std.testing.expect(!failing.has_induced_failure);
 }
 
@@ -89,11 +118,15 @@ test "HTTP/2 WebTransport settings failed output leaves acknowledged and submitt
     var fixture = try @import("../testing/blocked_output.zig").BlockedOutput.init(io, .client);
     defer fixture.deinit();
     fixture.connection.limits.enable_connect_protocol = true;
-    fixture.connection.local_webtransport_sent = initial;
-    fixture.connection.local_webtransport_acknowledged = initial;
+    fixture.connection.limits.webtransport = initial;
     try fixture.saturate();
     try std.testing.expectError(error.Timeout, fixture.connection.updateWebTransportSettingsWithTimeout(updated, .fromMilliseconds(10)));
-    try std.testing.expectEqualDeep(initial, fixture.connection.local_webtransport_sent);
+    try std.testing.expectEqualDeep(
+        initial,
+        fixture.connection.webtransport_settings.localSent(
+            fixture.connection.limits.webtransport,
+        ),
+    );
     try std.testing.expectEqualDeep(initial, fixture.connection.localWebTransportSettings());
     try std.testing.expect(!fixture.connection.awaiting_settings_ack);
     try std.testing.expect(!fixture.connection.isReusable());

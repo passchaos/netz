@@ -2025,8 +2025,28 @@ and sweep allocation failure during wrapper construction.
 Machine-readable reconnect evidence is recorded in
 `docs/evidence/webtransport_h2_reconnecting_client/2026-10-31.json`.
 
-Independent draft-15 browser/proxy interop remains open; the local reference
-set still has no second WebTransport-over-HTTP2 implementation.
+HTTP/2 endpoint clients can now establish their origin connection through an
+HTTP/1.1 CONNECT proxy. `HttpConnectProxy` keeps URI, proxy-only headers and
+HTTP/1 limits separate from origin HTTP/2 limits. One absolute deadline spans
+proxy resolution/TCP/CONNECT, origin TLS authentication with mandatory `h2`
+ALPN, HTTP/2 SETTINGS and endpoint admission. The CONNECT authority is derived
+from the origin host and port; that same host remains the TLS identity/SNI and
+HTTP/2 `:authority`, while `Proxy-Authorization` is never copied into the
+WebTransport CONNECT.
+
+Both direct `EndpointClient` setup and the reconnecting target expose this
+route. A real proxy regression carries a Session and DATAGRAM through the
+tunnel, closes its first HTTP/2 generation, rejects the stale handle, then
+opens a second proxy/TLS/H2 generation and completes another Session. The
+independent Hyper process gate supplies the HTTP/1.1 CONNECT proxy and HTTP/2
+origin, verifies proxy authentication at the tunnel boundary, rejects that
+header at the origin, and runs the existing TLS KeyUpdate, multiplexing,
+cancellation, keepalive and GOAWAY exchange through the tunnel.
+
+Independent draft-15 browser protocol interop remains open; the local
+reference set still has no second WebTransport-over-HTTP2 implementation. The
+proxy transport layer is independently covered, but the Capsule/virtual-stream
+state machine remains cross-checked by Netz peers.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

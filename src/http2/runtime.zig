@@ -21,6 +21,7 @@ pub const ServerDuplexPumpEvent = union(enum) {
     wake,
 };
 const header_output = @import("runtime/headers/output.zig");
+const webtransport_settings = @import("runtime/settings/webtransport.zig");
 test {
     _ = @import("runtime/settings/webtransport_tests.zig");
     _ = @import("runtime/client/authority_tests.zig");
@@ -216,6 +217,14 @@ pub const RedirectPolicy = uri_redirect.Policy;
 pub const RedirectOptions = struct {
     policy: RedirectPolicy = .{},
     tls: TlsConnectOptions = .{},
+};
+
+/// One HTTP/1.1 CONNECT proxy used to establish a TLS HTTP/2 transport.
+/// Proxy headers are scoped to CONNECT and are never forwarded to the origin.
+pub const HttpConnectProxy = struct {
+    uri: []const u8,
+    options: http1_runtime.ProxyOptions = .{},
+    limits: http1_runtime.Limits = .{},
 };
 
 const ServeReadConnectionError = enum {
@@ -1057,7 +1066,7 @@ pub const Server = struct {
         connection.applyLocalLimits();
         errdefer connection.close();
         try connection.applySettings(peer_settings);
-        connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
+        connection.webtransport_settings.acknowledgePeer();
         try connection.reservePeerStream(1);
         errdefer connection.releasePeerStream(1);
         try connection.rememberResponseSemantics(
@@ -1386,7 +1395,7 @@ fn acceptConnectionTransportMaybeBefore(
     }
     connection.applyLocalLimits();
     try connection.applySettings(peer_settings);
-    connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
+    connection.webtransport_settings.acknowledgePeer();
     return connection;
 }
 
@@ -2364,6 +2373,107 @@ pub const Client = struct {
         );
     }
 
+    /// Establish TLS HTTP/2 through one HTTP/1.1 CONNECT proxy. The origin
+    /// hostname is resolved by the proxy, while TLS identity, SNI and
+    /// :authority remain bound to `host` and `port`.
+    pub fn connectTlsHostViaProxy(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        proxy: HttpConnectProxy,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const parsed = try endpoint_host.parse(host, port);
+        const authority = try parsed.authorityAlloc(allocator, port);
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(authority);
+        const stream = try http1_runtime.Client.connectTunnelViaProxyUri(
+            allocator,
+            io,
+            proxy.uri,
+            authority,
+            proxy.options,
+            proxy.limits,
+        );
+        authority_owned = false;
+        return connectTlsStream(
+            allocator,
+            io,
+            stream,
+            parsed.host,
+            authority,
+            limits,
+            tls_options,
+        );
+    }
+
+    /// Preserve one absolute budget across proxy resolution/TCP/CONNECT,
+    /// origin TLS authentication with h2 ALPN, and HTTP/2 bootstrap.
+    pub fn connectTlsHostViaProxyWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        proxy: HttpConnectProxy,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const parsed = try endpoint_host.parse(host, port);
+        const authority = try parsed.authorityAlloc(allocator, port);
+        var authority_owned = true;
+        errdefer if (authority_owned) allocator.free(authority);
+        const stream = try http1_runtime.Client
+            .connectTunnelViaProxyUriWithDeadline(
+            allocator,
+            io,
+            proxy.uri,
+            authority,
+            proxy.options,
+            proxy.limits,
+            deadline,
+        );
+        authority_owned = false;
+        return connectTlsStreamBefore(
+            allocator,
+            io,
+            stream,
+            parsed.host,
+            authority,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    pub fn connectTlsHostViaProxyWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        proxy: HttpConnectProxy,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostViaProxyWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            proxy,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect to an already resolved address while verifying TLS against a
     /// separate DNS or IP identity. This keeps service discovery and certificate/SNI
     /// identity independent without weakening mandatory HTTP/2 ALPN checks.
@@ -3224,7 +3334,7 @@ pub const Client = struct {
                     &.{},
                     deadline,
                 );
-                connection.peer_webtransport_acknowledged = connection.peer_webtransport_settings;
+                connection.webtransport_settings.acknowledgePeer();
             }
         }
     }
@@ -3992,10 +4102,7 @@ pub const Connection = struct {
     /// the last advertised slot; use the next operation's original deadline.
     peer_reset_admission_pending: bool = false,
     peer_enable_connect_protocol: bool = false,
-    peer_webtransport_settings: http2.WebTransportSettings = .{},
-    peer_webtransport_acknowledged: http2.WebTransportSettings = .{},
-    local_webtransport_sent: http2.WebTransportSettings = .{},
-    local_webtransport_acknowledged: http2.WebTransportSettings = .{},
+    webtransport_settings: webtransport_settings.LazyState = .{},
     peer_enable_push: bool = true,
     peer_no_rfc7540_priorities: bool = false,
     peer_priority_setting_seen: bool = false,
@@ -4143,6 +4250,7 @@ pub const Connection = struct {
             self.allocator.destroy(pending);
         }
         self.priority_state.deinit(self.allocator);
+        self.webtransport_settings.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
         self.response_semantics_index.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
@@ -4262,12 +4370,17 @@ pub const Connection = struct {
     /// Capture this value at CONNECT admission; later updates belong to new
     /// Sessions and must not modify an established Session's initial credit.
     pub fn peerWebTransportSettings(self: *const Connection) http2.WebTransportSettings {
-        return self.peer_webtransport_acknowledged;
+        return self.webtransport_settings.peerAcknowledged();
     }
 
     /// Last locally advertised WebTransport SETTINGS acknowledged by the peer.
     pub fn localWebTransportSettings(self: *const Connection) http2.WebTransportSettings {
-        return self.local_webtransport_acknowledged;
+        return self.webtransport_settings.localAcknowledged(
+            if (self.awaiting_settings_ack)
+                .{}
+            else
+                self.limits.webtransport,
+        );
     }
 
     pub fn updateWebTransportSettingsWithDeadline(self: *Connection, settings: http2.WebTransportSettings, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
@@ -4277,8 +4390,12 @@ pub const Connection = struct {
         var values: [7]http2.Setting = undefined;
         var payload: [max_settings_payload_len]u8 = undefined;
         const encoded = try encodeSettingsPayloadInto(&payload, settings.write(&values));
+        try self.webtransport_settings.prepareLocal(
+            self.allocator,
+            self.limits.webtransport,
+        );
         try self.writeControlFrameUntil(.settings, 0, encoded, deadline);
-        self.local_webtransport_sent = settings;
+        self.webtransport_settings.setLocalSent(settings);
         self.awaiting_settings_ack = true;
     }
 
@@ -14965,7 +15082,9 @@ pub const Connection = struct {
             if (frame_type == .window_update) {
                 self.resetPeerPingEnforcement();
             }
-            if (frame_type == .settings and flags & flag_ack != 0) self.peer_webtransport_acknowledged = self.peer_webtransport_settings;
+            if (frame_type == .settings and flags & flag_ack != 0) {
+                self.webtransport_settings.acknowledgePeer();
+            }
             return;
         }
         writeFrameTransport(
@@ -14981,7 +15100,9 @@ pub const Connection = struct {
             return err;
         };
         if (frame_type == .window_update) self.resetPeerPingEnforcement();
-        if (frame_type == .settings and flags & flag_ack != 0) self.peer_webtransport_acknowledged = self.peer_webtransport_settings;
+        if (frame_type == .settings and flags & flag_ack != 0) {
+            self.webtransport_settings.acknowledgePeer();
+        }
     }
 
     fn writeEncodedControlUntil(
@@ -18904,7 +19025,7 @@ pub const Connection = struct {
     fn applySettingsAck(self: *Connection) Error!void {
         if (!self.awaiting_settings_ack) return error.InvalidFrame;
         self.awaiting_settings_ack = false;
-        self.local_webtransport_acknowledged = self.local_webtransport_sent;
+        self.webtransport_settings.acknowledgeLocal();
         self.adaptive_pending_stream_target = null;
         try self.sendQueuedAdaptiveWindowUpdate();
     }
@@ -19134,8 +19255,6 @@ pub const Connection = struct {
     }
 
     fn applyLocalLimits(self: *Connection) void {
-        self.local_webtransport_sent = self.limits.webtransport;
-        if (!self.awaiting_settings_ack) self.local_webtransport_acknowledged = self.local_webtransport_sent;
         self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
         self.hpack_encoder.setMaxDynamicTableSize(
             self.allocator,
@@ -23813,8 +23932,8 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
         const connection_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 2_032,
-            .ReleaseFast, .ReleaseSmall => 1_952,
+            .Debug, .ReleaseSafe => 2_080,
+            .ReleaseFast, .ReleaseSmall => 2_000,
         };
         try std.testing.expectEqual(connection_size, @sizeOf(Connection));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
@@ -23824,7 +23943,7 @@ test "HTTP/2 connection keeps optional state compact" {
             @sizeOf(DuplexHeaderBlockSlot),
         );
         try std.testing.expectEqual(
-            @as(usize, 120),
+            @as(usize, 128),
             @sizeOf(ClientDuplexStream),
         );
         try std.testing.expectEqual(
@@ -23854,6 +23973,10 @@ test "HTTP/2 connection keeps optional state compact" {
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Connection, "priority_state")),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Connection, "webtransport_settings")),
         );
     }
 
@@ -40150,6 +40273,7 @@ test {
     _ = @import("runtime/connect_udp_relay_tests.zig");
     _ = @import("runtime/connect_ip_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
+    _ = @import("runtime/proxy_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/unix_tests.zig");

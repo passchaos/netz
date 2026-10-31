@@ -4072,3 +4072,41 @@ Evidence is recorded in `docs/evidence/http_pool_close/2026-10-29.json`.
 Plain close and observation calls keep their unbounded ownership-admission
 policy. The bounded close APIs provide an explicit interruption and retry
 contract; a timed-out close retains its pool object until cleanup is completed.
+
+## TLS HTTP/2 through HTTP CONNECT proxies
+
+HTTP/2 clients now compose the existing strict HTTP/1.1 CONNECT tunnel with
+origin TLS and HTTP/2 bootstrap through `HttpConnectProxy` and
+`connectTlsHostViaProxy{,WithTimeout,WithDeadline}`. The proxy URI, proxy-only
+headers and HTTP/1 resource limits remain distinct from origin HTTP/2 limits.
+The proxy resolves the CONNECT authority, but origin TLS identity/SNI and
+HTTP/2 `:authority` retain the caller's host and port. Proxy credentials are
+not present in the tunneled HTTP/2 request.
+
+The absolute-deadline form validates its awake clock before network admission
+and carries that same timestamp through proxy resolution/TCP, CONNECT request
+and response, certificate verification, mandatory `h2` ALPN, preface and peer
+SETTINGS. Timeout conversion occurs once at API entry. Validation and authority
+allocation precede proxy I/O; allocation failure releases owned metadata
+without opening a socket. Once CONNECT succeeds, the TLS/HTTP2 constructor owns
+the raw stream on every return path.
+
+The independent process gate uses Hyper `084473f7` in both proxy and origin
+roles. Hyper validates the CONNECT authority and proxy credential, forwards
+the raw TLS stream, and rejects any leaked `Proxy-Authorization` at the HTTP/2
+origin. Netz then completes TLS KeyUpdate, request/trailers, keepalive,
+flow-control cancellation with a healthy sibling, and graceful GOAWAY through
+that tunnel. The local regression independently checks exact origin scheme and
+authority plus transaction-safe timeout/OOM rejection. Evidence is recorded in
+`docs/evidence/http2_hyper_connect_proxy/2026-10-31.json`.
+
+The broad gate also exposed a stale compact-layout guard from the initial
+HTTP/2 WebTransport SETTINGS work. Four 28-byte current/acknowledged snapshots
+had been embedded in every Connection, including peers that never negotiate
+WebTransport. They now live behind one lazy pointer, as push and priority state
+already do. Debug/ReleaseFast Connection size falls from 2176/2096 to
+2080/2000 bytes; the remaining 48-byte increase over the older guard is the
+public initial `Limits.webtransport` value. Ordinary SETTINGS allocate nothing,
+while a peer WebTransport setting or local quota update creates and reuses one
+owned snapshot state. Failed validation remains allocation-free and failed
+output leaves submitted/acknowledged quotas unchanged.

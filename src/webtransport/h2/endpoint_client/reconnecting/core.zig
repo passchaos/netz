@@ -45,12 +45,20 @@ pub const Target = union(enum) {
         limits: http2.runtime.Limits = .{},
         tls: http2.runtime.TlsConnectOptions = .{},
     },
+    tls_http_proxy: struct {
+        host: []const u8,
+        port: u16,
+        proxy: http2.runtime.HttpConnectProxy,
+        limits: http2.runtime.Limits = .{},
+        tls: http2.runtime.TlsConnectOptions = .{},
+    },
     custom: CustomConnector,
 
     fn validate(self: Target) Error!void {
         switch (self) {
             .cleartext_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
             .tls_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
+            .tls_http_proxy => |value| if (value.port == 0) return error.InvalidReconnectOptions,
             else => {},
         }
     }
@@ -92,6 +100,17 @@ pub const Target = union(enum) {
                 io,
                 value.host,
                 value.port,
+                value.limits,
+                value.tls,
+                deadline,
+            ),
+            .tls_http_proxy => |value| http2.runtime.Client
+                .connectTlsHostViaProxyWithDeadline(
+                allocator,
+                io,
+                value.host,
+                value.port,
+                value.proxy,
                 value.limits,
                 value.tls,
                 deadline,
