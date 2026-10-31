@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const quic = @import("../../../quic/mod.zig");
-const deadline_policy = @import("../../../internal/deadline.zig");
+const field_section = @import("field_section.zig");
 const runtime_error = @import("../error.zig");
 const control_sender = @import("../control/send.zig");
 const body_sender = @import("body.zig");
@@ -132,16 +132,7 @@ fn sendConnectionStreamingHeadUntil(
     var send = quic.stream_state.SendState.init(stream_id);
     const fin = !body_allowed or (!trailers_pending and expected_length != null and expected_length.? == 0);
     if (progress) |committed| {
-        while (committed.* < scratch.encoded.items.len) {
-            if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-            writeFragment(connection, stream_id, scratch.encoded.items, fin, committed, options.max_stream_frame_data) catch |err| switch (err) {
-                error.PacingLimited => {
-                    if (deadline) |absolute| try connection.waitForPacingAvailabilityWithDeadline(absolute) else try connection.waitForPacingAvailability();
-                    continue;
-                },
-                else => return err,
-            };
-        }
+        try field_section.sendProgress(connection, stream_id, scratch.encoded.items, 0, fin, committed, options.max_stream_frame_data, deadline);
         send.next_offset = committed.*;
     } else {
         try send.appendFrames(
@@ -213,41 +204,4 @@ pub fn sendProgress(
         deadline,
         committed,
     );
-}
-
-fn writeFragment(
-    connection: *quic.one_rtt.Connection,
-    stream_id: u62,
-    encoded: []const u8,
-    fin: bool,
-    committed: *usize,
-    max_frame_data: usize,
-) Error!void {
-    if (max_frame_data == 0 or committed.* > encoded.len) return error.InvalidStreamRange;
-    const credit = @min(connection.connectionSendAvailable(), connection.streamSendAvailable(stream_id));
-    const limit = @min(encoded.len - committed.*, @min(max_frame_data, std.math.cast(usize, credit) orelse std.math.maxInt(usize)));
-    if (limit == 0) return error.FlowControlBlocked;
-    var length = @min(limit, connection.currentSendDatagramSize());
-    var frame = quic.Frame{ .stream = .{
-        .stream_id = stream_id,
-        .offset = committed.*,
-        .data = encoded[committed.*..][0..length],
-        .fin = fin and committed.* + length == encoded.len,
-    } };
-    if (try connection.packetLenForFramesAtOffset(0, &.{frame}) > connection.currentSendDatagramSize()) {
-        var low: usize = 0;
-        var high = length;
-        while (low < high) {
-            const middle = low + (high - low + 1) / 2;
-            frame.stream.data = encoded[committed.*..][0..middle];
-            frame.stream.fin = fin and committed.* + middle == encoded.len;
-            if (try connection.packetLenForFramesAtOffset(0, &.{frame}) <= connection.currentSendDatagramSize()) low = middle else high = middle - 1;
-        }
-        if (low == 0) return error.DatagramTooLarge;
-        length = low;
-        frame.stream.data = encoded[committed.*..][0..length];
-        frame.stream.fin = fin and committed.* + length == encoded.len;
-    }
-    try connection.trySend(&.{frame});
-    committed.* += length;
 }

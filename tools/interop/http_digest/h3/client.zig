@@ -77,7 +77,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             try std.testing.expectEqualStrings(expected, response.response.body);
         }
     }
-    std.debug.print("RESULT {{\"role\":\"netz-client\",\"version\":{d},\"requests\":9,\"streaming\":true,\"corruption_detected\":true,\"representation_scope\":true,\"io\":\"zio-std-io\"}}\n", .{if (version == .version_1) @as(u8, 1) else 2});
+    std.debug.print("RESULT {{\"role\":\"netz-client\",\"version\":{d},\"requests\":9,\"complete_request_bytes\":{d},\"streaming\":true,\"corruption_detected\":true,\"representation_scope\":true,\"io\":\"zio-std-io\"}}\n", .{ if (version == .version_1) @as(u8, 1) else 2, common.generated.len });
 }
 
 fn streaming(client: *netz.http3.runtime.HandshakeClient, until: std.Io.Clock.Timestamp, allocator: std.mem.Allocator) !void {

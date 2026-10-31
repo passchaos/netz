@@ -49,6 +49,9 @@ def pair(server_args, client_args, version, expected_server, expected_client):
             assert result["role"] == role and result["version"] == version and result["requests"] == len(PATHS), result
         go_result = server_result[0] if expected_server.startswith("quic-go") else client_result[0]
         assert go_result["connections"] == 1 and go_result["paths"] == PATHS
+        assert go_result["complete_request_bytes"] == 9216
+        if expected_client == "netz-client":
+            assert client_result[0]["complete_request_bytes"] == 9216
         assert go_result["tls"] == "TLSv1.3" and go_result["alpn"] == "h3"
         print(server_output.strip())
         print(client_output.strip())

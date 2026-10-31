@@ -1,0 +1,15 @@
+{
+  "status": "reproduced",
+  "base_commit": "f1d6525d",
+  "driver_sha256": "e35db0faf2a368eeeaad7f25ea36920a8bcbf0d8c3406a50832fc0a0a4844fd2",
+  "command": "python3 tools/interop/http_digest/h3/run.py <baseline-debug-driver>",
+  "runtime": "HandshakeClient.requestWithDeadline",
+  "request_path": "/generated",
+  "complete_request_bytes": 9216,
+  "peer": "quic-go v0.59.0",
+  "peer_stream_window": 2048,
+  "peer_connection_window": 8192,
+  "result": "FlowControlBlocked in sendPreparedConnectionMessageUntil; no completed upload",
+  "log": "before.log",
+  "fixture_change": "Increase generated payload to 512 repetitions; preserve Appendix D vector as a separate constant"
+}

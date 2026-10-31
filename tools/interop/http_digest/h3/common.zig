@@ -2,7 +2,7 @@ const std = @import("std");
 const netz = @import("netz");
 
 pub const payload = "HTTP3 digest content " ** 512;
-pub const generated = "{\"hello\": \"world\"}";
+pub const generated = "{\"hello\": \"world\"}" ** 512;
 pub const paths = [_][]const u8{ "/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/sliced", "/finish" };
 
 pub fn deadline(io: std.Io) std.Io.Clock.Timestamp {

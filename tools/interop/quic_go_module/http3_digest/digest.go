@@ -13,7 +13,8 @@ import (
 )
 
 var payload = []byte(strings.Repeat("HTTP3 digest content ", 512))
-var generated = []byte(`{"hello": "world"}`)
+var appendixPayload = []byte(`{"hello": "world"}`)
+var generated = bytes.Repeat(appendixPayload, 512)
 var paths = []string{"/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/sliced", "/finish"}
 var digestMismatch = errors.New("digest mismatch")
 

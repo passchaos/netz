@@ -2783,6 +2783,32 @@ pub const Request = struct {
         stream_id: u64,
         encoder: anytype,
     ) Error!void {
+        return self.writeCompleteDynamic(list, allocator, peer_settings, stream_id, encoder, true);
+    }
+
+    /// Validate the complete body and trailers before encoding its initial
+    /// HEADERS. Runtimes can then send borrowed DATA under flow control without
+    /// retaining a second encoded copy of the complete request.
+    pub fn writeCompleteHeadDynamic(
+        self: Request,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+    ) Error!void {
+        return self.writeCompleteDynamic(list, allocator, peer_settings, stream_id, encoder, false);
+    }
+
+    fn writeCompleteDynamic(
+        self: Request,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+        include_body: bool,
+    ) Error!void {
         var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
         const fields_buf = try header_fields.acquire(
             allocator,
@@ -2825,17 +2851,21 @@ pub const Request = struct {
             self.trailers,
         );
         try validateContentLengthValue(declared_content_length, self.body.len);
-        try writeHeadersAndDataDynamic(
-            list,
-            allocator,
-            fields,
-            self.body,
-            self.trailers,
-            stream_id,
-            encoder,
-        );
+        if (include_body) {
+            try writeHeadersAndDataDynamic(
+                list,
+                allocator,
+                fields,
+                self.body,
+                self.trailers,
+                stream_id,
+                encoder,
+            );
+        } else {
+            try writeHeadersFrameDynamic(list, allocator, fields, stream_id, encoder);
+        }
         try queueIndexableFields(encoder, fields);
-        try queueIndexableFields(encoder, self.trailers);
+        if (include_body) try queueIndexableFields(encoder, self.trailers);
     }
 
     /// Encode only the initial HEADERS section for an incrementally-sent body.

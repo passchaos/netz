@@ -113,7 +113,7 @@ is a complete HTTP/3 DATA frame, preserving an exact application prefix when
 a later deadline expires. Request/response routing and push cancellation keep
 driving their owning receive loop.
 
-The complete matrix checks 32 requests and same-connection reuse after the
+The initial matrix checked 32 requests and same-connection reuse after the
 conflicting digest. A regression additionally limits flow credit to 128 bytes,
 expires the deadline after one socket send and requires exactly 125 content
 bytes plus the three-byte DATA header to remain committed without closing the
@@ -156,3 +156,14 @@ verified results are in `docs/evidence/http3_paced_parts/2026-10-31.json`.
 
 The sliced-body regression bundle passes 147/147 in Debug and ReleaseFast.
 Each independent HTTP3 matrix verifies all 36 requests.
+
+## Flow-aware complete HTTP/3 requests
+
+The `/generated` POST now carries 9,216 bytes through the complete request API
+against the fixed 2-KiB stream and 8-KiB connection windows. Both independent
+peers check the exact upload, Content-Digest header/trailer agreement and later
+same-connection requests for QUIC v1 and v2. The Appendix D digest example stays
+a separate fixed-vector input. Native complete requests send initial HEADERS,
+borrowed DATA and trailing HEADERS under one deadline with exact committed
+offsets. See [complete request behavior](http3_complete_requests.md) and
+`docs/evidence/http3_complete_requests/2026-11-01.json`.

@@ -38,6 +38,7 @@ const paced_body = @import("runtime/send/paced_body.zig");
 const body_sender = @import("runtime/send/body.zig");
 const body_fragment = @import("runtime/send/body_fragment.zig");
 const message_sender = @import("runtime/send/message.zig");
+const complete_request = @import("runtime/client/complete_request.zig");
 const send_packetizer = @import("runtime/send/packetizer.zig");
 const protected_send_module = @import("runtime/send/protected.zig");
 const send_scratch = @import("runtime/send/scratch.zig");
@@ -369,8 +370,6 @@ const sendConnectionMessage = message_sender.sendConnectionMessage;
 const sendConnectionMessageWithDeadline =
     message_sender.sendConnectionMessageWithDeadline;
 const prepareConnectionMessage = message_sender.prepareConnectionMessage;
-const sendPreparedConnectionMessageUntil =
-    message_sender.sendPreparedConnectionMessageUntil;
 const trySendConnectionRequestLiteral =
     message_sender.trySendConnectionRequestLiteral;
 const trySendConnectionStreamingRequestHeadLiteral =
@@ -14799,148 +14798,18 @@ pub const HandshakeClient = struct {
         request_options: http3.Request,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        if (self.callback_reader_active) return error.ConcurrentRead;
-        const stream_id = self.next_stream_id;
-        const next_stream_id = std.math.add(u62, stream_id, 4) catch
-            return error.StreamCreationError;
-        if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
-        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
-        const extended_connect = requestHasProtocol(request_options.headers);
-        if (!lifecycle_exists) {
-            try self.request_lifecycle.open(
-                stream_id,
-                request_options.method,
-                extended_connect,
-            );
-        } else if (!self.request_lifecycle.matchesRequest(
-            stream_id,
-            request_options.method,
-            extended_connect,
-        )) {
-            return error.UnexpectedStream;
-        }
-        if (lifecycle_exists and
-            !self.requestStreamSendRetryable(stream_id, next_stream_id))
-        {
-            return error.UnexpectedStream;
-        }
-        var transport_reserved = lifecycle_exists;
-        const qpack_checkpoint = self.qpack_encode.checkpoint();
-        var message_sent = false;
-        errdefer {
-            if (!message_sent) self.qpack_encode.rollbackAfter(qpack_checkpoint);
-            if (transport_reserved and self.requestStreamSendRetryable(
-                stream_id,
-                next_stream_id,
-            )) {
-                self.next_stream_id = stream_id;
-            } else {
-                if (transport_reserved and self.established.connection
-                    .nextLocalBidirectionalStreamId() == next_stream_id)
-                {
-                    self.next_stream_id = next_stream_id;
-                }
-                _ = self.request_lifecycle.finish(stream_id) catch false;
-            }
-        }
-        try prepareConnectionMessage(
-            self.allocator,
-            &self.stream_send_scratch,
-            stream_id,
-            request_options,
-            self.options,
-            self.control.settings.peer,
-            &self.qpack_encode,
-        );
-        if (deadline) |absolute| {
-            while (true) {
-                sendConnectionSettingsWithDeadline(
-                    &self.established.connection,
-                    &self.critical_stream_send_scratch,
-                    &self.control,
-                    &self.control_send,
-                    &self.qpack_encoder_send,
-                    &self.qpack_encoder_prefix_sent,
-                    &self.qpack_decoder_send,
-                    &self.qpack_decoder_prefix_sent,
-                    self.options,
-                    client_control_stream_id,
-                    absolute,
-                ) catch |err| switch (err) {
-                    error.FlowControlBlocked, error.CongestionLimited => {
-                        if (self.established.connection.closed()) return err;
-                        try self.receiveResponseProgressForSendUntil(
-                            stream_id,
-                            absolute,
-                        );
-                        continue;
-                    },
-                    else => |other| return other,
-                };
-                break;
-            }
-        } else {
-            try sendConnectionSettings(
-                &self.established.connection,
-                &self.critical_stream_send_scratch,
-                &self.control,
-                &self.control_send,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-                &self.qpack_decoder_send,
-                &self.qpack_decoder_prefix_sent,
-                self.options,
-                client_control_stream_id,
-            );
-        }
-        if (!lifecycle_exists) {
-            const transport_id = if (deadline) |absolute|
-                try self.openClientBidirectionalStreamWithDeadline(absolute)
-            else
-                try self.openClientBidirectionalStream();
-            std.debug.assert(transport_id == stream_id);
-            transport_reserved = true;
-        }
-        if (deadline) |absolute| {
-            while (true) {
-                sendPreparedConnectionMessageUntil(
-                    &self.established.connection,
-                    &self.stream_send_scratch,
-                    &self.critical_stream_send_scratch,
-                    &self.qpack_encode,
-                    &self.qpack_encoder_send,
-                    &self.qpack_encoder_prefix_sent,
-                    self.options,
-                    absolute,
-                ) catch |err| switch (err) {
-                    error.FlowControlBlocked, error.CongestionLimited => {
-                        if (self.established.connection.closed()) return err;
-                        try self.receiveResponseProgressForSendUntil(
-                            stream_id,
-                            absolute,
-                        );
-                        continue;
-                    },
-                    else => |other| return other,
-                };
-                break;
-            }
-        } else {
-            try sendPreparedConnectionMessageUntil(
-                &self.established.connection,
-                &self.stream_send_scratch,
-                &self.critical_stream_send_scratch,
-                &self.qpack_encode,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-                self.options,
-                null,
-            );
-        }
-        message_sent = true;
-        self.next_stream_id = next_stream_id;
-        return stream_id;
+        return complete_request.send(self, request_options, deadline, .{
+            .open = openCompleteRequestStream,
+            .receive = receivePacedRequestBody,
+            .retryable = requestStreamSendRetryable,
+        });
+    }
+
+    fn openCompleteRequestStream(self: *HandshakeClient, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!u62 {
+        return if (deadline) |absolute|
+            self.openClientBidirectionalStreamWithDeadline(absolute)
+        else
+            self.openClientBidirectionalStream();
     }
 
     /// Submit one complete request without waiting for pacing or reading UDP.
@@ -33001,9 +32870,7 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
     defer client.deinit();
 
     var encoded_capacity: usize = 0;
-    var frame_capacity: usize = 0;
     var encoded_ptr: [*]u8 = undefined;
-    var frame_ptr: [*]quic.Frame = undefined;
     var critical_capacity: usize = 0;
     var critical_frames_capacity: usize = 0;
     var critical_ptr: [*]u8 = undefined;
@@ -33030,14 +32897,13 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
             "repeated-response-value",
             repeated_value orelse return error.TestUnexpectedResult,
         );
+        // Complete HEADERS now submit borrowed fragments directly, retaining
+        // only encoded field-section storage between these dynamic exchanges.
+        try std.testing.expectEqual(@as(usize, 0), client.stream_send_scratch.frames.capacity);
         if (exchange == 0) {
             encoded_capacity = client.stream_send_scratch.encoded.capacity;
-            frame_capacity = client.stream_send_scratch.frames.capacity;
             try std.testing.expect(encoded_capacity != 0);
-            try std.testing.expect(frame_capacity != 0);
             encoded_ptr = client.stream_send_scratch.encoded
-                .allocatedSlice().ptr;
-            frame_ptr = client.stream_send_scratch.frames
                 .allocatedSlice().ptr;
         } else {
             try std.testing.expectEqual(
@@ -33045,16 +32911,8 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
                 client.stream_send_scratch.encoded.capacity,
             );
             try std.testing.expectEqual(
-                frame_capacity,
-                client.stream_send_scratch.frames.capacity,
-            );
-            try std.testing.expectEqual(
                 encoded_ptr,
                 client.stream_send_scratch.encoded.allocatedSlice().ptr,
-            );
-            try std.testing.expectEqual(
-                frame_ptr,
-                client.stream_send_scratch.frames.allocatedSlice().ptr,
             );
         }
         if (exchange == 1) {
@@ -35617,6 +35475,7 @@ test {
     _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
     _ = @import("runtime/client/owned_head_tests.zig");
+    _ = @import("runtime/client/complete_request.zig");
     _ = @import("runtime/qpack/tests/cancellation.zig");
     _ = @import("runtime/qpack/tests/decoder_progress.zig");
     _ = @import("runtime/connect_udp_tests.zig");

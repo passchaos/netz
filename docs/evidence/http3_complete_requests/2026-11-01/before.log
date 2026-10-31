@@ -1,0 +1,56 @@
+ok  	netz-quic-go-interop/http3_digest	0.003s
+Traceback (most recent call last):
+  File "/nav_env/project-z/netz/tools/interop/http_digest/h3/run.py", line 108, in <module>
+    main()
+  File "/nav_env/project-z/netz/tools/interop/http_digest/h3/run.py", line 85, in main
+    traces.append(pair(
+                  ^^^^^
+  File "/nav_env/project-z/netz/tools/interop/http_digest/h3/run.py", line 45, in pair
+    raise RuntimeError(server_output + client_output)
+RuntimeError: READY 36154
+2026/11/01 02:16:58 timeout: no recent network activity
+debug(zio): Spawning thread 0
+debug(zio): Removing thread 0
+error: FlowControlBlocked
+/nav_env/project-z/netz/src/quic/one_rtt.zig:2788:25: 0x18cedab in sendManyProgressAtImpl__anon_53793 (netz-http3-digest-interop)
+                        return error.FlowControlBlocked;
+                        ^
+/nav_env/project-z/netz/src/quic/one_rtt.zig:2504:9: 0x18cc19b in sendManyProgressAt (netz-http3-digest-interop)
+        return self.sendManyProgressAtImpl(
+        ^
+/nav_env/project-z/netz/src/quic/one_rtt.zig:2490:9: 0x18cc057 in sendManyProgress (netz-http3-digest-interop)
+        return self.sendManyProgressAt(packets, self.monotonicNowNs());
+        ^
+/nav_env/project-z/netz/src/http3/runtime/send/packetizer.zig:418:25: 0x18cb487 in sendPackets (netz-http3-digest-interop)
+                else => return err,
+                        ^
+/nav_env/project-z/netz/src/http3/runtime/send/packetizer.zig:338:17: 0x182bee7 in finish (netz-http3-digest-interop)
+                try self.backend.sendPackets(packets[0..count]);
+                ^
+/nav_env/project-z/netz/src/http3/runtime/send/packetizer.zig:121:5: 0x182c6a7 in sendWithBackend__anon_46523 (netz-http3-digest-interop)
+    try packetizer.finish();
+    ^
+/nav_env/project-z/netz/src/http3/runtime/send/packetizer.zig:95:9: 0x182c98f in sendUntil (netz-http3-digest-interop)
+        return err;
+        ^
+/nav_env/project-z/netz/src/http3/runtime/send/packetizer.zig:47:5: 0x182caeb in sendWithDeadline (netz-http3-digest-interop)
+    return sendUntil(
+    ^
+/nav_env/project-z/netz/src/http3/runtime/send/body.zig:108:5: 0x182a9b3 in sendConnectionFramesWithDeadline (netz-http3-digest-interop)
+    try send_packetizer.sendWithDeadline(
+    ^
+/nav_env/project-z/netz/src/http3/runtime/send/message.zig:219:9: 0x220c6df in sendPreparedConnectionMessageUntil__anon_8025822 (netz-http3-digest-interop)
+        try sendConnectionFramesWithDeadline(
+        ^
+/nav_env/project-z/netz/src/http3/runtime.zig:14918:67: 0x220ac17 in sendRequestUntil (netz-http3-digest-interop)
+            return error.MissingSettings;
+                                                                  ^
+/nav_env/project-z/netz/src/http3/runtime.zig:14325:27: 0x2208c6f in requestWithDeadline (netz-http3-digest-interop)
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+                          ^
+/nav_env/project-z/netz/tools/interop/http_digest/h3/client.zig:47:24: 0x180757b in run (netz-http3-digest-interop)
+        var response = try client.requestWithDeadline(.{
+                       ^
+/nav_env/project-z/netz/tools/interop/http_digest/h3/main.zig:12:9: 0x180b767 in main (netz-http3-digest-interop)
+        try @import("client.zig").run(init.gpa, backend.io(), port, version, args[4]);
+        ^

@@ -4209,3 +4209,23 @@ a multi-packet sliced contribution. Evidence is recorded in
 
 The sliced-body regression bundle passes 147/147 in Debug and ReleaseFast.
 Each independent HTTP3 matrix verifies all 36 requests.
+
+## Complete HTTP/3 requests under flow control
+
+Native HandshakeClient complete sends now preflight the complete request, then
+send HEADERS, borrowed DATA and trailers with exact committed cursors under
+one caller-owned deadline. Initial and trailing field sections can themselves
+cross the flow window. A partial-send timeout cancels and retires only the
+request owner, preserving independent sibling requests. Zero-byte failures
+retain the existing retryable reservation and QPACK behavior.
+
+The [complete request gate](http3_complete_requests.md) strengthens the pinned
+quic-go digest transcript with a 9-KiB complete POST, plus exact-size assertions
+and connection reuse in both roles and QUIC v1/v2. Native tests cover larger
+HEADERS and trailers, complete upload byte equality, both deadline modes,
+empty-body trailers, pre-admission rejection, and scoped timeout cleanup in
+each send phase. Detailed evidence is recorded in
+`docs/evidence/http3_complete_requests/2026-11-01.json`.
+
+Debug and ReleaseFast HTTP/3 regression gates each pass 991/991, public-package
+checks pass 26/26, and each independent quic-go gate completes 36 requests.

@@ -1,0 +1,98 @@
+{
+  "base_commit": "f1d6525d",
+  "boundaries": [
+    "The preconfigured-key ProtectedClient and development client retain their separate send adapters.",
+    "A refused one-attempt cancellation retires local ownership and prevents pool reuse; it does not wait beyond the application deadline.",
+    "These are protocol, ownership and memory-structure checks; cross-stack throughput is not measured here."
+  ],
+  "commands": [
+    "zig build test-lib -Dtest-filter=HTTP/3 -Dtest-filter=HTTP3 --summary all",
+    "zig build test-lib -Dtest-filter=HTTP/3 -Dtest-filter=HTTP3 -Doptimize=ReleaseFast --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http-digest-quic-go --summary all",
+    "zig build interop-http-digest-quic-go -Doptimize=ReleaseFast --summary all"
+  ],
+  "counterexample": "2026-11-01/before.json",
+  "date": "2026-11-01",
+  "feature": "Native HTTP3 complete request sends under flow control",
+  "interop": {
+    "appendix_d_fixed_vector_preserved": true,
+    "complete_request_bytes": 9216,
+    "connections_per_transcript": 1,
+    "digest_headers_and_trailers": true,
+    "requests_per_mode": 36,
+    "reuse_after_upload": true,
+    "roles": [
+      "netz-client",
+      "netz-server"
+    ],
+    "versions": [
+      1,
+      2
+    ]
+  },
+  "peer": "quic-go v0.59.0",
+  "public_package": {
+    "log": "2026-11-01/package.Debug.log",
+    "tests_passed": 26,
+    "tests_total": 26
+  },
+  "reference": {
+    "commit": "1f3d5295833ad454343f25d55633fb6bee1027b2",
+    "paths": [
+      "h3/src/client/connection.rs",
+      "h3/src/client/stream.rs"
+    ],
+    "repository": "/nav_env/Work/h3"
+  },
+  "regression": {
+    "body_bytes": 28672,
+    "connection_window": 8192,
+    "deadline_modes": [
+      "bounded",
+      "unbounded"
+    ],
+    "empty_body_trailers": "one finite HEADERS sequence and FIN; outbound body ownership retired",
+    "initial_field_value_bytes": 5000,
+    "partial_timeout_phases": [
+      "initial HEADERS",
+      "DATA",
+      "trailing HEADERS"
+    ],
+    "preflight": "Content-Length mismatch, forbidden trailer and invalid plain CONNECT body consume no packet or stream ID",
+    "stream_window": 2048,
+    "timeout_result": "Timeout; H3_REQUEST_CANCELLED; sibling response completes; connection remains open",
+    "trailing_field_value_bytes": 5000
+  },
+  "source_sha256": {
+    "src/http3/mod.zig": "5fa9a99d02ea87aa5bf9c8635a2d7dd07eedfbb54661c17884d9f0601cd242e8",
+    "src/http3/runtime.zig": "aaa06f8f1f33156e37d29978f664106d8bb46c3c6122218b06eacc8e65c2f83f",
+    "src/http3/runtime/client/complete_request.zig": "6fef5211d8bc0b1cd1191f69749e8c272fd779b44515162d02b2b189c45b3f42",
+    "src/http3/runtime/client/complete_request_tests.zig": "86849fb740b9569536c09bfff5d122918e89ce32cbfb13131c226ebad8e7f48c",
+    "src/http3/runtime/send/field_section.zig": "af058dce021e2ef3a4a5d875476427813ba9c2e607c5dbedbe9e5bd715b98caf",
+    "src/http3/runtime/send/streaming_head.zig": "e8cc464607325102c849b3865c43111c766b276dbff438bde8c7c7eb35dde54b",
+    "tools/interop/http_digest/h3/client.zig": "9dffb8ebf6e0057cb1deb8168af9504f8ae0d4fc5fe8024d177f3ac597323841",
+    "tools/interop/http_digest/h3/common.zig": "ab6af3eff050aab3ec229248a199ba56b16f82c04638a5554f28bae59803c263",
+    "tools/interop/http_digest/h3/run.py": "b1d241a16f97acc9d9de0513faa68761cb11fb8d1475c3e9e522464f3e040e54",
+    "tools/interop/quic_go_module/http3_digest/digest.go": "0b4dd7e192d772c3d8c8b02d93141fdadd02a051a6152e4940f65d9aeaaaae2d",
+    "tools/interop/quic_go_module/http3_digest/digest_test.go": "c6f80bb03306767242a44a80f7912e2258f163ed577ade95eedc07c5069a28e8",
+    "tools/interop/quic_go_module/http3_digest/main.go": "ec710b9a950dd95ff64fac76c508c05f9df7c9c459d99716ff3e38c90a6a70b9"
+  },
+  "status": "verified",
+  "verification": {
+    "Debug": {
+      "interop_report": "2026-11-01/Debug.json",
+      "interop_requests": 36,
+      "test_log": "2026-11-01/tests.Debug.log",
+      "tests_passed": 991,
+      "tests_total": 991
+    },
+    "ReleaseFast": {
+      "interop_report": "2026-11-01/ReleaseFast.json",
+      "interop_requests": 36,
+      "test_log": "2026-11-01/tests.ReleaseFast.log",
+      "tests_passed": 991,
+      "tests_total": 991
+    }
+  }
+}
