@@ -919,9 +919,29 @@ existing connection. A changed Health service gates later business admission
 until SERVING, while active RPCs continue. Request counters are independent
 of the current picker so completions remain balanced across policy changes.
 Identical config and endpoint-only updates retain current detector buckets,
-child schedules and a still-healthy pick-first selection. Changed config
-builds a fresh policy runtime. grpc-core's 15-minute removed-child cache and
-policy-state restoration on reactivation remain separate unfinished work.
+child schedules and a still-healthy pick-first selection. Changed config now
+matches compatible weighted-target children by their complete hierarchical
+name, preserving pick-first/RR position, learned WRR report timestamps and
+static-stride state. Ring/WRR cache buffers move only after every fallible
+admission step succeeds, leaving old runtime destruction with no duplicate
+buffer ownership. Different leaf types still start a new policy instance.
+
+Matching nested outlier wrappers remap their endpoint buckets from old to new
+indexes, so inserting a sibling cannot erase or misattribute an ejection.
+Unchanged intervals retain the next evaluation time. Disabling both algorithms
+clears ejection and its multiplier following grpc-core's `DisableEjection`.
+Disabled wrappers skip their own completion counts while enabled nested
+wrappers continue recording.
+An allocation sweep verifies rollback before state moves. Real TCP cases
+check RR continuation across parent weight/method updates, a resized populated
+ring, maintained ejection through sibling insertion and re-admission when
+counting is disabled. The per-RPC ORCA case stops new reports before changing
+the parent weight, retains weighted distribution, then checks expiration/RR
+fallback. Evidence is in
+`docs/evidence/grpc_shared_child_state/2026-11-01.json`.
+
+grpc-core's 15-minute removed-child cache and policy-state restoration after
+removal/reactivation remain separate unfinished work.
 Evidence is in `docs/evidence/grpc_shared_live_update/2026-11-01.json`.
 
 The top-level ring metadata fixture now retains static header storage across

@@ -4,6 +4,7 @@ const State = @import("../state.zig").State;
 const Prepared = @import("prepare.zig").Prepared;
 const Settings = @import("../worker_settings.zig").Settings;
 const Outlier = @import("../../outlier_detection.zig").Endpoint;
+const Transfer = @import("../weighted_target/state_transfer.zig").Plan(State.WeightedTarget);
 
 const Change = struct {
     worker: *State.Worker,
@@ -36,6 +37,8 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         }
     }
     const outlier_count = if (prepared.weighted) |*runtime| runtime.outlierCount() else 0;
+    var transfer = try Transfer.init(allocator, if (state.weighted_target) |*runtime| runtime else null, if (prepared.weighted) |*runtime| runtime else null);
+    defer transfer.deinit();
     var changes: std.ArrayList(Change) = .empty;
     defer changes.deinit(allocator);
     var changes_transferred = false;
@@ -60,7 +63,7 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         errdefer settings.destroy();
         const outliers = try allocator.alloc(Outlier, outlier_count);
         for (outliers) |*outlier| outlier.* = .{};
-        if (same_config and outliers.len == worker.weighted_outliers.len) @memcpy(outliers, worker.weighted_outliers);
+        if (same_config and outliers.len == worker.weighted_outliers.len) @memcpy(outliers, worker.weighted_outliers) else transfer.copyOutliers(worker.source.endpoint.hierarchicalPath(), worker.weighted_outliers, outliers);
         changes.appendAssumeCapacity(.{ .worker = worker, .settings = settings, .outliers = outliers });
     }
     var workers: std.ArrayList(*State.Worker) = .empty;
@@ -138,7 +141,7 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         change.worker.weighted_outliers = change.outliers;
         if (!same_config) {
             change.worker.outlier = .{};
-            change.worker.wrr_weight.disconnected();
+            if (!transfer.keepsWrr(change.worker.source.endpoint.hierarchicalPath())) change.worker.wrr_weight.disconnected();
         }
     }
     changes_transferred = true;
@@ -155,6 +158,7 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         prepared.weighted = null;
         if (!same_layout or weights_changed) state.weighted_target.?.invalidatePickers();
     } else {
+        transfer.commit();
         const previous_weighted = state.weighted_target;
         state.weighted_target = prepared.weighted;
         prepared.weighted = previous_weighted;

@@ -378,7 +378,7 @@ pub const State = struct {
                 return;
             }
         }
-        if (self.outlier_config == null) return;
+        if (self.outlier_config == null or !self.outlier_config.?.countingEnabled()) return;
         if (comptime @hasField(@TypeOf(worker.*), "outlier")) {
             worker.outlier.record(success);
         }

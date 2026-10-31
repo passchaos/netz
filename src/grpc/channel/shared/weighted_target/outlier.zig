@@ -72,7 +72,7 @@ pub fn record(node: anytype, state: anytype, worker: anytype, success: bool) voi
             record(child.node, state, worker, success);
         },
         .outlier => |wrapper| {
-            worker.weighted_outliers[wrapper.index].record(success);
+            if (wrapper.config.countingEnabled()) worker.weighted_outliers[wrapper.index].record(success);
             record(wrapper.child, state, worker, success);
         },
     }

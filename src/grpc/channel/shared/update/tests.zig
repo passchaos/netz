@@ -12,6 +12,7 @@ test {
     _ = @import("late_admission_tests.zig");
     _ = @import("override_tests.zig");
     _ = @import("selection_tests.zig");
+    _ = @import("child_state_tests.zig");
 }
 
 fn unary(sender: shared.Sender, message: []const u8) !grpc.UnaryResponse {

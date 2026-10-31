@@ -85,6 +85,27 @@ test "gRPC SharedChannel weighted target WRR filters per-RPC ORCA workers" {
         try std.testing.expectEqual(@as(usize, 2), matching_updates);
         try std.testing.expectEqual(@as(usize, 0), outside_updates);
     }
+    // Stop new ORCA reports before changing only the parent child weight.
+    // Learned weights must survive without restarting their blackout period.
+    reporting.store(false, .release);
+    _ = try client.update(.{ .service_config = .{ .replace =
+        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
+        \\ "targets":{"wrr":{"weight":2,"childPolicy":[
+        \\  {"weighted_round_robin":{"enableOobLoadReport":false,
+        \\   "blackoutPeriod":"0s","weightUpdatePeriod":"0.1s",
+        \\   "weightExpirationPeriod":"2s",
+        \\   "metricNamesForComputingUtilization":["cpu_utilization"]}}]}}
+        \\ }}]}
+    } });
+    {
+        client.state.lock();
+        defer client.state.unlock();
+        for (client.state.workers.items) |worker| {
+            if (std.mem.eql(u8, worker.source.endpoint.hierarchicalPath()[0], "wrr")) {
+                try std.testing.expect(worker.wrr_weight.non_empty_since_ns != null);
+            }
+        }
+    }
     try std.Io.sleep(io, .fromMilliseconds(120), .awake);
     var counts = [_]usize{ 0, 0 };
     for (0..weighted_calls) |_| {
