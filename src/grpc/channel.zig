@@ -419,6 +419,11 @@ pub const Options = struct {
 };
 
 const Slot = struct {
+    const WeightedOutlier = struct {
+        endpoint: outlier_detection.Endpoint = .{},
+        enabled: bool = false,
+    };
+
     endpoint: Endpoint,
     connection: ?http2.runtime.Connection = null,
     consecutive_failures: usize = 0,
@@ -426,6 +431,8 @@ const Slot = struct {
     disabled: bool = false,
     wrr_weight: weighted_round_robin.Weight = .{},
     outlier: outlier_detection.Endpoint = .{},
+    weighted_outliers: []WeightedOutlier = &.{},
+    weighted_target_ejected: bool = false,
     outstanding_requests: usize = 0,
     least_request_enabled: bool = false,
     outlier_enabled: bool = false,
@@ -441,6 +448,14 @@ const Slot = struct {
         self.consecutive_failures = 0;
         self.next_attempt_at_ns = null;
         self.disabled = false;
+    }
+
+    fn deinitPolicyState(self: *Slot, allocator: std.mem.Allocator) void {
+        if (self.weighted_outliers.len != 0) {
+            allocator.free(self.weighted_outliers);
+        }
+        self.weighted_outliers = &.{};
+        self.weighted_target_ejected = false;
     }
 };
 
@@ -789,6 +804,7 @@ pub const Channel = struct {
             );
             result.selection_policy = .weighted_target;
             try result.weighted_target_runtime.?.configureSlots(result.slots);
+            result.weighted_target_runtime.?.startOutliers(io);
         }
         if (result.selection_policy == .weighted_round_robin and
             balancing.policy == .weighted_round_robin)
@@ -834,7 +850,10 @@ pub const Channel = struct {
         if (self.host_resolution) |*resolution| {
             resolution.deinit(self.allocator);
         }
-        for (self.slots) |*slot| slot.closeConnection();
+        for (self.slots) |*slot| {
+            slot.closeConnection();
+            slot.deinitPolicyState(self.allocator);
+        }
         self.allocator.free(self.slots);
         self.wrr_scheduler.deinit(self.allocator);
         if (self.weighted_target_runtime) |*runtime| runtime.deinit();
@@ -1486,6 +1505,12 @@ pub const Channel = struct {
     ) Error!ReadyConnection {
         const runtime = &self.weighted_target_runtime.?;
         while (true) {
+            _ = runtime.evaluateOutliers(self.slots, self.io);
+            if (self.selected_index) |index| {
+                if (self.slots[index].weighted_target_ejected) {
+                    self.selected_index = null;
+                }
+            }
             const pass_duration = self.connection_attempt_delay orelse
                 self.backoff_policy.min_connect_timeout;
             var pass_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
@@ -1899,6 +1924,7 @@ pub const Channel = struct {
             if (matched) |old_index| {
                 replacement[new_index] = old_slots[old_index];
                 old_slots[old_index].connection = null;
+                old_slots[old_index].weighted_outliers = &.{};
                 if (old_selected == old_index) selected = new_index;
             } else {
                 replacement[new_index] = .{
@@ -1911,7 +1937,10 @@ pub const Channel = struct {
                 };
             }
         }
-        for (old_slots) |*slot| slot.closeConnection();
+        for (old_slots) |*slot| {
+            slot.closeConnection();
+            slot.deinitPolicyState(self.allocator);
+        }
         self.wrr_scheduler.invalidate();
         self.allocator.free(old_slots);
         self.slots = replacement;
@@ -2012,8 +2041,16 @@ pub const Channel = struct {
         }
     }
 
-    fn earliestAttempt(self: *const Channel) ?i96 {
+    fn earliestAttempt(self: *Channel) ?i96 {
         var earliest = self.outlier_next_evaluation_ns;
+        if (self.weighted_target_runtime) |*runtime| {
+            if (runtime.nextOutlierDeadline()) |candidate| {
+                earliest = if (earliest) |current|
+                    @min(current, candidate)
+                else
+                    candidate;
+            }
+        }
         for (self.slots) |slot| {
             const candidate = slot.next_attempt_at_ns orelse continue;
             earliest = if (earliest) |current|
@@ -2087,7 +2124,9 @@ pub const Channel = struct {
 
     fn hasReadyConnection(self: *const Channel) bool {
         for (self.slots) |*slot| {
-            if (slot.outlier.isEjected()) continue;
+            if (slot.outlier.isEjected() or slot.weighted_target_ejected) {
+                continue;
+            }
             if (slot.connection) |*connection| {
                 if (connection.isReusable()) return true;
             }
@@ -2147,7 +2186,8 @@ pub const Channel = struct {
         index: usize,
     ) std.mem.Allocator.Error!?*completion.Observer {
         const slot = &self.slots[index];
-        if (!slot.least_request_enabled and !slot.outlier_enabled) return null;
+        if (!slot.least_request_enabled and !slot.outlier_enabled and
+            !hasWeightedOutlier(slot)) return null;
         return try completion.Observer.create(
             self.allocator,
             slot,
@@ -2156,8 +2196,11 @@ pub const Channel = struct {
     }
 
     fn recordOutlier(self: *Channel, index: usize, success: bool) void {
-        if (self.outlier_config == null) return;
-        self.slots[index].outlier.record(success);
+        const slot = &self.slots[index];
+        if (self.outlier_config != null) slot.outlier.record(success);
+        for (slot.weighted_outliers) |*state| {
+            if (state.enabled) state.endpoint.record(success);
+        }
     }
 
     fn finishRequestCompletion(context: *anyopaque, success: bool) void {
@@ -2169,6 +2212,9 @@ pub const Channel = struct {
             slot.outstanding_requests -= 1;
         }
         if (slot.outlier_enabled) slot.outlier.record(success);
+        for (slot.weighted_outliers) |*state| {
+            if (state.enabled) state.endpoint.record(success);
+        }
     }
 
     fn setConnectivityState(
@@ -2201,9 +2247,14 @@ fn slotMayAttempt(slot: *Slot, io: std.Io) bool {
 }
 
 fn wrrSlotReady(slot: *Slot) bool {
-    if (slot.outlier.isEjected()) return false;
+    if (slot.outlier.isEjected() or slot.weighted_target_ejected) return false;
     const connection = if (slot.connection) |*value| value else return false;
     return connection.isReusable();
+}
+
+fn hasWeightedOutlier(slot: *const Slot) bool {
+    for (slot.weighted_outliers) |state| if (state.enabled) return true;
+    return false;
 }
 
 fn leastRequestSlotReady(self: *Channel, index: usize) bool {

@@ -504,6 +504,135 @@ test "gRPC ordinary weighted target OOB WRR stays leaf local RR" {
     try b_peer.await(io);
 }
 
+test "gRPC ordinary weighted target outlier ejects and restores child slot" {
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var bad_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer bad_server.deinit();
+    var good_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer good_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var bad_task = io.async(OutlierPeer.run, .{
+        &bad_server,
+        &stop,
+        false,
+    });
+    defer _ = bad_task.cancel(io) catch {};
+    var good_task = io.async(OutlierPeer.run, .{
+        &good_server,
+        &stop,
+        true,
+    });
+    defer _ = good_task.cancel(io) catch {};
+    const path = [_][]const u8{"wrapped"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{
+            .address = bad_server.address(),
+            .hierarchical_path = &path,
+        } },
+        .{ .cleartext_ip = .{
+            .address = good_server.address(),
+            .hierarchical_path = &path,
+        } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
+        \\ "targets":{"wrapped":{"weight":1,"childPolicy":[
+        \\  {"outlier_detection_experimental":{
+        \\   "interval":"0.02s","baseEjectionTime":"0.2s",
+        \\   "maxEjectionTime":"0.2s","maxEjectionPercent":100,
+        \\   "failurePercentageEjection":{"threshold":50,
+        \\    "enforcementPercentage":100,"minimumHosts":1,
+        \\    "requestVolume":2},
+        \\   "childPolicy":[{"round_robin":{}}]}}]}}
+        \\ }}]}
+    );
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .connection_attempt_delay = .fromMilliseconds(100) },
+        &config,
+    );
+    config.deinit();
+    var client_live = true;
+    defer if (client_live) client.deinit();
+    {
+        var stream = try client.startDuplex(.{
+            .path = "/demo.WeightedTarget/OutlierDuplex",
+            .wait_for_ready = true,
+            .timeout = try grpc.Timeout.init(5, .second),
+        });
+        defer stream.deinit();
+        try std.testing.expectEqual(
+            grpc.DuplexWriteResult.complete,
+            try stream.writeFinalMessage("request"),
+        );
+        const Consumer = struct {
+            fn consume(_: void, _: grpc.StreamingMessage) !void {
+                return error.UnexpectedMessage;
+            }
+        };
+        while (true) {
+            var event = try stream.readResponseEventWithTimeout(
+                .fromSeconds(5),
+                {},
+                Consumer.consume,
+            );
+            defer event.deinit(allocator);
+            if (event == .terminal) {
+                try std.testing.expectEqual(
+                    grpc.Status.unavailable,
+                    event.terminal.status,
+                );
+                break;
+            }
+        }
+    }
+    var initial = [_]usize{ 0, 0 };
+    for (0..2) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        initial[@intFromBool(response.status == .ok)] += 1;
+    }
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1 }, &initial);
+    try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+    for (0..5) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        try std.testing.expectEqual(grpc.Status.ok, response.status);
+        try std.testing.expectEqualStrings("good", response.message.?.payload);
+    }
+    try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+    var restored_bad = false;
+    for (0..2) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        restored_bad = restored_bad or response.status == .unavailable;
+    }
+    try std.testing.expect(restored_bad);
+    client.deinit();
+    client_live = false;
+    stop.set(io);
+    try bad_task.await(io);
+    try good_task.await(io);
+}
+
 test "gRPC ordinary weighted target excludes unavailable heavy child" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -623,6 +752,35 @@ const WrrServer = struct {
                     }},
                 } else .{ .message = label },
             );
+        }
+    }
+};
+
+const OutlierPeer = struct {
+    fn run(
+        server: *grpc.runtime.Server,
+        stop: *std.Io.Event,
+        healthy: bool,
+    ) !void {
+        var connection = try server.acceptWithTimeout(.fromSeconds(5));
+        defer connection.deinit();
+        while (!stop.isSet()) {
+            var request = connection.readUnaryWithTimeout(
+                .fromMilliseconds(100),
+            ) catch |err| switch (err) {
+                error.Timeout => continue,
+                error.ConnectionClosed,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                error.UnexpectedEof,
+                => return,
+                else => return err,
+            };
+            defer request.deinit();
+            try connection.writeUnary(request.request.stream_id, if (healthy)
+                .{ .message = "good" }
+            else
+                .{ .status = .unavailable, .trailers_only = true });
         }
     }
 };

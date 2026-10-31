@@ -166,7 +166,7 @@ fn pickLogical(
             slot.endpoint,
             endpoint,
         )) continue;
-        if (slot.disabled) continue;
+        if (slot.disabled or slot.weighted_target_ejected) continue;
         if (slot.connection) |*connection| {
             if (connection.isReusable()) return .{ .ready = index };
         }
@@ -222,6 +222,7 @@ test "ordinary weighted target ring hash collapses child endpoints" {
         endpoint: Endpoint,
         connection: ?Connection,
         disabled: bool = false,
+        weighted_target_ejected: bool = false,
         next_attempt_at_ns: ?i96 = null,
     };
     const Node = struct { path: []const []const u8 };

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "outlier-detection wrappers inside ordinary Channel weighted_target",
+  "decision": "accepted wrapper-local single-owner runtime support",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "wrapper": "outlier_detection_experimental",
+    "targets": "static resolved endpoints",
+    "completion": "unary and sequential or duplex stream terminal paths"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "outlier_detection_sha256": "174951052396dc00fe460d72fa32ae5be2b003b99c899a45de0bcd83e7fab4d0",
+    "contracts": [
+      "every wrapper owns independent counters, multiplier, ejection timestamp and evaluation deadline",
+      "only endpoints under the wrapper hierarchical path contribute to its statistics",
+      "ejection removes picker eligibility without closing the underlying transport",
+      "unary and streaming terminal outcomes feed the same wrapper-local detector",
+      "expiry restores picker eligibility without resetting unrelated child policy state"
+    ]
+  },
+  "implementation": {
+    "ownership": "each slot owns one persistent detector state per recursive wrapper plus exact membership",
+    "isolation": "nested matching wrappers record independently and sibling wrapper indexes remain disabled",
+    "reconciliation": "retained logical slots transfer detector arrays while new slots receive zeroed arrays transactionally",
+    "completion": "unary records immediately and streams transfer recording to the existing exactly-once completion observer",
+    "selection": "ejected slots are excluded from aggregate READY state, PF, RR, least-request, ring-hash and WRR",
+    "scheduling": "eligibility changes invalidate leaf-local WRR snapshots",
+    "timers": "wrapper deadlines start at Channel initialization and participate in wait-for-ready progress",
+    "transport": "ejection preserves the established HTTP2 connection and endpoint backoff state"
+  },
+  "native_cases": [
+    "one duplex UNAVAILABLE and one unary failure meet requestVolume 2 for the failing slot",
+    "one healthy unary response remains isolated in the sibling detector",
+    "after the 20-ms evaluation interval, five consecutive RPCs use only the healthy slot",
+    "after the 200-ms ejection expires, the failing slot participates again",
+    "a deterministic nested configuration gives path a wrapper memberships 0 and 1 but not 2",
+    "sibling path b belongs only to wrapper index 2",
+    "recursive construction and per-slot membership allocation pass every induced allocation failure",
+    "ServiceConfig is destroyed immediately after Channel initialization"
+  ],
+  "negative_boundary": {
+    "hostname_targets": "ordinary weighted-target remains limited to static resolved endpoints",
+    "dynamic_child_retention": false,
+    "ordinary_wrr_oob_owner": false,
+    "silent_fallback": false
+  },
+  "results": {
+    "outlier_network": "143/143 passed",
+    "membership_allocation_sweep": "137/137 passed",
+    "ordinary_weighted_target": "149/149 passed",
+    "runtime_allocation_sweep": "137/137 passed",
+    "complete_grpc_debug": "502/502 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel.zig": "e33bbe6b44e048f91705173eac8de1d969af293f05455c7156f8eea16ceacb8b",
+    "src/grpc/channel/weighted_target.zig": "2e3b4dd0e0b25ac04ba70069be2217791dae608158207e6fcbbfaaaef1838400",
+    "src/grpc/channel/weighted_target/outlier.zig": "5f7297055bf647d3069902a929d303cbd96daede0a489e800bcd07f87b27133f",
+    "src/grpc/channel/weighted_target/ring_hash.zig": "0a09b08be64fd0a890842d07be2fa6639a1760fd98bfc2f90a6c00d3f92eb7da",
+    "src/grpc/channel/weighted_target/weighted_round_robin.zig": "1d2474acc115335a97c272f428d04299921259682f558005c30706346ace35c6",
+    "src/grpc/channel/weighted_target_tests.zig": "541995ab4c7099083b92a7be92956f2bba41c4bacef045b6a4f03b153d3b710e",
+    "src/grpc/channel/outlier_detection.zig": "16b59aa65b7d0286ec8aa6755520c9fe25005a637e0a8b1a41b9aa4ca2d34dc9",
+    "docs/grpc_parity.md": "20d74095e2a0903bf0b3c2c7e9e739035ad800e377df852f836f2ab54348a131"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target outlier' --summary all",
+    "zig build test-lib -Dtest-filter='ordinary weighted target outlier membership' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target' --summary all",
+    "zig build test-lib -Dtest-filter='ordinary weighted target runtime deep copy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "dynamic service-config updates with grpc-core child retention, hostname composite ownership and final long-run interop remain before broad superiority"
+}

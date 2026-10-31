@@ -11,6 +11,8 @@ const ring_hash = @import("ring_hash.zig");
 const ring_support = @import("weighted_target/ring_hash.zig");
 const weighted_round_robin = @import("weighted_round_robin.zig");
 const wrr_support = @import("weighted_target/weighted_round_robin.zig");
+const outlier_detection = @import("outlier_detection.zig");
+const outlier_support = @import("weighted_target/outlier.zig");
 const service_config = @import("../service_config.zig");
 
 pub const RequestInput = struct {
@@ -38,6 +40,7 @@ pub fn Runtime(comptime Slot: type) type {
     return struct {
         allocator: std.mem.Allocator,
         root: *Node,
+        outlier_count: usize = 0,
 
         const Self = @This();
         const AggregateState = enum {
@@ -72,11 +75,19 @@ pub fn Runtime(comptime Slot: type) type {
             node: *Node,
         };
 
+        const Outlier = struct {
+            config: service_config.OutlierDetectionConfig,
+            index: usize,
+            next_evaluation_ns: i96 = 0,
+            child: *Node,
+        };
+
         const Node = struct {
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
                 weighted: []Child,
+                outlier: Outlier,
             },
         };
 
@@ -115,6 +126,29 @@ pub fn Runtime(comptime Slot: type) type {
             return wrr_support.config(self.root, &slots[index]);
         }
 
+        pub fn evaluateOutliers(self: *Self, slots: []Slot, io: std.Io) bool {
+            const changed = outlier_support.evaluate(
+                self.root,
+                slots,
+                io,
+                std.Io.Clock.awake.now(io).nanoseconds,
+            );
+            self.updateEjectedSlots(slots);
+            if (changed) self.invalidateWrr(self.root);
+            return changed;
+        }
+
+        pub fn startOutliers(self: *Self, io: std.Io) void {
+            outlier_support.start(
+                self.root,
+                std.Io.Clock.awake.now(io).nanoseconds,
+            );
+        }
+
+        pub fn nextOutlierDeadline(self: *const Self) ?i96 {
+            return outlier_support.nextDeadline(self.root);
+        }
+
         pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
             for (slots) |*slot| {
                 slot.least_request_enabled = self.pathUsesLeastRequest(
@@ -124,6 +158,7 @@ pub fn Runtime(comptime Slot: type) type {
             }
             self.invalidateWrr(self.root);
             try self.rebuildRings(self.root, slots);
+            try self.configureOutliers(slots);
         }
 
         fn build(
@@ -150,7 +185,10 @@ pub fn Runtime(comptime Slot: type) type {
                     weighted,
                     path,
                 ),
-                else => error.InvalidChannelOptions,
+                .outlier_detection => |wrapper| self.buildOutlier(
+                    wrapper,
+                    path,
+                ),
             };
         }
 
@@ -262,6 +300,32 @@ pub fn Runtime(comptime Slot: type) type {
             return node;
         }
 
+        fn buildOutlier(
+            self: *Self,
+            wrapper: @FieldType(
+                service_config.LoadBalancingNode,
+                "outlier_detection",
+            ),
+            path: []const []const u8,
+        ) BuildError!*Node {
+            const index = self.outlier_count;
+            self.outlier_count += 1;
+            const owned_path = try dupePath(self.allocator, path);
+            errdefer freePath(self.allocator, owned_path);
+            const child = try self.build(wrapper.child, path);
+            errdefer self.destroy(child);
+            const node = try self.allocator.create(Node);
+            node.* = .{
+                .path = owned_path,
+                .kind = .{ .outlier = .{
+                    .config = wrapper.config,
+                    .index = index,
+                    .child = child,
+                } },
+            };
+            return node;
+        }
+
         fn destroy(self: *Self, node: *Node) void {
             switch (node.kind) {
                 .leaf => |*leaf| {
@@ -279,6 +343,7 @@ pub fn Runtime(comptime Slot: type) type {
                     for (children) |child| self.destroy(child.node);
                     self.allocator.free(children);
                 },
+                .outlier => |wrapper| self.destroy(wrapper.child),
             }
             freePath(self.allocator, node.path);
             self.allocator.destroy(node);
@@ -327,6 +392,12 @@ pub fn Runtime(comptime Slot: type) type {
                     }
                     unreachable;
                 },
+                .outlier => |wrapper| try self.pickNode(
+                    wrapper.child,
+                    slots,
+                    io,
+                    input,
+                ),
             };
         }
 
@@ -356,6 +427,10 @@ pub fn Runtime(comptime Slot: type) type {
                     else
                         .transient_failure;
                 },
+                .outlier => |wrapper| self.aggregate(
+                    wrapper.child,
+                    slots,
+                ),
             };
         }
 
@@ -369,9 +444,8 @@ pub fn Runtime(comptime Slot: type) type {
                 if (!pathMatches(slot.endpoint.hierarchicalPath(), path)) {
                     continue;
                 }
-                if (slot.connection) |*connection| {
-                    if (connection.isReusable()) return .ready;
-                }
+                if (slot.weighted_target_ejected) continue;
+                if (slotReady(slot)) return .ready;
                 if (slot.disabled) continue;
                 if (slot.next_attempt_at_ns != null) connecting = true else idle = true;
             }
@@ -512,6 +586,10 @@ pub fn Runtime(comptime Slot: type) type {
                         return self.pathUsesLeastRequest(child.node, path);
                     }
                 } else false,
+                .outlier => |wrapper| self.pathUsesLeastRequest(
+                    wrapper.child,
+                    path,
+                ),
             };
         }
 
@@ -536,6 +614,10 @@ pub fn Runtime(comptime Slot: type) type {
                 .weighted => |children| for (children) |child| {
                     try self.rebuildRings(child.node, slots);
                 },
+                .outlier => |wrapper| try self.rebuildRings(
+                    wrapper.child,
+                    slots,
+                ),
             }
         }
 
@@ -547,11 +629,73 @@ pub fn Runtime(comptime Slot: type) type {
                 .weighted => |children| for (children) |child| {
                     self.invalidateWrr(child.node);
                 },
+                .outlier => |wrapper| self.invalidateWrr(wrapper.child),
+            }
+        }
+
+        fn configureOutliers(self: *Self, slots: []Slot) BuildError!void {
+            if (self.outlier_count == 0) return;
+            const State = @typeInfo(
+                @FieldType(Slot, "weighted_outliers"),
+            ).pointer.child;
+            const pending = try self.allocator.alloc(?[]State, slots.len);
+            defer self.allocator.free(pending);
+            @memset(pending, null);
+            errdefer for (pending) |states| if (states) |owned| {
+                self.allocator.free(owned);
+            };
+            for (slots, pending) |slot, *replacement| {
+                if (slot.weighted_outliers.len == self.outlier_count) continue;
+                if (slot.weighted_outliers.len != 0) {
+                    return error.InvalidChannelOptions;
+                }
+                const states = try self.allocator.alloc(
+                    State,
+                    self.outlier_count,
+                );
+                @memset(states, .{});
+                replacement.* = states;
+            }
+            for (slots, pending) |*slot, replacement| {
+                if (replacement) |states| slot.weighted_outliers = states;
+                for (slot.weighted_outliers) |*state| state.enabled = false;
+                self.markOutlierMembership(self.root, slot);
+            }
+            self.updateEjectedSlots(slots);
+        }
+
+        fn markOutlierMembership(
+            self: *Self,
+            node: *Node,
+            slot: *Slot,
+        ) void {
+            if (!pathMatches(
+                slot.endpoint.hierarchicalPath(),
+                node.path,
+            )) return;
+            switch (node.kind) {
+                .leaf => {},
+                .weighted => |children| for (children) |child| {
+                    self.markOutlierMembership(child.node, slot);
+                },
+                .outlier => |wrapper| {
+                    slot.weighted_outliers[wrapper.index].enabled = true;
+                    self.markOutlierMembership(wrapper.child, slot);
+                },
+            }
+        }
+
+        fn updateEjectedSlots(self: *Self, slots: []Slot) void {
+            for (slots) |*slot| {
+                slot.weighted_target_ejected = outlier_support.ejected(
+                    self.root,
+                    slot,
+                );
             }
         }
 
         fn slotReady(slot: *Slot) bool {
-            if (slot.disabled) return false;
+            if (slot.disabled or slot.weighted_target_ejected) return false;
             const connection = if (slot.connection) |*value| value else return false;
             return connection.isReusable();
         }
@@ -607,6 +751,12 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
             .metric_names = &.{"named_metrics.queue"},
         },
     };
+    const outlier_leaf = service_config.LoadBalancingNode{
+        .outlier_detection = .{
+            .config = .{},
+            .child = &leaf,
+        },
+    };
     const nested_targets = [_]service_config.WeightedTargetConfig.Target{.{
         .name = "inner",
         .weight = 1,
@@ -621,6 +771,7 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
         .{ .name = "least", .weight = 2, .child = &least_leaf },
         .{ .name = "ring", .weight = 4, .child = &ring_leaf },
         .{ .name = "wrr", .weight = 5, .child = &wrr_leaf },
+        .{ .name = "outlier", .weight = 6, .child = &outlier_leaf },
     };
     const root = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &targets,
@@ -656,6 +807,10 @@ test "ordinary weighted target least request is child local" {
             return self.path;
         }
     };
+    const FakeWeightedOutlier = struct {
+        endpoint: outlier_detection.Endpoint = .{},
+        enabled: bool = false,
+    };
     const FakeSlot = struct {
         endpoint: FakeEndpoint,
         connection: ?FakeConnection = .{},
@@ -663,6 +818,8 @@ test "ordinary weighted target least request is child local" {
         next_attempt_at_ns: ?i96 = null,
         outstanding_requests: usize = 0,
         least_request_enabled: bool = false,
+        weighted_target_ejected: bool = false,
+        weighted_outliers: []FakeWeightedOutlier = &.{},
     };
     const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
         .choice_count = 10,
@@ -705,4 +862,78 @@ test "ordinary weighted target least request is child local" {
         low_load_picks += @intFromBool(picked == 1);
     }
     try std.testing.expect(low_load_picks > 4000);
+}
+
+test "ordinary weighted target outlier membership is allocation transactional" {
+    const FakeEndpoint = struct {
+        path: []const []const u8,
+
+        fn hierarchicalPath(self: *const @This()) []const []const u8 {
+            return self.path;
+        }
+    };
+    const FakeState = struct {
+        endpoint: outlier_detection.Endpoint = .{},
+        enabled: bool = false,
+    };
+    const FakeSlot = struct {
+        endpoint: FakeEndpoint,
+        least_request_enabled: bool = false,
+        weighted_target_ejected: bool = false,
+        weighted_outliers: []FakeState = &.{},
+    };
+    const leaf = service_config.LoadBalancingNode.round_robin;
+    const nested_wrapper = service_config.LoadBalancingNode{
+        .outlier_detection = .{ .config = .{}, .child = &leaf },
+    };
+    const a_wrapper = service_config.LoadBalancingNode{
+        .outlier_detection = .{
+            .config = .{},
+            .child = &nested_wrapper,
+        },
+    };
+    const b_wrapper = service_config.LoadBalancingNode{
+        .outlier_detection = .{ .config = .{}, .child = &leaf },
+    };
+    const targets = [_]service_config.WeightedTargetConfig.Target{
+        .{ .name = "a", .weight = 1, .child = &a_wrapper },
+        .{ .name = "b", .weight = 1, .child = &b_wrapper },
+    };
+    const root = service_config.LoadBalancingNode{ .weighted_target = .{
+        .targets = &targets,
+    } };
+    const a_path = [_][]const u8{"a"};
+    const b_path = [_][]const u8{"b"};
+    const Harness = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            config: *const service_config.LoadBalancingNode,
+            first_path: []const []const u8,
+            second_path: []const []const u8,
+        ) !void {
+            var slots = [_]FakeSlot{
+                .{ .endpoint = .{ .path = first_path } },
+                .{ .endpoint = .{ .path = second_path } },
+            };
+            defer for (&slots) |*slot| if (slot.weighted_outliers.len != 0) {
+                allocator.free(slot.weighted_outliers);
+            };
+            var runtime = try Runtime(FakeSlot).init(allocator, config);
+            defer runtime.deinit();
+            try runtime.configureSlots(&slots);
+            try std.testing.expectEqual(@as(usize, 3), slots[0].weighted_outliers.len);
+            try std.testing.expectEqual(@as(usize, 3), slots[1].weighted_outliers.len);
+            try std.testing.expect(slots[0].weighted_outliers[0].enabled);
+            try std.testing.expect(slots[0].weighted_outliers[1].enabled);
+            try std.testing.expect(!slots[0].weighted_outliers[2].enabled);
+            try std.testing.expect(!slots[1].weighted_outliers[0].enabled);
+            try std.testing.expect(!slots[1].weighted_outliers[1].enabled);
+            try std.testing.expect(slots[1].weighted_outliers[2].enabled);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Harness.run,
+        .{ &root, &a_path, &b_path },
+    );
 }

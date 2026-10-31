@@ -754,22 +754,20 @@ Evidence is recorded in
 The single-owner Channel now executes the first weighted-target runtime subset
 for static resolved endpoints: arbitrary nested weighted targets with
 `pick_first`, `round_robin`, `least_request_experimental`,
-`ring_hash_experimental` and `weighted_round_robin` leaves. Unlike
-SharedChannel it has no background endpoint owners, so each RPC performs
-bounded composite warming before the pick. Every reachable child is
-established within the caller's absolute deadline, while each blackholed child
-is capped by the configured connection attempt delay instead of consuming the
-whole RPC budget. Selection then uses only READY children and delegates to
-child-local picker state.
+`ring_hash_experimental` and `weighted_round_robin` leaves plus nested
+`outlier_detection_experimental` wrappers. Unlike SharedChannel it has no
+background endpoint owners, so each RPC performs bounded composite warming
+before the pick. Every reachable child is established within the caller's
+absolute deadline, while each blackholed child is capped by the configured
+connection attempt delay instead of consuming the whole RPC budget. Selection
+then uses only READY children and delegates to child-local picker state.
 
 The runtime deep-copies every target path element; applications may destroy the
 ServiceConfig immediately after Channel initialization. A real three-server
 test does so, then proves nested 1:3 parent weighting and exact alternation
 below the low-weight child across 400 RPCs. Another keeps all traffic on a
 weight-1 healthy child while a weight-100 sibling remains unavailable. Runtime
-construction passes every induced allocation failure. Outlier wrappers remain
-an explicit ordinary-Channel initialization error, so broad support still
-belongs to SharedChannel. Evidence is recorded in
+construction passes every induced allocation failure. Evidence is recorded in
 `docs/evidence/grpc_ordinary_weighted_target_core/2026-10-31.json`.
 
 The ordinary least-request leaf keeps its configured `choiceCount`, samples
@@ -833,6 +831,32 @@ owner: an `enableOobLoadReport:true` leaf opens no hidden stream, ignores
 per-RPC reports under that mode and produces exact RR. SharedChannel remains
 the owner for true OOB WRR. Evidence is in
 `docs/evidence/grpc_ordinary_weighted_target_wrr/2026-10-31.json`.
+
+Ordinary weighted targets now execute nested outlier wrappers without sharing
+detector state across siblings. Each endpoint slot owns one persistent detector
+per wrapper index plus an exact membership bit; nested wrappers on the same
+path record independently, while a sibling's success/failure bucket,
+multiplier and expiry remain untouched. Address reconciliation transfers this
+state with retained logical slots and allocates zeroed state only for new
+slots. Construction and membership setup are allocation-transactional.
+
+Unary attempts record their terminal status immediately. Sequential and duplex
+streams transfer completion ownership to the existing exactly-once observer,
+which records only wrappers matching that slot on terminal status, reset,
+cancellation, fatal receive failure or abandoning deinit. Evaluation uses each
+wrapper's own interval/config, removes ejected slots from READY aggregation and
+all child pickers without closing their transport, invalidates leaf-local WRR
+snapshots when eligibility changes, and includes the earliest wrapper deadline
+in wait-for-ready progress timers so unejection does not need unrelated work.
+
+A real two-endpoint case uses one duplex UNAVAILABLE plus one unary failure to
+meet `requestVolume:2`, proving stream completion participates in the same
+wrapper. The failing slot is then excluded for five consecutive RPCs while the
+healthy sibling remains READY, and automatically participates again after its
+200-ms ejection expires. A deterministic nested/sibling allocation sweep proves
+an `a` slot belongs to wrapper indexes 0 and 1 but not 2, while a `b` slot
+belongs only to index 2. Evidence is in
+`docs/evidence/grpc_ordinary_weighted_target_outlier/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

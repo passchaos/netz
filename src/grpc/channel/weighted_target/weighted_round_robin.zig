@@ -49,6 +49,7 @@ pub fn config(
         .weighted => |children| for (children) |child| {
             if (config(child.node, slot)) |value| return value;
         } else null,
+        .outlier => |wrapper| config(wrapper.child, slot),
     };
 }
 
@@ -60,7 +61,7 @@ fn Context(comptime NodePointer: type) type {
             if (!pathMatches(
                 slot.endpoint.hierarchicalPath(),
                 self.node.path,
-            ) or slot.disabled) return false;
+            ) or slot.disabled or slot.weighted_target_ejected) return false;
             const connection = if (slot.connection) |*value|
                 value
             else
