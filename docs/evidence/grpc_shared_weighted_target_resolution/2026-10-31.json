@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "weighted_target resolver membership promotion and draining",
+  "decision": "accepted",
+  "scope": {
+    "owner": "grpc.SharedChannel",
+    "source": "one hostname logical source inside weighted_target and ring_hash",
+    "updates": "physical address A to physical address B",
+    "active_rpc": "old worker remains alive through completion after retirement"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "files": {
+      "src/core/load_balancing/weighted_target/weighted_target.cc": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+      "src/core/load_balancing/address_filtering.cc": "2c5cd86579afef9f06a1657300f80d67c1ef87719e2f5b37d78475cb33a0c454"
+    },
+    "contracts": [
+      "resolver addresses retain one logical hierarchical source identity",
+      "a replacement membership is promoted only after its candidate is usable",
+      "picker snapshots invalidate when source membership changes",
+      "retired workers drain active RPCs before transport and policy state destruction"
+    ]
+  },
+  "implementation": {
+    "identity": "hierarchical_path and explicit ring_hash_key remain on the logical hostname source across address replacement",
+    "promotion": "pending membership becomes current after the B worker reaches READY",
+    "ring": "promotion invalidates every child-local ring before the next pick",
+    "watch": "the old physical endpoint tracker transitions to SHUTDOWN and the replacement tracker reaches READY",
+    "drain": "retirement removes old capacity immediately but Worker lifetime continues until its active list is empty",
+    "authority": "the logical resolve.test authority and original port remain unchanged when the resolver publishes B's physical port"
+  },
+  "native_case": [
+    "initial refresh publishes server A and one weighted/ring logical endpoint",
+    "warm RPC routes to A",
+    "second A RPC remains active behind a barrier",
+    "resolver refresh publishes server B",
+    "B reaches READY before atomic promotion",
+    "old endpoint watch reports SHUTDOWN",
+    "next hash routes to B after ring rebuild",
+    "barrier release lets the retired A worker finish its original RPC"
+  ],
+  "results": {
+    "weighted_target_resolution_debug": "143/143 passed",
+    "complete_grpc_debug": "495/495 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared/weighted_target/resolution_tests.zig": "ef0d75c7ede044bcab0c88cb248a49195456f818ff8dd6792207a4f57f186bd7",
+    "src/grpc/channel/shared/resolution.zig": "72e1dbeaf236223fa027df1e9a49e2d896612cad27c5e6ea76c756520ade71a0",
+    "src/grpc/channel/shared/membership.zig": "dccccba9504110a54554f5ef5757794bd330ffd6785be0a6e2ea3356d62525ae",
+    "src/grpc/channel/shared/weighted_target.zig": "8c7ace89de5275b327fecd5919579798cd729835e2fab7910a72f5071b965036",
+    "src/grpc/channel/shared/weighted_target/ring_hash.zig": "61ee161323c166cea8af3c2acbf4ce770b0e3fee4b8ade44f0f019f63779160d",
+    "src/grpc/channel/shared/source.zig": "227118ca1ddd043a6668ad643cb608000069b278738ad12b418e6746e47d1c3b",
+    "src/grpc/mod.zig": "25979d23ef8791539c37a92d8d0327a71a1027987f42fa66c25c87b230dc7488",
+    "docs/grpc_parity.md": "3f4efd47ebd18be833c84795f597d1131b59db1da8db930a119e6e0e23cc8aed"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC weighted target ring rebuilds after resolver promotion' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "dynamic service-config child removal retention and ordinary Channel remain before broad weighted_target completion"
+}

@@ -740,6 +740,17 @@ parsed by Netz; ordinary Channel and resolver churn/retention evidence remain.
 Evidence is in
 `docs/evidence/grpc_shared_weighted_target_outlier/2026-10-31.json`.
 
+Weighted-target logical sources now have direct resolver-churn evidence. A
+hostname source under a ring-hash child begins on address A, keeps a second RPC
+active there, then publishes address B. SharedChannel waits for B to become
+READY before atomically promoting membership, invalidates the child-local ring,
+marks the old endpoint watch SHUTDOWN and routes the next hash through the same
+logical hierarchy/key to B. The retired A worker remains alive until its active
+RPC finishes, then releases its transport and wrapper/scheduler state. The
+resolver's changed physical port never replaces the original logical authority.
+Evidence is recorded in
+`docs/evidence/grpc_shared_weighted_target_resolution/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper
