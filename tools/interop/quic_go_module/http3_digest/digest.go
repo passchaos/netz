@@ -14,7 +14,7 @@ import (
 
 var payload = []byte(strings.Repeat("HTTP3 digest content ", 512))
 var generated = []byte(`{"hello": "world"}`)
-var paths = []string{"/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/finish"}
+var paths = []string{"/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/sliced", "/finish"}
 var digestMismatch = errors.New("digest mismatch")
 
 func digestField(data []byte, algorithm string) string {
@@ -100,7 +100,7 @@ func reply(path string) ([]byte, http.Header, http.Header, error) {
 		headers.Set("Content-Digest", digestField(content, "sha-256"))
 		headers.Set("Repr-Digest", digestField(payload, "sha-512"))
 		headers.Set("Content-Range", fmt.Sprintf("bytes 8-71/%d", len(payload)))
-	case "/stream":
+	case "/stream", "/sliced":
 		trailers.Set("Content-Digest", digestField(content, "sha-256")+", "+digestField(content, "sha-512"))
 	case "/generated":
 		content = []byte("verified")

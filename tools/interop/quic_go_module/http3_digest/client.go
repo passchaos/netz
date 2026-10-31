@@ -52,14 +52,22 @@ func client(address, caPath string, version int) error {
 		var content io.Reader
 		if path == "/head" {
 			method = http.MethodHead
-		} else if path == "/generated" {
-			method, content = http.MethodPost, bytes.NewReader(generated)
+		} else if path == "/generated" || path == "/sliced" {
+			data := generated
+			if path == "/sliced" {
+				data = payload
+			}
+			method, content = http.MethodPost, bytes.NewReader(data)
 		}
 		request, _ := http.NewRequest(method, "https://"+address+path, content)
-		if path == "/generated" {
-			request.Header.Set("Content-Digest", digestField(generated, "sha-256"))
+		if path == "/generated" || path == "/sliced" {
+			data := generated
+			if path == "/sliced" {
+				data = payload
+			}
+			request.Header.Set("Content-Digest", digestField(data, "sha-256"))
 			request.Header.Set("Want-Content-Digest", "sha-256=3, sha-512=10")
-			request.Trailer = http.Header{"Content-Digest": []string{digestField(generated, "sha-512")}}
+			request.Trailer = http.Header{"Content-Digest": []string{digestField(data, "sha-512")}}
 		}
 		response, err := client.Do(request)
 		if err != nil {
@@ -94,7 +102,7 @@ func client(address, caPath string, version int) error {
 			return err
 		}
 		err = verifySums(map[string][]byte{"sha-256": h256.Sum(nil), "sha-512": h512.Sum(nil)}, response.Header.Values("Content-Digest"), response.Trailer.Values("Content-Digest"))
-		if path == "/stream" && (reads < 2 || response.Trailer.Get("Content-Digest") != "sha-256=:"+base64.StdEncoding.EncodeToString(h256.Sum(nil))+":, sha-512=:"+base64.StdEncoding.EncodeToString(h512.Sum(nil))+":") {
+		if (path == "/stream" || path == "/sliced") && (reads < 2 || response.Trailer.Get("Content-Digest") != "sha-256=:"+base64.StdEncoding.EncodeToString(h256.Sum(nil))+":, sha-512=:"+base64.StdEncoding.EncodeToString(h512.Sum(nil))+":") {
 			return errors.New("incremental digest or trailer mismatch")
 		}
 		if path == "/corrupt" {
@@ -124,7 +132,7 @@ func client(address, caPath string, version int) error {
 			if path == "/head" && len(body) != 0 || path == "/range" && (response.StatusCode != 206 || !bytes.Equal(body, payload[8:72])) {
 				return errors.New("wrong content/representation scope")
 			}
-		case "/trailer", "/stream":
+		case "/trailer", "/stream", "/sliced":
 			if !bytes.Equal(body, payload) || len(response.Trailer.Values("Content-Digest")) == 0 {
 				return errors.New("missing body/trailers")
 			}

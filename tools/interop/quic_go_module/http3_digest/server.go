@@ -9,6 +9,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -28,7 +29,7 @@ func server(address, caPath, certPath, keyPath string, version int) error {
 	var connections atomic.Uint32
 	results := make(chan error, len(paths))
 	var sequence atomic.Uint32
-	service := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}, QUICConfig: config(version)}
+	service := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}, QUICConfig: config(version), Logger: slog.Default()}
 	service.ConnContext = func(ctx context.Context, connection *quic.Conn) context.Context {
 		connections.Add(1)
 		if connection.ConnectionState().TLS.Version != tls.VersionTLS13 || connection.ConnectionState().TLS.NegotiatedProtocol != "h3" || connection.ConnectionState().Version != config(version).Versions[0] {
@@ -46,7 +47,7 @@ func server(address, caPath, certPath, keyPath string, version int) error {
 		if request.URL.Path == "/head" {
 			method = http.MethodHead
 		}
-		if request.URL.Path == "/generated" {
+		if request.URL.Path == "/generated" || request.URL.Path == "/sliced" {
 			method = http.MethodPost
 		}
 		if request.Method != method {
@@ -54,6 +55,13 @@ func server(address, caPath, certPath, keyPath string, version int) error {
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(request.Body, 65537))
+		if err == nil && request.URL.Path == "/sliced" {
+			if !bytes.Equal(body, payload) {
+				err = errors.New("bad sliced request body")
+			} else {
+				err = verifyFields(body, request.Header.Values("Content-Digest"), request.Trailer.Values("Content-Digest"))
+			}
+		}
 		if err == nil && request.URL.Path == "/generated" {
 			if !bytes.Equal(body, generated) || request.Header.Get("Want-Content-Digest") != "sha-256=3, sha-512=10" {
 				err = errors.New("bad generated request")

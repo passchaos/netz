@@ -3,7 +3,7 @@ const netz = @import("netz");
 
 pub const payload = "HTTP3 digest content " ** 512;
 pub const generated = "{\"hello\": \"world\"}";
-pub const paths = [_][]const u8{ "/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/finish" };
+pub const paths = [_][]const u8{ "/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/sliced", "/finish" };
 
 pub fn deadline(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{ .raw = .fromSeconds(15), .clock = .awake });

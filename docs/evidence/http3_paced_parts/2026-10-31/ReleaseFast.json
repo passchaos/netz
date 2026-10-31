@@ -1,0 +1,160 @@
+{
+  "driver_sha256": "008c1c94f71c2414e9037d05e6721eb5df67c702f782221249fedde47b9b09c0",
+  "peer_dependencies": "/tmp/netz-http3-digest-c7tvo94m/peer: go1.24.13\n\tpath\tnetz-quic-go-interop/http3_digest\n\tmod\tnetz-quic-go-interop\t(devel)\t\n\tdep\tgithub.com/quic-go/qpack\tv0.6.0\th1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=\n\tdep\tgithub.com/quic-go/quic-go\tv0.59.0\th1:OLJkp1Mlm/aS7dpKgTc6cnpynnD2Xg7C1pwL6vy/SAw=\n\tdep\tgolang.org/x/crypto\tv0.41.0\th1:WKYxWedPGCTVVl5+WHSSrOBT0O8lx32+zxmHxijgXp4=\n\tdep\tgolang.org/x/net\tv0.43.0\th1:lat02VYK2j4aLzMzecihNvTlJNQUq316m2Mr9rnM6YE=\n\tdep\tgolang.org/x/sys\tv0.35.0\th1:vz1N37gP5bs89s7He8XuIYXpyY0+QlsKmzipCbUtyxI=\n\tdep\tgolang.org/x/text\tv0.28.0\th1:rhazDwis8INMIwQ4tpjLDzUhx6RlXqZNPEM0huQojng=\n\tbuild\t-buildmode=exe\n\tbuild\t-compiler=gc\n\tbuild\tCGO_ENABLED=1\n\tbuild\tCGO_CFLAGS=\n\tbuild\tCGO_CPPFLAGS=\n\tbuild\tCGO_CXXFLAGS=\n\tbuild\tCGO_LDFLAGS=\n\tbuild\tGOARCH=arm64\n\tbuild\tGOOS=linux\n\tbuild\tGOARM64=v8.0\n",
+  "peer_sha256": "6cb11452659c25363e78d12b71f61990ef438cd438b8c6ae7f133de43173572e",
+  "source_sha256": {
+    "tools/interop/http_digest/h3/client.zig": "ad7bbc470ee1d628cc3036508faf5957224f7cda26d83092690e63068ddc5cd3",
+    "tools/interop/http_digest/h3/common.zig": "510aa35f2ec6a003214bdc35ea23c951c2da4a16102623fb1d29aedc601d4a74",
+    "tools/interop/http_digest/h3/main.zig": "5ba10717cadc9c61c6c2e7caa1627739c00b894a417f9e7fed476078d4167cf2",
+    "tools/interop/http_digest/h3/run.py": "5ee6f8525a5a07dc7d7c887255244f3bc4a074d91c4f9b39e2b9e851fffab6d3",
+    "tools/interop/http_digest/h3/server.zig": "dc2a8388ac5a18616b95c32699a8e7000375a7a02a7595fa41b03166621ab971",
+    "tools/interop/quic_go_module/go.mod": "42f9111a8e29246b8d725c5db0aaa5fbf096e8d2b8c0183975562204af480247",
+    "tools/interop/quic_go_module/go.sum": "34b952e5bb4512f341159a1be569fcd138d30d757d6c987ca15bf4e289ca511b",
+    "tools/interop/quic_go_module/http3_digest/client.go": "bee666ac49c1f78d810580d6f9d4e93715aad99dcf88e81ef4a463dd9d8c1fa3",
+    "tools/interop/quic_go_module/http3_digest/digest.go": "d7eb02460db70bcef33fa22d04b51dc3060a1e4ffde1caeb1ea0631b9ff54e66",
+    "tools/interop/quic_go_module/http3_digest/digest_test.go": "f29b46b1c0f4f4e8c8c9ee4ea746f8e91ddb33125ac150773991e932829a6415",
+    "tools/interop/quic_go_module/http3_digest/main.go": "a14039c187446cf4d7404d3d47b94c4af1abf62a14169079358ce8e3264233dc",
+    "tools/interop/quic_go_module/http3_digest/server.go": "b9c85be381895868e7fbe8e9e4943f5ead36b8ff0670b11a98e53326c893d36e"
+  },
+  "standard": "RFC9530",
+  "status": "passed",
+  "traces": [
+    {
+      "client": {
+        "corruption_detected": true,
+        "io": "zio-std-io",
+        "representation_scope": true,
+        "requests": 9,
+        "role": "netz-client",
+        "streaming": true,
+        "version": 1
+      },
+      "server": {
+        "alpn": "h3",
+        "connections": 1,
+        "corruption_detected": false,
+        "generated_verified": true,
+        "injected_corruption": true,
+        "paths": [
+          "/encoded",
+          "/trailer",
+          "/corrupt",
+          "/head",
+          "/range",
+          "/stream",
+          "/generated",
+          "/sliced",
+          "/finish"
+        ],
+        "requests": 9,
+        "role": "quic-go-server",
+        "stream_window": 2048,
+        "tls": "TLSv1.3",
+        "version": 1
+      },
+      "version": 1
+    },
+    {
+      "client": {
+        "alpn": "h3",
+        "connections": 1,
+        "corruption_detected": true,
+        "generated_verified": true,
+        "injected_corruption": false,
+        "paths": [
+          "/encoded",
+          "/trailer",
+          "/corrupt",
+          "/head",
+          "/range",
+          "/stream",
+          "/generated",
+          "/sliced",
+          "/finish"
+        ],
+        "requests": 9,
+        "role": "quic-go-client",
+        "stream_window": 2048,
+        "tls": "TLSv1.3",
+        "version": 1
+      },
+      "server": {
+        "generated_verified": true,
+        "io": "zio-std-io",
+        "requests": 9,
+        "role": "netz-server",
+        "version": 1
+      },
+      "version": 1
+    },
+    {
+      "client": {
+        "corruption_detected": true,
+        "io": "zio-std-io",
+        "representation_scope": true,
+        "requests": 9,
+        "role": "netz-client",
+        "streaming": true,
+        "version": 2
+      },
+      "server": {
+        "alpn": "h3",
+        "connections": 1,
+        "corruption_detected": false,
+        "generated_verified": true,
+        "injected_corruption": true,
+        "paths": [
+          "/encoded",
+          "/trailer",
+          "/corrupt",
+          "/head",
+          "/range",
+          "/stream",
+          "/generated",
+          "/sliced",
+          "/finish"
+        ],
+        "requests": 9,
+        "role": "quic-go-server",
+        "stream_window": 2048,
+        "tls": "TLSv1.3",
+        "version": 2
+      },
+      "version": 2
+    },
+    {
+      "client": {
+        "alpn": "h3",
+        "connections": 1,
+        "corruption_detected": true,
+        "generated_verified": true,
+        "injected_corruption": false,
+        "paths": [
+          "/encoded",
+          "/trailer",
+          "/corrupt",
+          "/head",
+          "/range",
+          "/stream",
+          "/generated",
+          "/sliced",
+          "/finish"
+        ],
+        "requests": 9,
+        "role": "quic-go-client",
+        "stream_window": 2048,
+        "tls": "TLSv1.3",
+        "version": 2
+      },
+      "server": {
+        "generated_verified": true,
+        "io": "zio-std-io",
+        "requests": 9,
+        "role": "netz-server",
+        "version": 2
+      },
+      "version": 2
+    }
+  ],
+  "transport": "HTTP3"
+}

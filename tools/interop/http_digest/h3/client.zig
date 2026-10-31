@@ -21,7 +21,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             .server_name = "localhost",
             .server_auth = verifier.clientVerifier(),
             .local_transport_parameters = common.parameters(),
-            .initial_one_rtt_config = .{ .receive_window = 8192, .max_receive_window = 8192, .stream_receive_window = 2048, .max_stream_receive_window = 2048, .max_datagram_size = 1200 },
+            .initial_one_rtt_config = .{ .key_update_profile = if (version == .version_2) .quic_go_v0_59 else .rfc, .receive_window = 8192, .max_receive_window = 8192, .stream_receive_window = 2048, .max_stream_receive_window = 2048, .max_datagram_size = 1200 },
         },
         .session = .{ .max_stream_buffer = 64 * 1024, .max_stream_frame_data = 1200 },
     });
@@ -30,6 +30,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
         const until = common.deadline(io);
         if (std.mem.eql(u8, path, "/stream")) {
             try streaming(&client, until, allocator);
+            continue;
+        }
+        if (std.mem.eql(u8, path, "/sliced")) {
+            try sliced(&client, until, allocator, version);
             continue;
         }
         var value_storage: [154]u8 = undefined;
@@ -73,11 +77,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             try std.testing.expectEqualStrings(expected, response.response.body);
         }
     }
-    std.debug.print("RESULT {{\"role\":\"netz-client\",\"version\":{d},\"requests\":8,\"streaming\":true,\"corruption_detected\":true,\"representation_scope\":true,\"io\":\"zio-std-io\"}}\n", .{if (version == .version_1) @as(u8, 1) else 2});
+    std.debug.print("RESULT {{\"role\":\"netz-client\",\"version\":{d},\"requests\":9,\"streaming\":true,\"corruption_detected\":true,\"representation_scope\":true,\"io\":\"zio-std-io\"}}\n", .{if (version == .version_1) @as(u8, 1) else 2});
 }
 
 fn streaming(client: *netz.http3.runtime.HandshakeClient, until: std.Io.Clock.Timestamp, allocator: std.mem.Allocator) !void {
     const id = try client.startRequestWithDeadline(.{ .method = "GET", .path = "/stream", .scheme = "https", .authority = "localhost" }, 0, until);
+    return receiveStreaming(client, id, until, allocator);
+}
+
+fn receiveStreaming(client: *netz.http3.runtime.HandshakeClient, id: u62, until: std.Io.Clock.Timestamp, allocator: std.mem.Allocator) !void {
     var hasher = try netz.http.DigestHasher.init(.{ .max_content_bytes = common.payload.len });
     var expected: ?netz.http.digest.Field = null;
     var reads: usize = 0;
@@ -105,4 +113,23 @@ fn streaming(client: *netz.http3.runtime.HandshakeClient, until: std.Io.Clock.Ti
     try std.testing.expect(reads > 1);
     try std.testing.expectEqual(common.payload.len, hasher.bytes);
     try std.testing.expectEqual(netz.http.DigestResult.sha256_and_sha512, try netz.http.digest.verifyComputed(expected orelse return error.MissingTrailer, try hasher.finish(), .{}));
+}
+
+fn sliced(client: *netz.http3.runtime.HandshakeClient, until: std.Io.Clock.Timestamp, allocator: std.mem.Allocator, version: netz.quic.Version) !void {
+    var header: [154]u8 = undefined;
+    var trailer: [154]u8 = undefined;
+    const headers = [_]netz.http3.Qpack.HeaderField{.{ .name = "content-digest", .value = try common.field(common.payload, false, false, &header) }};
+    const trailers = [_]netz.http3.Qpack.HeaderField{.{ .name = "content-digest", .value = try common.field(common.payload, false, true, &trailer) }};
+    const id = try client.startRequestWithDeadline(.{ .method = "POST", .path = "/sliced", .scheme = "https", .authority = "localhost", .headers = &headers }, common.payload.len, until);
+    const parts = [_][]const u8{ common.payload[0..11], "", common.payload[11..93], common.payload[93..2057], common.payload[2057..] };
+    if (version == .version_1) {
+        try client.sendRequestBodyPartsPaced(id, &parts, false);
+    } else {
+        var progress: netz.http3.runtime.BodyWriteProgress = .{};
+        try client.sendRequestBodyPartsPacedWithDeadline(id, &parts, false, &progress, until);
+        try std.testing.expectEqual(common.payload.len, progress.committed_bytes);
+        try std.testing.expect(!progress.fin_committed);
+    }
+    try client.finishRequestTrailersPacedWithDeadline(id, &trailers, until);
+    try receiveStreaming(client, id, until, allocator);
 }

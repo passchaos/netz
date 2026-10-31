@@ -1,0 +1,94 @@
+ok  	netz-quic-go-interop/http3_digest	(cached)
+Traceback (most recent call last):
+  File "/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/run.py", line 108, in <module>
+    main()
+  File "/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/run.py", line 85, in main
+    traces.append(pair(
+                  ^^^^^
+  File "/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/run.py", line 45, in pair
+    raise RuntimeError(server_output + client_output)
+RuntimeError: READY 50811
+2026/10/31 16:11:35 H3_INTERNAL_ERROR: partial-http3-send
+debug(zio): Spawning thread 0
+debug(zio): Removing thread 0
+error: ConnectionClosed
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/quic/one_rtt.zig:2788:25: 0x18ccdab in sendManyProgressAtImpl__anon_53788 (netz-http3-digest-interop)
+                        return error.FlowControlBlocked;
+                        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/quic/one_rtt.zig:2504:9: 0x18ca19b in sendManyProgressAt (netz-http3-digest-interop)
+        return self.sendManyProgressAtImpl(
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/quic/one_rtt.zig:2490:9: 0x18ca057 in sendManyProgress (netz-http3-digest-interop)
+        return self.sendManyProgressAt(packets, self.monotonicNowNs());
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/packetizer.zig:418:25: 0x18c9487 in sendPackets (netz-http3-digest-interop)
+                else => return err,
+                        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/packetizer.zig:338:17: 0x1829ee7 in finish (netz-http3-digest-interop)
+                try self.backend.sendPackets(packets[0..count]);
+                ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/packetizer.zig:121:5: 0x182a6a7 in sendWithBackend__anon_46518 (netz-http3-digest-interop)
+    try packetizer.finish();
+    ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/packetizer.zig:95:9: 0x182a98f in sendUntil (netz-http3-digest-interop)
+        return err;
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/packetizer.zig:33:25: 0x182889f in send (netz-http3-digest-interop)
+        else => |other| return @errorCast(other),
+                        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/body.zig:94:5: 0x1828617 in sendConnectionFrames (netz-http3-digest-interop)
+    try send_packetizer.send(
+    ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/send/body.zig:498:5: 0x19fdb93 in sendConnectionBodyParts__anon_72799 (netz-http3-digest-interop)
+    try sendConnectionFrames(
+    ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/quic/one_rtt.zig:12086:13: 0x19927a7 in receiveDatagramsIntoServicingTimersUntil (netz-http3-digest-interop)
+            return error.ConnectionClosed;
+            ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/quic/one_rtt.zig:12028:29: 0x1991f0b in receiveDatagramsIntoServicingTimers (netz-http3-digest-interop)
+            else => |other| return @errorCast(other),
+                            ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime/receive/cursor.zig:266:44: 0x22164a3 in visit__anon_8026295 (netz-http3-digest-interop)
+                raw_batch.count = @intCast(try connection
+                                           ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime.zig:27036:9: 0x221437f in receiveConnectionResponsePacketUntil (netz-http3-digest-interop)
+        try receive_packets.visit(
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime.zig:26992:25: 0x2241133 in receiveConnectionResponsePacket (netz-http3-digest-interop)
+        else => |other| return @errorCast(other),
+                        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime.zig:19971:9: 0x22404bf in receiveResponseProgressForSend (netz-http3-digest-interop)
+        try receiveConnectionResponsePacket(
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/src/http3/runtime.zig:15755:29: 0x2241d73 in sendRequestBodyPartsPaced (netz-http3-digest-interop)
+                            try self.receiveResponseProgressForSend(stream_id);
+                            ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/client.zig:126:9: 0x1803aa3 in sliced (netz-http3-digest-interop)
+        try client.sendRequestBodyPartsPaced(id, &parts, false);
+        ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/client.zig:36:13: 0x1804fe7 in run (netz-http3-digest-interop)
+            try sliced(&client, until, allocator, version);
+            ^
+/nav_env/project-z/netz-wt-h2-validation-20261031/tools/interop/http_digest/h3/main.zig:12:9: 0x1809767 in main (netz-http3-digest-interop)
+        try @import("client.zig").run(init.gpa, backend.io(), port, version, args[4]);
+        ^
+
+interop-http-digest-quic-go
++- run python3 failure
+error: process exited with error code 1
+failed command: python3 tools/interop/http_digest/h3/run.py /nav_env/project-z/netz/.zig-cache/o/ad4d5085f5c0c82d1c340f1584e6420b/netz-http3-digest-interop
+
+Build Summary: 6/8 steps succeeded (1 failed)
+interop-http-digest-quic-go transitive failure
++- run python3 failure
+   +- compile exe netz-http3-digest-interop Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 8ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+/nav_env/project-z/netz/.zig-cache/o/2af9db9b2b118e960a122a40457b6ec3/build /nav_env/Temp/zig-aarch64-linux-0.16.0/zig /nav_env/Temp/zig-aarch64-linux-0.16.0/lib /nav_env/project-z/netz-wt-h2-validation-20261031 /nav_env/project-z/netz/.zig-cache /home/passchaos/.cache/zig --seed 0xb98e0b6c -Zb584e1f23517f8af interop-http-digest-quic-go --summary all

@@ -125,3 +125,34 @@ Individual gates accept `--report`; use distinct files when retaining results.
 
 The focused paced-body regression bundle passes 147/147 in Debug and
 ReleaseFast. Each independent quic-go matrix verifies all 32 requests.
+
+
+## Flow-aware sliced HTTP/3 bodies
+
+The HTTP3 digest gate now includes a ninth `/sliced` request. Each endpoint
+role uploads and downloads the 10-KiB payload through multiple borrowed slices,
+including empty descriptors and boundaries inside a DATA contribution. QUIC
+v1 exercises unbounded PartsPaced APIs; QUIC v2 exercises their absolute
+deadline forms and requires an exact complete application-byte prefix. Digest
+request trailers and response trailers independently verify every byte. The
+expanded matrix verifies 36 requests, with a later checked response on each
+same connection.
+
+Request and response PartsPaced entry points now share `paced_body.writeParts`.
+It computes current stream, connection, congestion and packet capacity before
+staging descriptors, then commits the descriptor cursor only after the packet
+reaches the socket. Backpressure receives peer progress before recomputing
+capacity; it does not retry an oversized fixed contribution. One-frame
+configuration fallbacks preserve the single-buffer sender's progress contract.
+The existing deadline regression now covers contiguous and sliced inputs,
+requiring the same exact 125-byte prefix under 128 bytes of flow credit.
+
+The pinned quic-go 0.59 peer applies the v1 update label to QUIC v2 traffic
+secrets. This longer matrix crosses its initial 100-packet update threshold,
+so the fixture explicitly selects the existing quic_go_v0_59 update profile
+for that peer/version pairing. The RFC9369 profile stays the library default.
+The Go fixture also supplies a logger for its trailer-failure path. Scope and
+verified results are in `docs/evidence/http3_paced_parts/2026-10-31.json`.
+
+The sliced-body regression bundle passes 147/147 in Debug and ReleaseFast.
+Each independent HTTP3 matrix verifies all 36 requests.

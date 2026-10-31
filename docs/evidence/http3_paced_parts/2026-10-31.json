@@ -1,0 +1,65 @@
+{
+  "status": "verified",
+  "date": "2026-10-31",
+  "feature": "HTTP3 flow-aware request and response sliced DATA writes",
+  "base_commit": "38e65294",
+  "peer": "quic-go v0.59.0",
+  "versions": [
+    1,
+    2
+  ],
+  "requests_per_mode": 36,
+  "source_sha256": {
+    "src/http3/runtime.zig": "9089b7f8a9c052a076de8cb97e8968143b7ecb6068c12c2fd1cc7a2876b37afe",
+    "src/http3/runtime/send/paced_body.zig": "98839e4db4118980c73082e3e83d196c8bda4467c662a8c85a525ee1640185ee",
+    "src/http3/runtime/send/tests/paced_body.zig": "1a7328bc9d67cd62e57f9820662726a6000372cf58f071f85701e714c2f2887a",
+    "tools/interop/http_digest/h3/client.zig": "ad7bbc470ee1d628cc3036508faf5957224f7cda26d83092690e63068ddc5cd3",
+    "tools/interop/http_digest/h3/server.zig": "dc2a8388ac5a18616b95c32699a8e7000375a7a02a7595fa41b03166621ab971",
+    "tools/interop/http_digest/h3/main.zig": "5ba10717cadc9c61c6c2e7caa1627739c00b894a417f9e7fed476078d4167cf2",
+    "tools/interop/http_digest/h3/run.py": "5ee6f8525a5a07dc7d7c887255244f3bc4a074d91c4f9b39e2b9e851fffab6d3",
+    "tools/interop/http_digest/h3/common.zig": "510aa35f2ec6a003214bdc35ea23c951c2da4a16102623fb1d29aedc601d4a74",
+    "tools/interop/quic_go_module/http3_digest/digest.go": "d7eb02460db70bcef33fa22d04b51dc3060a1e4ffde1caeb1ea0631b9ff54e66",
+    "tools/interop/quic_go_module/http3_digest/client.go": "bee666ac49c1f78d810580d6f9d4e93715aad99dcf88e81ef4a463dd9d8c1fa3",
+    "tools/interop/quic_go_module/http3_digest/server.go": "b9c85be381895868e7fbe8e9e4943f5ead36b8ff0670b11a98e53326c893d36e",
+    "tools/interop/quic_go_module/http3_digest/digest_test.go": "f29b46b1c0f4f4e8c8c9ee4ea746f8e91ddb33125ac150773991e932829a6415",
+    "tools/interop/quic_go_module/http3_digest/main.go": "a14039c187446cf4d7404d3d47b94c4af1abf62a14169079358ce8e3264233dc"
+  },
+  "verification": {
+    "Debug": {
+      "tests_passed": 147,
+      "tests_total": 147,
+      "interop_report": "2026-10-31/Debug.json",
+      "requests": 36
+    },
+    "ReleaseFast": {
+      "tests_passed": 147,
+      "tests_total": 147,
+      "interop_report": "2026-10-31/ReleaseFast.json",
+      "requests": 36
+    }
+  },
+  "counterexample": "2026-10-31/before.json",
+  "regression": {
+    "flow_credit": 128,
+    "committed_contiguous_or_sliced_body_prefix": 125,
+    "data_header_bytes": 3,
+    "connection_usable": true
+  },
+  "compatibility_profile": {
+    "version1": "rfc",
+    "version2": "quic_go_v0_59",
+    "scope": "pinned peer fixture only"
+  },
+  "test_filters": [
+    "HTTP/3 paced DATA deadline",
+    "HTTP/3 handshake body parts deadline",
+    "HTTP/3 paced request send",
+    "HTTP/3 handshake client streams promised push",
+    "HTTP/3 handshake server streams large request",
+    "HTTP/3 handshake client streams dynamic response"
+  ],
+  "interop_command": "zig build interop-http-digest-quic-go --summary all",
+  "limitations": [
+    "This is protocol/lifecycle evidence, not a cross-stack throughput claim."
+  ]
+}

@@ -4191,3 +4191,21 @@ reproduction are in `docs/http_digest.md`; evidence is in
 
 The focused paced-body regression bundle passes 147/147 in Debug and
 ReleaseFast. Each independent quic-go matrix verifies all 32 requests.
+
+
+## Sliced DATA sends under current credit
+
+The HTTP3 PartsPaced request/response methods now reuse the common paced
+writer's current-credit planning. The staged descriptor cursor can span slice
+boundaries without joining plaintext; flow control, congestion and MTU limit
+the complete DATA contribution before submission. Both bounded and unbounded
+entry points preserve exact committed prefixes and keep the owner-specific
+cancellation/receive routing hooks. A fixed-window quic-go matrix now transfers
+10-KiB sliced request and response bodies with digest trailers in both endpoint
+roles, using QUIC v1 and v2, then checks connection reuse. The old 38e65294
+implementation fails the same matrix with partial-http3-send after flow blocks
+a multi-packet sliced contribution. Evidence is recorded in
+`docs/evidence/http3_paced_parts/2026-10-31.json`.
+
+The sliced-body regression bundle passes 147/147 in Debug and ReleaseFast.
+Each independent HTTP3 matrix verifies all 36 requests.

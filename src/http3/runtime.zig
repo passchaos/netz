@@ -9897,87 +9897,11 @@ pub const HandshakeServerSession = struct {
         fin: bool,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        if (self.options.max_frames_per_packet >= 2 and
-            self.options.max_stream_frame_data != 0)
-        {
-            var cursor = BodyPartCursor{ .parts = parts };
-            if (cursor.done()) {
-                return self.sendResponseBodyPaced(stream_id, &.{}, fin);
-            }
-            var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
-            const chunk_limit = pacedBodyChunkLimit(self.options);
-            var response_finished_by_fallback = false;
-            while (!cursor.done()) {
-                var attempt_limit = chunk_limit;
-                while (true) {
-                    var staged = cursor;
-                    const chunk = staged.next(
-                        &chunk_storage,
-                        attempt_limit,
-                        self.options.max_stream_frame_data,
-                    );
-                    const last = staged.done();
-                    if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
-                        return responseResetError(cancel.application_error_code);
-                    }
-                    sendConnectionBodyParts(
-                        &self.established.connection,
-                        &self.outbound_bodies,
-                        stream_id,
-                        chunk,
-                        fin and last,
-                        self.options,
-                    ) catch |err| switch (err) {
-                        error.FlowControlBlocked, error.CongestionLimited => {
-                            try self.receiveRequestPacket();
-                            continue;
-                        },
-                        error.DatagramTooLarge => {
-                            if (attempt_limit == 1) {
-                                try self.sendResponseBodyPaced(
-                                    stream_id,
-                                    chunk[0],
-                                    fin and last,
-                                );
-                                response_finished_by_fallback = fin and last;
-                                cursor = staged;
-                                break;
-                            }
-                            attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    cursor = staged;
-                    break;
-                }
-            }
-            if (fin and !response_finished_by_fallback) {
-                finishServerRequest(
-                    &self.control,
-                    &self.request_lifecycle,
-                    stream_id,
-                );
-            }
-            return;
-        }
-
-        var non_empty: usize = 0;
-        for (parts) |part| non_empty += @intFromBool(part.len != 0);
-        if (non_empty == 0) {
-            try self.sendResponseBodyPaced(stream_id, &.{}, fin);
-            return;
-        }
-        var sent: usize = 0;
-        for (parts) |part| {
-            if (part.len == 0) continue;
-            sent += 1;
-            try self.sendResponseBodyPaced(
-                stream_id,
-                part,
-                fin and sent == non_empty,
-            );
-        }
+        var progress: BodyWriteProgress = .{};
+        _ = paced_body.writeParts(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, parts, fin, null, &progress, paced_response_hooks) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn sendResponseBodyPartsPacedWithTimeout(
@@ -10017,102 +9941,7 @@ pub const HandshakeServerSession = struct {
         progress.* = .{};
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        const total_len = try bodyPartsLength(parts);
-        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
-        if (total_len == 0) {
-            return self.sendResponseBodyPacedWithDeadline(
-                stream_id,
-                &.{},
-                fin,
-                progress,
-                deadline,
-            );
-        }
-
-        if (self.options.max_frames_per_packet < 2 or
-            self.options.max_stream_frame_data == 0)
-        {
-            var non_empty: usize = 0;
-            for (parts) |part| non_empty += @intFromBool(part.len != 0);
-            var sent: usize = 0;
-            for (parts) |part| {
-                if (part.len == 0) continue;
-                sent += 1;
-                var part_progress: BodyWriteProgress = .{};
-                self.sendResponseBodyPacedWithDeadline(
-                    stream_id,
-                    part,
-                    fin and sent == non_empty,
-                    &part_progress,
-                    deadline,
-                ) catch |err| {
-                    progress.committed_bytes += part_progress.committed_bytes;
-                    progress.fin_committed = part_progress.fin_committed;
-                    return err;
-                };
-                progress.committed_bytes += part_progress.committed_bytes;
-                progress.fin_committed = part_progress.fin_committed;
-            }
-            return;
-        }
-
-        var cursor = BodyPartCursor{ .parts = parts };
-        var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        while (!cursor.done()) {
-            var attempt_limit = chunk_limit;
-            while (true) {
-                _ = try deadline_policy.usableAwake(
-                    self.connectionIo(),
-                    deadline,
-                );
-                var staged = cursor;
-                const chunk = staged.next(
-                    &chunk_storage,
-                    attempt_limit,
-                    self.options.max_stream_frame_data,
-                );
-                const last = staged.done();
-                if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
-                    return responseResetError(cancel.application_error_code);
-                }
-                trySendConnectionBodyParts(
-                    &self.established.connection,
-                    &self.outbound_bodies,
-                    stream_id,
-                    chunk,
-                    fin and last,
-                    self.options,
-                ) catch |err| switch (err) {
-                    error.FlowControlBlocked, error.CongestionLimited => {
-                        try self.receiveRequestPacketUntil(deadline);
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailabilityWithDeadline(deadline);
-                        continue;
-                    },
-                    error.DatagramTooLarge => {
-                        if (attempt_limit == 1) return err;
-                        attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
-                        continue;
-                    },
-                    else => return err,
-                };
-                progress.committed_bytes += bodyPartChunkLength(chunk);
-                progress.fin_committed = fin and last;
-                cursor = staged;
-                break;
-            }
-        }
-        if (fin) {
-            finishServerRequest(
-                &self.control,
-                &self.request_lifecycle,
-                stream_id,
-            );
-        }
+        _ = try paced_body.writeParts(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, parts, fin, deadline, progress, paced_response_hooks);
     }
 
     /// Batched counterpart to `sendResponseBodyPaced` for concurrent response
@@ -15721,78 +15550,12 @@ pub const HandshakeClient = struct {
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.callback_reader_active) return error.ConcurrentRead;
-        if (!self.request_lifecycle.contains(stream_id)) {
-            return error.UnexpectedStream;
-        }
-        if (self.options.max_frames_per_packet >= 2 and
-            self.options.max_stream_frame_data != 0)
-        {
-            var cursor = BodyPartCursor{ .parts = parts };
-            if (cursor.done()) {
-                return self.sendRequestBodyPaced(stream_id, &.{}, fin);
-            }
-            var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
-            const chunk_limit = pacedBodyChunkLimit(self.options);
-            while (!cursor.done()) {
-                var attempt_limit = chunk_limit;
-                while (true) {
-                    var staged = cursor;
-                    const chunk = staged.next(
-                        &chunk_storage,
-                        attempt_limit,
-                        self.options.max_stream_frame_data,
-                    );
-                    const last = staged.done();
-                    sendConnectionBodyParts(
-                        &self.established.connection,
-                        &self.outbound_bodies,
-                        stream_id,
-                        chunk,
-                        fin and last,
-                        self.options,
-                    ) catch |err| switch (err) {
-                        error.FlowControlBlocked, error.CongestionLimited => {
-                            try self.receiveResponseProgressForSend(stream_id);
-                            continue;
-                        },
-                        error.DatagramTooLarge => {
-                            if (attempt_limit == 1) {
-                                try self.sendRequestBodyPaced(
-                                    stream_id,
-                                    chunk[0],
-                                    fin and last,
-                                );
-                                cursor = staged;
-                                break;
-                            }
-                            attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    cursor = staged;
-                    break;
-                }
-            }
-            return;
-        }
-
-        var non_empty: usize = 0;
-        for (parts) |part| non_empty += @intFromBool(part.len != 0);
-        if (non_empty == 0) {
-            try self.sendRequestBodyPaced(stream_id, &.{}, fin);
-            return;
-        }
-        var sent: usize = 0;
-        for (parts) |part| {
-            if (part.len == 0) continue;
-            sent += 1;
-            try self.sendRequestBodyPaced(
-                stream_id,
-                part,
-                fin and sent == non_empty,
-            );
-        }
+        if (!self.request_lifecycle.contains(stream_id)) return error.UnexpectedStream;
+        var progress: BodyWriteProgress = .{};
+        _ = paced_body.writeParts(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, parts, fin, null, &progress, paced_request_hooks) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn sendRequestBodyPartsPacedWithTimeout(
@@ -15830,103 +15593,12 @@ pub const HandshakeClient = struct {
         progress: *BodyWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
         progress.* = .{};
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (!self.request_lifecycle.contains(stream_id)) return error.UnexpectedStream;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        if (!self.request_lifecycle.contains(stream_id)) {
-            return error.UnexpectedStream;
-        }
-        const total_len = try bodyPartsLength(parts);
-        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
-        if (total_len == 0) {
-            return self.sendRequestBodyPacedWithDeadline(
-                stream_id,
-                &.{},
-                fin,
-                progress,
-                deadline,
-            );
-        }
-
-        if (self.options.max_frames_per_packet < 2 or
-            self.options.max_stream_frame_data == 0)
-        {
-            var non_empty: usize = 0;
-            for (parts) |part| non_empty += @intFromBool(part.len != 0);
-            var sent: usize = 0;
-            for (parts) |part| {
-                if (part.len == 0) continue;
-                sent += 1;
-                var part_progress: BodyWriteProgress = .{};
-                self.sendRequestBodyPacedWithDeadline(
-                    stream_id,
-                    part,
-                    fin and sent == non_empty,
-                    &part_progress,
-                    deadline,
-                ) catch |err| {
-                    progress.committed_bytes += part_progress.committed_bytes;
-                    progress.fin_committed = part_progress.fin_committed;
-                    return err;
-                };
-                progress.committed_bytes += part_progress.committed_bytes;
-                progress.fin_committed = part_progress.fin_committed;
-            }
-            return;
-        }
-
-        var cursor = BodyPartCursor{ .parts = parts };
-        var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        while (!cursor.done()) {
-            var attempt_limit = chunk_limit;
-            while (true) {
-                _ = try deadline_policy.usableAwake(
-                    self.connectionIo(),
-                    deadline,
-                );
-                try self.failIfRequestResetForSend(stream_id);
-                var staged = cursor;
-                const chunk = staged.next(
-                    &chunk_storage,
-                    attempt_limit,
-                    self.options.max_stream_frame_data,
-                );
-                const last = staged.done();
-                trySendConnectionBodyParts(
-                    &self.established.connection,
-                    &self.outbound_bodies,
-                    stream_id,
-                    chunk,
-                    fin and last,
-                    self.options,
-                ) catch |err| switch (err) {
-                    error.FlowControlBlocked, error.CongestionLimited => {
-                        try self.receiveResponseProgressForSendUntil(
-                            stream_id,
-                            deadline,
-                        );
-                        continue;
-                    },
-                    error.PacingLimited => {
-                        try self.established.connection
-                            .waitForPacingAvailabilityWithDeadline(deadline);
-                        continue;
-                    },
-                    error.DatagramTooLarge => {
-                        if (attempt_limit == 1) return err;
-                        attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
-                        continue;
-                    },
-                    else => return err,
-                };
-                progress.committed_bytes += bodyPartChunkLength(chunk);
-                progress.fin_committed = fin and last;
-                cursor = staged;
-                break;
-            }
-        }
+        _ = try paced_body.writeParts(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, parts, fin, deadline, progress, paced_request_hooks);
     }
 
     /// Send one DATA contribution per active request stream as a stateful QUIC

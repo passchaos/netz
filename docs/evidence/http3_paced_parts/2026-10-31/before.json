@@ -1,0 +1,7 @@
+{
+  "base_commit": "38e65294",
+  "expected_status": "failed",
+  "cause": "sliced request crosses current flow credit and partial packetizer submission closes HTTP3 connection",
+  "error": "H3_INTERNAL_ERROR partial-http3-send / ConnectionClosed",
+  "runtime_sha256": "120e01c6b48be0c581522df24e9fdb30f82cb999f01499d5fab220c6b74d84eb"
+}
