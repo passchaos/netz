@@ -135,6 +135,7 @@ pub const ChannelOptions = runtime.ChannelOptions;
 pub const ChannelBackoffPolicy = runtime.ChannelBackoffPolicy;
 pub const ChannelCustomConnector = runtime.ChannelCustomConnector;
 pub const ChannelHttpConnectProxy = runtime.ChannelHttpConnectProxy;
+pub const ChannelSocks5Proxy = runtime.ChannelSocks5Proxy;
 pub const ChannelProxyEnvironment = runtime.ChannelProxyEnvironment;
 pub const ChannelProxyPolicy = runtime.ChannelProxyPolicy;
 pub const ChannelProxyDecision = runtime.ChannelProxyDecision;
@@ -188,6 +189,7 @@ test {
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("channel/proxy_tests.zig");
     _ = @import("channel/proxy_policy_tests.zig");
+    _ = @import("channel/socks5_tests.zig");
     _ = @import("service_config/least_request_tests.zig");
     _ = @import("service_config/ring_hash_tests.zig");
     _ = @import("service_config/hedging_tests.zig");

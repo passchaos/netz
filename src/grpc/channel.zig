@@ -26,6 +26,8 @@ const net = std.Io.net;
 pub const BackoffPolicy = backoff.Policy;
 pub const AddressResolver = resolver.AddressResolver;
 pub const HttpConnectProxy = http2.runtime.HttpConnectProxy;
+pub const Socks5Proxy = http2.socks5_runtime.Proxy;
+pub const ConnectError = http2.socks5_runtime.Error;
 pub const ProxyEnvironment = proxy_policy.Environment;
 pub const ProxyPolicy = proxy_policy.Policy;
 pub const ProxyDecision = proxy_policy.Decision;
@@ -33,7 +35,7 @@ pub const ProxySource = proxy_policy.ProxySource;
 pub const ProxyBypassSource = proxy_policy.BypassSource;
 pub const ProxyDirectReason = proxy_policy.DirectReason;
 
-pub const Error = streaming.Error || resolver.Error || error{
+pub const Error = streaming.Error || resolver.Error || ConnectError || error{
     InvalidChannelOptions,
     MissingRequestHash,
     ChannelBusy,
@@ -102,6 +104,10 @@ pub const Endpoint = union(enum) {
         /// certificate identity, :authority, and gRPC metadata remain bound
         /// to the origin.
         proxy: ?HttpConnectProxy = null,
+        /// Optional RFC 1928 SOCKS5 CONNECT hop with proxy-side origin DNS.
+        /// Mutually exclusive with `proxy`; credentials and resolver policy
+        /// remain scoped to the proxy transport.
+        socks5_proxy: ?Socks5Proxy = null,
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
     },
@@ -121,7 +127,7 @@ pub const Endpoint = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         deadline: std.Io.Clock.Timestamp,
-    ) http2.runtime.Error!http2.runtime.Connection {
+    ) ConnectError!http2.runtime.Connection {
         return switch (self) {
             .cleartext_ip => |target| blk: {
                 var connection = try http2.runtime.Client.connectWithDeadline(
@@ -152,6 +158,17 @@ pub const Endpoint = union(enum) {
                     target.host,
                     target.port,
                     proxy,
+                    target.limits,
+                    target.tls,
+                    deadline,
+                )
+            else if (target.socks5_proxy) |proxy|
+                http2.socks5_runtime.Client.connectTlsHostWithDeadline(
+                    allocator,
+                    io,
+                    proxy,
+                    target.host,
+                    target.port,
                     target.limits,
                     target.tls,
                     deadline,
@@ -196,6 +213,24 @@ pub const Endpoint = union(enum) {
     }
 
     fn validate(self: Endpoint) error{InvalidChannelOptions}!void {
+        switch (self) {
+            .cleartext_host => |target| if (target.port == 0) {
+                return error.InvalidChannelOptions;
+            },
+            .tls_host => |target| {
+                if (target.port == 0 or
+                    (target.proxy != null and target.socks5_proxy != null))
+                {
+                    return error.InvalidChannelOptions;
+                }
+                if (target.socks5_proxy) |proxy| {
+                    if (!validSocks5Proxy(proxy)) {
+                        return error.InvalidChannelOptions;
+                    }
+                }
+            },
+            else => {},
+        }
         const enables_push = switch (self) {
             .cleartext_ip => |target| target.limits.enable_push,
             .cleartext_host => |target| target.limits.enable_push,
@@ -249,7 +284,7 @@ pub const Target = union(enum) {
         };
     }
 
-    fn validate(self: Target) error{InvalidChannelOptions}!void {
+    pub fn validate(self: Target) error{InvalidChannelOptions}!void {
         if (self.count() == 0) return error.InvalidChannelOptions;
         for (0..self.count()) |index| try self.endpoint(index).validate();
     }
@@ -259,9 +294,10 @@ pub const Target = union(enum) {
 /// value alive for at least as long as every Channel using `target`; `deinit`
 /// invalidates the borrowed URI and CONNECT-header slices inside that target.
 ///
-/// A caller-supplied `tls_host.proxy` is already a complete explicit transport
-/// override and therefore takes precedence without consulting the policy or
-/// environment. As with `Endpoint`, caller-provided extra header values,
+/// A caller-supplied `tls_host.proxy` or `tls_host.socks5_proxy` is already a
+/// complete explicit transport override and therefore takes precedence
+/// without consulting the HTTP proxy policy or environment. As with
+/// `Endpoint`, caller-provided extra header values,
 /// resolver contexts, and `tunnel_authority` remain borrowed for this target's
 /// lifetime.
 pub const TlsHostProxyTarget = struct {
@@ -274,7 +310,7 @@ pub const TlsHostProxyTarget = struct {
         policy: ProxyPolicy,
         tls_host: @FieldType(Endpoint, "tls_host"),
     ) proxy_policy.Error!TlsHostProxyTarget {
-        if (tls_host.proxy != null) return .{
+        if (tlsProxyResolvesOrigin(tls_host)) return .{
             .target = .{ .tls_host = tls_host },
             .decision = null,
         };
@@ -316,7 +352,7 @@ pub const TlsHostProxyTarget = struct {
         policy: ProxyPolicy,
         tls_host: @FieldType(Endpoint, "tls_host"),
     ) (proxy_policy.Error || std.process.Environ.CreateMapError)!TlsHostProxyTarget {
-        if (tls_host.proxy != null) return .{
+        if (tlsProxyResolvesOrigin(tls_host)) return .{
             .target = .{ .tls_host = tls_host },
             .decision = null,
         };
@@ -409,7 +445,9 @@ const HostResolution = struct {
         target: Target,
         options: Options,
     ) Error!?HostResolution {
-        if (target == .tls_host and target.tls_host.proxy != null) return null;
+        if (target == .tls_host and tlsProxyResolvesOrigin(target.tls_host)) {
+            return null;
+        }
         const host: []const u8, const port: u16, var transport = switch (target) {
             .cleartext_host => |value| .{
                 value.host,
@@ -544,7 +582,7 @@ pub const Channel = struct {
         );
         errdefer if (host_resolution) |*value| value.deinit(allocator);
         const proxy_resolves_origin = target == .tls_host and
-            target.tls_host.proxy != null;
+            tlsProxyResolvesOrigin(target.tls_host);
         if (options.address_resolver != null and host_resolution == null and
             !proxy_resolves_origin)
         {
@@ -2104,6 +2142,12 @@ fn retryableConnectError(err: anyerror) bool {
         error.NetworkUnreachable,
         error.NoAddressReturned,
         error.ProcessFdQuotaExceeded,
+        error.ProxyConnectionClosed,
+        error.ProxyConnectionRefused,
+        error.ProxyGeneralFailure,
+        error.ProxyHostUnreachable,
+        error.ProxyNetworkUnreachable,
+        error.ProxyTtlExpired,
         error.SocketUnconnected,
         error.SystemFdQuotaExceeded,
         error.SystemResources,
@@ -2112,6 +2156,40 @@ fn retryableConnectError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+test "gRPC SOCKS5 retry classification separates transport and policy failures" {
+    for ([_]anyerror{
+        error.ProxyConnectionClosed,
+        error.ProxyConnectionRefused,
+        error.ProxyGeneralFailure,
+        error.ProxyHostUnreachable,
+        error.ProxyNetworkUnreachable,
+        error.ProxyTtlExpired,
+    }) |err| try std.testing.expect(retryableConnectError(err));
+    for ([_]anyerror{
+        error.InvalidCredentials,
+        error.InvalidProxyPort,
+        error.ProxyAuthenticationFailed,
+        error.ProxyAuthenticationRequired,
+        error.ProxyProtocolViolation,
+        error.ProxyUnsupportedAuthentication,
+    }) |err| try std.testing.expect(!retryableConnectError(err));
+}
+
+fn tlsProxyResolvesOrigin(target: @FieldType(Endpoint, "tls_host")) bool {
+    return target.proxy != null or target.socks5_proxy != null;
+}
+
+fn validSocks5Proxy(proxy: Socks5Proxy) bool {
+    if (proxy.host.len == 0 or proxy.port == 0) return false;
+    if (net.IpAddress.parse(proxy.host, proxy.port)) |_| {} else |_| {
+        _ = net.HostName.init(proxy.host) catch return false;
+    }
+    const credentials = proxy.options.credentials orelse
+        return proxy.options.allow_no_authentication;
+    return credentials.username.len > 0 and credentials.username.len <= 255 and
+        credentials.password.len > 0 and credentials.password.len <= 255;
 }
 
 fn connectionLost(err: anyerror) bool {

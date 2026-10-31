@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRPC TLS channels through authenticated SOCKS5",
+  "decision": "accepted",
+  "scope": {
+    "owners": [
+      "single-owner grpc.runtime.Channel",
+      "background grpc.SharedChannel"
+    ],
+    "proxy": "RFC 1928 CONNECT with optional RFC 1929 username/password authentication",
+    "origin_transport": "certificate-verified TLS 1.3 with mandatory h2 ALPN",
+    "dns": "origin hostname is carried as a SOCKS domain target and is not resolved locally"
+  },
+  "reference": {
+    "standards": [
+      "RFC 1928 SOCKS Protocol Version 5",
+      "RFC 1929 Username/Password Authentication for SOCKS V5"
+    ],
+    "grpc_core": {
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "http_proxy_mapper_sha256": "0488cb60ad1a5c9a842752f3660ebb81b98ece4908b04b840ba4b824bb2adef0",
+      "native_socks_transport_found": false,
+      "audit": "case-insensitive source search found only c-ares socket variable names, not a SOCKS proxy transport"
+    },
+    "netz_transport": {
+      "src/proxy/socks5.zig": "e1c74c32ddfdfb3365983801d39a37cc1c77a3b9cda273ad51dcf7359598d3c8",
+      "src/http2/socks5_runtime.zig": "00078c38682d53c5eed85e0330e893949765419639a634963a7182f0204fc2f2"
+    },
+    "observed_contract": [
+      "proxy routing and credentials are independent from origin TLS and gRPC identity",
+      "one absolute attempt deadline spans proxy resolution, TCP, authentication, CONNECT, TLS, ALPN, and HTTP2 bootstrap",
+      "proxy-side DNS requires the untouched origin hostname in the SOCKS request",
+      "a persistent HTTP2 connection reuses one successful SOCKS tunnel across later gRPC streams"
+    ]
+  },
+  "implementation": {
+    "endpoint": "tls_host accepts optional ChannelSocks5Proxy and rejects simultaneous HTTP CONNECT plus SOCKS configuration",
+    "validation": "ordinary and SharedChannel synchronously reject zero ports, empty or malformed proxy hosts, missing mandatory credentials, and empty or oversized RFC 1929 fields",
+    "resolver": "SOCKS endpoints remain one logical source and skip local origin resolution while allowing caller resolver configuration for other endpoints",
+    "identity": "TLS SNI, certificate verification, default :authority, exporter ownership, gRPC metadata, picker identity, and retry ownership remain origin-bound",
+    "credentials": "username/password bytes exist only in the RFC 1929 exchange and cannot enter the origin HPACK field block",
+    "retry": "connection closure, refusal, network/host unreachable, TTL expiry, and proxy general failure enter existing endpoint backoff; authentication, protocol, and configuration errors are non-retryable",
+    "lifecycle": "ordinary and SharedChannel retain their existing HTTP2 connection owner, cancellation, backoff, and shutdown paths above the tunnel"
+  },
+  "advantages_over_pinned_grpc_core": [
+    "native pure-Zig authenticated SOCKS5 transport instead of HTTP CONNECT only",
+    "explicit authentication-downgrade prevention",
+    "remote origin DNS without application resolver or hosts-file mutation",
+    "structured SOCKS protocol errors participate in endpoint retry classification"
+  ],
+  "native_cases": [
+    "RFC 1929 is the only offered method when downgrade is disabled",
+    "exact grpc-user and grpc-pass:word credentials",
+    "domain address type carrying localhost and the exact dynamic origin port",
+    "first proxy general failure followed by bounded endpoint backoff and successful retry",
+    "certificate-pinned TLS 1.3 and h2 through the retried tunnel",
+    "ordinary Channel unary RPC",
+    "SharedChannel unary RPC through a separate authenticated tunnel",
+    "exact origin authority and absence of Proxy-Authorization metadata",
+    "caller origin resolver invocation count remains zero",
+    "HTTP CONNECT/SOCKS conflict and malformed proxy configuration fail synchronously for both owners"
+  ],
+  "process_case": {
+    "client": "Netz SharedChannel",
+    "proxy": "independent Python socket SOCKS5 relay",
+    "origin": "pinned grpc-cpp TLS interoperability server",
+    "assertions": [
+      "RFC 1929 username/password authentication is mandatory and accepted",
+      "origin target is foo.test.google.fr as SOCKS domain address",
+      "certificate verification and h2 ALPN use foo.test.google.fr",
+      "two canonical UnaryCall RPCs validate independent protobuf payload sizes",
+      "exactly one proxy tunnel carries both RPCs"
+    ]
+  },
+  "results": {
+    "native_socks_debug": "143/143 passed",
+    "complete_grpc_debug": "481/481 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_http_connect_socks_release_fast": "11/11 build steps passed",
+    "runtime_identity": "client_io=zio-std-io proxy_io=python-socket server_io=grpc-cpp-posix-event-engine"
+  },
+  "source_sha256": {
+    "build.zig": "71ac7a353e68c9785b71e344e7ae4fb57c4e5a6e11a265989f2493c3aa77fe60",
+    "src/grpc/channel.zig": "3c1e12e4950fdde919325a61d015bd2c2c7269590800a0329ff5cb6957a91799",
+    "src/grpc/channel/shared/init.zig": "1b8456cd5edccc99898c982e21d8c7ba255e45524ff537cb508ecf2dc8401f7c",
+    "src/grpc/channel/shared/source.zig": "ca46dd871b753aa5a6b9d0bd4fb99b174a5ab211d9f2d3162f5f290351cbed9a",
+    "src/grpc/channel/socks5_tests.zig": "7df16fb374321604a8a99f081b3b2b1c22c6e5179aa2764070e3036b1844ca85",
+    "src/grpc/runtime.zig": "62601134b1cc21d94a8919f500396c8d871472e560971f255340bb77b5bc0783",
+    "src/grpc/mod.zig": "16888bf488de648300d67cbb7dbb331bca5d6ebd47acaa4692da37ef26eaefe2",
+    "test/package_test.zig": "275d01fe7285f9ebe62c6a134fd10dc13da0f50395df649689fa272e93c06f00",
+    "tools/interop/grpc_cpp.sh": "342ffdd10335afa6104792585e4f8b96342f3b94d28e1ce07eea839dacfa5d8c",
+    "tools/interop/grpc_socks5_client.zig": "e99e03eaee6846caab7f8c3d3e0e6c46baea3a53d234638c3fe51b8c770932f9",
+    "tools/interop/grpc_socks5.py": "e7fcb4b9b4cad57c3be92beabf7184e34d6b71c2fd71fea3e91b03fc6452bd03",
+    "tools/interop/mqtt_socks5.py": "a1ea258f830d44a239760af3fa8dfda695c623bcf705a084b561b8ff27162042",
+    "docs/grpc_parity.md": "26a2f4d431e54f8e0f4abae1071dad087b12665355d7a5807267aa67364261cb"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC Channels use authenticated SOCKS5' --summary all",
+    "zig build test-lib -Dtest-filter='SOCKS5 proxy options' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server TMPDIR=/nav_env/Temp/netz-grpc-tmp zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "explicit SOCKS5 channel transport is complete; PAC and automatic SOCKS environment URI selection remain separate policy work"
+}

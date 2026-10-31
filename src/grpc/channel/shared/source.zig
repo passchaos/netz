@@ -20,7 +20,10 @@ pub fn Source(comptime Worker: type) type {
 
         const Self = @This();
         pub fn init(allocator: std.mem.Allocator, io: std.Io, endpoint: channel.Endpoint, options: channel.Options) channel.Error!Self {
-            if (endpoint == .tls_host and endpoint.tls_host.proxy != null) {
+            if (endpoint == .tls_host and
+                (endpoint.tls_host.proxy != null or
+                    endpoint.tls_host.socks5_proxy != null))
+            {
                 return .{
                     .endpoint = endpoint,
                     .ring_hash_weight = ring_hash.endpointWeight(endpoint),
@@ -90,7 +93,8 @@ pub fn Source(comptime Worker: type) type {
                     .ring_hash_key = v.ring_hash_key,
                     .ring_hash_weight = self.ring_hash_weight,
                 } },
-                .tls_host => |v| if (v.proxy != null)
+                .tls_host => |v| if (v.proxy != null or
+                    v.socks5_proxy != null)
                     .{ .tls_host = v }
                 else
                     .{ .tls_address = .{

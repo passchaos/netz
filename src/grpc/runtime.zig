@@ -46,6 +46,7 @@ pub const ChannelOptions = channel.Options;
 pub const ChannelBackoffPolicy = channel.BackoffPolicy;
 pub const ChannelCustomConnector = channel.CustomConnector;
 pub const ChannelHttpConnectProxy = channel.HttpConnectProxy;
+pub const ChannelSocks5Proxy = channel.Socks5Proxy;
 pub const ChannelProxyEnvironment = channel.ProxyEnvironment;
 pub const ChannelProxyPolicy = channel.ProxyPolicy;
 pub const ChannelProxyDecision = channel.ProxyDecision;

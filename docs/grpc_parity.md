@@ -826,6 +826,39 @@ Evidence is recorded in
 `docs/evidence/grpc_hyper_connect_proxy/2026-10-31.json` and
 `docs/evidence/grpc_proxy_policy/2026-10-31.json`.
 
+## Authenticated SOCKS5 proxy channels
+
+TLS gRPC host endpoints also accept `ChannelSocks5Proxy`, composing the shared
+RFC 1928/RFC 1929 transport with ordinary Channel and SharedChannel. SOCKS5 and
+HTTP CONNECT are mutually exclusive and validated before background work:
+origin/proxy port zero, an empty or malformed proxy host, missing credentials
+when authentication downgrade is forbidden, and empty or oversized username/
+password values all fail channel initialization. SharedChannel now applies the
+same endpoint validation synchronously rather than discovering bad proxy
+configuration only in a worker.
+
+The proxy receives the original origin hostname as a SOCKS domain target; the
+gRPC resolver is not run for that origin, even when a caller supplied one for
+other endpoints. One absolute attempt deadline covers proxy resolution/TCP,
+SOCKS method selection, RFC 1929 authentication, CONNECT, origin TLS and h2
+bootstrap. Proxy credentials remain in the SOCKS handshake and cannot enter the
+origin HTTP/2 metadata. TLS SNI, certificate verification and gRPC `:authority`
+remain bound to the requested origin. HTTP CONNECT and SOCKS error sets share
+the existing retry/backoff owner: transport closure, network/host unreachable,
+refusal, TTL expiry and general proxy failure are retryable; authentication,
+protocol and configuration failures are not.
+
+The native TLS regression forces username/password authentication without
+no-auth fallback, checks the exact domain target and credentials, proves a
+caller resolver is never invoked, and completes RPCs through both Channel
+owners. The independent process gate uses a Python socket relay in front of the
+pinned grpc-cpp TLS server. Two canonical UnaryCall RPCs reuse exactly one
+authenticated tunnel while preserving `foo.test.google.fr` certificate
+identity and mandatory `h2` ALPN. The pinned grpc-core source contains HTTP
+CONNECT mapping but no SOCKS transport; this is an explicit Netz capability,
+not a renamed grpc-core option. Evidence is recorded in
+`docs/evidence/grpc_socks5_proxy/2026-10-31.json`.
+
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial
 response could first exhaust that deadline trying to return connection credit.

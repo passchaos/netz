@@ -2242,12 +2242,24 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    const grpc_socks5_client = b.addExecutable(.{
+        .name = "netz-grpc-socks5-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/grpc_socks5_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
     const grpc_cpp_interop = b.addSystemCommand(
         &.{"tools/interop/grpc_cpp.sh"},
     );
     grpc_cpp_interop.addArtifactArg(grpc_cpp_client);
     grpc_cpp_interop.addArtifactArg(grpc_cpp_pick_first_failover);
     grpc_cpp_interop.addArtifactArg(grpc_hyper_proxy_client);
+    grpc_cpp_interop.addArtifactArg(grpc_socks5_client);
     const grpc_cpp_interop_step = b.step(
         "interop-grpc-cpp",
         "Run netz gRPC h2c/TLS client against upstream gRPC C++",

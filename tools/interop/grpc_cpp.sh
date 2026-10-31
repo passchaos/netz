@@ -4,6 +4,7 @@ set -euo pipefail
 client=${1:?netz grpc-cpp client executable path}
 pick_first_failover=${2:?netz grpc-cpp pick-first failover executable path}
 proxy_client=${3:?netz grpc Hyper proxy client executable path}
+socks_client=${4:?netz grpc SOCKS5 client executable path}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 hyper_manifest="$repo_root/tools/hyper_http2_flow/Cargo.toml"
 hyper_proxy="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-http-connect-proxy"
@@ -275,6 +276,16 @@ grep -Fq \
   "$work/hyper-proxy.log"
 cat "$work/proxy-client.log"
 cat "$work/hyper-proxy.log"
+
+python3 "$repo_root/tools/interop/grpc_socks5.py" \
+  "$socks_client" "$port" "$ca_file" >"$work/socks-client.log" 2>&1
+grep -Fq \
+  "netz gRPC tunneled grpc-cpp TLS through SOCKS5: rpcs=2 remote_dns=true rfc1929=true auth_downgrade=false tls_identity=foo.test.google.fr certificate_verified=true alpn=h2 connection_reused=true client_io=zio-std-io proxy_io=python-socket server_io=grpc-cpp-posix-event-engine" \
+  "$work/socks-client.log"
+grep -Fq \
+  "Python SOCKS5 tunneled netz gRPC TLS: remote_dns=true rfc1929=true auth_downgrade=false target=foo.test.google.fr tunnels=1 rpcs=2 connection_reused=true" \
+  "$work/socks-client.log"
+cat "$work/socks-client.log"
 
 kill -INT "$server_pid" 2>/dev/null || true
 wait "$server_pid" 2>/dev/null || true

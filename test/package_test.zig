@@ -668,6 +668,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
+        "ChannelSocks5Proxy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
         "ChannelProxyEnvironment",
     ));
     try std.testing.expect(@hasDecl(

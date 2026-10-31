@@ -18,6 +18,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     if (target == .resolved and target.resolved.endpoints.len == 0) {
         return error.InvalidSharedOptions;
     }
+    try target.validate();
     var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parseWithOptions(
         allocator,
         json,
@@ -164,7 +165,8 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     for (sources) |source| {
         proxy_resolves_origin = proxy_resolves_origin or
             (source.endpoint == .tls_host and
-                source.endpoint.tls_host.proxy != null);
+                (source.endpoint.tls_host.proxy != null or
+                    source.endpoint.tls_host.socks5_proxy != null));
     }
     if (options.channel.address_resolver != null and !has_host and
         !proxy_resolves_origin)
