@@ -3,9 +3,9 @@ test-lib success
 +- run test 6144 pass (6144 total) 5m MaxRSS:1G
    +- compile test Debug native success 3m MaxRSS:11G
       +- WriteFile cached
-      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:29M
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:30M
       +- WriteFile cached
-      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:29M
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:30M
       +- compile obj vort-br-record-optimal Debug native (reused)
       +- compile obj vort-zstd-huffman-x2 Debug native (reused)
       +- options cached
