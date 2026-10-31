@@ -63,7 +63,7 @@ pub fn pick(
             state,
             local_index,
         ).?;
-        switch (pickSource(state, source_index)) {
+        switch (pickSource(runtime, state, source_index)) {
             .worker => |worker| return worker,
             .pending => if (!request_hash.random) return null,
             .failed => {},
@@ -187,13 +187,18 @@ fn SourcePick(comptime WorkerPointer: type) type {
     };
 }
 
-fn pickSource(state: anytype, source_index: usize) SourcePick(@TypeOf(
+fn pickSource(
+    runtime: anytype,
+    state: anytype,
+    source_index: usize,
+) SourcePick(@TypeOf(
     state.sources[0].current[0],
 )) {
     const source = &state.sources[source_index];
     var pending = source.resolver != null and source.current.len == 0;
     for (source.current) |worker| {
-        if (!worker.eligible or worker.retired) continue;
+        if (!worker.eligible or worker.retired or
+            runtime.workerEjected(state, worker)) continue;
         switch (worker.published) {
             .ready => if (worker.capacity != 0) {
                 return .{ .worker = worker };

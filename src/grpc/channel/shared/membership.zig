@@ -33,7 +33,31 @@ pub fn Membership(comptime State: type) type {
             errdefer orca_tracker.release();
             const wake = try Wake.create(allocator);
             errdefer wake.release();
-            worker.* = .{ .parent = state, .source_index = source_index, .address = address, .owner = owner, .tracker = tracker, .orca_tracker = orca_tracker, .wake = wake };
+            const outlier_count = if (state.weighted_target) |*runtime|
+                runtime.outlierCount()
+            else
+                0;
+            const weighted_outliers: []@import("../outlier_detection.zig").Endpoint = if (outlier_count == 0)
+                @constCast(&[_]@import("../outlier_detection.zig").Endpoint{})
+            else blk: {
+                const values = try allocator.alloc(
+                    @import("../outlier_detection.zig").Endpoint,
+                    outlier_count,
+                );
+                for (values) |*value| value.* = .{};
+                break :blk values;
+            };
+            errdefer allocator.free(weighted_outliers);
+            worker.* = .{
+                .parent = state,
+                .source_index = source_index,
+                .address = address,
+                .owner = owner,
+                .tracker = tracker,
+                .orca_tracker = orca_tracker,
+                .wake = wake,
+                .weighted_outliers = weighted_outliers,
+            };
             try state.group.concurrent(state.io, State.Worker.run, .{worker});
             state.workers.appendAssumeCapacity(worker);
             state.wrr_scheduler.next_update_ns = 0;

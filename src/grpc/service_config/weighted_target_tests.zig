@@ -181,28 +181,3 @@ test "gRPC weighted target runtime boundary is explicit per channel owner" {
         manager.selectionPolicy(),
     );
 }
-
-test "gRPC SharedChannel weighted target rejects unsupported child runtimes" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    const target: channel.Target = .{ .cleartext_ip = .{
-        .address = .{ .ip4 = .loopback(9) },
-        .hierarchical_path = &.{"a"},
-    } };
-    for ([_][]const u8{
-        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
-        \\ "targets":{"a":{"weight":1,"childPolicy":[
-        \\  {"outlier_detection_experimental":{"childPolicy":[
-        \\   {"round_robin":{}}]}}]}}}}]}
-        ,
-    }) |json| try std.testing.expectError(
-        error.InvalidSharedOptions,
-        shared.SharedChannel.init(
-            std.testing.allocator,
-            io,
-            target,
-            .{ .service_config_json = json },
-        ),
-    );
-}

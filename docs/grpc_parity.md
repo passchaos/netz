@@ -713,9 +713,32 @@ owns OOB reporting. A real three-server per-RPC test learns 1:3 weights only
 from the two matching workers, excludes a weight-100 unmatched reporter, then
 expires both reports and returns to exact 1:1. A separate gRPC/OOB server proves
 one matching worker opens the stream, publishes a watch update and learns a
-weight while its READY sibling remains untouched. Outlier children and ordinary
-Channel remain explicit initialization errors. Evidence is in
+weight while its READY sibling remains untouched. At that milestone outlier
+children and ordinary Channel remained explicit initialization errors. Evidence is in
 `docs/evidence/grpc_shared_weighted_target_wrr/2026-10-31.json`.
+
+Shared weighted targets now execute `outlier_detection_experimental` wrappers
+without flattening their ownership. Runtime construction assigns every wrapper
+an independent index; every worker allocates one persistent bucket/ejection
+state per wrapper, so sibling policies cannot share success/failure rotation,
+multiplier or expiry. Completion records into each matching wrapper on the
+worker's tree path. Interval evaluation filters the wrapper's hierarchical
+subset, preserves grpc-core success-rate/failure-percentage enforcement and
+max-ejection accounting, and feeds ejection into every child picker including
+ring and WRR. The earliest wrapper deadline wakes idle endpoint owners, so
+expiry does not require later application traffic.
+
+A real two-backend round-robin test records two successes and two failures,
+ejects only the all-failing endpoint, sends the next five RPCs exclusively to
+the healthy sibling, then observes automatic unejection after 200 ms. A second
+two-target test gives each sibling its own wrapper and sends 100 successful
+RPCs; each worker's matching bucket is nonzero while the other wrapper's
+success and failure counters remain exactly zero. Recursive runtime construction
+with an outlier-wrapped nested target also passes every induced allocation
+failure. SharedChannel now executes every load-balancing policy type currently
+parsed by Netz; ordinary Channel and resolver churn/retention evidence remain.
+Evidence is in
+`docs/evidence/grpc_shared_weighted_target_outlier/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

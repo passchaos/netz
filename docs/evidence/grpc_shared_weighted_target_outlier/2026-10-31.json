@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "outlier-detection child wrappers inside SharedChannel weighted_target",
+  "decision": "accepted",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "wrapper": "outlier_detection_experimental",
+    "children": [
+      "pick_first",
+      "round_robin",
+      "least_request_experimental",
+      "ring_hash_experimental",
+      "weighted_round_robin",
+      "nested weighted_target_experimental"
+    ]
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "contracts": [
+      "each composite wrapper owns independent child-policy state",
+      "success-rate and failure-percentage buckets rotate per configured interval",
+      "maximum ejection percentage is scoped to eligible endpoints in that wrapper",
+      "ejection multiplier and expiry persist per endpoint and wrapper",
+      "ejected endpoints are unavailable to the delegated child picker"
+    ]
+  },
+  "implementation": {
+    "indexing": "runtime construction assigns one stable index to every outlier wrapper",
+    "worker_storage": "each worker allocates one persistent Endpoint state per wrapper",
+    "recording": "unary and streaming terminal completion records into every matching wrapper along the worker tree path",
+    "evaluation": "wrapper-local hierarchy filtering drives existing grpc-core-compatible success/failure evaluator",
+    "picker_integration": "pick-first, round-robin, least-request, ring-hash and WRR all exclude ejected workers",
+    "deadline": "State reports the earliest wrapper evaluation deadline so idle workers wake for unejection without application traffic",
+    "isolation": "sibling wrappers use separate counters, multipliers and timestamps",
+    "allocation": "worker state arrays and outlier-wrapped runtime construction are transactional"
+  },
+  "native_cases": {
+    "ejection": [
+      "round-robin sends two calls each to one healthy and one always-UNAVAILABLE endpoint",
+      "20 ms evaluation ejects only the all-failing endpoint",
+      "the next five RPCs all use the healthy sibling",
+      "200 ms expiry automatically restores the ejected endpoint state"
+    ],
+    "sibling_isolation": [
+      "two weighted targets each own a separate outlier wrapper",
+      "100 successful RPCs reach both targets",
+      "each worker has two wrapper slots",
+      "only its matching slot records successes; the sibling slot retains zero successes and failures"
+    ],
+    "allocation": "outlier-wrapped nested runtime passes every induced allocation failure"
+  },
+  "results": {
+    "weighted_target_outlier_debug": "143/143 passed",
+    "runtime_allocation_sweep": "137/137 passed",
+    "complete_grpc_debug": "494/494 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/shared/weighted_target.zig": "8c7ace89de5275b327fecd5919579798cd729835e2fab7910a72f5071b965036",
+    "src/grpc/channel/shared/weighted_target/outlier.zig": "d64afc0947b94258a8cd2914011d7b5db631bfb23a64b48302d317197564fa8f",
+    "src/grpc/channel/shared/weighted_target/outlier_tests.zig": "3bf517d52c3a7b55bd7215686c6f30df04164e7f38ed98993398e3995ec531ee",
+    "src/grpc/channel/shared/weighted_target/ring_hash.zig": "61ee161323c166cea8af3c2acbf4ce770b0e3fee4b8ade44f0f019f63779160d",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin.zig": "7d3c6731e6c788394e6eb821e9dcc772fa9449b9b8ec6c708d295edbfbe88658",
+    "src/grpc/channel/shared/state.zig": "b516ffbc8ad9e53a1020e36a404a92362a3b81db2440e64a51d0ca0b93a474a5",
+    "src/grpc/channel/shared/init.zig": "358472957dd3bebf5bd43690caf1435aab70a3dfdc6919a6cdc9ad27c775d144",
+    "src/grpc/channel/shared/membership.zig": "dccccba9504110a54554f5ef5757794bd330ffd6785be0a6e2ea3356d62525ae",
+    "src/grpc/channel/shared/worker.zig": "b48bda806e4d9597e6ae1df0ac46dc0a99e5a1264b9b292cd6a3deeefd5c8a1e",
+    "src/grpc/mod.zig": "6421eccb1f9f88d1822b80bef3a91da0845626be35f8ef495e8742d8661580f6",
+    "src/grpc/service_config/weighted_target_tests.zig": "ca19d85eb0e32405353b263463dacb67ec9fba227f1665678d844743cf7308ba",
+    "docs/grpc_parity.md": "f25471b4a95bf4f4d5f2bfa9aa2fb67433014e5c29035877e48349b58776c964"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel weighted target outlier' --summary all",
+    "zig build test-lib -Dtest-filter='SharedChannel weighted target runtime construction' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "resolver membership churn, delayed child retention, and ordinary Channel remain before broad weighted_target completion"
+}

@@ -96,8 +96,13 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .weighted_target = weighted_target,
         .least_request_config = balancing.least_request,
         .ring_hash_config = balancing.ring_hash,
-        .outlier_config = balancing.outlier_detection,
-        .outlier_next_evaluation_ns = if (balancing.outlier_detection) |outlier|
+        .outlier_config = if (balancing.policy == .weighted_target)
+            null
+        else
+            balancing.outlier_detection,
+        .outlier_next_evaluation_ns = if (balancing.policy == .weighted_target)
+            null
+        else if (balancing.outlier_detection) |outlier|
             if (outlier.countingEnabled()) std.Io.Clock.awake.now(io)
                 .addDuration(.fromNanoseconds(@max(
                     outlier.interval.nanoseconds,

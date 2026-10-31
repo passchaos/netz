@@ -53,6 +53,7 @@ pub fn Worker(comptime State: type) type {
         connection_keepalive_interval: ?std.Io.Duration = null,
         wrr_weight: weighted_round_robin.Weight = .{},
         outlier: outlier_detection.Endpoint = .{},
+        weighted_outliers: []outlier_detection.Endpoint = &.{},
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
@@ -69,6 +70,7 @@ pub fn Worker(comptime State: type) type {
                 self.orca_tracker.shutdown();
                 self.orca_tracker.release();
                 self.wake.release();
+                parent.allocator.free(self.weighted_outliers);
                 parent.allocator.destroy(self);
             }
             while (!self.parent.shouldStop(self, self.active.items.len == 0 and self.streams.items.len == 0)) {

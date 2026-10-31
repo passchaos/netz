@@ -352,6 +352,12 @@ pub const State = struct {
         worker: anytype,
         success: bool,
     ) void {
+        if (comptime @TypeOf(worker) == *Worker) {
+            if (self.weighted_target) |*runtime| {
+                runtime.recordOutlier(self, worker, success);
+                return;
+            }
+        }
         if (self.outlier_config == null) return;
         if (comptime @hasField(@TypeOf(worker.*), "outlier")) {
             worker.outlier.record(success);
@@ -531,7 +537,10 @@ pub const State = struct {
     pub fn nextOutlierDeadline(self: *State) ?std.Io.Clock.Timestamp {
         self.lock();
         defer self.unlock();
-        const raw = self.outlier_next_evaluation_ns orelse return null;
+        const raw = if (self.weighted_target) |*runtime|
+            runtime.nextOutlierDeadline() orelse return null
+        else
+            self.outlier_next_evaluation_ns orelse return null;
         return .{ .raw = .{ .nanoseconds = raw }, .clock = .awake };
     }
     pub fn expireQueued(self: *State) void {
@@ -760,6 +769,10 @@ pub const State = struct {
         return !workers[index].retired;
     }
     fn evaluateOutliersLocked(self: *State) void {
+        if (self.weighted_target) |*runtime| {
+            if (runtime.evaluateOutliers(self)) self.wakeAllLocked();
+            return;
+        }
         const config = self.outlier_config orelse return;
         const next = self.outlier_next_evaluation_ns orelse return;
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;

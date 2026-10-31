@@ -5,12 +5,21 @@ const orca_config = @import("../orca/config.zig");
 
 pub fn pick(
     allocator: std.mem.Allocator,
+    runtime: anytype,
     node: anytype,
     leaf: anytype,
     state: anytype,
 ) std.mem.Allocator.Error!?@TypeOf(state.workers.items[0]) {
-    const ContextType = Context(@TypeOf(node), @TypeOf(state));
-    var context = ContextType{ .node = node, .state = state };
+    const ContextType = Context(
+        @TypeOf(runtime),
+        @TypeOf(node),
+        @TypeOf(state),
+    );
+    var context = ContextType{
+        .runtime = runtime,
+        .node = node,
+        .state = state,
+    };
     const now = std.Io.Clock.awake.now(state.io).nanoseconds;
     if (now >= leaf.wrr_scheduler.next_update_ns) {
         try leaf.wrr_scheduler.rebuildFiltered(
@@ -44,6 +53,7 @@ pub fn config(
         .weighted => |weighted| for (weighted.children) |child| {
             if (config(child.node, state, worker)) |value| return value;
         } else null,
+        .outlier => |wrapper| config(wrapper.child, state, worker),
     };
 }
 
@@ -56,6 +66,7 @@ pub fn disconnect(node: anytype, state: anytype, worker: anytype) void {
         .weighted => |weighted| for (weighted.children) |child| {
             disconnect(child.node, state, worker);
         },
+        .outlier => |wrapper| disconnect(wrapper.child, state, worker),
     }
 }
 
@@ -70,6 +81,7 @@ pub fn orcaConfig(
         .weighted => |weighted| for (weighted.children) |child| {
             if (orcaConfig(child.node, state, worker)) |value| return value;
         } else null,
+        .outlier => |wrapper| orcaConfig(wrapper.child, state, worker),
     };
 }
 
@@ -79,18 +91,25 @@ pub fn hasOob(node: anytype) bool {
         .weighted => |weighted| for (weighted.children) |child| {
             if (hasOob(child.node)) break true;
         } else false,
+        .outlier => |wrapper| hasOob(wrapper.child),
     };
 }
 
-fn Context(comptime NodePointer: type, comptime StatePointer: type) type {
+fn Context(
+    comptime RuntimePointer: type,
+    comptime NodePointer: type,
+    comptime StatePointer: type,
+) type {
     return struct {
+        runtime: RuntimePointer,
         node: NodePointer,
         state: StatePointer,
 
         fn ready(self: *@This(), worker: anytype) bool {
             return workerMatches(self.state, worker, self.node.path) and
                 worker.eligible and !worker.retired and
-                worker.published == .ready;
+                worker.published == .ready and
+                !self.runtime.workerEjected(self.state, worker);
         }
 
         fn available(self: *@This(), worker: anytype) bool {

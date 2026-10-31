@@ -12,11 +12,13 @@ const ring_support = @import("weighted_target/ring_hash.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const wrr_support = @import("weighted_target/weighted_round_robin.zig");
 const orca_config = @import("orca/config.zig");
+const outlier_support = @import("weighted_target/outlier.zig");
 
 pub fn Runtime(comptime State: type) type {
     return struct {
         allocator: std.mem.Allocator,
         root: *Node,
+        outlier_count: usize = 0,
 
         const Self = @This();
         const Worker = State.Worker;
@@ -48,11 +50,19 @@ pub fn Runtime(comptime State: type) type {
             children: []Child,
         };
 
+        const Outlier = struct {
+            config: service_config.OutlierDetectionConfig,
+            index: usize,
+            next_evaluation_ns: i96 = 0,
+            child: *Node,
+        };
+
         const Node = struct {
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
                 weighted: Weighted,
+                outlier: Outlier,
             },
         };
 
@@ -133,13 +143,46 @@ pub fn Runtime(comptime State: type) type {
             return wrr_support.hasOob(self.root);
         }
 
+        pub fn outlierCount(self: *const Self) usize {
+            return self.outlier_count;
+        }
+
         pub fn available(
             self: *Self,
             state: *State,
             worker: *Worker,
         ) bool {
-            _ = self;
-            return workerAvailable(state, worker);
+            return self.workerAvailable(state, worker);
+        }
+
+        pub fn evaluateOutliers(self: *Self, state: *State) bool {
+            return outlier_support.evaluate(
+                self,
+                self.root,
+                state,
+                std.Io.Clock.awake.now(state.io).nanoseconds,
+            );
+        }
+
+        pub fn nextOutlierDeadline(self: *Self) ?i96 {
+            return outlier_support.nextDeadline(self.root);
+        }
+
+        pub fn recordOutlier(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+            success: bool,
+        ) void {
+            outlier_support.record(self.root, state, worker, success);
+        }
+
+        pub fn workerEjected(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+        ) bool {
+            return outlier_support.ejected(self.root, state, worker);
         }
 
         fn build(
@@ -166,7 +209,10 @@ pub fn Runtime(comptime State: type) type {
                     weighted,
                     path,
                 ),
-                else => error.InvalidSharedOptions,
+                .outlier_detection => |wrapper| self.buildOutlier(
+                    wrapper,
+                    path,
+                ),
             };
         }
 
@@ -260,6 +306,29 @@ pub fn Runtime(comptime State: type) type {
             return node;
         }
 
+        fn buildOutlier(
+            self: *Self,
+            wrapper: @FieldType(service_config.LoadBalancingNode, "outlier_detection"),
+            path: []const []const u8,
+        ) BuildError!*Node {
+            const index = self.outlier_count;
+            self.outlier_count += 1;
+            const owned_path = try self.allocator.dupe([]const u8, path);
+            errdefer self.allocator.free(owned_path);
+            const child = try self.build(wrapper.child, path);
+            errdefer self.destroy(child);
+            const node = try self.allocator.create(Node);
+            node.* = .{
+                .path = owned_path,
+                .kind = .{ .outlier = .{
+                    .config = wrapper.config,
+                    .index = index,
+                    .child = child,
+                } },
+            };
+            return node;
+        }
+
         fn destroy(self: *Self, node: *Node) void {
             switch (node.kind) {
                 .leaf => |*leaf| {
@@ -271,6 +340,7 @@ pub fn Runtime(comptime State: type) type {
                     for (weighted.children) |child| self.destroy(child.node);
                     self.allocator.free(weighted.children);
                 },
+                .outlier => |wrapper| self.destroy(wrapper.child),
             }
             self.allocator.free(node.path);
             self.allocator.destroy(node);
@@ -301,6 +371,10 @@ pub fn Runtime(comptime State: type) type {
                     else
                         .transient_failure;
                 },
+                .outlier => |wrapper| self.aggregateNode(
+                    wrapper.child,
+                    state,
+                ),
             };
         }
 
@@ -309,7 +383,6 @@ pub fn Runtime(comptime State: type) type {
             node: *Node,
             state: *State,
         ) connectivity.State {
-            _ = self;
             var connecting = false;
             var idle = false;
             for (state.workers.items) |worker| {
@@ -319,7 +392,9 @@ pub fn Runtime(comptime State: type) type {
                     continue;
                 }
                 switch (worker.published) {
-                    .ready => return .ready,
+                    .ready => if (!self.workerEjected(state, worker)) {
+                        return .ready;
+                    },
                     .connecting => connecting = true,
                     .idle => idle = true,
                     .transient_failure, .shutdown => {},
@@ -377,6 +452,11 @@ pub fn Runtime(comptime State: type) type {
                     }
                     unreachable;
                 },
+                .outlier => |wrapper| try self.pickNode(
+                    wrapper.child,
+                    state,
+                    job,
+                ),
             };
         }
 
@@ -390,12 +470,12 @@ pub fn Runtime(comptime State: type) type {
             if (leaf.policy == .pick_first) {
                 if (leaf.selected) |selected| {
                     if (workerMatches(state, selected, node.path) and
-                        workerAvailable(state, selected)) return selected;
+                        self.workerAvailable(state, selected)) return selected;
                     leaf.selected = null;
                 }
             }
             if (leaf.policy == .least_request) {
-                return pickLeastRequest(node, leaf, state);
+                return self.pickLeastRequest(node, leaf, state);
             }
             if (leaf.policy == .ring_hash) {
                 return try self.pickRingHash(node, leaf, state, job);
@@ -420,7 +500,7 @@ pub fn Runtime(comptime State: type) type {
                 for (state.workers.items) |worker| {
                     if (!workerMatches(state, worker, node.path)) continue;
                     if (ordinal == wanted) {
-                        if (!workerAvailable(state, worker)) break;
+                        if (!self.workerAvailable(state, worker)) break;
                         if (leaf.policy == .pick_first) leaf.selected = worker;
                         return worker;
                     }
@@ -464,6 +544,11 @@ pub fn Runtime(comptime State: type) type {
                         return;
                     }
                 },
+                .outlier => |wrapper| self.commitNode(
+                    wrapper.child,
+                    state,
+                    worker,
+                ),
             }
         }
 
@@ -494,6 +579,11 @@ pub fn Runtime(comptime State: type) type {
                         return;
                     }
                 },
+                .outlier => |wrapper| self.finishOutstandingNode(
+                    wrapper.child,
+                    state,
+                    worker,
+                ),
             }
         }
 
@@ -508,10 +598,12 @@ pub fn Runtime(comptime State: type) type {
                         self.removeNode(child.node, worker);
                     }
                 },
+                .outlier => |wrapper| self.removeNode(wrapper.child, worker),
             }
         }
 
         fn pickLeastRequest(
+            self: *Self,
             node: *Node,
             leaf: *const Leaf,
             state: *State,
@@ -519,7 +611,7 @@ pub fn Runtime(comptime State: type) type {
             var available_count: usize = 0;
             for (state.workers.items) |worker| {
                 if (workerMatches(state, worker, node.path) and
-                    workerAvailable(state, worker))
+                    self.workerAvailable(state, worker))
                 {
                     available_count += 1;
                 }
@@ -534,7 +626,7 @@ pub fn Runtime(comptime State: type) type {
                 var ordinal = random.uintLessThan(usize, available_count);
                 const sampled = for (state.workers.items) |worker| {
                     if (!workerMatches(state, worker, node.path) or
-                        !workerAvailable(state, worker))
+                        !self.workerAvailable(state, worker))
                     {
                         continue;
                     }
@@ -574,7 +666,13 @@ pub fn Runtime(comptime State: type) type {
             leaf: *Leaf,
             state: *State,
         ) std.mem.Allocator.Error!?*Worker {
-            return wrr_support.pick(self.allocator, node, leaf, state);
+            return wrr_support.pick(
+                self.allocator,
+                self,
+                node,
+                leaf,
+                state,
+            );
         }
 
         fn invalidateNodeRings(self: *Self, node: *Node) void {
@@ -585,6 +683,7 @@ pub fn Runtime(comptime State: type) type {
                 .weighted => |weighted| for (weighted.children) |child| {
                     self.invalidateNodeRings(child.node);
                 },
+                .outlier => |wrapper| self.invalidateNodeRings(wrapper.child),
             }
         }
 
@@ -601,6 +700,7 @@ pub fn Runtime(comptime State: type) type {
                         return self.pathUsesRing(child.node, path);
                     }
                 } else false,
+                .outlier => |wrapper| self.pathUsesRing(wrapper.child, path),
             };
         }
 
@@ -616,10 +716,10 @@ pub fn Runtime(comptime State: type) type {
             );
         }
 
-        fn workerAvailable(state: *State, worker: *Worker) bool {
-            _ = state;
+        fn workerAvailable(self: *Self, state: *State, worker: *Worker) bool {
             return worker.eligible and !worker.retired and
-                worker.published == .ready and worker.capacity != 0;
+                worker.published == .ready and worker.capacity != 0 and
+                !self.workerEjected(state, worker);
         }
 
         fn pathMatches(
@@ -648,9 +748,13 @@ test "SharedChannel weighted target runtime construction is transactional" {
     const nested = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &nested_targets,
     } };
+    const wrapped = service_config.LoadBalancingNode{ .outlier_detection = .{
+        .config = .{ .failure_percentage_ejection = .{} },
+        .child = &nested,
+    } };
     const targets = [_]service_config.WeightedTargetConfig.Target{
         .{ .name = "a", .weight = 1, .child = &leaf },
-        .{ .name = "b", .weight = 3, .child = &nested },
+        .{ .name = "b", .weight = 3, .child = &wrapped },
     };
     const root = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &targets,
@@ -658,6 +762,7 @@ test "SharedChannel weighted target runtime construction is transactional" {
     const Harness = struct {
         fn run(allocator: std.mem.Allocator, config: *const service_config.LoadBalancingNode) !void {
             var runtime = try Runtime(FakeState).init(allocator, config);
+            try std.testing.expectEqual(@as(usize, 1), runtime.outlierCount());
             runtime.deinit();
         }
     };
