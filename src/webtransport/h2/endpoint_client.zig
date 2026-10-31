@@ -447,6 +447,21 @@ pub const EndpointClient = struct {
         return self.exportKeyingMaterialWithDeadline(handle, label, context, length, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
 
+    /// Return the transport-owning worker's terminal failure, if any. A
+    /// reconnecting owner uses this only to retire the complete connection
+    /// generation; stream-local failures remain scoped to their Session.
+    pub fn terminalFailure(self: EndpointClient) ?anyerror {
+        self.state.lock();
+        defer self.state.unlock();
+        return self.state.failure;
+    }
+
+    /// Request endpoint shutdown without releasing this owner. Retained
+    /// results may still release their state after observing EndpointClosed.
+    pub fn requestShutdown(self: EndpointClient) void {
+        self.state.close();
+    }
+
     pub fn deinit(self: *EndpointClient) void {
         const state = self.state;
         state.close();

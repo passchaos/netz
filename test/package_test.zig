@@ -300,6 +300,20 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "removeWithTimeout",
         "exportKeyingMaterialWithTimeout",
     }) |decl| try std.testing.expect(@hasDecl(h2.EndpointClient, decl));
+    try std.testing.expect(@hasDecl(h2, "ReconnectingEndpointClient"));
+    try std.testing.expect(@hasDecl(h2, "ReconnectingEndpointTarget"));
+    try std.testing.expect(@hasDecl(h2, "ReconnectingSessionHandle"));
+    inline for (&.{
+        "connectAttemptWithTimeout",
+        "connectWithTimeout",
+        "sendDatagramWithTimeout",
+        "receiveWithTimeout",
+        "openStreamWithTimeout",
+        "sendStreamWithTimeout",
+        "closeWithTimeout",
+        "removeWithTimeout",
+        "exportKeyingMaterialWithTimeout",
+    }) |decl| try std.testing.expect(@hasDecl(h2.ReconnectingEndpointClient, decl));
     try std.testing.expect(@hasDecl(h2, "EndpointServer"));
     inline for (&.{
         "receiveRequestWithTimeout",

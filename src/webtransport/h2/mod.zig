@@ -17,6 +17,14 @@ pub const SessionHandle = endpoint_client.Handle;
 pub const EndpointEvent = endpoint_client.Event;
 pub const EndpointAccepted = endpoint_client.Accepted;
 pub const EndpointKeyingMaterial = endpoint_client.KeyingMaterial;
+pub const reconnecting_endpoint_client = @import("endpoint_client/reconnecting.zig");
+pub const ReconnectingEndpointClient = reconnecting_endpoint_client.ReconnectingEndpointClient;
+pub const ReconnectingEndpointClientOptions = reconnecting_endpoint_client.Options;
+pub const ReconnectingEndpointTarget = reconnecting_endpoint_client.Target;
+pub const ReconnectingEndpointBackoff = reconnecting_endpoint_client.Backoff;
+pub const ReconnectingSessionHandle = reconnecting_endpoint_client.Handle;
+pub const ReconnectingAccepted = reconnecting_endpoint_client.Accepted;
+pub const ReconnectingConnectAttempt = reconnecting_endpoint_client.ConnectAttempt;
 pub const endpoint_server = @import("endpoint_server.zig");
 pub const EndpointServer = endpoint_server.EndpointServer;
 pub const EndpointServerOptions = endpoint_server.Options;
@@ -37,6 +45,7 @@ test {
     _ = @import("runtime_tests.zig");
     _ = @import("session_write_tests.zig");
     _ = endpoint_client;
+    _ = reconnecting_endpoint_client;
     _ = endpoint_server;
     _ = endpoint_listener;
 }

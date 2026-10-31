@@ -2004,9 +2004,29 @@ TLS authentication/ALPN, HTTP/2 SETTINGS and endpoint worker admission; direct
 `init` remains available for an already negotiated connection and has explicit
 transfer-on-entry ownership.
 
-The remaining HTTP/2 orchestration work is an optional automatic client
-reconnection policy. Independent draft-15 browser/proxy interop also remains
-open.
+`h2.ReconnectingEndpointClient` now supplies the client-side connection
+generation owner. Concurrent callers share one in-progress TCP/TLS/HTTP2
+connection attempt, and retryable failures use bounded exponential backoff,
+jitter and one original awake deadline instead of busy-looping. Its borrowed
+target supports address/host and cleartext/TLS connectors plus an explicit
+custom connector seam; endpoint Session/queue limits remain independently
+configured. Every returned handle carries the connection generation as well as
+the per-connection Session generation. A transport-terminal operation retires
+the complete generation, while ordinary SessionClosed, rejection and capacity
+errors stay scoped and cannot silently move a Session. A later explicit
+CONNECT may retire an old connection after a pre-accept SessionClosed/GOAWAY,
+establish a new generation and retry within that CONNECT's deadline; previously
+accepted Sessions are never replayed or migrated. A real TLS regression opens
+two Sessions concurrently on one generation, keeps a 429 rejection on the same
+connection, terminates the transport, removes the two failed Session slots,
+then establishes a second generation for a third Session and rejects both old
+handles as StaleConnection. Separate tests bound repeated connection refusal
+and sweep allocation failure during wrapper construction.
+Machine-readable reconnect evidence is recorded in
+`docs/evidence/webtransport_h2_reconnecting_client/2026-10-31.json`.
+
+Independent draft-15 browser/proxy interop remains open; the local reference
+set still has no second WebTransport-over-HTTP2 implementation.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

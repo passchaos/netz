@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "generation-scoped automatic reconnection for future HTTP/2 WebTransport Sessions",
+  "decision": "accepted",
+  "scope": {
+    "client": "webtransport.h2.ReconnectingEndpointClient",
+    "targets": [
+      "cleartext address and host transport ownership",
+      "TLS address and host with borrowed verification policy",
+      "custom connector and retry classifier"
+    ],
+    "replay_boundary": "an operation on an existing Session is never replayed or migrated; only a later explicit CONNECT can establish a new connection generation",
+    "handles": "every Session handle contains independent connection and per-connection Session generations"
+  },
+  "implementation": {
+    "concurrent_connect": "concurrent callers share one in-progress TCP/TLS/HTTP2 connector and then multiplex CONNECT on the same EndpointClient generation",
+    "backoff": "retryable connection establishment uses bounded exponential backoff, optional jitter, a minimum connect-attempt timeout and one caller-owned awake deadline",
+    "retirement": "terminal transport errors retire the current generation; SessionClosed remains Session-scoped except when a new unaccepted CONNECT proves the old connection cannot host future Sessions",
+    "rejection": "HTTP rejection, endpoint capacity and ordinary Session failure do not trigger reconnection",
+    "shutdown": "deinit marks the wrapper closed, requests endpoint shutdown and joins active callers before destroying target state",
+    "session_api": "DATAGRAM, virtual stream, flow-control, reset/stop, drain/close, remove and exporter operations route only through a matching live connection generation"
+  },
+  "results": {
+    "focused_debug": "143/143 passed",
+    "focused_release_fast": "143/143 passed",
+    "http2_webtransport_debug": "174/174 passed",
+    "webtransport_debug": "753/753 passed",
+    "package": "26/26 passed",
+    "concurrent_sessions": "two simultaneous CONNECT calls used one TLS connection generation and received distinct Session handles",
+    "rejection_reuse": "a 429 response with body later remained on generation one; two accepted Sessions followed on the same connection",
+    "future_reconnect": "after generation one terminated, failed Session slots were removed and CONNECT C automatically established generation two within the original deadline",
+    "stale_handles": "generation-one handles returned StaleConnection after generation two became current",
+    "retry_budget": "a custom connector returning ConnectionRefused retried at least twice but fewer than twenty times under a 20-ms deadline and 1-ms backoff",
+    "allocation": "fail-first allocation swept wrapper construction without leaking target state",
+    "hyper_http2_regression": "independent Hyper h2c/TLS client and server matrix passed all 9/9 build steps, including multiplexing, cancellation, GOAWAY, pooling, redirects and TLS KeyUpdate"
+  },
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client.zig": "65d0015b056fddc751be5c8a1c477d973d23f96dcee1c9f6455b2c1b2d283e37",
+    "src/webtransport/h2/endpoint_client/reconnecting.zig": "5e8e4543fed87fb8011f866275ebb6e69c6cc232416f8b31315549ca8f41d704",
+    "src/webtransport/h2/endpoint_client/reconnecting/core.zig": "c330313c3da9b873be39f978453c27fc98488bf54f4160d532881daf097647b2",
+    "src/webtransport/h2/endpoint_client/reconnecting/runtime.zig": "2ce4426bd48f7a01ad32862e9eb95cef3a1ffcb24b94f7ca2e66797ffec7e1b0",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "5e2f989b037540c265c664bf83b1a1e1c8162018f0523fb9046b76fe75f6f131",
+    "src/webtransport/h2/mod.zig": "15864225a28855db69e0c13a5bc098515488cca4d61d8d790527fb089a8769d3",
+    "test/package_test.zig": "5851a5b2243d4292658a0db228b0ca59c9b1fd0fbd99708caf010271396cc348",
+    "docs/webtransport_parity.md": "49bcd2f1b44e45251c44bc59bc1de3d9cb45448839a21831827262da3b913a7e"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2 ReconnectingEndpointClient' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='WebTransport HTTP2 ReconnectingEndpointClient' --summary all",
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-lib -Dtest-filter='WebTransport' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http2-hyper-client -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "The local reference set still has no independent draft-15 WebTransport-over-HTTP2 browser or proxy implementation."
+}
