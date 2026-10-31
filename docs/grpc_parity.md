@@ -692,9 +692,30 @@ promotion/worker retirement, sticks explicit hashes to a connecting primary,
 and walks clockwise past a failed primary. A real three-source test proves
 header-over-explicit precedence for both unary and duplex calls, exact `a_0`/
 `b_0` routing, a failed `c_0` primary reaching a healthy successor, and four
-configured endpoints collapsing to three logical owners. WRR, outlier children
-and ordinary Channel remain explicit initialization errors. Evidence is in
+configured endpoints collapsing to three logical owners. At that milestone
+WRR, outlier children and ordinary Channel remained explicit initialization
+errors. Evidence is in
 `docs/evidence/grpc_shared_weighted_target_ring_hash/2026-10-31.json`.
+
+Shared weighted targets now execute child-local `weighted_round_robin` leaves
+with the same grpc-core static-stride scheduler as the top-level policy. Its
+rebuild and pick APIs accept a zero-cost hierarchy predicate, so sibling
+workers never enter mean substitution, scaled weights, availability counts or
+fallback rotation. Per-RPC ORCA parsing is gated by the selected worker's leaf
+config instead of the old global-policy flag. Each leaf independently owns its
+blackout/update/expiration periods, metric names, scheduler snapshot and
+sequence; expired or absent weights fall back to leaf-local round-robin.
+
+OOB mode is leaf-local too. Matching workers create the configured ORCA stream
+and update their leaf weights, while READY unmatched siblings neither start a
+stream nor parse reports. Endpoint ORCA watches remain available when any leaf
+owns OOB reporting. A real three-server per-RPC test learns 1:3 weights only
+from the two matching workers, excludes a weight-100 unmatched reporter, then
+expires both reports and returns to exact 1:1. A separate gRPC/OOB server proves
+one matching worker opens the stream, publishes a watch update and learns a
+weight while its READY sibling remains untouched. Outlier children and ordinary
+Channel remain explicit initialization errors. Evidence is in
+`docs/evidence/grpc_shared_weighted_target_wrr/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

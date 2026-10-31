@@ -203,7 +203,7 @@ pub const State = struct {
     pub fn watchEndpointOrca(self: *State, index: usize) ?orca_tracker.Watch {
         self.lock();
         defer self.unlock();
-        if (self.closed or self.orca_oob == null) return null;
+        if (self.closed or !self.hasOrcaLocked()) return null;
         const tracker = self.endpointOrcaTrackerLocked(index) orelse return null;
         return .init(tracker);
     }
@@ -214,7 +214,7 @@ pub const State = struct {
     ) Error!?orca_tracker.Watch {
         try self.lockBefore(deadline);
         defer self.unlock();
-        if (self.closed or self.orca_oob == null) return null;
+        if (self.closed or !self.hasOrcaLocked()) return null;
         const tracker = self.endpointOrcaTrackerLocked(index) orelse return null;
         tracker.retain();
         return .{ .tracker = tracker };
@@ -240,6 +240,22 @@ pub const State = struct {
             ordinal -= members.len;
         }
         return null;
+    }
+    fn hasOrcaLocked(self: *State) bool {
+        return self.orca_oob != null or
+            (if (self.weighted_target) |*runtime| runtime.hasOob() else false);
+    }
+    pub fn orcaConfigFor(
+        self: *State,
+        worker: *Worker,
+    ) ?*orca_config.Config {
+        self.lock();
+        defer self.unlock();
+        if (self.orca_oob) |*config| return config;
+        return if (self.weighted_target) |*runtime|
+            runtime.orcaConfig(self, worker)
+        else
+            null;
     }
     pub fn requestNameResolution(self: *State) Error!void {
         return Resolution.request(self);
@@ -399,7 +415,7 @@ pub const State = struct {
     ) void {
         self.lock();
         defer self.unlock();
-        const config = self.wrr_config orelse return;
+        const config = self.wrrConfigLocked(worker) orelse return;
         if (config.enable_oob_load_report != oob) return;
         worker.wrr_weight.update(
             report,
@@ -407,10 +423,29 @@ pub const State = struct {
             config,
         );
     }
+    pub fn wantsWrr(self: *State, worker: *Worker, oob: bool) bool {
+        self.lock();
+        defer self.unlock();
+        const config = self.wrrConfigLocked(worker) orelse return false;
+        return config.enable_oob_load_report == oob;
+    }
+    fn wrrConfigLocked(
+        self: *State,
+        worker: *Worker,
+    ) ?service_config.WeightedRoundRobinConfig {
+        return if (self.weighted_target) |*runtime|
+            runtime.wrrConfig(self, worker)
+        else
+            self.wrr_config;
+    }
     pub fn disconnectWrr(self: *State, worker: *Worker) void {
         self.lock();
         defer self.unlock();
         worker.wrr_weight.disconnected();
+        if (self.weighted_target) |*runtime| {
+            runtime.disconnectWrr(self, worker);
+            return;
+        }
         self.wrr_scheduler.next_update_ns = 0;
     }
     pub fn recomputeLocked(self: *State) void {

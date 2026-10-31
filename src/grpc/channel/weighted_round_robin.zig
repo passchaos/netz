@@ -39,6 +39,47 @@ pub const Scheduler = struct {
         config: service_config.WeightedRoundRobinConfig,
         comptime readyFn: anytype,
     ) std.mem.Allocator.Error!void {
+        return self.rebuildWith(
+            allocator,
+            workers,
+            now_ns,
+            config,
+            {},
+            false,
+            readyFn,
+        );
+    }
+
+    pub fn rebuildFiltered(
+        self: *Scheduler,
+        allocator: std.mem.Allocator,
+        workers: anytype,
+        now_ns: i96,
+        config: service_config.WeightedRoundRobinConfig,
+        context: anytype,
+        comptime readyFn: anytype,
+    ) std.mem.Allocator.Error!void {
+        return self.rebuildWith(
+            allocator,
+            workers,
+            now_ns,
+            config,
+            context,
+            true,
+            readyFn,
+        );
+    }
+
+    fn rebuildWith(
+        self: *Scheduler,
+        allocator: std.mem.Allocator,
+        workers: anytype,
+        now_ns: i96,
+        config: service_config.WeightedRoundRobinConfig,
+        context: anytype,
+        comptime filtered: bool,
+        comptime readyFn: anytype,
+    ) std.mem.Allocator.Error!void {
         var ready: usize = 0;
         var nonzero: usize = 0;
         var sum: f64 = 0;
@@ -49,7 +90,7 @@ pub const Scheduler = struct {
                 .pointer => item,
                 else => &workers[index],
             };
-            if (!readyFn(worker)) continue;
+            if (!predicate(filtered, readyFn, context, worker)) continue;
             ready += 1;
             const value = worker.wrr_weight.usable(now_ns, config);
             if (value > 0) {
@@ -78,7 +119,7 @@ pub const Scheduler = struct {
                 .pointer => item,
                 else => &workers[index],
             };
-            if (!readyFn(worker)) continue;
+            if (!predicate(filtered, readyFn, context, worker)) continue;
             const raw = worker.wrr_weight.usable(now_ns, config);
             const scaled: u16 = if (raw == 0) scaled_mean else @max(lower, @as(u16, @intFromFloat(@round(@min(raw, maximum) * scale))));
             self.entries.appendAssumeCapacity(.{
@@ -96,6 +137,39 @@ pub const Scheduler = struct {
         sequence: *u32,
         comptime availableFn: anytype,
     ) ?*Worker {
+        return self.pickWith(
+            Worker,
+            sequence,
+            {},
+            false,
+            availableFn,
+        );
+    }
+
+    pub fn pickFiltered(
+        self: *Scheduler,
+        comptime Worker: type,
+        sequence: *u32,
+        context: anytype,
+        comptime availableFn: anytype,
+    ) ?*Worker {
+        return self.pickWith(
+            Worker,
+            sequence,
+            context,
+            true,
+            availableFn,
+        );
+    }
+
+    fn pickWith(
+        self: *Scheduler,
+        comptime Worker: type,
+        sequence: *u32,
+        context: anytype,
+        comptime filtered: bool,
+        comptime availableFn: anytype,
+    ) ?*Worker {
         var available: usize = 0;
         for (self.entries.items) |entry| {
             const worker: *Worker = @ptrCast(@alignCast(entry.worker));
@@ -103,7 +177,7 @@ pub const Scheduler = struct {
                 self.next_update_ns = 0;
                 continue;
             }
-            if (availableFn(worker)) {
+            if (predicate(filtered, availableFn, context, worker)) {
                 available += 1;
                 if (available > 1) break;
             }
@@ -120,12 +194,21 @@ pub const Scheduler = struct {
                 self.next_update_ns = 0;
                 continue;
             }
-            if (!availableFn(worker)) continue;
+            if (!predicate(filtered, availableFn, context, worker)) continue;
             const mod = (@as(u64, entry.weight) * generation + @as(u64, index) * (max_scaled / 2)) % max_scaled;
             if (mod >= max_scaled - entry.weight) return worker;
         }
     }
 };
+
+fn predicate(
+    comptime filtered: bool,
+    comptime function: anytype,
+    context: anytype,
+    worker: anytype,
+) bool {
+    return if (filtered) function(context, worker) else function(worker);
+}
 
 pub const Weight = struct {
     value: f64 = 0,

@@ -127,7 +127,7 @@ pub fn Worker(comptime State: type) type {
         fn disconnect(self: *Self, err: anyerror) void {
             self.dropWatch();
             self.dropOrca();
-            if (self.parent.orca_oob != null) {
+            if (self.parent.orcaConfigFor(self) != null) {
                 self.orca_tracker.setStatus(.unavailable);
             }
             while (self.active.items.len != 0) self.failActive(0, err);
@@ -210,7 +210,7 @@ pub fn Worker(comptime State: type) type {
                 }
                 self.dropWatch();
                 self.dropOrca();
-                if (self.parent.orca_oob != null) {
+                if (self.parent.orcaConfigFor(self) != null) {
                     self.orca_tracker.setStatus(.unavailable);
                 }
                 self.local_state = .transient_failure;
@@ -229,11 +229,11 @@ pub fn Worker(comptime State: type) type {
                 self.local_state = .connecting;
             }
             if (connection.peer_goaway_last_stream_id == null and
-                !retiring and self.parent.orca_oob != null and
+                !retiring and self.parent.orcaConfigFor(self) != null and
                 !self.orca_disabled and self.orca == null and
                 (self.orca_at == null or self.expired(self.orca_at)))
             {
-                const config = &self.parent.orca_oob.?;
+                const config = self.parent.orcaConfigFor(self).?;
                 const opened: ?orca_oob.ClientStream = orca_oob.startPreparedWithDeadline(
                     connection,
                     self.parent.allocator,
@@ -275,7 +275,7 @@ pub fn Worker(comptime State: type) type {
                     var event = ready;
                     switch (event) {
                         .terminal => |terminal| {
-                            if (self.parent.wrr_config != null) {
+                            if (self.parent.wantsWrr(self, false)) {
                                 const headers = if (terminal.head) |head| head.headers else &.{};
                                 if (orca_report.fromMetadataAlloc(
                                     self.parent.allocator,

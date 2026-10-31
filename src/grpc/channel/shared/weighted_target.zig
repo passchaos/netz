@@ -9,6 +9,9 @@ const connectivity = @import("../connectivity.zig");
 const least_request = @import("../least_request.zig");
 const ring_hash = @import("../ring_hash.zig");
 const ring_support = @import("weighted_target/ring_hash.zig");
+const weighted_round_robin = @import("../weighted_round_robin.zig");
+const wrr_support = @import("weighted_target/weighted_round_robin.zig");
+const orca_config = @import("orca/config.zig");
 
 pub fn Runtime(comptime State: type) type {
     return struct {
@@ -23,11 +26,15 @@ pub fn Runtime(comptime State: type) type {
         const PickError = BuildError || error{MissingRequestHash};
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin, least_request, ring_hash },
+            policy: enum { pick_first, round_robin, least_request, ring_hash, weighted_round_robin },
             least_request_config: least_request.Config = .{},
             ring_hash_config: ring_hash.Config = .{},
             ring: ring_hash.Ring = .{},
             ring_dirty: bool = true,
+            wrr_config: service_config.WeightedRoundRobinConfig = .{},
+            wrr_scheduler: weighted_round_robin.Scheduler = .{},
+            wrr_sequence: u32 = 0,
+            wrr_oob: ?orca_config.Config = null,
             selected: ?*Worker = null,
             next_pick: usize = 0,
         };
@@ -98,6 +105,34 @@ pub fn Runtime(comptime State: type) type {
             return self.pathUsesRing(self.root, path);
         }
 
+        pub fn wrrConfig(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+        ) ?service_config.WeightedRoundRobinConfig {
+            return wrr_support.config(self.root, state, worker);
+        }
+
+        pub fn disconnectWrr(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+        ) void {
+            wrr_support.disconnect(self.root, state, worker);
+        }
+
+        pub fn orcaConfig(
+            self: *Self,
+            state: *State,
+            worker: *Worker,
+        ) ?*orca_config.Config {
+            return wrr_support.orcaConfig(self.root, state, worker);
+        }
+
+        pub fn hasOob(self: *Self) bool {
+            return wrr_support.hasOob(self.root);
+        }
+
         pub fn available(
             self: *Self,
             state: *State,
@@ -120,6 +155,10 @@ pub fn Runtime(comptime State: type) type {
                     config_value,
                 ),
                 .ring_hash => |config_value| self.buildRingHash(
+                    path,
+                    config_value,
+                ),
+                .weighted_round_robin => |config_value| self.buildWrr(
                     path,
                     config_value,
                 ),
@@ -166,6 +205,26 @@ pub fn Runtime(comptime State: type) type {
             return node;
         }
 
+        fn buildWrr(
+            self: *Self,
+            path: []const []const u8,
+            config: service_config.WeightedRoundRobinConfig,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .weighted_round_robin);
+            errdefer self.destroy(node);
+            node.kind.leaf.wrr_config = config;
+            if (config.enable_oob_load_report) {
+                node.kind.leaf.wrr_oob = orca_config.Config.init(
+                    self.allocator,
+                    .{ .report_interval = config.oob_reporting_period },
+                ) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidSharedOptions,
+                };
+            }
+            return node;
+        }
+
         fn buildWeighted(
             self: *Self,
             config: service_config.WeightedTargetConfig,
@@ -203,7 +262,11 @@ pub fn Runtime(comptime State: type) type {
 
         fn destroy(self: *Self, node: *Node) void {
             switch (node.kind) {
-                .leaf => |*leaf| leaf.ring.deinit(self.allocator),
+                .leaf => |*leaf| {
+                    leaf.ring.deinit(self.allocator);
+                    leaf.wrr_scheduler.deinit(self.allocator);
+                    if (leaf.wrr_oob) |*config| config.deinit();
+                },
                 .weighted => |weighted| {
                     for (weighted.children) |child| self.destroy(child.node);
                     self.allocator.free(weighted.children);
@@ -337,13 +400,19 @@ pub fn Runtime(comptime State: type) type {
             if (leaf.policy == .ring_hash) {
                 return try self.pickRingHash(node, leaf, state, job);
             }
+            if (leaf.policy == .weighted_round_robin) {
+                if (try self.pickWrr(node, leaf, state)) |worker| {
+                    return worker;
+                }
+            }
             var count: usize = 0;
             for (state.workers.items) |worker| {
                 if (workerMatches(state, worker, node.path)) count += 1;
             }
             if (count == 0) return null;
             for (0..count) |offset| {
-                const wanted = if (leaf.policy == .round_robin)
+                const wanted = if (leaf.policy == .round_robin or
+                    leaf.policy == .weighted_round_robin)
                     (leaf.next_pick + offset) % count
                 else
                     offset;
@@ -373,7 +442,8 @@ pub fn Runtime(comptime State: type) type {
                         worker.outstanding_requests += 1;
                         return;
                     }
-                    if (leaf.policy != .round_robin) return;
+                    if (leaf.policy != .round_robin and
+                        leaf.policy != .weighted_round_robin) return;
                     var ordinal: usize = 0;
                     var count: usize = 0;
                     for (state.workers.items) |member| {
@@ -431,6 +501,7 @@ pub fn Runtime(comptime State: type) type {
             switch (node.kind) {
                 .leaf => |*leaf| {
                     if (leaf.selected == worker) leaf.selected = null;
+                    leaf.wrr_scheduler.remove(worker);
                 },
                 .weighted => |weighted| {
                     for (weighted.children) |child| {
@@ -495,6 +566,15 @@ pub fn Runtime(comptime State: type) type {
                 state,
                 job,
             );
+        }
+
+        fn pickWrr(
+            self: *Self,
+            node: *Node,
+            leaf: *Leaf,
+            state: *State,
+        ) std.mem.Allocator.Error!?*Worker {
+            return wrr_support.pick(self.allocator, node, leaf, state);
         }
 
         fn invalidateNodeRings(self: *Self, node: *Node) void {

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "weighted-round-robin child policy inside SharedChannel weighted_target",
+  "decision": "accepted",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "weighted_round_robin",
+    "report_sources": [
+      "per-RPC ORCA trailers",
+      "long-lived ORCA OOB stream"
+    ],
+    "scheduler": "grpc-core-compatible static stride with child hierarchy filtering"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "files": {
+      "src/core/load_balancing/weighted_round_robin/static_stride_scheduler.cc": "e486d311bd6fd7188150af972ebebca77f43782c7a7f04d041887679d5ea224c",
+      "src/core/load_balancing/weighted_target/weighted_target.cc": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e"
+    },
+    "contracts": [
+      "weighted_target delegates one READY child picker",
+      "WRR unknown weights use the nonzero mean",
+      "blackout and expiration are evaluated per policy instance",
+      "static stride consumes only available workers from that instance",
+      "missing or expired weights fall back to round-robin"
+    ]
+  },
+  "implementation": {
+    "filtered_scheduler": "Scheduler rebuildFiltered and pickFiltered accept a comptime predicate plus context while legacy wrappers remain zero-cost",
+    "subset": "mean substitution, scaling, generation checks, availability and fallback see only workers under the leaf path",
+    "ownership": "each leaf owns config, scheduler entries, sequence and optional encoded OOB request",
+    "per_rpc_gate": "Worker asks State for its exact leaf config before parsing ORCA trailers",
+    "oob_gate": "Worker opens an OOB stream only when its exact leaf owns an OOB config",
+    "watch": "endpoint ORCA watches remain available when any weighted leaf enables OOB",
+    "disconnect": "worker disconnect/removal invalidates only the matching leaf scheduler generation"
+  },
+  "native_cases": {
+    "per_rpc": [
+      "two matching workers report QPS weights 1 and 3",
+      "one READY unmatched sibling reports weight 100 but remains outside the scheduler",
+      "200 calls observe a bounded 1:3 distribution",
+      "after two-second expiration 40 calls return to exact 1:1 round-robin"
+    ],
+    "oob": [
+      "one matching worker opens the configured ORCA stream and publishes a watch update",
+      "the report updates its WRR weight",
+      "one READY unmatched sibling opens no weighted OOB stream and retains no weight"
+    ]
+  },
+  "results": {
+    "weighted_target_wrr_debug": "144/144 passed",
+    "complete_grpc_debug": "493/493 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/weighted_round_robin.zig": "bcf2e59fee863e816be704a943383c2a44d9a349cb127b3a707323ffa05ece7b",
+    "src/grpc/channel/shared/weighted_target.zig": "8a455326799ce542ecc98b2f6af860a1a5fef3465a8bf97f67c356f32b407557",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin.zig": "2ac79c271da7006f9bc0ff8d6bb4c8a6fa0bed9e55892354394bbd0af4b8d3b6",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin_tests.zig": "08e5281a1d47ab823c7f16a45d0ffa0e99b68b435852dc6c701071e8e6dc44ba",
+    "src/grpc/channel/shared/state.zig": "c9202608ae0f8af726eae2946a5b68aec6a8e4039edb450e78d81553e358b195",
+    "src/grpc/channel/shared/worker.zig": "d77f647a86bdfe6ea56e5fe9a63fb3103c14f5d0bbb11ea8fa2653d7f4ba0bc5",
+    "src/grpc/service_config/weighted_target_tests.zig": "f868be1183597636392990dbae96dfac006ed65af85a1ad297b9305c06d88b00",
+    "src/grpc/mod.zig": "1cdcc13d4b70b068a63fbbedec10c08c3d8a4ca683e2949a113734584db25dcc",
+    "docs/grpc_parity.md": "c180e4fe21cafa08a09ec53dcf2d50f7e704a00623e90dfe4cf7929b79d7607e"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC SharedChannel weighted target WRR' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "outlier children, resolver churn, and ordinary Channel remain before broad weighted_target completion"
+}
