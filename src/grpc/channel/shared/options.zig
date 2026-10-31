@@ -15,6 +15,9 @@ pub const Options = struct {
     disable_health_check: bool = false,
     health_metadata: health.WatchOptions = .{},
     service_config_json: ?[]const u8 = null,
+    /// Opt into grpc-core's experimental retryPolicy.perAttemptRecvTimeout.
+    /// Attempts remain sequential; this does not enable concurrent hedging.
+    enable_per_attempt_recv_timeout: bool = false,
     /// grpc-core-compatible HTTP/2 liveness probes. Null disables keepalive;
     /// the default probes active transports after two hours of peer silence.
     keepalive: ?keepalive.Options = .{},

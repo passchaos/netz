@@ -24,6 +24,7 @@ const JsonRetryPolicy = struct {
     maxBackoff: ?[]const u8 = null,
     backoffMultiplier: ?f64 = null,
     retryableStatusCodes: ?[]const []const u8 = null,
+    perAttemptRecvTimeout: ?[]const u8 = null,
 };
 
 const JsonMethodConfig = struct {
@@ -66,12 +67,20 @@ pub const LoadBalancingConfig = struct {
     weighted_round_robin: WeightedRoundRobinConfig = .{},
 };
 
+pub const ParseOptions = struct {
+    /// Match grpc-core's GRPC_ARG_EXPERIMENTAL_ENABLE_HEDGING gate. This
+    /// enables sequential retry perAttemptRecvTimeout only; Netz does not
+    /// claim concurrent hedging support.
+    enable_per_attempt_recv_timeout: bool = false,
+};
+
 const OwnedRetryPolicy = struct {
     max_attempts: u8,
     initial_backoff: std.Io.Duration,
     max_backoff: std.Io.Duration,
     backoff_multiplier: f64,
     retryable_status_codes: []const wire.Status,
+    per_attempt_recv_timeout: ?std.Io.Duration,
 
     fn view(
         self: OwnedRetryPolicy,
@@ -83,6 +92,7 @@ const OwnedRetryPolicy = struct {
             .max_backoff = self.max_backoff,
             .backoff_multiplier = self.backoff_multiplier,
             .retryable_status_codes = self.retryable_status_codes,
+            .per_attempt_recv_timeout = self.per_attempt_recv_timeout,
             .throttler = throttler,
         };
     }
@@ -120,6 +130,14 @@ pub const ServiceConfig = struct {
     pub fn parse(
         allocator: std.mem.Allocator,
         json: []const u8,
+    ) Error!ServiceConfig {
+        return parseWithOptions(allocator, json, .{});
+    }
+
+    pub fn parseWithOptions(
+        allocator: std.mem.Allocator,
+        json: []const u8,
+        options: ParseOptions,
     ) Error!ServiceConfig {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -161,7 +179,11 @@ pub const ServiceConfig = struct {
                     config.maxResponseMessageBytes,
                 ),
                 .retry_policy = if (config.retryPolicy) |retry|
-                    try parseRetryPolicy(owned, retry)
+                    try parseRetryPolicy(
+                        owned,
+                        retry,
+                        options.enable_per_attempt_recv_timeout,
+                    )
                 else
                     null,
             };
@@ -559,13 +581,22 @@ fn parseOptionalSize(value: ?std.json.Value) Error!?u32 {
 fn parseRetryPolicy(
     allocator: std.mem.Allocator,
     json: JsonRetryPolicy,
+    enable_per_attempt_recv_timeout: bool,
 ) Error!OwnedRetryPolicy {
     const raw_attempts = json.maxAttempts orelse
         return error.InvalidServiceConfig;
     if (raw_attempts < 2) return error.InvalidServiceConfig;
-    const statuses_raw = json.retryableStatusCodes orelse
+    const per_attempt_recv_timeout = if (enable_per_attempt_recv_timeout)
+        if (json.perAttemptRecvTimeout) |value|
+            try parseDuration(value, false)
+        else
+            null
+    else
+        null;
+    const statuses_raw = json.retryableStatusCodes orelse &.{};
+    if (statuses_raw.len == 0 and per_attempt_recv_timeout == null) {
         return error.InvalidServiceConfig;
-    if (statuses_raw.len == 0) return error.InvalidServiceConfig;
+    }
     const statuses = try allocator.alloc(wire.Status, statuses_raw.len);
     for (statuses_raw, statuses) |raw, *status| {
         status.* = parseStatusName(raw) orelse
@@ -587,6 +618,7 @@ fn parseRetryPolicy(
         .backoff_multiplier = json.backoffMultiplier orelse
             return error.InvalidServiceConfig,
         .retryable_status_codes = statuses,
+        .per_attempt_recv_timeout = per_attempt_recv_timeout,
     };
     policy.view(null).validate() catch return error.InvalidServiceConfig;
     return policy;
@@ -790,6 +822,53 @@ test "gRPC service config accepts an immediate method timeout" {
     try std.testing.expectEqual(
         @as(i96, 0),
         config.methodPolicy("/demo.Service/Call").?.timeout.?.nanoseconds,
+    );
+}
+
+test "gRPC service config gates per-attempt receive timeout" {
+    const without_statuses =
+        \\{"methodConfig":[{"name":[{}],"retryPolicy":{
+        \\ "maxAttempts":2,"initialBackoff":"1s","maxBackoff":"2s",
+        \\ "backoffMultiplier":1.5,"perAttemptRecvTimeout":"0.25s"}}]}
+    ;
+    try std.testing.expectError(
+        error.InvalidServiceConfig,
+        ServiceConfig.parse(std.testing.allocator, without_statuses),
+    );
+    var enabled = try ServiceConfig.parseWithOptions(
+        std.testing.allocator,
+        without_statuses,
+        .{ .enable_per_attempt_recv_timeout = true },
+    );
+    defer enabled.deinit();
+    const policy = enabled.retryPolicy("/demo.Service/Unary").?;
+    try std.testing.expectEqual(@as(usize, 0), policy.retryable_status_codes.len);
+    try std.testing.expectEqual(
+        @as(i96, 250 * std.time.ns_per_ms),
+        policy.per_attempt_recv_timeout.?.nanoseconds,
+    );
+
+    var ignored = try ServiceConfig.parse(std.testing.allocator,
+        \\{"methodConfig":[{"name":[{}],"retryPolicy":{
+        \\ "maxAttempts":2,"initialBackoff":"1s","maxBackoff":"2s",
+        \\ "backoffMultiplier":1.5,"perAttemptRecvTimeout":"invalid",
+        \\ "retryableStatusCodes":["ABORTED"]}}]}
+    );
+    defer ignored.deinit();
+    try std.testing.expect(
+        ignored.retryPolicy("/demo.Service/Unary").?.per_attempt_recv_timeout == null,
+    );
+
+    try std.testing.expectError(
+        error.InvalidServiceConfig,
+        ServiceConfig.parseWithOptions(
+            std.testing.allocator,
+            \\{"methodConfig":[{"name":[{}],"retryPolicy":{
+            \\ "maxAttempts":2,"initialBackoff":"1s","maxBackoff":"2s",
+            \\ "backoffMultiplier":1.5,"perAttemptRecvTimeout":"0s"}}]}
+        ,
+            .{ .enable_per_attempt_recv_timeout = true },
+        ),
     );
 }
 

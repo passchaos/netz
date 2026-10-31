@@ -14,6 +14,7 @@ pub const Job = struct {
     owned_message: ?[]u8 = null,
     options: call.UnaryCallOptions,
     deadline: ?std.Io.Clock.Timestamp,
+    rpc_deadline: ?std.Io.Clock.Timestamp = null,
     wait_for_ready: bool,
     previous_attempts: ?u8,
     stream: ?*@import("state.zig").State.StreamCall = null,
@@ -22,7 +23,13 @@ pub const Job = struct {
     err: ?anyerror = null,
     done: std.Io.Event = .unset,
 
-    pub fn create(parent: *State, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, previous: ?u8) std.mem.Allocator.Error!*Job {
+    pub fn create(
+        parent: *State,
+        options: call.UnaryCallOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+        rpc_deadline: ?std.Io.Clock.Timestamp,
+        previous: ?u8,
+    ) std.mem.Allocator.Error!*Job {
         const allocator = parent.allocator;
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
@@ -31,7 +38,7 @@ pub const Job = struct {
         const message = try allocator.dupe(u8, options.message);
         request.options.message = message;
         parent.retain();
-        job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .owned_inputs = request.inputs, .owned_message = message };
+        job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .rpc_deadline = rpc_deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .owned_inputs = request.inputs, .owned_message = message };
         return job;
     }
 
@@ -39,7 +46,7 @@ pub const Job = struct {
         const job = try parent.allocator.create(Job);
         parent.retain();
         stream.retain();
-        job.* = .{ .parent = parent, .options = .{ .path = stream.options.path, .message = &.{} }, .deadline = deadline, .wait_for_ready = ready, .previous_attempts = null, .stream = stream };
+        job.* = .{ .parent = parent, .options = .{ .path = stream.options.path, .message = &.{} }, .deadline = deadline, .rpc_deadline = null, .wait_for_ready = ready, .previous_attempts = null, .stream = stream };
         return job;
     }
     pub fn retain(self: *Job) void {

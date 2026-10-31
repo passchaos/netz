@@ -342,6 +342,7 @@ pub fn Worker(comptime State: type) type {
                     .compression = job.options.compression,
                     .compression_level = job.options.compression_level,
                     .accepted_encodings = job.options.accepted_encodings,
+                    .timeout = job.options.timeout,
                     .metadata = job.options.metadata,
                     .binary_metadata = job.options.binary_metadata,
                     .max_message_size = job.options.max_message_size,
@@ -349,7 +350,14 @@ pub fn Worker(comptime State: type) type {
                     .max_response_message_size = job.options.max_response_message_size,
                     .previous_attempts = job.previous_attempts,
                 };
-                var stream = duplex.startDuplexWithDeadlines(connection, self.parent.allocator, options, job.deadline, minimum(job.deadline, self.outputDeadline()).?) catch |err| {
+                var stream = duplex.startDuplexWithRetryDeadlines(
+                    connection,
+                    self.parent.allocator,
+                    options,
+                    job.rpc_deadline,
+                    job.deadline,
+                    minimum(job.deadline, self.outputDeadline()).?,
+                ) catch |err| {
                     self.parent.finish(job, null, err);
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;

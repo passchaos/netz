@@ -542,8 +542,16 @@ pub const State = struct {
         };
         if (job.err) |err| return @errorCast(err);
     }
-    pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, _: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
-        const job = try Job.create(self, options, deadline, previous);
+    pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, rpc_deadline: ?std.Io.Clock.Timestamp, timeout_header: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
+        var attempt_options = options;
+        attempt_options.timeout = timeout_header;
+        const job = try Job.create(
+            self,
+            attempt_options,
+            deadline,
+            rpc_deadline,
+            previous,
+        );
         defer job.release();
         try self.enqueue(job);
         try self.awaitJob(job);

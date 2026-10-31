@@ -89,6 +89,7 @@ pub const UnaryCallOptions = call.UnaryCallOptions;
 pub const RetryPolicy = call.RetryPolicy;
 pub const RetryThrottler = call.RetryThrottler;
 pub const ServiceConfig = service_config.ServiceConfig;
+pub const ServiceConfigParseOptions = service_config.ParseOptions;
 pub const MethodPolicy = service_config.MethodPolicy;
 pub const LoadBalancingPolicy = service_config.LoadBalancingPolicy;
 pub const LoadBalancingConfig = service_config.LoadBalancingConfig;
@@ -162,6 +163,7 @@ test {
     _ = @import("call/early_response_tests.zig");
     _ = @import("call/refused_retry_tests.zig");
     _ = @import("call/retry_lifecycle_tests.zig");
+    _ = @import("call/per_attempt_timeout_tests.zig");
     _ = @import("channel_tests.zig");
     _ = @import("channel/weighted_round_robin_tests.zig");
     _ = @import("channel/host_tests.zig");

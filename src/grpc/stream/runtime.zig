@@ -270,7 +270,14 @@ pub fn startClientUnderDeadline(
     options: RequestOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!ClientWriter {
-    return startClientWithDeadlines(connection, allocator, options, deadline, deadline);
+    return startClientWithDeadlines(
+        connection,
+        allocator,
+        options,
+        deadline,
+        deadline,
+        deadline,
+    );
 }
 
 fn startClientWithDeadlines(
@@ -278,6 +285,7 @@ fn startClientWithDeadlines(
     allocator: std.mem.Allocator,
     options: RequestOptions,
     rpc_deadline: ?std.Io.Clock.Timestamp,
+    stream_deadline: ?std.Io.Clock.Timestamp,
     io_deadline: ?std.Io.Clock.Timestamp,
 ) Error!ClientWriter {
     _ = try call.parseRequestMetadata(
@@ -382,7 +390,7 @@ fn startClientWithDeadlines(
         },
         .accepted_encodings = options.accepted_encodings,
         .max_message_size = options.responseMessageLimit(),
-        .deadline = rpc_deadline,
+        .deadline = stream_deadline,
     };
 }
 
@@ -435,6 +443,7 @@ pub fn startClientDuplexTransportWithIoDeadline(
         allocator,
         options,
         null,
+        null,
         deadline,
     );
     return beginClientDuplexTransport(&writer);
@@ -447,7 +456,36 @@ pub fn startClientDuplexTransportWithDeadlines(
     rpc_deadline: ?std.Io.Clock.Timestamp,
     output_deadline: std.Io.Clock.Timestamp,
 ) Error!ClientDuplexTransport {
-    var writer = try startClientWithDeadlines(connection, allocator, options, rpc_deadline, output_deadline);
+    var writer = try startClientWithDeadlines(
+        connection,
+        allocator,
+        options,
+        rpc_deadline,
+        rpc_deadline,
+        output_deadline,
+    );
+    return beginClientDuplexTransport(&writer);
+}
+
+/// Start a retry attempt with an overall RPC deadline on the wire and a
+/// distinct local attempt deadline. The output deadline bounds only request
+/// setup; it must not replace either lifetime.
+pub fn startClientDuplexTransportWithRetryDeadlines(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    rpc_deadline: ?std.Io.Clock.Timestamp,
+    attempt_deadline: ?std.Io.Clock.Timestamp,
+    output_deadline: std.Io.Clock.Timestamp,
+) Error!ClientDuplexTransport {
+    var writer = try startClientWithDeadlines(
+        connection,
+        allocator,
+        options,
+        rpc_deadline,
+        attempt_deadline,
+        output_deadline,
+    );
     return beginClientDuplexTransport(&writer);
 }
 

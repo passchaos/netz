@@ -15,7 +15,11 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     try options.channel.validate();
     const count = if (target == .resolved) target.resolved.endpoints.len else 1;
     if (count == 0) return error.InvalidSharedOptions;
-    var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parse(allocator, json) else null;
+    var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parseWithOptions(
+        allocator,
+        json,
+        .{ .enable_per_attempt_recv_timeout = options.enable_per_attempt_recv_timeout },
+    ) else null;
     var transferred = false;
     errdefer if (!transferred) if (config) |*value| value.deinit();
     const name: ?[]const u8 = if (options.disable_health_check) null else options.health_service orelse (if (options.health_metadata.service.len != 0) options.health_metadata.service else if (config) |*value| value.healthCheckServiceName() else null);

@@ -22,7 +22,7 @@ pub fn run(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, 
     );
 }
 
-pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) @TypeOf(attempt(connection, allocator, options, deadline, @as(?Timeout, null), @as(?u8, null))) {
+pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) @TypeOf(attempt(connection, allocator, options, deadline, deadline, @as(?Timeout, null), @as(?u8, null))) {
     if (policy) |configured| try configured.validate();
     var attempts: u8 = 0;
     var transparent_used = false;
@@ -33,7 +33,56 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
             if (remaining.nanoseconds <= 0) return error.Timeout;
             break :blk try Timeout.fromDuration(remaining);
         } else null;
-        var response = try attempt(connection, allocator, options, deadline, timeout_header, if (attempts == 0) null else attempts);
+        const attempt_boundary = perAttemptDeadline(
+            connection.io,
+            deadline,
+            policy,
+        );
+        var response = attempt(
+            connection,
+            allocator,
+            options,
+            attempt_boundary.deadline,
+            deadline,
+            timeout_header,
+            if (attempts == 0) null else attempts,
+        ) catch |err| {
+            if (err != error.Timeout or !attempt_boundary.limited) return err;
+            attempts += 1;
+            const configured = policy.?;
+            const retry_allowed = if (configured.throttler) |throttler|
+                throttler.recordFailure()
+            else
+                true;
+            if (!retry_allowed or attempts >= configured.max_attempts) {
+                return call.perAttemptTimeoutResponse(allocator);
+            }
+            const delay = jitteredBackoff(connection.io, backoff);
+            backoff = nextBackoff(backoff, configured);
+            try sleepForRetry(connection.io, delay, deadline);
+            continue;
+        };
+        if (response.reset != null and
+            response.reset.?.error_code == .cancel and
+            attempt_boundary.deadline != null and
+            attempt_boundary.deadline.?.durationFromNow(connection.io).raw.nanoseconds <= 0)
+        {
+            response.deinit();
+            if (!attempt_boundary.limited) return error.Timeout;
+            attempts += 1;
+            const configured = policy.?;
+            const retry_allowed = if (configured.throttler) |throttler|
+                throttler.recordFailure()
+            else
+                true;
+            if (!retry_allowed or attempts >= configured.max_attempts) {
+                return call.perAttemptTimeoutResponse(allocator);
+            }
+            const delay = jitteredBackoff(connection.io, backoff);
+            backoff = nextBackoff(backoff, configured);
+            try sleepForRetry(connection.io, delay, deadline);
+            continue;
+        }
         if (options.transparent_retry and !transparent_used and !response.response_committed and
             response.reset != null and response.reset.?.error_code == .refused_stream)
         {
@@ -67,6 +116,38 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
         response.deinit();
         try sleepForRetry(connection.io, delay, deadline);
     }
+}
+
+const AttemptBoundary = struct {
+    deadline: ?std.Io.Clock.Timestamp,
+    limited: bool,
+};
+
+fn perAttemptDeadline(
+    io: std.Io,
+    overall: ?std.Io.Clock.Timestamp,
+    policy: ?RetryPolicy,
+) AttemptBoundary {
+    const configured = policy orelse return .{
+        .deadline = overall,
+        .limited = false,
+    };
+    const duration = configured.per_attempt_recv_timeout orelse return .{
+        .deadline = overall,
+        .limited = false,
+    };
+    const attempt = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = duration,
+        .clock = .awake,
+    });
+    const outer = overall orelse return .{
+        .deadline = attempt,
+        .limited = true,
+    };
+    if (std.Io.Clock.Timestamp.compare(attempt, .lt, outer)) {
+        return .{ .deadline = attempt, .limited = true };
+    }
+    return .{ .deadline = outer, .limited = false };
 }
 
 const RetryPushback = union(enum) {

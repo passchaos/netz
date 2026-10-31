@@ -26,7 +26,7 @@ test "gRPC retired Job owns request inputs and wake storage after the caller rel
     var path: [7]u8 = "/svc/Op".*;
     var value: [6]u8 = "before".*;
     var binary: [3]u8 = .{ 0, 255, 42 };
-    const job = try Job.create(state, .{ .path = &path, .message = &body, .authority = "host.test", .scheme = "https", .metadata = &.{.{ .name = "x-value", .value = &value, .never_index = true }}, .binary_metadata = &.{.{ .name = "x-value-bin", .value = &binary }} }, null, null);
+    const job = try Job.create(state, .{ .path = &path, .message = &body, .authority = "host.test", .scheme = "https", .metadata = &.{.{ .name = "x-value", .value = &value, .never_index = true }}, .binary_metadata = &.{.{ .name = "x-value-bin", .value = &binary }} }, null, null, null);
     var caller = true;
     defer if (caller) job.release();
     job.retain(); // Fake endpoint owns an assigned Job until completion.
@@ -67,7 +67,7 @@ test "gRPC Job completed response wins later abandonment and transfers once" {
     const state = sender.state;
     state.closed = false;
     defer state.closed = true;
-    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "body" }, .{ .clock = .awake, .raw = .zero }, null);
+    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "body" }, .{ .clock = .awake, .raw = .zero }, null, null);
     var owned = true;
     defer if (owned) job.release();
     job.retain();
@@ -95,7 +95,7 @@ test "gRPC Job input allocation failures preserve parent and release partial clo
             state.allocator = allocator;
             defer state.allocator = old;
             const refs = state.refs.load(.acquire);
-            const job = Job.create(state, .{ .path = "/svc/Op", .message = "body", .authority = "host.test", .scheme = "https", .metadata = &.{.{ .name = "x-name", .value = "value" }}, .binary_metadata = &.{.{ .name = "x-byte-bin", .value = &.{ 0, 255 } }} }, null, null) catch |err| {
+            const job = Job.create(state, .{ .path = "/svc/Op", .message = "body", .authority = "host.test", .scheme = "https", .metadata = &.{.{ .name = "x-name", .value = "value" }}, .binary_metadata = &.{.{ .name = "x-byte-bin", .value = &.{ 0, 255 } }} }, null, null, null) catch |err| {
                 try std.testing.expectEqual(refs, state.refs.load(.acquire));
                 return err;
             };
@@ -118,7 +118,7 @@ test "gRPC queued abandoned Job is reclaimed by the next shared owner" {
     state.closed = false;
     defer state.closed = true;
     const refs = state.refs.load(.acquire);
-    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "body", .wait_for_ready = true }, .{ .clock = .awake, .raw = .zero }, null);
+    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "body", .wait_for_ready = true }, .{ .clock = .awake, .raw = .zero }, null, null);
     job.retain();
     state.head = job;
     state.tail = job;

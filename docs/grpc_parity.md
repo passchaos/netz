@@ -130,6 +130,16 @@ existing HTTP/2 runtime:
   applies gRPC's milli-token algorithm, debiting configured retryable failures
   before eligibility and replenishing successful RPCs without exceeding its
   maximum,
+- grpc-core-compatible experimental `retryPolicy.perAttemptRecvTimeout` for
+  unary calls. Parsing is disabled by default and requires an explicit
+  `ServiceConfigParseOptions.enable_per_attempt_recv_timeout` or
+  `SharedChannelOptions.enable_per_attempt_recv_timeout` opt-in, matching the
+  upstream channel-argument gate. Each physical attempt owns a receive timer;
+  expiry sends `RST_STREAM(CANCEL)`, charges retry throttling, observes normal
+  backoff and starts the next attempt sequentially. Exhausting attempts returns
+  CANCELLED with `retry perAttemptRecvTimeout exceeded`. The shorter attempt
+  boundary never replaces the overall wire `grpc-timeout`, and the overall RPC
+  deadline remains authoritative. This does not claim concurrent hedging,
 - owned standard service-config JSON parsing for global `retryThrottling` and
   method `retryPolicy`, including protobuf Duration strings, canonical status
   names, gRPC Core's five-attempt clamp, duplicate-selector rejection, and
@@ -2087,3 +2097,39 @@ reuse, serial opt-out, short deadline cleanup and immediate refusal. The pinned
 grpc-js SDK independently confirms third-endpoint fallback, while its two
 still-live pending sockets after close are recorded separately. Rows and source
 hashes are in `docs/evidence/grpc_connection_race/2026-10-30.json`.
+
+## Experimental per-attempt receive timeout
+
+Unary retry policies now implement grpc-core's experimental
+`perAttemptRecvTimeout` behavior behind an explicit parser/channel opt-in. The
+default parser ignores the field; after opt-in, the field must be a positive
+protobuf Duration and can replace the otherwise-required non-empty
+`retryableStatusCodes` list. This follows grpc-core's
+`GRPC_ARG_EXPERIMENTAL_ENABLE_HEDGING` parser gate without claiming its
+concurrent hedging implementation.
+
+The retry driver derives a fresh local attempt deadline after each backoff.
+Timeout cancels the physical HTTP/2 stream, counts as a throttle failure, and
+uses the existing jitter/backoff path before the next sequential attempt. A
+final timer expiry produces a transport-free CANCELLED response with the exact
+grpc-core status text. The logical RPC deadline still bounds connection
+readiness, all attempts and backoff, and wins as `error.Timeout` when it is
+shorter.
+
+Ordinary Channel recomputes the advertised `grpc-timeout` from the original
+absolute RPC deadline after connection readiness while using the attempt
+deadline only for local I/O. SharedChannel retains both timestamps in each job:
+the worker uses the overall deadline for the wire header, the attempt deadline
+for local stream lifetime, and a third bounded output deadline for the current
+write. An aggregate ordinary-Channel attempt timeout retires its non-resumable
+connection; SharedChannel cancels only the owned duplex stream and reuses the
+connection.
+
+Real h2c regressions cover timeout then ABORTED then OK on ordinary Channel,
+timeout then OK on one SharedChannel connection, final-attempt CANCELLED with
+no retryable status list, exact CANCEL observation on every timed attempt, and
+overall-deadline precedence. The focused gate passed 146/146, the full gRPC
+Debug gate passed 440/440, public package checks passed 26/26, and the pinned
+grpc-cpp ReleaseFast h2c/TLS gate passed 9/9 build steps. Detailed reference,
+boundary and command evidence is recorded in
+`docs/evidence/grpc_per_attempt_recv_timeout/2026-10-31.json`.

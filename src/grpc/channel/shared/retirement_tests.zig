@@ -13,7 +13,7 @@ fn exercise(assigned: bool, canceled: bool) !void {
     const state = sender.state;
     const State = @TypeOf(state.*);
     state.closed = false;
-    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "original", .wait_for_ready = true }, .fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(100) }), null);
+    const job = try Job.create(state, .{ .path = "/svc/Op", .message = "original", .wait_for_ready = true }, .fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(100) }), null, null);
     defer job.release();
     job.retain();
     var endpoint = true;

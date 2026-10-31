@@ -745,15 +745,16 @@ pub const Channel = struct {
         self: *Channel,
         allocator: std.mem.Allocator,
         options: call.UnaryCallOptions,
-        deadline: ?std.Io.Clock.Timestamp,
+        attempt_deadline: ?std.Io.Clock.Timestamp,
+        rpc_deadline: ?std.Io.Clock.Timestamp,
         _: ?wire.Timeout,
         previous_attempts: ?u8,
     ) Error!call.UnaryResponse {
         const ready_connection = try self.ready(
             options.wait_for_ready orelse false,
-            deadline,
+            attempt_deadline,
         );
-        const timeout_header: ?wire.Timeout = if (deadline) |absolute| blk: {
+        const timeout_header: ?wire.Timeout = if (rpc_deadline) |absolute| blk: {
             const remaining = absolute.durationFromNow(self.io).raw;
             if (remaining.nanoseconds <= 0) return error.Timeout;
             break :blk try wire.Timeout.fromDuration(remaining);
@@ -762,10 +763,13 @@ pub const Channel = struct {
             ready_connection.connection,
             allocator,
             options,
-            deadline,
+            attempt_deadline,
             timeout_header,
             previous_attempts,
         ) catch |err| {
+            if (err == error.Timeout) {
+                self.slots[ready_connection.index].closeConnection();
+            }
             self.retireAfterOperationError(ready_connection.index, err);
             return err;
         };

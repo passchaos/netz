@@ -851,6 +851,30 @@ pub fn startDuplexWithDeadlines(connection: *http2.runtime.Connection, allocator
     return clientFromTransport(allocator, options, try sequential.startClientDuplexTransportWithDeadlines(connection, allocator, options, rpc_deadline, output_deadline));
 }
 
+/// Start one retry attempt without advertising its shorter local timer as the
+/// RPC's grpc-timeout budget.
+pub fn startDuplexWithRetryDeadlines(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: RequestOptions,
+    rpc_deadline: ?std.Io.Clock.Timestamp,
+    attempt_deadline: ?std.Io.Clock.Timestamp,
+    output_deadline: std.Io.Clock.Timestamp,
+) Error!ClientDuplex {
+    return clientFromTransport(
+        allocator,
+        options,
+        try sequential.startClientDuplexTransportWithRetryDeadlines(
+            connection,
+            allocator,
+            options,
+            rpc_deadline,
+            attempt_deadline,
+            output_deadline,
+        ),
+    );
+}
+
 fn clientFromTransport(
     allocator: std.mem.Allocator,
     options: RequestOptions,

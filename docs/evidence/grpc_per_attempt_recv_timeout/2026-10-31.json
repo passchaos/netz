@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "experimental gRPC retryPolicy.perAttemptRecvTimeout",
+  "decision": "accepted",
+  "scope": {
+    "calls": [
+      "ordinary Channel unary",
+      "SharedChannel unary"
+    ],
+    "policy": "sequential retries only; concurrent hedging is not implemented or claimed",
+    "gate": "disabled by default and enabled explicitly through ServiceConfigParseOptions or SharedChannelOptions",
+    "wire_boundary": "the per-attempt receive timer cancels local I/O without shortening or renewing the logical RPC grpc-timeout",
+    "terminal_boundary": "the overall RPC deadline returns error.Timeout; exhausted per-attempt timers return CANCELLED with retry perAttemptRecvTimeout exceeded"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ retry service config and legacy retry filter",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "files": [
+      "src/core/client_channel/retry_service_config.cc",
+      "src/core/client_channel/retry_service_config.h",
+      "src/core/client_channel/retry_filter_legacy_call_data.cc",
+      "test/core/end2end/tests/retry_per_attempt_recv_timeout.cc",
+      "test/core/end2end/tests/retry_per_attempt_recv_timeout_on_last_attempt.cc"
+    ],
+    "observed_contract": [
+      "parsing is gated by GRPC_ARG_EXPERIMENTAL_ENABLE_HEDGING",
+      "a positive perAttemptRecvTimeout permits an empty retryableStatusCodes list",
+      "each physical attempt owns a timer and normal throttling and backoff still apply",
+      "the last timed attempt returns CANCELLED containing retry perAttemptRecvTimeout exceeded"
+    ]
+  },
+  "implementation": {
+    "parser": "ServiceConfig.parseWithOptions owns the optional protobuf Duration only when enable_per_attempt_recv_timeout is true; the default parser ignores the field",
+    "retry_driver": "a fresh attempt deadline is derived after each backoff, timeout records one throttle failure, emits CANCEL, and starts the next attempt sequentially",
+    "ordinary_channel": "connection readiness and aggregate I/O use the attempt deadline; the wire timeout is recomputed from the original absolute RPC deadline; timed aggregate state retires the connection",
+    "shared_channel": "each unary Job owns separate attempt and RPC deadlines; the worker uses the RPC deadline for HEADERS, the attempt deadline for local stream lifetime, and an operation deadline for the current output",
+    "final_response": "exhaustion synthesizes one owned transport-free CANCELLED UnaryResponse with the grpc-core status text"
+  },
+  "native_cases": [
+    "ordinary Channel timeout then ABORTED then OK with previous-attempt metadata 1 and 2",
+    "ordinary Channel final timed attempt returns CANCELLED without retryableStatusCodes",
+    "SharedChannel timeout then OK while reusing one HTTP/2 connection",
+    "a 50 ms overall deadline wins a configured 200 ms per-attempt timer",
+    "every timed attempt is observed by the server as RST_STREAM(CANCEL)",
+    "wire grpc-timeout remains above the 200 ms attempt timer for a 2 s RPC and below it for the 50 ms overall-deadline case"
+  ],
+  "results": {
+    "focused_debug": "146/146 passed without leaks",
+    "grpc_debug": "440/440 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS, including deadline and CANCEL regression coverage",
+    "external_boundary": "the pinned grpc-cpp interop matrix is a regression gate; it does not configure the experimental perAttemptRecvTimeout policy"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "gcc": "13.3.0",
+    "bazel": "8.7.0",
+    "grpc_root": "/nav_env/Work/grpc",
+    "grpc_bazel_output_user_root": "/nav_env/Temp/netz-grpc-bazel"
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "a48836a160622dcaec1e676f1443f5fa277b1ae83092f2e198ec7f03bdcc1a92",
+    "src/grpc/call/retry.zig": "5e40d8e058ea03af7d4c178b20201db7a77262f301fcb361f2d964d5a5519dd4",
+    "src/grpc/call/per_attempt_timeout_tests.zig": "ca282b375a57a235d533d6aeae27ffa10a9fa8e5c04a300f707c01942394f926",
+    "src/grpc/service_config.zig": "1d21a9e8c051dba6366fd6dc703fecaa74e12b1584a7760a2d848d909280abc1",
+    "src/grpc/channel.zig": "150d46b2073c27ef29e2776205a3ae27c489ec92537cb9836e888c381ece7ce9",
+    "src/grpc/channel/shared/job.zig": "c1ea1855669b554b4ee37b700f032f7427415870c8b4fd1c3a16da2590369286",
+    "src/grpc/channel/shared/state.zig": "30c7a8e7a1ced9288cbea40df0b5feebad92c6b12465ebdd65ba23702274c6dc",
+    "src/grpc/channel/shared/worker.zig": "b4b67151c9aa053fba57a73bd8e4847f988860f51e345d0a64c616d7af6f2aed",
+    "src/grpc/stream/runtime.zig": "3f02ee4664e1db1754c5c400fb7d8fc553c70e1f4813787025286ab34a57b70a",
+    "src/grpc/stream/duplex.zig": "5f9146f96f09b033f866da4de7aa2e2eadf9959f928a537c8f6201c7c81e3c85",
+    "src/grpc/mod.zig": "55b2259a4560e6cf1fbde9b784f7efb3d67b1e0a2e9a59df6fcbe8e071e3ec98"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='per-attempt receive timeout' -Dtest-filter='per-attempt receive' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "grpc-core concurrent hedging remains a separate unimplemented feature; this change intentionally provides only the per-attempt receive timer on the existing sequential retry engine"
+}

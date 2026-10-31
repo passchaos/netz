@@ -271,6 +271,10 @@ pub const RetryPolicy = struct {
     max_backoff: std.Io.Duration,
     backoff_multiplier: f64,
     retryable_status_codes: []const Status,
+    /// Optional receive timer for each physical attempt. This is sequential
+    /// retry, not concurrent hedging: expiry cancels the current attempt,
+    /// applies ordinary retry throttling/backoff, then starts the next one.
+    per_attempt_recv_timeout: ?std.Io.Duration = null,
     /// Optional token bucket shared by calls to the same logical backend.
     /// A retryable failure consumes one token before retry eligibility is
     /// decided; an OK response restores `token_ratio` up to the configured
@@ -286,9 +290,13 @@ pub const RetryPolicy = struct {
             self.max_backoff.nanoseconds <= 0 or
             !std.math.isFinite(self.backoff_multiplier) or
             self.backoff_multiplier <= 0 or
-            self.retryable_status_codes.len == 0)
+            (self.retryable_status_codes.len == 0 and
+                self.per_attempt_recv_timeout == null))
         {
             return error.InvalidRetryPolicy;
+        }
+        if (self.per_attempt_recv_timeout) |timeout| {
+            if (timeout.nanoseconds <= 0) return error.InvalidRetryPolicy;
         }
         for (self.retryable_status_codes) |status| {
             if (status == .ok) return error.InvalidRetryPolicy;
@@ -400,10 +408,29 @@ pub const UnaryResponse = struct {
     }
 };
 
+pub fn perAttemptTimeoutResponse(
+    allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!UnaryResponse {
+    return .{
+        .allocator = allocator,
+        .transport = null,
+        .response_committed = true,
+        .status = .cancelled,
+        .status_message = try allocator.dupe(
+            u8,
+            "retry perAttemptRecvTimeout exceeded",
+        ),
+        .message = null,
+        .was_compressed = false,
+        .encoding = null,
+        .owned_message = null,
+    };
+}
+
 /// One unary RPC, including one transparent refusal recovery before any
 /// response head. Every physical attempt retains the original awake deadline.
 pub fn unaryCall(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions) Error!UnaryResponse {
-    return retry.run(connection, allocator, options, null, unaryCallAttempt);
+    return retry.run(connection, allocator, options, null, retryUnaryCallAttempt);
 }
 
 /// Unary call whose absolute deadline was captured by an owning channel before
@@ -415,14 +442,20 @@ pub fn unaryCallUnderDeadline(connection: *http2.runtime.Connection, allocator: 
         options,
         null,
         deadline,
-        unaryCallAttempt,
+        retryUnaryCallAttempt,
     );
 }
 
 /// Add explicit replay-safe retries to the transparent transport recovery.
 /// Logical attempts, pushback, throttling, and backoff share one RPC deadline.
 pub fn unaryCallWithRetry(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, policy: RetryPolicy) Error!UnaryResponse {
-    return retry.run(connection, allocator, options, policy, unaryCallAttempt);
+    return retry.run(
+        connection,
+        allocator,
+        options,
+        policy,
+        retryUnaryCallAttempt,
+    );
 }
 
 pub fn unaryCallWithRetryUnderDeadline(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: UnaryCallOptions, policy: RetryPolicy, deadline: ?std.Io.Clock.Timestamp) Error!UnaryResponse {
@@ -432,7 +465,26 @@ pub fn unaryCallWithRetryUnderDeadline(connection: *http2.runtime.Connection, al
         options,
         policy,
         deadline,
-        unaryCallAttempt,
+        retryUnaryCallAttempt,
+    );
+}
+
+fn retryUnaryCallAttempt(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: UnaryCallOptions,
+    attempt_deadline: ?std.Io.Clock.Timestamp,
+    _: ?std.Io.Clock.Timestamp,
+    timeout_header: ?Timeout,
+    previous_attempts: ?u8,
+) Error!UnaryResponse {
+    return unaryCallAttempt(
+        connection,
+        allocator,
+        options,
+        attempt_deadline,
+        timeout_header,
+        previous_attempts,
     );
 }
 
