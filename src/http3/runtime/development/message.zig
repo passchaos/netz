@@ -1,4 +1,5 @@
 const std = @import("std");
+const content_digest = @import("../../../http/digest.zig");
 const http3 = @import("../../mod.zig");
 const content_coding = @import("../../../http/content_coding.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -102,6 +103,10 @@ pub const OwnedResponse = struct {
     extra_datagrams: []quic.runtime.OwnedDatagram = &.{},
     bytes: []u8 = &.{},
     response: http3.DecodedResponse,
+
+    pub fn verifyContentDigest(self: OwnedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return self.response.verifyContentDigest(policy);
+    }
 
     pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);

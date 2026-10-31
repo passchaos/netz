@@ -1,4 +1,5 @@
 const std = @import("std");
+const content_digest = @import("../http/digest.zig");
 const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
@@ -6930,6 +6931,10 @@ fn dropRedirectHeader(
 pub const OwnedResponse = struct {
     bytes: []u8,
     response: http1.Response,
+
+    pub fn verifyContentDigest(self: OwnedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return self.response.verifyContentDigest(policy);
+    }
 
     pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);

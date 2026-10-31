@@ -4147,3 +4147,27 @@ HTTP/2 WebTransport. Evidence is recorded in
 The focused Extended CONNECT, HTTP2 WebTransport and RFC 8441 test bundle
 passes 201/201 in Debug and ReleaseFast. The independent Python peer gate
 passes both directions in both modes.
+
+
+## RFC 9530 content and representation digests
+
+The shared `http.digest` module now parses and generates Content-Digest,
+Repr-Digest and their Want preference fields with native SHA-256/SHA-512.
+All three HTTP versions expose explicit response verification; the unified
+response and redirected-response wrappers preserve that contract. Content
+verification includes Content-Encoding bytes after transfer decoding, while
+representation verification requires the caller's complete selected data for
+HEAD/range semantics. Headers and trailers merge in RFC 8941 Dictionary order,
+with final duplicate values validated against the RFC 9530 schema. Parsing
+uses fixed 64-member storage and a total matching-field byte bound; streaming
+hashing has an explicit byte quota and one-shot finish.
+
+The independent Python HTTPS peer checks generated digests and preferences
+through pinned http-sfv, and produces hashlib digests for compressed responses,
+chunked/H2 trailers and streamed content. Four failure cases preserve their
+typed errors, then the same connection handles a succeeding checked POST.
+Scope and reproduction are documented in `docs/http_digest.md`; evidence is
+recorded in `docs/evidence/http_digest/2026-10-31.json`.
+
+The focused HTTP digest tests pass 150/150 in Debug and ReleaseFast. Both
+independent HTTPS peer runs verify all 16 requests.

@@ -1,5 +1,15 @@
 //! Shared HTTP semantics independent of wire version.
 
+pub const digest = @import("digest.zig");
+pub const DigestHasher = digest.Hasher;
+pub const DigestHasherOptions = digest.HasherOptions;
+pub const DigestPolicy = digest.Policy;
+pub const DigestResult = digest.Result;
+pub const DigestError = digest.Error;
+pub const DigestAlgorithm = digest.Algorithm;
+pub const DigestKind = digest.Kind;
+pub const DigestPreferences = digest.Preferences;
+
 pub const content_coding = @import("content_coding.zig");
 pub const authority = @import("authority/mod.zig");
 pub const early_data = @import("early_data.zig");
@@ -77,6 +87,7 @@ pub const PoolError = client_pool.Error;
 pub const PoolOperationError = client_pool.OperationError;
 
 test {
+    _ = digest;
     _ = authority;
     _ = content_coding;
     _ = early_data;

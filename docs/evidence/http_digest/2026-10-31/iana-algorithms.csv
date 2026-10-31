@@ -1,0 +1,11 @@
+Algorithm Key,Status,Description,Reference
+sha-512,Active,The SHA-512 algorithm.,[RFC 6234]; [RFC 4648]; [RFC 9530]
+sha-256,Active,The SHA-256 algorithm.,[RFC 6234]; [RFC 4648]; [RFC 9530]
+md5,Deprecated,"The MD5 algorithm. It is vulnerable to collision attacks; see [NO-MD5]
+      and [CMU-836068]",[RFC 1321]; [RFC 4648]; [RFC 9530]
+sha,Deprecated,"The SHA-1 algorithm. It is vulnerable to collision attacks; see [NO-SHA]
+      and [IACR-2020-014]",[RFC 3174]; [RFC 4648]; [RFC 6234]; [RFC 9530]
+unixsum,Deprecated,"The algorithm used by the UNIX ""sum"" command.",[RFC 4648]; [RFC 6234]; [UNIX]; [RFC 9530]
+unixcksum,Deprecated,"The algorithm used by the UNIX ""cksum"" command.",[RFC 4648]; [RFC 6234]; [UNIX]; [RFC 9530]
+adler,Deprecated,The ADLER32 algorithm.,[RFC 1950]; [RFC 9530]
+crc32c,Deprecated,The CRC32c algorithm.,"[RFC 9260, Appendix A]; [RFC 9530]"

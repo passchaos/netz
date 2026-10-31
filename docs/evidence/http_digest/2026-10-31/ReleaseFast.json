@@ -1,0 +1,51 @@
+{
+  "driver_sha256": "7462cc903e57f045c5ae54b0851a6faa6a31a4ce5672889d7fc435584154bca0",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "http-sfv": "0.9.9",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "d7017c9482396e09804069b4c2f10bd53c97d9022a1d4dc1933e6b57abe42342",
+    "peer.py": "36083965fb5bb4a43eb9d0b4acaca320c969b3bdeb330d4d1a679affb1d92f72",
+    "run.py": "d70a3eda14f90ce97a2c651f37816448bea66a7a563f76bfaa67e5c441f1f539"
+  },
+  "standard": "RFC9530",
+  "status": "passed",
+  "traces": [
+    {
+      "generated_verified": true,
+      "paths": [
+        "/header",
+        "/trailer",
+        "/corrupt",
+        "/missing",
+        "/unsupported",
+        "/malformed",
+        "/stream",
+        "/generated"
+      ],
+      "protocol": "http1",
+      "requests": 8,
+      "tls": "TLSv1.3"
+    },
+    {
+      "alpn": "h2",
+      "generated_verified": true,
+      "paths": [
+        "/header",
+        "/trailer",
+        "/corrupt",
+        "/missing",
+        "/unsupported",
+        "/malformed",
+        "/stream",
+        "/generated"
+      ],
+      "protocol": "http2",
+      "requests": 8,
+      "tls": "TLSv1.3"
+    }
+  ]
+}

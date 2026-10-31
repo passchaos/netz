@@ -1,4 +1,5 @@
 const std = @import("std");
+const content_digest = @import("../http/digest.zig");
 const RuntimeModule = @This();
 const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -20487,6 +20488,10 @@ pub const OwnedHandshakeRequest = struct {
 pub const OwnedHandshakeResponse = struct {
     stream_bytes: []u8,
     response: http3.DecodedResponse,
+
+    pub fn verifyContentDigest(self: OwnedHandshakeResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return self.response.verifyContentDigest(policy);
+    }
 
     pub fn deinit(self: *OwnedHandshakeResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);

@@ -1,3 +1,4 @@
+const content_digest = @import("../http/digest.zig");
 const std = @import("std");
 const authority_semantics = @import("../http/authority/mod.zig");
 
@@ -3720,6 +3721,12 @@ pub const DecodedResponse = struct {
         Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
+    }
+
+    /// Validate actual message content, including content-coded bytes, against
+    /// every enabled Content-Digest in headers and trailers.
+    pub fn verifyContentDigest(self: DecodedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return content_digest.verifyContent(self.body, self.headers, self.trailers, policy);
     }
 
     pub fn contentEncoding(

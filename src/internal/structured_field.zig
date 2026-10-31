@@ -147,7 +147,7 @@ fn consumeMemberVersion(value: []const u8, cursor: *usize, rfc9651: bool) Error!
     try consumeParametersVersion(value, cursor, rfc9651);
 }
 
-fn consumeKey(value: []const u8, cursor: *usize) Error!void {
+pub fn consumeKey(value: []const u8, cursor: *usize) Error!void {
     if (cursor.* >= value.len or !isKeyStart(value[cursor.*])) {
         return error.InvalidStructuredField;
     }

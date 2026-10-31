@@ -1,3 +1,4 @@
+const content_digest = @import("../http/digest.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const http2 = @import("mod.zig");
@@ -19856,6 +19857,12 @@ pub const OwnedResponse = struct {
         freeHeaders(allocator, self.trailers);
         allocator.free(self.body);
         self.* = undefined;
+    }
+
+    /// Validate actual message content, including content-coded bytes, against
+    /// every enabled Content-Digest in headers and trailers.
+    pub fn verifyContentDigest(self: OwnedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return content_digest.verifyContent(self.body, self.headers, self.trailers, policy);
     }
 
     pub fn contentEncoding(

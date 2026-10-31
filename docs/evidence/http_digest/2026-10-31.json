@@ -1,0 +1,90 @@
+{
+  "status": "verified",
+  "date": "2026-10-31",
+  "feature": "RFC9530 HTTP integrity fields",
+  "validated_base_commit": "a98fd9bdd497d9c52ad73059b9186e7871676d3d",
+  "specification": {
+    "url": "https://www.rfc-editor.org/rfc/rfc9530",
+    "sha256": "544dbb7d9afceafa8c9931d9924ca6cff2b4807274166d7ed2483342ef2cdd6a"
+  },
+  "active_algorithms": [
+    "sha-256",
+    "sha-512"
+  ],
+  "iana_registry": {
+    "url": "https://www.iana.org/assignments/http-digest-hash-alg/",
+    "evidence": "2026-10-31/iana-algorithms.csv",
+    "sha256": "771e9e35c099e7d65136163440e8688e92889e08d61b11c5bdbab8a85bbb9305"
+  },
+  "source_sha256": {
+    "build.zig": "579c9f4e65cf33a68d62dc524dc00b8ca44a3d0241d121b3b7ca86e486859124",
+    "src/http/client/types.zig": "41c9f0357c68ca4095581cd0999426930342fe0f2839680a958f92be6babae6b",
+    "src/http/mod.zig": "11c27cc46850e4250d286f3fb998c2ef750ec34a71a11255309378f0cd2ce7c4",
+    "src/http1/mod.zig": "302b45f8485ed6008bcc1995bba8e80c8a934f80cfdabff7d0eb3aae7a2ce2b2",
+    "src/http1/runtime.zig": "8a6cf09086c6f1014604761def6617665eca9aff843ea0a11b3abb7b1f982793",
+    "src/http2/runtime.zig": "02afd5a5f3d656a4579b743847af2d52be00d1e0e1dbcbd813da4494e082373c",
+    "src/http3/mod.zig": "5e0cfd23ec67214eb6bdd2780652bc16730aa56b0e9f7b11ad86a1e5aa01a97a",
+    "src/http3/runtime.zig": "c65ff2eb62803242d001869c0454aa81c3013842caa7ff0ca4a29cfc35c97f85",
+    "src/http3/runtime/development/message.zig": "6416962a0db1c648f0cc9ca4ce6e13aad9ad1b33e1e75636d25eb10c751d73d0",
+    "src/internal/structured_field.zig": "964e6cae6406434f69f6c7c0e8b30597f19dd6751bf214a13295bea2b85849a2",
+    "src/http/digest.zig": "ae46c603b3df4f9adceab9a621ad159e3750fc830666cb524b9f12aa8284210d",
+    "src/http/digest/value.zig": "4ee6a7d45986811db324912de1c1b33be3a3ac6bd91ca90696653a3e25c24baf",
+    "src/http/digest/types.zig": "648f56662f7eb165b41c0230ba1fa4520337048bc16d4e3cf7738806e1e476e1",
+    "src/http/digest/hash.zig": "43a1ccb0f8a05cdaca724354be49c0afc8458d175a009f30ae0a785e31a12ec9",
+    "src/http/digest/response_tests.zig": "2562dcdeb2015b32254e62d3d79725eeeadaf97261eb0e3f0af02641b07eda47",
+    "src/http/digest/fields.zig": "6465cbef1cc00d0e79691652061fb6d46fdbdac8e7c4d913e6a8d2a8bfd94b12",
+    "src/http/digest/tests.zig": "95c774ef26f6804c2b4bd4924bcb70db30731803f0cc3794a84145338cbba188",
+    "tools/interop/http_digest/peer.py": "36083965fb5bb4a43eb9d0b4acaca320c969b3bdeb330d4d1a679affb1d92f72",
+    "tools/interop/http_digest/driver.zig": "d7017c9482396e09804069b4c2f10bd53c97d9022a1d4dc1933e6b57abe42342",
+    "tools/interop/http_digest/run.py": "d70a3eda14f90ce97a2c651f37816448bea66a7a563f76bfaa67e5c441f1f539",
+    "tools/interop/http_digest/build.zig": "3503de6f2a8dbde93456cbe4182328abda9756b6df25d5f83fad7013ee15d64a"
+  },
+  "verification": {
+    "Debug": {
+      "tests_passed": 150,
+      "tests_total": 150,
+      "isolated_from_unrelated_edits": true,
+      "interop_report": "2026-10-31/Debug.json",
+      "https_protocols": [
+        "http1",
+        "http2"
+      ],
+      "requests": 16
+    },
+    "ReleaseFast": {
+      "tests_passed": 150,
+      "tests_total": 150,
+      "isolated_from_unrelated_edits": true,
+      "interop_report": "2026-10-31/ReleaseFast.json",
+      "https_protocols": [
+        "http1",
+        "http2"
+      ],
+      "requests": 16
+    }
+  },
+  "test_command": "zig build test-lib -Dtest-filter='HTTP digest' --summary all",
+  "interop_command": "zig build interop-http-digest-python --summary all",
+  "scope": [
+    "Content-Digest",
+    "Repr-Digest",
+    "Want-Content-Digest",
+    "Want-Repr-Digest",
+    "headers and trailers",
+    "final RFC8941 duplicate values",
+    "constant-time digest comparisons",
+    "bounded incremental hashing",
+    "HTTP1/2/3 explicit response verification",
+    "unified and redirected responses",
+    "native HTTP1 and HTTP3 owning response convenience methods"
+  ],
+  "storage_bounds": {
+    "dictionary_members": 64,
+    "matching_field_bytes_default": 16384,
+    "serialized_sha256_sha512_bytes": 154
+  },
+  "limitations": [
+    "HTTP3 digest integration is covered by QPACK/DATA image and unified-response tests; independent network peers cover HTTP1 and HTTP2.",
+    "No cross-library throughput claim is inferred from these functional gates."
+  ]
+}

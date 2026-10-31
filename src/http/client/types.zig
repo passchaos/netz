@@ -7,6 +7,7 @@ const http2 = @import("../../http2/mod.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
 const http3 = @import("../../http3/mod.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
+const content_digest = @import("../digest.zig");
 const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
@@ -203,6 +204,14 @@ pub const OwnedResponse = struct {
         return fieldIterator(self.value, .trailers, name);
     }
 
+    pub fn verifyContentDigest(self: OwnedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return switch (self.value) {
+            .http1 => |response| response.verifyContentDigest(policy),
+            .http2 => |response| response.verifyContentDigest(policy),
+            .http3 => |response| response.verifyContentDigest(policy),
+        };
+    }
+
     /// Parse every Content-Encoding field without exposing the negotiated
     /// protocol's concrete header representation.
     pub fn contentEncoding(
@@ -277,6 +286,10 @@ pub const RedirectedResponse = struct {
         self.allocator.free(self.final_uri);
         self.* = undefined;
         return response;
+    }
+
+    pub fn verifyContentDigest(self: RedirectedResponse, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return self.response.verifyContentDigest(policy);
     }
 
     pub fn contentEncoding(

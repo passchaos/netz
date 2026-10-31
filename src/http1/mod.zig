@@ -1,3 +1,4 @@
+const content_digest = @import("../http/digest.zig");
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
@@ -582,6 +583,12 @@ pub const Response = struct {
 
     pub fn header(self: Response, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
+    }
+
+    /// Validate actual message content, including content-coded bytes, against
+    /// every enabled Content-Digest in headers and trailers.
+    pub fn verifyContentDigest(self: Response, policy: content_digest.Policy) content_digest.Error!content_digest.Result {
+        return content_digest.verifyContent(self.body, self.headers, self.trailers, policy);
     }
 
     pub fn contentEncoding(
