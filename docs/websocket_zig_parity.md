@@ -106,7 +106,9 @@ two properties are asserted by the independent netz server endpoint on the
 same real browser connection while the browser verifies decoded payloads and
 close metadata. Browser coverage for RFC 8441/9220 remains limited by the
 standard browser WebSocket API's HTTP version selection and current browser
-support.
+support. A fresh headless Chromium 149.0.7827.196 run on 2026-11-01 passed both
+the `ws` and `wss` matrices with exact launcher/process-image SHA-256 and
+User-Agent binding; see `docs/evidence/browser_interop/2026-11-01.json`.
 
 `websocket.runtime.TlsServer` negotiates TLS 1.2 or TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.

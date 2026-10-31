@@ -1,0 +1,4 @@
+Chrome WebSocket interop passed: scheme=ws rejected-origin accepted-origin subprotocol compressed-text binary automatic-pong close=1001/netz-browser-done
+netz Chrome WebSocket server listening on 127.0.0.1:54975 scheme=ws
+netz Chrome WebSocket interop passed: scheme=ws rejected-origin accepted-origin subprotocol compressed-text binary ping-pong close=1001/netz-browser-done
+exit=0

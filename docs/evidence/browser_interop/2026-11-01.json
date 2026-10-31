@@ -1,0 +1,33 @@
+{
+  "browser": "Chromium 149.0.7827.196 (headless)",
+  "browser_launcher_sha256": "36cbbb620daeb933ae7861de07fcff05b5e1f7527303b5992459b8aa6707b845",
+  "browser_process_sha256": "3a7459ac6edc2ed80101d3b5a0492cae71a0097012a4f236b308d0a9b848290f",
+  "commands": [
+    "CHROME=/usr/bin/chromium zig build interop-websocket-chrome",
+    "CHROME=/usr/bin/chromium zig build interop-websocket-chrome -- --tls",
+    "zig build interop-grpc-web-chrome"
+  ],
+  "date": "2026-11-01",
+  "grpc_web": {
+    "client": "grpc-web-2.1.1",
+    "details": "google.rpc.Status",
+    "error": "UNAUTHENTICATED",
+    "log": "2026-11-01/grpc_web_chrome.http1.log",
+    "preflight": 5,
+    "protocols": [
+      "http/1.1"
+    ],
+    "rejected_origin": true,
+    "stream": "incremental-text",
+    "unary": [
+      "binary",
+      "text"
+    ]
+  },
+  "status": "passed",
+  "websocket": {
+    "log_dir": "2026-11-01",
+    "ws": "rejected-origin accepted-origin subprotocol compressed-text binary automatic-pong close=1001/netz-browser-done",
+    "wss": "rejected-origin accepted-origin subprotocol compressed-text binary ping-pong close=1001/netz-browser-done"
+  }
+}

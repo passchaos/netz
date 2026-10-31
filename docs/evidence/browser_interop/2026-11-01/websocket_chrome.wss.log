@@ -1,0 +1,6 @@
+Chrome WebSocket interop passed: scheme=wss rejected-origin accepted-origin subprotocol compressed-text binary automatic-pong close=1001/netz-browser-done
+netz Chrome WebSocket server listening on 127.0.0.1:45069 scheme=wss
+debug(zio): Spawning thread 0
+netz Chrome WebSocket interop passed: scheme=wss rejected-origin accepted-origin subprotocol compressed-text binary ping-pong close=1001/netz-browser-done
+debug(zio): Removing thread 0
+exit=0
