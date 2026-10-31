@@ -14,6 +14,7 @@
   "date": "2026-11-01",
   "feature": "Aggregate HTTP/3 server push timeout retires only its streams",
   "regression": {
+    "bodyless_parent": "Only the push stream resets; the parent HEAD/FIN remains complete and the connection stays open.",
     "connection_survives": true,
     "deadline": "The original awake-clock deadline is not renewed by packet or flow-control progress.",
     "parent_reset_code": "H3_INTERNAL_ERROR",
@@ -24,7 +25,7 @@
   },
   "source_sha256": {
     "src/http3/runtime.zig": "2d2f265fe8f4dd0a743f59c184f856940777c3aa4c90e6859d687b2860374bf9",
-    "src/http3/runtime/stream/push/tests/send.zig": "f1baa8505ab21fe0448f6d6eca9f1297c495a564688f57654f92cb75037fdef6"
+    "src/http3/runtime/stream/push/tests/send.zig": "3a8f69ba37e2bc690dd5b9c0183675365302a28380d879fc9e98024aff8aafea"
   },
   "status": "verified",
   "verification": {

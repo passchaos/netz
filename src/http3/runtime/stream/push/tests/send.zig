@@ -717,8 +717,11 @@ test "HTTP/3 handshake paced push stops after client cancellation" {
     try std.testing.expect(shared.pushed_bytes < body_len);
 }
 
-test "HTTP/3 handshake paced push timeout retires only its streams" {
-    const allocator = std.testing.allocator;
+fn runPushTimeoutCase(
+    allocator: std.mem.Allocator,
+    parent_body: []const u8,
+    expect_parent_reset: bool,
+) !void {
     const body_len: usize = 1024 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -783,8 +786,11 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
     };
 
     const Shared = struct {
+        allocator: std.mem.Allocator,
         server: *runtime.HandshakeServer,
         advance: *std.atomic.Value(bool),
+        parent_body: []const u8,
+        expect_parent_reset: bool,
         err: ?anyerror = null,
         push_reset: ?u64 = null,
         parent_reset: ?u64 = null,
@@ -806,8 +812,8 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
             while (session.control.peer_max_push_id != 0) {
                 try session.pollControlWithTimeout(.fromSeconds(2));
             }
-            const body = try allocator.alloc(u8, body_len);
-            defer allocator.free(body);
+            const body = try shared.allocator.alloc(u8, body_len);
+            defer shared.allocator.free(body);
             @memset(body, 0x5a);
             var timed = AdvanceIo{
                 .delegate = session.established.connection.endpoint.io,
@@ -822,7 +828,7 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
             defer session.established.connection.endpoint.io = timed.delegate;
             const result = session.sendResponseWithPushPacedAndTimeout(
                 request.stream_id,
-                .{ .status = 200, .body = "parent" },
+                .{ .status = 200, .body = shared.parent_body },
                 .{
                     .push_id = 0,
                     .request = .{
@@ -844,8 +850,12 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
             const parent_stats = session.established.connection.sendStreamStats(
                 request.stream_id,
             ) orelse return error.TestUnexpectedResult;
-            try std.testing.expect(parent_stats.reset != null);
-            shared.parent_reset = parent_stats.reset.?.application_error_code;
+            if (shared.expect_parent_reset) {
+                try std.testing.expect(parent_stats.reset != null);
+                shared.parent_reset = parent_stats.reset.?.application_error_code;
+            } else {
+                try std.testing.expect(parent_stats.reset == null);
+            }
             try std.testing.expect(
                 session.outbound_bodies.find(first_server_push_stream_id) == null,
             );
@@ -863,7 +873,13 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
     };
 
     var advance = std.atomic.Value(bool).init(false);
-    var shared = Shared{ .server = &server, .advance = &advance };
+    var shared = Shared{
+        .allocator = allocator,
+        .server = &server,
+        .advance = &advance,
+        .parent_body = parent_body,
+        .expect_parent_reset = expect_parent_reset,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -943,9 +959,18 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
         @as(u64, http3.ApplicationErrorCode.request_cancelled),
         shared.push_reset.?,
     );
-    try std.testing.expectEqual(
-        @as(u64, http3.ApplicationErrorCode.internal_error),
-        shared.parent_reset.?,
-    );
+    if (expect_parent_reset) {
+        try std.testing.expectEqual(
+            @as(u64, http3.ApplicationErrorCode.internal_error),
+            shared.parent_reset.?,
+        );
+    } else {
+        try std.testing.expect(shared.parent_reset == null);
+    }
     try std.testing.expectEqual(@as(u16, 204), shared.sibling_status);
+}
+
+test "HTTP/3 handshake paced push timeout retires only its streams" {
+    try runPushTimeoutCase(std.testing.allocator, "parent", true);
+    try runPushTimeoutCase(std.testing.allocator, "", false);
 }

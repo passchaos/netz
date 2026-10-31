@@ -52,7 +52,9 @@ the protected server retain their separate contracts.
 A regression blocks the push body on flow control, advances the server's awake
 clock past the original deadline, and requires both the push and parent
 streams to reset while the connection stays open and a later request on the
-same connection completes. Evidence is recorded in
+same connection completes. The same regression also covers a bodyless parent:
+its HEAD/FIN is already complete, so only the push resets and the parent
+response survives. Evidence is recorded in
 `docs/evidence/http3_push_timeout/2026-11-01.json`.
 
 ## Evidence
