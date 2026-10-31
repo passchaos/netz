@@ -2043,6 +2043,17 @@ origin, verifies proxy authentication at the tunnel boundary, rejects that
 header at the origin, and runs the existing TLS KeyUpdate, multiplexing,
 cancellation, keepalive and GOAWAY exchange through the tunnel.
 
+Those endpoint surfaces now also accept a native SOCKS5 route through
+`http2.socks5_runtime`. The destination hostname remains a domain in the SOCKS
+CONNECT request, while origin TLS identity/SNI and WebTransport `:authority`
+remain unchanged. HTTP CONNECT and SOCKS5 share one extracted two-generation
+regression: generation one completes a Session/DATAGRAM exchange and then
+closes, its handle becomes stale, and generation two opens a fresh proxy,
+TLS/h2 and Session lifecycle. The independent Python SOCKS gate separately
+requires the direct HTTP/2 API to negotiate TLS 1.3/h2 through a domain-form
+SOCKS request. Evidence is recorded in
+`docs/evidence/http2_socks5_proxy/2026-10-31.json`.
+
 Independent draft-15 browser protocol interop remains open; the local
 reference set still has no second WebTransport-over-HTTP2 implementation. The
 proxy transport layer is independently covered, but the Capsule/virtual-stream

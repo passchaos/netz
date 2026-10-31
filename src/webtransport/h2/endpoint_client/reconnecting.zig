@@ -15,5 +15,6 @@ pub const ReconnectingEndpointClient = runtime.ReconnectingEndpointClient;
 
 test {
     _ = runtime;
+    _ = @import("reconnecting/proxy_tests.zig");
     _ = @import("reconnecting/tests.zig");
 }

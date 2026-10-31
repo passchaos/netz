@@ -10,7 +10,7 @@ pub const Handle = job_mod.Handle;
 pub const Event = job_mod.Event;
 pub const KeyingMaterial = job_mod.Bytes;
 pub const Accepted = job_mod.Accepted;
-pub const Error = runtime.Error || error{ EndpointClosed, EndpointCapacity, EndpointQueueFull, StaleSession, InvalidEndpointOptions };
+pub const Error = runtime.Error || http2.socks5_runtime.Error || error{ EndpointClosed, EndpointCapacity, EndpointQueueFull, StaleSession, InvalidEndpointOptions };
 
 pub const Options = struct {
     max_sessions: usize = 64,
@@ -332,6 +332,55 @@ pub const EndpointClient = struct {
             host,
             port,
             proxy,
+            limits,
+            tls_options,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+    pub fn connectTlsHostViaSocks5WithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: http2.socks5_runtime.Proxy,
+        host: []const u8,
+        port: u16,
+        limits: http2.runtime.Limits,
+        tls_options: http2.runtime.TlsConnectOptions,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!EndpointClient {
+        try options.validate();
+        const connection = try http2.socks5_runtime.Client
+            .connectTlsHostWithDeadline(
+            allocator,
+            io,
+            proxy,
+            host,
+            port,
+            limits,
+            tls_options,
+            deadline,
+        );
+        return init(allocator, connection, options);
+    }
+    pub fn connectTlsHostViaSocks5WithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy: http2.socks5_runtime.Proxy,
+        host: []const u8,
+        port: u16,
+        limits: http2.runtime.Limits,
+        tls_options: http2.runtime.TlsConnectOptions,
+        options: Options,
+        timeout: std.Io.Duration,
+    ) Error!EndpointClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostViaSocks5WithDeadline(
+            allocator,
+            io,
+            proxy,
+            host,
+            port,
             limits,
             tls_options,
             options,

@@ -74,6 +74,7 @@ def frame(frame_type: int, flags: int, stream_id: int, payload: bytes) -> bytes:
 def serve_h2(
     server: socket.socket,
     context: ssl.SSLContext,
+    response_body: bytes,
 ) -> None:
     raw, _ = server.accept()
     with raw:
@@ -91,7 +92,7 @@ def serve_h2(
                 elif frame_type == 1:
                     request_stream = stream_id
             client.sendall(frame(1, 4, request_stream, bytes((0x88,))))
-            client.sendall(frame(0, 1, request_stream, b"h2-socks"))
+            client.sendall(frame(0, 1, request_stream, response_body))
 
 
 def serve_pool(server: socket.socket) -> None:
@@ -163,14 +164,15 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         ca, cert, key = create_identity(directory, "origin.internal")
-        redirect, final, h2, pooled = (listener() for _ in range(4))
+        redirect, final, h2, direct_h2, pooled = (listener() for _ in range(5))
         proxy = listener()
         tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls_context.minimum_version = ssl.TLSVersion.TLSv1_3
         tls_context.set_alpn_protocols(["h2"])
         tls_context.load_cert_chain(cert, key)
         ports = tuple(
-            server.getsockname()[1] for server in (redirect, final, h2, pooled)
+            server.getsockname()[1]
+            for server in (redirect, final, h2, direct_h2, pooled)
         )
         trace: list[int] = []
         errors: list[BaseException] = []
@@ -184,7 +186,14 @@ def main() -> None:
         threads = (
             threading.Thread(target=run, args=(serve_redirect, redirect, ports[1])),
             threading.Thread(target=run, args=(serve_final, final)),
-            threading.Thread(target=run, args=(serve_h2, h2, tls_context)),
+            threading.Thread(
+                target=run,
+                args=(serve_h2, h2, tls_context, b"h2-socks"),
+            ),
+            threading.Thread(
+                target=run,
+                args=(serve_h2, direct_h2, tls_context, b"h2-direct-socks"),
+            ),
             threading.Thread(target=run, args=(serve_pool, pooled)),
             threading.Thread(target=run, args=(serve_proxy, proxy, ports, trace)),
         )
@@ -203,7 +212,7 @@ def main() -> None:
         )
         for thread in threads:
             thread.join(timeout=5)
-        for server in (redirect, final, h2, pooled, proxy):
+        for server in (redirect, final, h2, direct_h2, pooled, proxy):
             server.close()
         if any(thread.is_alive() for thread in threads):
             raise TimeoutError("HTTP SOCKS peers did not terminate")
@@ -216,7 +225,8 @@ def main() -> None:
             raise AssertionError(f"HTTP SOCKS tunnel trace mismatch: {trace}")
         expected = (
             "HTTP SOCKS5 client passed: redirects=1 http1=true http2=true "
-            "alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=4 "
+            "http2_direct=true alpn=h2 pool_requests=2 pool_tunnels=1 "
+            "total_tunnels=5 "
             "remote_dns=true credentials_isolated=true tls_hostname=true "
             "deadline=true client_io=zio-std-io"
         )
@@ -224,8 +234,9 @@ def main() -> None:
             raise AssertionError(f"missing client result: {result.stdout}")
         print(
             "HTTP SOCKS5 interoperability passed: redirects=1 http1=true "
-            "http2=true alpn=h2 pool_requests=2 pool_tunnels=1 "
-            "total_tunnels=4 remote_dns=true credentials_isolated=true "
+            "http2=true http2_direct=true alpn=h2 pool_requests=2 "
+            "pool_tunnels=1 total_tunnels=5 remote_dns=true "
+            "credentials_isolated=true "
             "tls13=true tls_hostname=true deadline=true "
             "client_io=zio-std-io peer_io=python-socket"
         )

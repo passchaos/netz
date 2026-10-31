@@ -2022,6 +2022,117 @@ pub const Client = struct {
         return connection;
     }
 
+    /// Perform origin-authenticated TLS and HTTP/2 bootstrap on a
+    /// caller-connected TCP stream. Ownership transfers at entry; `tls_host`
+    /// remains the certificate/SNI identity while `authority` is copied for
+    /// later requests.
+    pub fn adoptTlsStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+    ) Error!Connection {
+        return adoptTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn adoptTlsStreamWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        return adoptTlsStreamMaybeBefore(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    /// A non-positive relative timeout is rejected before ownership transfer.
+    pub fn adoptTlsStreamWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return adoptTlsStreamWithDeadline(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            authority,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn adoptTlsStreamMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        tls_host: []const u8,
+        authority: []const u8,
+        limits: Limits,
+        tls_options: TlsConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        try validateLocalLimits(limits);
+        const identity = try endpoint_host.parse(tls_host, 443);
+        if (authority.len == 0) return error.InvalidHeader;
+        const owned_authority = try allocator.dupe(u8, authority);
+        stream_owned = false;
+        return if (deadline) |absolute|
+            connectTlsStreamBefore(
+                allocator,
+                io,
+                stream,
+                identity.host,
+                owned_authority,
+                limits,
+                tls_options,
+                absolute,
+            )
+        else
+            connectTlsStream(
+                allocator,
+                io,
+                stream,
+                identity.host,
+                owned_authority,
+                limits,
+                tls_options,
+            );
+    }
+
     /// Adopt a certificate-verified TLS connection already negotiated as
     /// `h2`, then complete the HTTP/2 bootstrap. Ownership transfers at entry.
     pub fn adoptNegotiatedTls(

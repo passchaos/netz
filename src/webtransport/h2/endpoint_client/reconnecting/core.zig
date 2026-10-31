@@ -52,6 +52,13 @@ pub const Target = union(enum) {
         limits: http2.runtime.Limits = .{},
         tls: http2.runtime.TlsConnectOptions = .{},
     },
+    tls_socks5_proxy: struct {
+        proxy: http2.socks5_runtime.Proxy,
+        host: []const u8,
+        port: u16,
+        limits: http2.runtime.Limits = .{},
+        tls: http2.runtime.TlsConnectOptions = .{},
+    },
     custom: CustomConnector,
 
     fn validate(self: Target) Error!void {
@@ -59,6 +66,7 @@ pub const Target = union(enum) {
             .cleartext_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
             .tls_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
             .tls_http_proxy => |value| if (value.port == 0) return error.InvalidReconnectOptions,
+            .tls_socks5_proxy => |value| if (value.port == 0) return error.InvalidReconnectOptions,
             else => {},
         }
     }
@@ -68,7 +76,7 @@ pub const Target = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         deadline: std.Io.Clock.Timestamp,
-    ) http2.runtime.Error!http2.runtime.Connection {
+    ) Error!http2.runtime.Connection {
         return switch (self) {
             .cleartext_address => |value| http2.runtime.Client.connectWithDeadline(
                 allocator,
@@ -111,6 +119,17 @@ pub const Target = union(enum) {
                 value.host,
                 value.port,
                 value.proxy,
+                value.limits,
+                value.tls,
+                deadline,
+            ),
+            .tls_socks5_proxy => |value| http2.socks5_runtime.Client
+                .connectTlsHostWithDeadline(
+                allocator,
+                io,
+                value.proxy,
+                value.host,
+                value.port,
                 value.limits,
                 value.tls,
                 deadline,
@@ -505,6 +524,12 @@ fn retryableConnectError(err: anyerror) bool {
         error.NetworkUnreachable,
         error.NoAddressReturned,
         error.ProcessFdQuotaExceeded,
+        error.ProxyConnectionClosed,
+        error.ProxyConnectionRefused,
+        error.ProxyGeneralFailure,
+        error.ProxyHostUnreachable,
+        error.ProxyNetworkUnreachable,
+        error.ProxyTtlExpired,
         error.SocketUnconnected,
         error.SystemFdQuotaExceeded,
         error.SystemResources,

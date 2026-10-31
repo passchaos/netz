@@ -293,6 +293,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "connectAttemptWithTimeout",
         "connectTlsAddressWithTimeout",
         "connectTlsHostViaProxyWithTimeout",
+        "connectTlsHostViaSocks5WithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",
@@ -306,6 +307,10 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     try std.testing.expect(@hasField(
         h2.ReconnectingEndpointTarget,
         "tls_http_proxy",
+    ));
+    try std.testing.expect(@hasField(
+        h2.ReconnectingEndpointTarget,
+        "tls_socks5_proxy",
     ));
     try std.testing.expect(@hasDecl(h2, "ReconnectingSessionHandle"));
     inline for (&.{
@@ -352,6 +357,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsAddressWithTimeout(std.testing.allocator, undefined, undefined, "localhost", "localhost", .{}, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostWithTimeout(std.testing.allocator, undefined, "localhost", 443, .{}, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostViaProxyWithTimeout(std.testing.allocator, undefined, "localhost", 443, .{ .uri = "http://proxy.invalid" }, .{}, .{}, .{}, .zero));
+    try std.testing.expectError(error.Timeout, h2.EndpointClient.connectTlsHostViaSocks5WithTimeout(std.testing.allocator, undefined, .{ .host = "proxy.invalid" }, "localhost", 443, .{}, .{}, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
     try std.testing.expectError(error.Timeout, h2.EndpointServer.acceptTlsConnectionWithTimeout(std.testing.allocator, undefined, .{}, .zero));
 }
@@ -1750,6 +1756,23 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
         "connectTlsAddressWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Client,
+        "adoptTlsStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(netz.http2, "socks5_runtime"));
+    try std.testing.expect(@hasDecl(
+        netz.http2.socks5_runtime,
+        "Proxy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.socks5_runtime,
+        "Client",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.socks5_runtime.Client,
+        "connectTlsHostWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,

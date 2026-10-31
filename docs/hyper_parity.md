@@ -2827,6 +2827,18 @@ remote-DNS SOCKS CONNECT requests and completes both HTTP and certificate- and
 hostname-verified HTTPS without exposing the proxy authority in Host or TLS
 identity.
 
+The lower-level HTTP/2 surface now exposes this TCP route independently of the
+unified client. `http2.socks5_runtime.Client` performs SOCKS5 CONNECT with
+proxy-side destination DNS, then transfers the raw tunnel into
+`runtime.Client.adoptTlsStream{,WithTimeout,WithDeadline}`. The SOCKS error set
+stays in the composition module instead of widening core Connection state. Host
+validation and origin-authority allocation happen before proxy I/O; the exact
+awake deadline then spans proxy connection/authentication/CONNECT, TLS
+certificate and hostname verification, mandatory `h2` ALPN, preface and peer
+SETTINGS. The existing Python gate now requires a fifth domain-form tunnel for
+this direct API and returns an independent `h2-direct-socks` response. Evidence
+is recorded in `docs/evidence/http2_socks5_proxy/2026-10-31.json`.
+
 The unified HTTP client and bounded connection pool now take the same fixed
 SOCKS5 route. Cleartext HTTP/1, cleartext HTTP/2 prior knowledge, and HTTPS
 ALPN negotiation all run on the returned tunnel; redirect hops open new

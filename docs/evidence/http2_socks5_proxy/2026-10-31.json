@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "TLS HTTP/2 and WebTransport HTTP/2 through SOCKS5 CONNECT",
+  "decision": "accepted",
+  "scope": {
+    "http2": "standalone http2.socks5_runtime Client with relative, absolute, and unbounded TLS host connection entry points",
+    "webtransport": "direct EndpointClient setup and ReconnectingEndpointClient tls_socks5_proxy target",
+    "dns": "the origin hostname remains a SOCKS5 domain address and is not resolved locally",
+    "deadline": "one awake-clock timestamp spans proxy DNS/TCP, SOCKS negotiation, CONNECT, origin TLS/h2 ALPN, HTTP/2 bootstrap, and endpoint admission",
+    "identity": "origin hostname remains the TLS certificate and SNI identity and the HTTP/2 or WebTransport authority",
+    "error_boundary": "SOCKS protocol and reply errors remain in http2.socks5_runtime and do not widen core HTTP/2 Connection state"
+  },
+  "reference": {
+    "protocol": "RFC 1928 SOCKS5 CONNECT",
+    "implementation": "independent Python socket peer plus existing Netz RFC 1928 codec",
+    "files": [
+      "tools/interop/http_socks5.py",
+      "src/proxy/socks5.zig",
+      "src/proxy/socks5/udp.zig"
+    ],
+    "oracle_boundary": "the Python peer parses the greeting and domain-form CONNECT request independently, relays opaque TLS bytes, and serves the minimal HTTP/2 origin"
+  },
+  "implementation": {
+    "adoption": "runtime.Client.adoptTlsStream transfers a caller-connected TCP stream into origin-authenticated TLS and HTTP/2 while copying authority ownership",
+    "composition": "http2.socks5_runtime validates and allocates origin identity before proxy I/O, opens SOCKS CONNECT, and transfers the stream to the runtime adopter",
+    "reconnect": "the WebTransport target opens a fresh SOCKS, TLS, HTTP/2, and Session generation after transport loss and rejects the old handle",
+    "test_structure": "HTTP CONNECT and SOCKS5 two-generation scenarios share a dedicated proxy_tests module instead of enlarging the general reconnect test file"
+  },
+  "native_cases": [
+    "timeout and authority allocation rejection before proxy I/O",
+    "SOCKS greeting selects no-auth and CONNECT uses address type domain for localhost",
+    "exact destination port and success reply before TLS bytes",
+    "TLS 1.3 certificate verification and mandatory h2 ALPN",
+    "WebTransport Session and DATAGRAM on generation one",
+    "transport close makes the first handle stale",
+    "generation two opens another SOCKS tunnel and completes a new Session"
+  ],
+  "results": {
+    "focused_debug": "143/143 passed",
+    "http2_webtransport_debug": "1558/1558 passed without leaks",
+    "package": "26/26 passed",
+    "python_release_fast": "8/8 build steps passed; five domain-form tunnels covered redirect, HTTP/1, unified HTTP/2, direct HTTP/2, and pooled reuse",
+    "python_summary": "redirects=1 http1=true http2=true http2_direct=true alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=5 remote_dns=true credentials_isolated=true tls13=true tls_hostname=true deadline=true"
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "proxy_io": "python-socket",
+    "client_io": "zio-std-io"
+  },
+  "source_sha256": {
+    "src/http2/mod.zig": "dd91675cad4f6b7ce8a5de20cdfe07dfca2aef677c17b3e6847e40d453a8518a",
+    "src/http2/runtime.zig": "8b7c06ea7e6518496425d0cae8f764ffff7c5b9c46f4c756d45bc5bed6b895de",
+    "src/http2/socks5_runtime.zig": "00078c38682d53c5eed85e0330e893949765419639a634963a7182f0204fc2f2",
+    "src/webtransport/h2/endpoint_client.zig": "4e4426ea0c493da313b4da1f9435c907941f90ff9220b257eadeb72313bc3fb2",
+    "src/webtransport/h2/endpoint_client/reconnecting.zig": "f3232c00d397793613ed810b5b0af6daf36412a809fed3e4dfe0a27a13297f41",
+    "src/webtransport/h2/endpoint_client/reconnecting/core.zig": "3dbcdc9fe6e544df0385b0e5a37c6ebd738071519030b5648e6d6d8e3c0807b3",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "5e2f989b037540c265c664bf83b1a1e1c8162018f0523fb9046b76fe75f6f131",
+    "src/webtransport/h2/endpoint_client/reconnecting/proxy_tests.zig": "902476e4e710cf6bc2df22bf2bd05b2d4e2ff4d3d1da9a1b9fa4112896628a07",
+    "tools/interop/http_socks5_client.zig": "efc0af319f53e463dac2db75e67ad489f3b7b8e3ae9b7042c2b7bd6d33761253",
+    "tools/interop/http_socks5.py": "86c0db4e2b25d42c490007989db8a82dc43c20ff877ce720271b7b39b7e965e1",
+    "test/package_test.zig": "2358809ffc3daac54c485453ed553def8b4f34672f9463d2f221840db72874e9"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='reconnects through HTTP CONNECT proxy' -Dtest-filter='reconnects through SOCKS5 remote DNS proxy' -Dtest-filter='HTTP/2 SOCKS5 TLS' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/2' -Dtest-filter='WebTransport' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-http-socks5 -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "independent draft-15 WebTransport-over-HTTP2 browser protocol coverage remains open; this closes the native TCP SOCKS5 transport route"
+}

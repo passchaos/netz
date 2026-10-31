@@ -28,12 +28,13 @@ fn deadline(io: std.Io) std.Io.Clock.Timestamp {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 7) return error.InvalidArgument;
+    if (args.len != 8) return error.InvalidArgument;
     const proxy_port = try port(args[1]);
     const redirect_port = try port(args[2]);
     const final_port = try port(args[3]);
     const h2_port = try port(args[4]);
-    const pool_port = try port(args[5]);
+    const direct_h2_port = try port(args[5]);
+    const pool_port = try port(args[6]);
 
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
@@ -44,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         std.Io.Clock.real.now(io),
-        args[6],
+        args[7],
     );
     var ca_lock: std.Io.RwLock = .init;
     const socks = netz.http.Socks5Proxy{
@@ -97,6 +98,30 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqual(netz.http.Protocol.http2, h2_response.protocol());
     try std.testing.expectEqualStrings("h2-socks", h2_response.body());
 
+    var direct_h2 = try netz.http2.socks5_runtime.Client
+        .connectTlsHostWithDeadline(
+        allocator,
+        io,
+        .{ .host = "127.0.0.1", .port = proxy_port },
+        "origin.internal",
+        direct_h2_port,
+        .{ .max_body_bytes = 4096 },
+        .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+        deadline(io),
+    );
+    defer direct_h2.close();
+    var direct_response = try direct_h2.request(.{
+        .path = "/h2-direct",
+    });
+    defer direct_response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "h2-direct-socks",
+        direct_response.body,
+    );
+
     var pool = try netz.http.Pool.init(allocator, io, .{
         .max_connections = 1,
         .max_idle_connections = 1,
@@ -120,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "HTTP SOCKS5 client passed: redirects=1 http1=true http2=true " ++
-            "alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=4 " ++
+            "http2_direct=true alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=5 " ++
             "remote_dns=true credentials_isolated=true tls_hostname=true " ++
             "deadline=true client_io=zio-std-io\n",
         .{},
