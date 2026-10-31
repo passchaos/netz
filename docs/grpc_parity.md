@@ -589,6 +589,8 @@ reset race from closing with unread upload bytes.
    transport replacement while preserving its single frame owner. Standard
    `weighted_round_robin` now consumes these metrics across endpoints with
    grpc-core's static-stride, blackout, expiration and RR-fallback semantics.
+   SharedChannel now also implements the grpc-core
+   `outlier_detection_experimental` composite policy described below.
    Additional composite/xDS policies remain explicit integration work rather
    than being silently inferred from ORCA metrics.
 
@@ -598,6 +600,43 @@ Machine-readable SharedChannel ORCA evidence is recorded in
 The current tests establish concurrent shared unary and streaming calls,
 sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature
 parity remains open.
+
+## SharedChannel outlier detection
+
+Service config now parses grpc-core's `outlier_detection_experimental` wrapper
+and selects the first implemented `childPolicy`. Interval, base/max ejection
+time, maximum ejection percentage, success-rate standard-deviation policy and
+failure-percentage policy preserve grpc-core defaults and validation. Omitting
+`maxEjectionTime` selects `max(baseEjectionTime, 300s)`. Unknown child policies
+are skipped; a missing or entirely unknown child list is rejected.
+
+Each SharedChannel endpoint owns two atomic completion buckets plus persistent
+ejection timestamp/multiplier state. Unary physical attempts and completed or
+failed streaming calls record OK as success and every other terminal status or
+transport result as failure. At each interval the active bucket rotates, the
+success-rate mean/population deviation and strict failure percentage are
+evaluated without allocation, enforcement sampling is applied, and the
+configured maximum ejected percentage is observed while still permitting the
+first ejection like grpc-core. Repeated ejections multiply the base duration up
+to `max(base, max)`, while healthy intervals decay that multiplier.
+
+Ejection changes only the policy wrapper: the endpoint's underlying transport,
+Health Watch and reconnect owner stay alive, while its exposed connectivity is
+`TRANSIENT_FAILURE` and picker capacity is zero. The worker pump includes the
+next evaluation timestamp in its wait, so an idle ejected endpoint becomes
+READY again without requiring unrelated traffic. WRR snapshots are invalidated
+when membership eligibility changes.
+
+Real two-endpoint h2c coverage sends UNAVAILABLE through endpoint A and OK
+through B, observes A transition READY -> TRANSIENT_FAILURE, requires two later
+calls to use B, then observes A return to READY and receive the next call. A
+separate shared-duplex regression proves a streaming UNAVAILABLE terminal also
+drives ejection. Parser/evaluator and runtime focused tests pass 145/145; the
+complete gRPC Debug gate passes 445/445. Ordinary `Channel` currently rejects
+this Shared-owned composite policy with `InvalidChannelOptions` instead of
+silently ignoring it; integrating completion ownership for returned ordinary
+stream handles remains explicit follow-up work. Evidence is recorded in
+`docs/evidence/grpc_shared_outlier_detection/2026-10-31.json`.
 
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial

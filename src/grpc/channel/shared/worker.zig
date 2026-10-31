@@ -13,6 +13,7 @@ const Active = @import("active.zig").Active;
 const Wake = @import("wake.zig").Wake;
 const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
+const outlier_detection = @import("../outlier_detection.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -47,6 +48,7 @@ pub fn Worker(comptime State: type) type {
         goaway_keepalive_applied: bool = false,
         connection_keepalive_interval: ?std.Io.Duration = null,
         wrr_weight: weighted_round_robin.Weight = .{},
+        outlier: outlier_detection.Endpoint = .{},
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
@@ -147,7 +149,7 @@ pub fn Worker(comptime State: type) type {
             self.active.items[index].stream.cancel() catch {};
             self.active.items[index].deinit();
             _ = self.active.swapRemove(index);
-            self.parent.finish(job, null, err);
+            self.parent.finishAttempt(self, job, null, err);
         }
         fn publish(self: *Self) void {
             const connection = self.connection orelse {
@@ -297,7 +299,7 @@ pub fn Worker(comptime State: type) type {
                             const job = item.job;
                             item.deinit();
                             _ = self.active.swapRemove(i);
-                            self.parent.finish(job, result, null);
+                            self.parent.finishAttempt(self, job, result, null);
                             progress = true;
                             continue;
                         },
@@ -325,14 +327,14 @@ pub fn Worker(comptime State: type) type {
                 progress = true;
                 if (job.stream != null) {
                     StreamOwner.open(self, job, self.outputDeadline()) catch |err| {
-                        self.parent.finish(job, null, err);
+                        self.parent.finishAttempt(self, job, null, err);
                         if (connection.aggregate_timeout_unusable) return err;
                     };
                     self.publish();
                     continue;
                 }
                 self.active.ensureUnusedCapacity(self.parent.allocator, 1) catch |err| {
-                    self.parent.finish(job, null, err);
+                    self.parent.finishAttempt(self, job, null, err);
                     continue;
                 };
                 const options: streaming.RequestOptions = .{
@@ -358,13 +360,13 @@ pub fn Worker(comptime State: type) type {
                     job.deadline,
                     minimum(job.deadline, self.outputDeadline()).?,
                 ) catch |err| {
-                    self.parent.finish(job, null, err);
+                    self.parent.finishAttempt(self, job, null, err);
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;
                 };
                 stream.stageFinalMessage(job.options.message, .{}) catch |err| {
                     stream.deinit();
-                    self.parent.finish(job, null, err);
+                    self.parent.finishAttempt(self, job, null, err);
                     continue;
                 };
                 job.releaseMessage();
@@ -374,7 +376,10 @@ pub fn Worker(comptime State: type) type {
             if (progress) return;
             var until = minimum(
                 self.parent.nextQueuedDeadline(),
-                minimum(self.health_at, self.orca_at),
+                minimum(
+                    self.parent.nextOutlierDeadline(),
+                    minimum(self.health_at, self.orca_at),
+                ),
             );
             for (self.active.items) |item| until = minimum(until, item.job.deadline);
             for (self.streams.items) |item| {

@@ -70,6 +70,15 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             balancing.weighted_round_robin
         else
             null,
+        .outlier_config = balancing.outlier_detection,
+        .outlier_next_evaluation_ns = if (balancing.outlier_detection) |outlier|
+            if (outlier.countingEnabled()) std.Io.Clock.awake.now(io)
+                .addDuration(.fromNanoseconds(@max(
+                    outlier.interval.nanoseconds,
+                    1,
+                ))).nanoseconds else null
+        else
+            null,
     };
     transferred = true;
     errdefer {

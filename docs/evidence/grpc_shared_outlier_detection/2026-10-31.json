@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "grpc-core-compatible SharedChannel outlier_detection_experimental",
+  "decision": "accepted",
+  "scope": {
+    "owner": "SharedChannel endpoint workers",
+    "calls": [
+      "every physical unary attempt",
+      "shared client-streaming, server-streaming, and bidirectional terminal completion or failure"
+    ],
+    "child_policies": [
+      "pick_first",
+      "round_robin",
+      "weighted_round_robin"
+    ],
+    "ordinary_channel": "explicitly returns InvalidChannelOptions because returned ordinary streaming handles do not yet retain composite completion ownership"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ outlier_detection_experimental policy",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "files": [
+      "src/core/load_balancing/outlier_detection/outlier_detection.h",
+      "src/core/load_balancing/outlier_detection/outlier_detection.cc",
+      "test/core/load_balancing/outlier_detection_lb_config_parser_test.cc",
+      "test/core/load_balancing/outlier_detection_test.cc"
+    ],
+    "observed_contract": [
+      "two completion buckets rotate at every configured interval",
+      "success-rate ejection uses mean minus population stdev multiplied by stdevFactor divided by 1000",
+      "failure-percentage comparison is strict and both algorithms honor request volume and minimum hosts",
+      "the first ejection is permitted before maxEjectionPercent accounting blocks later ejections",
+      "ejection duration is min(base times multiplier, max(base, max)) and healthy intervals decay the multiplier",
+      "ejection changes wrapped connectivity without destroying the underlying subchannel"
+    ]
+  },
+  "implementation": {
+    "parser": "service config validates all standard fields, grpc-core defaults, max(base, 300s) default max ejection time, and first-supported childPolicy selection",
+    "counters": "each endpoint owns atomic active success/failure counters plus lock-owned rotated buckets, multiplier, and ejection timestamp",
+    "evaluation": "interval evaluation is allocation-free and includes success-rate, failure-percentage, enforcement sampling, max percentage, ejection, unejection, and multiplier decay",
+    "scheduling": "worker socket waits include the next outlier deadline so idle ejected endpoints restore without unrelated RPC traffic",
+    "picker": "ejected endpoints publish TRANSIENT_FAILURE with zero capacity while their transport, Health Watch, ORCA state, and reconnect owner remain live",
+    "wrr": "an ejection transition invalidates the weighted-round-robin scheduler snapshot before the next pick"
+  },
+  "native_cases": [
+    "valid and invalid parser fields plus unknown child fallback",
+    "success-rate bucket rotation, standard deviation threshold, max percentage, and timed unejection",
+    "failure-percentage ejection and retired endpoint exclusion",
+    "two real h2c endpoints transition READY to TRANSIENT_FAILURE to READY",
+    "two calls during ejection use only the healthy endpoint and the first restored call returns to the prior endpoint",
+    "shared streaming UNAVAILABLE terminal triggers endpoint ejection",
+    "ordinary Channel rejects the Shared-owned composite policy"
+  ],
+  "results": {
+    "focused_debug": "145/145 passed",
+    "grpc_debug": "445/445 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
+    "external_boundary": "the pinned grpc-cpp matrix is a transport and picker regression gate; the deterministic outlier policy proof uses native real-endpoint tests"
+  },
+  "source_sha256": {
+    "src/grpc/service_config.zig": "84ec4586dad70346d4159e0264149fc5f4c21683730db6a9341c0366f11d9d79",
+    "src/grpc/channel/outlier_detection.zig": "e6ae1641615401566388a2e24f47010ad4dd91558b7e5523fb492fe461f4f9e0",
+    "src/grpc/channel.zig": "6e5eaab581cea7f098caf3e89b5d862c71860975f6cfb3311c2c9c635381df3a",
+    "src/grpc/channel/shared/init.zig": "c67e5227ff1c95b51f18afa4427881d865eea5da6384a11dd902fc3642f9821c",
+    "src/grpc/channel/shared/state.zig": "5758fd00372f9c82e1a48082a7bd2c8e93ab9cd8b090e838de2e243c5fd486a3",
+    "src/grpc/channel/shared/worker.zig": "68736c4e75db75f8bcf5ad9596759c50867c573312c679bd0134c41fff56f396",
+    "src/grpc/channel/shared/membership.zig": "c4d2251d54df46763b2ad9791dc7c63a249f771bd9f7eb2b122f4df2d8aa790c",
+    "src/grpc/channel/shared/stream/owner.zig": "1cddf5a13a77216bf55db93dd1e0ae5394f1f7ae311a29e20bb35bec087ddf70",
+    "src/grpc/channel/shared/outlier_detection_tests.zig": "32ea67d6dff8977526ae5b3004add6e7a35588e0a31895824e78485b85895a31",
+    "src/grpc/channel/shared.zig": "9017d0b428394f35d256058249b73afc83c2188346008ee8ff04877306fa4c7b",
+    "src/grpc/mod.zig": "811d3ab6dfb7c0af46ece862885fdbbe41c01e64a531f77a444fd8d1d44a2c21",
+    "test/package_test.zig": "a7590799ba6cbf0a04e95ee1237b16b1ee5506e4b180adf9d919fee5b6c5e791"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='outlier detection' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/Temp/netz-grpc-bazel-bin/bazel-8.7.0-linux-arm64 TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "ordinary Channel needs a retained completion observer for returned streaming handles before this composite policy can be enabled there; other xDS composite policies remain separate work"
+}

@@ -8,6 +8,7 @@ const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
+const outlier_detection = @import("../outlier_detection.zig");
 const orca = @import("../../orca.zig");
 const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
@@ -47,6 +48,8 @@ pub const State = struct {
     wrr_config: ?service_config.WeightedRoundRobinConfig = null,
     wrr_sequence: u32 = 0,
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
+    outlier_config: ?service_config.OutlierDetectionConfig = null,
+    outlier_next_evaluation_ns: ?i96 = null,
 
     pub const Worker = @import("worker.zig").Worker(State);
     pub const Source = @import("source.zig").Source(Worker);
@@ -280,6 +283,31 @@ pub const State = struct {
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }
+    pub fn finishAttempt(
+        self: *State,
+        worker: *Worker,
+        job: *Job,
+        result: ?call.UnaryResponse,
+        err: ?anyerror,
+    ) void {
+        self.lock();
+        defer self.unlock();
+        self.observeOutlierLocked(worker, if (result) |response|
+            response.status == .ok
+        else
+            err == null);
+        self.finishLocked(job, result, err);
+        self.wakeAllLocked();
+    }
+    pub fn observeOutlierLocked(
+        _: *State,
+        worker: anytype,
+        success: bool,
+    ) void {
+        if (comptime @hasField(@TypeOf(worker.*), "outlier")) {
+            worker.outlier.record(success);
+        }
+    }
     fn removeQueuedLocked(self: *State, job: *Job) void {
         var previous: ?*Job = null;
         var cursor = self.head;
@@ -295,6 +323,7 @@ pub const State = struct {
         unreachable;
     }
     pub fn aggregateLocked(self: *State) connectivity.State {
+        self.evaluateOutliersLocked();
         if (self.closed) return .shutdown;
         if (!self.demand) return .idle;
         var connecting = false;
@@ -311,10 +340,17 @@ pub const State = struct {
     pub fn publish(self: *State, worker: *Worker, state: connectivity.State, capacity: usize) void {
         self.lock();
         defer self.unlock();
-        const changed = worker.published != state or worker.capacity != capacity;
-        worker.published = state;
-        worker.capacity = capacity;
-        worker.tracker.setState(if (self.closed or worker.retired) .shutdown else state);
+        self.evaluateOutliersLocked();
+        const effective_state: connectivity.State = if (worker.outlier.isEjected())
+            .transient_failure
+        else
+            state;
+        const effective_capacity = if (worker.outlier.isEjected()) 0 else capacity;
+        const changed = worker.published != effective_state or
+            worker.capacity != effective_capacity;
+        worker.published = effective_state;
+        worker.capacity = effective_capacity;
+        worker.tracker.setState(if (self.closed or worker.retired) .shutdown else effective_state);
         Membership.promoteLocked(self, worker.source_index);
         self.recomputeLocked();
         if (changed) self.wakeAllLocked();
@@ -359,6 +395,7 @@ pub const State = struct {
     pub fn needsConnection(self: *State, worker: *Worker) bool {
         self.lock();
         defer self.unlock();
+        self.evaluateOutliersLocked();
         worker.wake.reset();
         return self.demand and !worker.retired;
     }
@@ -410,6 +447,12 @@ pub const State = struct {
         }
         return result;
     }
+    pub fn nextOutlierDeadline(self: *State) ?std.Io.Clock.Timestamp {
+        self.lock();
+        defer self.unlock();
+        const raw = self.outlier_next_evaluation_ns orelse return null;
+        return .{ .raw = .{ .nanoseconds = raw }, .clock = .awake };
+    }
     pub fn expireQueued(self: *State) void {
         self.lock();
         defer self.unlock();
@@ -424,6 +467,7 @@ pub const State = struct {
         }
     }
     fn pickLocked(self: *State, claimant: *Worker) ?*Worker {
+        self.evaluateOutliersLocked();
         if (self.policy == .pick_first) {
             if (self.selected) |worker| if (worker.eligible and worker.published == .ready) {
                 return if (worker.capacity != 0) worker else null;
@@ -479,6 +523,57 @@ pub const State = struct {
     }
     fn wrrAvailable(worker: *Worker) bool {
         return wrrReady(worker) and worker.capacity != 0;
+    }
+    fn outlierEndpoint(worker: *Worker) *outlier_detection.Endpoint {
+        return &worker.outlier;
+    }
+    fn outlierEligible(worker: *Worker) bool {
+        return !worker.retired;
+    }
+    fn evaluateOutliersLocked(self: *State) void {
+        const config = self.outlier_config orelse return;
+        const next = self.outlier_next_evaluation_ns orelse return;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now < next) return;
+        const changed = outlier_detection.evaluate(
+            self.io,
+            config,
+            self.workers.items,
+            now,
+            outlierEndpoint,
+            outlierEligible,
+        );
+        self.outlier_next_evaluation_ns = now +| @max(
+            config.interval.nanoseconds,
+            1,
+        );
+        if (!changed) return;
+        for (self.workers.items) |worker| {
+            if (worker.retired) continue;
+            const state: connectivity.State = if (worker.outlier.isEjected())
+                .transient_failure
+            else
+                worker.local_state;
+            const capacity = if (state == .ready)
+                self.workerCapacityLocked(worker)
+            else
+                0;
+            worker.published = state;
+            worker.capacity = capacity;
+            worker.tracker.setState(state);
+            Membership.promoteLocked(self, worker.source_index);
+        }
+        self.wrr_scheduler.next_update_ns = 0;
+        self.wakeAllLocked();
+    }
+    fn workerCapacityLocked(self: *State, worker: *Worker) usize {
+        const connection = worker.connection orelse return 0;
+        const used = worker.active.items.len + worker.streams.items.len;
+        const room = self.options.max_active_calls_per_endpoint -| used;
+        return @min(
+            room,
+            connection.availableLocalStreamCapacity() orelse room,
+        );
     }
     pub fn claim(self: *State, worker: *Worker) ?*Job {
         self.lock();

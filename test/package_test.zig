@@ -559,6 +559,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc.SharedChannel, "keepAliveInterval"));
     try std.testing.expect(@hasDecl(netz.grpc, "SharedChannelKeepAliveOptions"));
     try std.testing.expect(@hasDecl(netz.grpc, "SharedChannelKeepAliveStats"));
+    try std.testing.expect(@hasDecl(netz.grpc, "OutlierDetectionConfig"));
+    try std.testing.expect(@hasDecl(netz.grpc, "SuccessRateEjection"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "FailurePercentageEjection",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc, "CleartextServerOptions"));
     try std.testing.expect(@hasDecl(netz.grpc, "ServerKeepAliveEnforcementPolicy"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Server, "listenWithOptions"));

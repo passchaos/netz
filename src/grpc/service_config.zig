@@ -60,11 +60,40 @@ pub const WeightedRoundRobinConfig = struct {
     metric_names: []const []const u8 = &.{},
 };
 
+pub const SuccessRateEjection = struct {
+    stdev_factor: u32 = 1900,
+    enforcement_percentage: u32 = 100,
+    minimum_hosts: u32 = 5,
+    request_volume: u32 = 100,
+};
+
+pub const FailurePercentageEjection = struct {
+    threshold: u32 = 85,
+    enforcement_percentage: u32 = 100,
+    minimum_hosts: u32 = 5,
+    request_volume: u32 = 50,
+};
+
+pub const OutlierDetectionConfig = struct {
+    interval: std.Io.Duration = .fromSeconds(10),
+    base_ejection_time: std.Io.Duration = .fromSeconds(30),
+    max_ejection_time: std.Io.Duration = .fromSeconds(300),
+    max_ejection_percent: u32 = 10,
+    success_rate_ejection: ?SuccessRateEjection = null,
+    failure_percentage_ejection: ?FailurePercentageEjection = null,
+
+    pub fn countingEnabled(self: OutlierDetectionConfig) bool {
+        return self.success_rate_ejection != null or
+            self.failure_percentage_ejection != null;
+    }
+};
+
 pub const LoadBalancingConfig = struct {
     policy: LoadBalancingPolicy = .pick_first,
     shuffle_address_list: bool = false,
     configured: bool = false,
     weighted_round_robin: WeightedRoundRobinConfig = .{},
+    outlier_detection: ?OutlierDetectionConfig = null,
 };
 
 pub const ParseOptions = struct {
@@ -434,6 +463,21 @@ fn parseLoadBalancing(
             if (object.count() != 1) return error.InvalidServiceConfig;
             var iterator = object.iterator();
             const item = iterator.next().?;
+            if (std.mem.eql(
+                u8,
+                item.key_ptr.*,
+                "outlier_detection_experimental",
+            )) {
+                const parsed = try parseOutlierDetection(item.value_ptr.*);
+                var child = try parseLoadBalancing(allocator, .{
+                    .loadBalancingConfig = parsed.child_policy,
+                });
+                if (child.outlier_detection != null) {
+                    return error.InvalidServiceConfig;
+                }
+                child.outlier_detection = parsed.config;
+                return child;
+            }
             if (std.mem.eql(u8, item.key_ptr.*, "round_robin")) {
                 const options = switch (item.value_ptr.*) {
                     .object => |value| value,
@@ -546,6 +590,128 @@ fn parseLoadBalancing(
         return error.InvalidServiceConfig;
     }
     return .{};
+}
+
+const ParsedOutlierDetection = struct {
+    config: OutlierDetectionConfig,
+    child_policy: []const std.json.Value,
+};
+
+fn parseOutlierDetection(
+    value: std.json.Value,
+) Error!ParsedOutlierDetection {
+    const options = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidServiceConfig,
+    };
+    var config: OutlierDetectionConfig = .{};
+    var child_policy: ?[]const std.json.Value = null;
+    var max_ejection_time_present = false;
+    var fields = options.iterator();
+    while (fields.next()) |field| {
+        const key = field.key_ptr.*;
+        const raw = field.value_ptr.*;
+        if (std.mem.eql(u8, key, "interval")) {
+            config.interval = try parseDurationValue(raw);
+        } else if (std.mem.eql(u8, key, "baseEjectionTime")) {
+            config.base_ejection_time = try parseDurationValue(raw);
+        } else if (std.mem.eql(u8, key, "maxEjectionTime")) {
+            config.max_ejection_time = try parseDurationValue(raw);
+            max_ejection_time_present = true;
+        } else if (std.mem.eql(u8, key, "maxEjectionPercent")) {
+            config.max_ejection_percent = try parseJsonU32(raw);
+        } else if (std.mem.eql(u8, key, "successRateEjection")) {
+            config.success_rate_ejection = try parseSuccessRateEjection(raw);
+        } else if (std.mem.eql(u8, key, "failurePercentageEjection")) {
+            config.failure_percentage_ejection =
+                try parseFailurePercentageEjection(raw);
+        } else if (std.mem.eql(u8, key, "childPolicy")) {
+            child_policy = switch (raw) {
+                .array => |array| array.items,
+                else => return error.InvalidServiceConfig,
+            };
+        } else return error.InvalidServiceConfig;
+    }
+    if (!max_ejection_time_present) {
+        config.max_ejection_time = .fromNanoseconds(@max(
+            config.base_ejection_time.nanoseconds,
+            300 * std.time.ns_per_s,
+        ));
+    }
+    if (config.max_ejection_percent > 100) {
+        return error.InvalidServiceConfig;
+    }
+    return .{
+        .config = config,
+        .child_policy = child_policy orelse
+            return error.InvalidServiceConfig,
+    };
+}
+
+fn parseSuccessRateEjection(
+    value: std.json.Value,
+) Error!SuccessRateEjection {
+    const object = switch (value) {
+        .object => |entry| entry,
+        else => return error.InvalidServiceConfig,
+    };
+    var result: SuccessRateEjection = .{};
+    var fields = object.iterator();
+    while (fields.next()) |field| {
+        const key = field.key_ptr.*;
+        if (std.mem.eql(u8, key, "stdevFactor")) {
+            result.stdev_factor = try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "enforcementPercentage")) {
+            result.enforcement_percentage =
+                try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "minimumHosts")) {
+            result.minimum_hosts = try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "requestVolume")) {
+            result.request_volume = try parseJsonU32(field.value_ptr.*);
+        } else return error.InvalidServiceConfig;
+    }
+    if (result.enforcement_percentage > 100) {
+        return error.InvalidServiceConfig;
+    }
+    return result;
+}
+
+fn parseFailurePercentageEjection(
+    value: std.json.Value,
+) Error!FailurePercentageEjection {
+    const object = switch (value) {
+        .object => |entry| entry,
+        else => return error.InvalidServiceConfig,
+    };
+    var result: FailurePercentageEjection = .{};
+    var fields = object.iterator();
+    while (fields.next()) |field| {
+        const key = field.key_ptr.*;
+        if (std.mem.eql(u8, key, "threshold")) {
+            result.threshold = try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "enforcementPercentage")) {
+            result.enforcement_percentage =
+                try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "minimumHosts")) {
+            result.minimum_hosts = try parseJsonU32(field.value_ptr.*);
+        } else if (std.mem.eql(u8, key, "requestVolume")) {
+            result.request_volume = try parseJsonU32(field.value_ptr.*);
+        } else return error.InvalidServiceConfig;
+    }
+    if (result.threshold > 100 or result.enforcement_percentage > 100) {
+        return error.InvalidServiceConfig;
+    }
+    return result;
+}
+
+fn parseJsonU32(value: std.json.Value) Error!u32 {
+    return switch (value) {
+        .integer => |integer| std.math.cast(u32, integer) orelse
+            error.InvalidServiceConfig,
+        .number_string => |text| std.fmt.parseInt(u32, text, 10) catch
+            error.InvalidServiceConfig,
+        else => error.InvalidServiceConfig,
+    };
 }
 
 fn parseDurationValue(value: std.json.Value) Error!std.Io.Duration {
@@ -914,6 +1080,75 @@ test "gRPC service config parses weighted round robin defaults and bounds" {
             ServiceConfig.parse(std.testing.allocator, json),
         );
     }
+}
+
+test "gRPC service config parses outlier detection and child policy" {
+    var parsed = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "interval":"1.2s","baseEjectionTime":"2.3s",
+        \\ "maxEjectionTime":"3.4s","maxEjectionPercent":3,
+        \\ "successRateEjection":{"stdevFactor":1,
+        \\  "enforcementPercentage":2,"minimumHosts":3,"requestVolume":4},
+        \\ "failurePercentageEjection":{"threshold":5,
+        \\  "enforcementPercentage":6,"minimumHosts":7,"requestVolume":8},
+        \\ "childPolicy":[{"unknown":{}},{"round_robin":{}}]}}]}
+    );
+    defer parsed.deinit();
+    const balancing = parsed.loadBalancingConfig();
+    try std.testing.expectEqual(
+        LoadBalancingPolicy.round_robin,
+        balancing.policy,
+    );
+    const outlier = balancing.outlier_detection.?;
+    try std.testing.expectEqual(
+        @as(i96, 1200 * std.time.ns_per_ms),
+        outlier.interval.nanoseconds,
+    );
+    try std.testing.expectEqual(@as(u32, 3), outlier.max_ejection_percent);
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        outlier.success_rate_ejection.?.stdev_factor,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 5),
+        outlier.failure_percentage_ejection.?.threshold,
+    );
+
+    var defaults = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "baseEjectionTime":"400s",
+        \\ "childPolicy":[{"pick_first":{}}]}}]}
+    );
+    defer defaults.deinit();
+    const default_outlier = defaults.loadBalancingConfig()
+        .outlier_detection.?;
+    try std.testing.expectEqual(
+        @as(i96, 400 * std.time.ns_per_s),
+        default_outlier.max_ejection_time.nanoseconds,
+    );
+    try std.testing.expect(!default_outlier.countingEnabled());
+
+    for ([_][]const u8{
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{}}]}
+        ,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "maxEjectionPercent":101,"childPolicy":[{"round_robin":{}}]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "failurePercentageEjection":{"threshold":101},
+        \\ "childPolicy":[{"round_robin":{}}]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "successRateEjection":{"enforcementPercentage":101},
+        \\ "childPolicy":[{"round_robin":{}}]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\ "childPolicy":[{"unknown":{}}]}}]}
+        ,
+    }) |json| try std.testing.expectError(
+        error.InvalidServiceConfig,
+        ServiceConfig.parse(std.testing.allocator, json),
+    );
 }
 
 test "gRPC service config selects the first supported balancing policy" {

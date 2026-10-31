@@ -43,6 +43,7 @@ pub fn Owner(comptime State: type) type {
             worker.streams.items[index].stream.deinit();
             _ = worker.streams.swapRemove(index);
             state.lock();
+            state.observeOutlierLocked(worker, false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
             state.unlock();
             call.release();
@@ -53,6 +54,7 @@ pub fn Owner(comptime State: type) type {
             worker.streams.items[index].stream.deinit();
             _ = worker.streams.swapRemove(index);
             state.lock();
+            state.observeOutlierLocked(worker, response.status == .ok);
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();

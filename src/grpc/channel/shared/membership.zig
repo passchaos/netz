@@ -15,7 +15,7 @@ pub fn Membership(comptime State: type) type {
             options.address_resolver = null;
             const target = state.sources[source_index].target(address);
             var owner = if (state.config) |*config|
-                try channel.Channel.initWithServiceConfig(allocator, state.io, target, options, config)
+                try channel.Channel.initWithServiceConfigChild(allocator, state.io, target, options, config)
             else
                 try channel.Channel.init(allocator, state.io, target, options);
             errdefer owner.deinit();

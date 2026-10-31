@@ -436,7 +436,52 @@ pub const Channel = struct {
         options: Options,
         config: *const service_config.ServiceConfig,
     ) Error!Channel {
+        return initWithServiceConfigMode(
+            allocator,
+            io,
+            target,
+            options,
+            config,
+            false,
+        );
+    }
+
+    /// SharedChannel owns composite endpoint policy outside each child
+    /// transport Channel. Keep method/retry configuration on the child while
+    /// allowing the outer owner to apply outlier detection exactly once.
+    pub fn initWithServiceConfigChild(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        target: Target,
+        options: Options,
+        config: *const service_config.ServiceConfig,
+    ) Error!Channel {
+        return initWithServiceConfigMode(
+            allocator,
+            io,
+            target,
+            options,
+            config,
+            true,
+        );
+    }
+
+    fn initWithServiceConfigMode(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        target: Target,
+        options: Options,
+        config: *const service_config.ServiceConfig,
+        composite_owned: bool,
+    ) Error!Channel {
         const balancing = config.loadBalancingConfig();
+        // Outlier detection requires completion tracking that remains owned
+        // beyond a returned streaming handle. SharedChannel supplies that
+        // owner; ordinary Channel rejects instead of silently ignoring the
+        // configured composite policy.
+        if (balancing.outlier_detection != null and !composite_owned) {
+            return error.InvalidChannelOptions;
+        }
         var resolved = options;
         if (resolved.selection_policy == null and balancing.configured) {
             resolved.selection_policy = switch (balancing.policy) {
