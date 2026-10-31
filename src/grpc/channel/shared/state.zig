@@ -8,6 +8,7 @@ const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
+const least_request = @import("../least_request.zig");
 const outlier_detection = @import("../outlier_detection.zig");
 const orca = @import("../../orca.zig");
 const orca_oob = @import("../../orca/oob.zig");
@@ -48,6 +49,8 @@ pub const State = struct {
     wrr_config: ?service_config.WeightedRoundRobinConfig = null,
     wrr_sequence: u32 = 0,
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
+    least_request_config: least_request.Config = .{},
+    least_request_selected: ?*Worker = null,
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
 
@@ -159,6 +162,9 @@ pub const State = struct {
         var count: usize = 0;
         for (self.sources) |*source| count += source.latest().len;
         return count;
+    }
+    pub fn selectionPolicy(self: *const State) channel.SelectionPolicy {
+        return self.policy;
     }
     pub fn endpointCount(self: *State) usize {
         self.lock();
@@ -292,11 +298,18 @@ pub const State = struct {
     ) void {
         self.lock();
         defer self.unlock();
+        self.finishOutstandingLocked(worker);
         self.observeOutlierLocked(worker, if (result) |response|
             response.status == .ok
         else
             err == null);
         self.finishLocked(job, result, err);
+        self.wakeAllLocked();
+    }
+    pub fn finishOutstandingLocked(self: *State, worker: anytype) void {
+        if (self.policy != .least_request) return;
+        std.debug.assert(worker.outstanding_requests != 0);
+        worker.outstanding_requests -= 1;
         self.wakeAllLocked();
     }
     pub fn observeOutlierLocked(
@@ -429,6 +442,10 @@ pub const State = struct {
         };
         worker.tracker.setState(.shutdown);
         self.wrr_scheduler.remove(worker);
+        if (self.selected == worker) self.selected = null;
+        if (self.least_request_selected == worker) {
+            self.least_request_selected = null;
+        }
         self.recomputeLocked();
     }
     pub fn canceled(self: *State, job: *Job) bool {
@@ -500,6 +517,28 @@ pub const State = struct {
                 }
             }
         }
+        if (self.policy == .least_request) {
+            if (self.least_request_selected) |selected| {
+                if (leastRequestWorkerAvailable(self, selected)) {
+                    return selected;
+                }
+                self.least_request_selected = null;
+            }
+            var seed: u64 = undefined;
+            self.io.random(std.mem.asBytes(&seed));
+            const count = self.currentWorkerCount();
+            const ordinal = least_request.pickIndex(
+                self,
+                count,
+                self.least_request_config,
+                seed,
+                leastRequestOrdinalAvailable,
+                leastRequestOrdinalOutstanding,
+            ) orelse return null;
+            const selected = self.currentWorkerAt(ordinal);
+            self.least_request_selected = selected;
+            return selected;
+        }
         var count: usize = 0;
         for (self.sources) |source| count += source.current.len;
         for (0..count) |offset| {
@@ -524,6 +563,29 @@ pub const State = struct {
     }
     fn wrrAvailable(worker: *Worker) bool {
         return wrrReady(worker) and worker.capacity != 0;
+    }
+    fn currentWorkerCount(self: *const State) usize {
+        var count: usize = 0;
+        for (self.sources) |source| count += source.current.len;
+        return count;
+    }
+    fn currentWorkerAt(self: *const State, target: usize) *Worker {
+        var ordinal = target;
+        for (self.sources) |source| {
+            if (ordinal < source.current.len) return source.current[ordinal];
+            ordinal -= source.current.len;
+        }
+        unreachable;
+    }
+    fn leastRequestWorkerAvailable(_: *const State, worker: *Worker) bool {
+        return worker.eligible and worker.published == .ready and
+            worker.capacity != 0;
+    }
+    fn leastRequestOrdinalAvailable(self: *State, ordinal: usize) bool {
+        return leastRequestWorkerAvailable(self, self.currentWorkerAt(ordinal));
+    }
+    fn leastRequestOrdinalOutstanding(self: *State, ordinal: usize) usize {
+        return self.currentWorkerAt(ordinal).outstanding_requests;
     }
     fn outlierEndpoint(
         workers: []const *Worker,
@@ -590,6 +652,10 @@ pub const State = struct {
         self.removeQueuedLocked(job);
         job.setOwnerWake(worker.wake);
         worker.capacity -= 1;
+        if (self.policy == .least_request) {
+            worker.outstanding_requests += 1;
+            self.least_request_selected = null;
+        }
         self.selected = picked;
         var count: usize = 0;
         var next: usize = 0;

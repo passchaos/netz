@@ -47,8 +47,11 @@ const JsonServiceConfig = struct {
 pub const LoadBalancingPolicy = enum {
     pick_first,
     round_robin,
+    least_request,
     weighted_round_robin,
 };
+
+pub const LeastRequestConfig = @import("channel/least_request.zig").Config;
 
 pub const WeightedRoundRobinConfig = struct {
     enable_oob_load_report: bool = false,
@@ -92,6 +95,7 @@ pub const LoadBalancingConfig = struct {
     policy: LoadBalancingPolicy = .pick_first,
     shuffle_address_list: bool = false,
     configured: bool = false,
+    least_request: LeastRequestConfig = .{},
     weighted_round_robin: WeightedRoundRobinConfig = .{},
     outlier_detection: ?OutlierDetectionConfig = null,
 };
@@ -485,6 +489,41 @@ fn parseLoadBalancing(
                 };
                 if (options.count() != 0) return error.InvalidServiceConfig;
                 return .{ .policy = .round_robin, .configured = true };
+            }
+            if (std.mem.eql(
+                u8,
+                item.key_ptr.*,
+                "least_request_experimental",
+            )) {
+                const options = switch (item.value_ptr.*) {
+                    .object => |value| value,
+                    else => return error.InvalidServiceConfig,
+                };
+                var least_request: LeastRequestConfig = .{};
+                var fields = options.iterator();
+                while (fields.next()) |field| {
+                    if (!std.mem.eql(
+                        u8,
+                        field.key_ptr.*,
+                        "choiceCount",
+                    )) return error.InvalidServiceConfig;
+                    const raw = switch (field.value_ptr.*) {
+                        .integer => |value| value,
+                        else => return error.InvalidServiceConfig,
+                    };
+                    if (raw < 2 or raw > std.math.maxInt(u32)) {
+                        return error.InvalidServiceConfig;
+                    }
+                    least_request.choice_count = @intCast(@min(
+                        raw,
+                        LeastRequestConfig.max_choice_count,
+                    ));
+                }
+                return .{
+                    .policy = .least_request,
+                    .configured = true,
+                    .least_request = least_request,
+                };
             }
             if (std.mem.eql(u8, item.key_ptr.*, "pick_first")) {
                 const options = switch (item.value_ptr.*) {

@@ -15,6 +15,7 @@ const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
 const weighted_round_robin = @import("channel/weighted_round_robin.zig");
+const least_request = @import("channel/least_request.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
@@ -47,6 +48,7 @@ pub const CustomConnector = struct {
 pub const SelectionPolicy = enum {
     pick_first,
     round_robin,
+    least_request,
     weighted_round_robin,
 };
 
@@ -242,6 +244,9 @@ const Slot = struct {
     disabled: bool = false,
     wrr_weight: weighted_round_robin.Weight = .{},
     outlier: outlier_detection.Endpoint = .{},
+    outstanding_requests: usize = 0,
+    least_request_enabled: bool = false,
+    outlier_enabled: bool = false,
 
     fn closeConnection(self: *Slot) void {
         if (self.connection) |*connection| connection.close();
@@ -381,6 +386,7 @@ pub const Channel = struct {
     wrr_metric_names: ?[][]u8 = null,
     wrr_sequence: u32 = 0,
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
+    least_request_config: least_request.Config = .{},
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
     canceled: std.Io.Event = .unset,
@@ -403,9 +409,20 @@ pub const Channel = struct {
         if (options.address_resolver != null and host_resolution == null) {
             return error.InvalidChannelOptions;
         }
+        const selection_policy = options.selection_policy orelse
+            target.policy();
+        const slot_count = if (host_resolution != null)
+            0
+        else switch (target) {
+            .resolved => |resolved| if (selection_policy == .least_request)
+                least_request.exactUniqueCount(resolved.endpoints)
+            else
+                resolved.endpoints.len,
+            else => 1,
+        };
         const slots = try allocator.alloc(
             Slot,
-            if (host_resolution == null) target.count() else 0,
+            slot_count,
         );
         errdefer allocator.free(slots);
         const connectivity_tracker = try connectivity.Tracker.create(
@@ -414,22 +431,36 @@ pub const Channel = struct {
         );
         errdefer connectivity_tracker.release();
         if (host_resolution == null) {
-            for (slots, 0..) |*slot, index| {
-                slot.* = .{ .endpoint = target.endpoint(index) };
+            var slot_index: usize = 0;
+            for (0..target.count()) |index| {
+                if (target == .resolved and selection_policy == .least_request and
+                    least_request.isExactDuplicate(
+                        target.resolved.endpoints,
+                        index,
+                    ))
+                {
+                    continue;
+                }
+                slots[slot_index] = .{ .endpoint = target.endpoint(index) };
+                slot_index += 1;
             }
+            std.debug.assert(slot_index == slots.len);
         }
         var result = Channel{
             .allocator = allocator,
             .io = io,
             .slots = slots,
-            .selection_policy = options.selection_policy orelse
-                target.policy(),
+            .selection_policy = selection_policy,
             .backoff_policy = options.backoff,
             .shuffle_address_list = options.shuffle_address_list orelse false,
             .connection_attempt_delay = options.connection_attempt_delay,
             .host_resolution = host_resolution,
             .connectivity_tracker = connectivity_tracker,
         };
+        for (result.slots) |*slot| {
+            slot.least_request_enabled =
+                result.selection_policy == .least_request;
+        }
         if (result.shuffle_address_list) result.shuffleSlots();
         return result;
     }
@@ -485,6 +516,7 @@ pub const Channel = struct {
             resolved.selection_policy = switch (balancing.policy) {
                 .pick_first => .pick_first,
                 .round_robin => .round_robin,
+                .least_request => .least_request,
                 .weighted_round_robin => .weighted_round_robin,
             };
         }
@@ -500,8 +532,14 @@ pub const Channel = struct {
                 balancing.weighted_round_robin,
             );
         }
+        if (result.selection_policy == .least_request and
+            balancing.policy == .least_request)
+        {
+            result.least_request_config = balancing.least_request;
+        }
         if (!composite_owned) if (balancing.outlier_detection) |outlier| {
             result.outlier_config = outlier;
+            for (result.slots) |*slot| slot.outlier_enabled = true;
             if (outlier.countingEnabled()) {
                 result.outlier_next_evaluation_ns =
                     std.Io.Clock.awake.now(io).addDuration(
@@ -806,6 +844,8 @@ pub const Channel = struct {
             options.wait_for_ready orelse false,
             attempt_deadline,
         );
+        self.beginRequest(ready_connection.index);
+        defer self.finishRequest(ready_connection.index);
         const timeout_header: ?wire.Timeout = if (rpc_deadline) |absolute| blk: {
             const remaining = absolute.durationFromNow(self.io).raw;
             if (remaining.nanoseconds <= 0) return error.Timeout;
@@ -860,6 +900,9 @@ pub const Channel = struct {
             resolved.wait_for_ready,
             deadline,
         );
+        self.beginRequest(ready_connection.index);
+        var owns_request = self.selection_policy == .least_request;
+        defer if (owns_request) self.finishRequest(ready_connection.index);
         var writer = streaming.startClientUnderDeadline(
             ready_connection.connection,
             self.allocator,
@@ -874,8 +917,9 @@ pub const Channel = struct {
             self.recordOutlier(ready_connection.index, false);
             writer.deinit();
         }
-        if (try self.outlierCompletionObserver(ready_connection.index)) |observer| {
+        if (try self.completionObserver(ready_connection.index)) |observer| {
             writer.setCompletionObserver(observer);
+            owns_request = false;
         }
         return writer;
     }
@@ -907,6 +951,9 @@ pub const Channel = struct {
             resolved.wait_for_ready,
             deadline,
         );
+        self.beginRequest(ready_connection.index);
+        var owns_request = self.selection_policy == .least_request;
+        defer if (owns_request) self.finishRequest(ready_connection.index);
         var stream = duplex.startDuplexUnderDeadline(
             ready_connection.connection,
             self.allocator,
@@ -921,8 +968,9 @@ pub const Channel = struct {
             self.recordOutlier(ready_connection.index, false);
             stream.deinit();
         }
-        if (try self.outlierCompletionObserver(ready_connection.index)) |observer| {
+        if (try self.completionObserver(ready_connection.index)) |observer| {
             stream.setCompletionObserver(observer);
+            owns_request = false;
         }
         return stream;
     }
@@ -945,6 +993,11 @@ pub const Channel = struct {
                 return ready_connection;
             }
         }
+        if (self.selection_policy == .least_request) {
+            if (self.pickReadyLeastRequest()) |ready_connection| {
+                return ready_connection;
+            }
+        }
         if (self.selection_policy != .pick_first) {
             if (self.pickReadyRoundRobin()) |ready_connection| {
                 return ready_connection;
@@ -959,6 +1012,11 @@ pub const Channel = struct {
                 self.wrr_config != null)
             {
                 if (self.pickReadyWeighted()) |ready_connection| {
+                    return ready_connection;
+                }
+            }
+            if (self.selection_policy == .least_request) {
+                if (self.pickReadyLeastRequest()) |ready_connection| {
                     return ready_connection;
                 }
             }
@@ -1105,8 +1163,34 @@ pub const Channel = struct {
     fn pickStart(self: *const Channel) usize {
         return switch (self.selection_policy) {
             .pick_first => self.selected_index orelse 0,
-            .round_robin, .weighted_round_robin => self.next_pick_index,
+            .round_robin, .least_request, .weighted_round_robin => self.next_pick_index,
         };
+    }
+
+    fn pickReadyLeastRequest(self: *Channel) ?ReadyConnection {
+        var seed: u64 = undefined;
+        self.io.random(std.mem.asBytes(&seed));
+        const index = least_request.pickIndex(
+            self,
+            self.slots.len,
+            self.least_request_config,
+            seed,
+            leastRequestSlotReady,
+            leastRequestSlotOutstanding,
+        ) orelse return null;
+        return self.select(index, &self.slots[index].connection.?);
+    }
+
+    fn beginRequest(self: *Channel, index: usize) void {
+        const slot = &self.slots[index];
+        if (slot.least_request_enabled) slot.outstanding_requests += 1;
+    }
+
+    fn finishRequest(self: *Channel, index: usize) void {
+        const slot = &self.slots[index];
+        if (!slot.least_request_enabled) return;
+        std.debug.assert(slot.outstanding_requests != 0);
+        slot.outstanding_requests -= 1;
     }
 
     fn pickReadyRoundRobin(self: *Channel) ?ReadyConnection {
@@ -1370,6 +1454,8 @@ pub const Channel = struct {
             } else {
                 replacement[new_index] = .{
                     .endpoint = resolution.endpoint(address),
+                    .least_request_enabled = self.selection_policy == .least_request,
+                    .outlier_enabled = self.outlier_config != null,
                 };
             }
         }
@@ -1592,15 +1678,16 @@ pub const Channel = struct {
             .transient_failure);
     }
 
-    fn outlierCompletionObserver(
+    fn completionObserver(
         self: *Channel,
         index: usize,
     ) std.mem.Allocator.Error!?*completion.Observer {
-        if (self.outlier_config == null) return null;
+        const slot = &self.slots[index];
+        if (!slot.least_request_enabled and !slot.outlier_enabled) return null;
         return try completion.Observer.create(
             self.allocator,
-            &self.slots[index].outlier,
-            finishOutlierCompletion,
+            slot,
+            finishRequestCompletion,
         );
     }
 
@@ -1609,11 +1696,15 @@ pub const Channel = struct {
         self.slots[index].outlier.record(success);
     }
 
-    fn finishOutlierCompletion(context: *anyopaque, success: bool) void {
-        const endpoint: *outlier_detection.Endpoint = @ptrCast(
+    fn finishRequestCompletion(context: *anyopaque, success: bool) void {
+        const slot: *Slot = @ptrCast(
             @alignCast(context),
         );
-        endpoint.record(success);
+        if (slot.least_request_enabled) {
+            std.debug.assert(slot.outstanding_requests != 0);
+            slot.outstanding_requests -= 1;
+        }
+        if (slot.outlier_enabled) slot.outlier.record(success);
     }
 
     fn setConnectivityState(
@@ -1649,6 +1740,14 @@ fn wrrSlotReady(slot: *Slot) bool {
     if (slot.outlier.isEjected()) return false;
     const connection = if (slot.connection) |*value| value else return false;
     return connection.isReusable();
+}
+
+fn leastRequestSlotReady(self: *Channel, index: usize) bool {
+    return wrrSlotReady(&self.slots[index]);
+}
+
+fn leastRequestSlotOutstanding(self: *Channel, index: usize) usize {
+    return self.slots[index].outstanding_requests;
 }
 
 fn callDeadline(

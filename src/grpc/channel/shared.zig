@@ -145,6 +145,9 @@ pub const SharedChannel = struct {
     pub fn endpointCount(self: SharedChannel) usize {
         return self.state.endpointCount();
     }
+    pub fn selectionPolicy(self: SharedChannel) channel.SelectionPolicy {
+        return self.state.selectionPolicy();
+    }
     pub fn endpointCountWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
         return self.state.endpointCountWithDeadline(deadline);
     }

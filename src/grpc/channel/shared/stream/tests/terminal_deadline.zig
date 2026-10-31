@@ -76,6 +76,7 @@ fn run(comptime truncated: bool) !void {
     call.bytes = try allocator.alloc(u8, 65535);
     const Worker = struct {
         parent: *State,
+        outstanding_requests: usize = 1,
         streams: std.ArrayList(Owner.Active) = .empty,
     };
     var worker = Worker{ .parent = &state };

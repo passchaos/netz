@@ -659,6 +659,48 @@ and aggregate TRANSIENT_FAILURE. Combined ordinary/Shared parser, evaluator
 and runtime focused coverage passes 147/147. Evidence is recorded in
 `docs/evidence/grpc_channel_outlier_detection/2026-10-31.json`.
 
+## Least-request endpoint selection
+
+Service config now accepts gRFC A48's `least_request_experimental` policy for
+ordinary `Channel` and background `SharedChannel`. `choiceCount` defaults to
+two, rejects values below two or outside the protobuf `uint32` domain, and
+caps effective sampling at ten. Each pick samples READY endpoints with
+replacement exactly as specified by A48, then selects the sampled endpoint
+with the fewest policy-instance-local outstanding RPCs. Sampling uses fresh
+runtime entropy; duplicate samples remain intentional instead of silently
+turning the algorithm into a full scan.
+
+Ordinary Channel endpoint slots increment their counter only after selection.
+Unary attempts release it on every return path. Streaming and duplex handles
+share the existing one-shot completion observer with outlier detection, so an
+OK or error terminal, reset, cancellation, failed receive, or abandoning
+deinit releases the counter exactly once. Channels that do not select
+least-request do not touch this counter or allocate an additional observer.
+
+SharedChannel increments under its picker lock when the selected endpoint
+actually claims a queued job, including the interval before an HTTP/2 stream
+is materialized. Unary completion and every accepted streaming terminal path
+release it under the same lock. Competing endpoint workers share one cached
+choice until that exact worker claims it, so racing wakeups cannot discard
+random samples or bias selection toward the fastest claimant. Retirement,
+outlier ejection, capacity loss, and worker teardown invalidate cached choices
+without closing healthy siblings.
+
+DNS reconciliation already collapses duplicate addresses. Least-request now
+also collapses exact duplicate pre-resolved endpoint entries for both Channel
+owners, matching A48's rule that repetition must not create another
+connection or implicit weight. Entries with distinct authority, TLS policy,
+transport limits, or connector identity remain separate security/transport
+contexts.
+
+Parser and picker unit tests cover defaults, `[2, 10]` bounding, the `uint32`
+edge, unknown-policy fallback, outlier composition, duplicate sampling and
+duplicate endpoint collapse. A real two-backend SharedChannel test keeps RPCs
+outstanding on a delayed endpoint and requires more than twice as many of 200
+rolling concurrent calls to complete through the idle endpoint; five repeated
+runs guard its probabilistic boundary. Evidence is recorded in
+`docs/evidence/grpc_least_request/2026-10-31.json`.
+
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial
 response could first exhaust that deadline trying to return connection credit.
@@ -1086,7 +1128,8 @@ healthy siblings, and a non-retryable endpoint remains disabled until
 
 Top-level service config now accepts the standard ordered
 `loadBalancingConfig` list plus deprecated `loadBalancingPolicy`, chooses the
-first supported `pick_first`, `round_robin`, or `weighted_round_robin` entry,
+first supported `pick_first`, `round_robin`, `least_request_experimental`, or
+`weighted_round_robin` entry,
 and supports `pick_first.shuffleAddressList`. WRR owns all grpc-core fields,
 including the 100-ms minimum weight-update period and custom utilization names.
 Explicit Channel options override service config. Real two-server tests prove
@@ -1362,10 +1405,11 @@ Connection attempts begin on the first call or explicit `connect()`. Endpoint
 workers connect in parallel and expose independent health-derived connectivity
 through `watchEndpointConnectivity`. `pick_first` stays with a ready selected
 endpoint, while `round_robin` advances across ready endpoints with available
-concurrency credit. `weighted_round_robin` applies per-RPC or OOB endpoint
-weights through the shared static-stride scheduler; a choice is committed only
-when its selected worker claims the queued RPC, so competing worker wakeups
-cannot consume one another's sequence. Connection and health retries use the
+concurrency credit. `least_request` samples READY endpoints by their exact
+policy-local outstanding RPC counts. `weighted_round_robin` applies per-RPC or
+OOB endpoint weights through the shared static-stride scheduler; a choice is
+committed only when its selected worker claims the queued RPC, so competing
+worker wakeups cannot consume one another's sequence. Connection and health retries use the
 existing gRPC backoff defaults. Each hostname source has an independent background resolver,
 including hostname entries mixed with static endpoints in a resolved target.
 Every physical address preserves the original logical authority, TLS server

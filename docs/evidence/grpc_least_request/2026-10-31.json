@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRFC A48 least_request_experimental endpoint selection",
+  "decision": "accepted",
+  "scope": {
+    "owners": [
+      "single-owner grpc.runtime.Channel",
+      "background grpc.SharedChannel"
+    ],
+    "calls": [
+      "unary physical attempts",
+      "client-streaming, server-streaming, and bidirectional RPC lifetimes"
+    ],
+    "composition": [
+      "standalone least_request_experimental",
+      "outlier_detection_experimental with least-request child policy"
+    ]
+  },
+  "reference": {
+    "implementation": "gRFC A48 equal-weight least-request contract plus the pinned grpc-core xDS feature declaration",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "proposal": "https://github.com/grpc/proposal/blob/master/A48-xds-least-request-lb-policy.md",
+    "files": [
+      "/nav_env/Work/grpc/doc/grpc_xds_features.md",
+      "/nav_env/Work/grpc/src/core/ext/upb-gen/envoy/config/cluster/v3/cluster.upb.h"
+    ],
+    "observed_contract": [
+      "choiceCount defaults to 2, rejects values below 2, and caps effective values at 10",
+      "each pick samples READY subchannels with replacement and chooses the sampled subchannel with the fewest active requests",
+      "outstanding counters belong to one policy instance and release on every RPC terminal outcome",
+      "duplicate resolved addresses create one subchannel and receive no implicit weight",
+      "least-request reuses round-robin connectivity aggregation and reconnect ownership"
+    ]
+  },
+  "implementation": {
+    "parser": "ordered service-config selection supports least_request_experimental, validates the uint32 domain, applies the A48 default and cap, and composes below outlier detection",
+    "picker": "allocation-free power-of-N sampling uses fresh runtime entropy, intentionally permits duplicate samples, and compares exact policy-local outstanding counts",
+    "ordinary_channel": "endpoint slots count selected unary attempts and returned streaming lifetimes; the one-shot completion observer shares outlier accounting and releases on OK, error, reset, cancellation, failed receive, or abandoning deinit",
+    "shared_channel": "claim increments under the state lock before stream materialization; completion decrements under the same lock; one cached choice survives competing worker wakeups until its exact worker claims the job",
+    "membership": "DNS results and exact duplicate pre-resolved endpoints collapse before worker or connection creation; distinct authority, TLS policy, limits, or connector identity remain separate",
+    "non_selected_fast_path": "ordinary and shared channels that do not select least-request do not mutate outstanding counters or allocate an extra completion observer"
+  },
+  "native_cases": [
+    "default, configured, capped, below-minimum, above-uint32, wrong-type, and unknown-field choiceCount parsing",
+    "unknown-policy fallback and outlier-detection child composition",
+    "READY-only sampling, no-ready behavior, intentional duplicate samples, and lower-outstanding preference",
+    "exact duplicate pre-resolved endpoint collapse in both channel owners",
+    "ordinary and shared public policy adoption",
+    "two real h2c backends with 200 rolling concurrent RPCs and a 20 ms delayed endpoint",
+    "slow-backend coverage requires the idle endpoint to complete more than twice as many RPCs and passed five repeated runs",
+    "stream terminal, reset, cancellation, deadline, allocation-failure, and worker-retirement regressions through the complete gRPC suite"
+  ],
+  "results": {
+    "focused_debug": "146/146 passed",
+    "concurrency_repeat": "5/5 repeated focused runs passed after initial acceptance",
+    "grpc_debug": "453/453 passed",
+    "package": "26/26 passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
+    "external_boundary": "the pinned grpc-cpp checkout documents A48 but does not contain a C++ least-request policy implementation at this revision; its process matrix is therefore a complete transport/channel regression gate, while the A48 picker proof is native and uses real endpoints"
+  },
+  "source_sha256": {
+    "src/grpc/channel/least_request.zig": "85cfe46c9e1fe5fefe8f4397f3f863fe85894407b86a1a6c140c623a3899fcaa",
+    "src/grpc/service_config.zig": "bd561b79e68a6cc00df0835a9b7a2c83e2e58f2ea358e14ed9d74cbe6fb991bc",
+    "src/grpc/channel.zig": "842b3edb12fc4f36d28a5d3353bf1cdcd1b998c9c760a762743976986d3efb04",
+    "src/grpc/channel/shared/init.zig": "496f3e9845f531b75c1dceb1abb820d1b42a1c0e35be9acd4ab61a2d8fe11756",
+    "src/grpc/channel/shared/state.zig": "8112de2391fe95af0bba8ee5eb6e8b6b51edd180abe1648291fc2dc2920ad135",
+    "src/grpc/channel/shared/worker.zig": "69e444c154bc157d3cc9b9d0b8e72c3934e218290945174cee3436ed3489c310",
+    "src/grpc/channel/shared/membership.zig": "a549f1861b525d2242e2e09ca6dbec144424c1d2fe844396b067ea85552f30f3",
+    "src/grpc/channel/shared/stream/owner.zig": "13de1358de16249072a043758a409bad613b0c470e21370f56050af286a5204a",
+    "src/grpc/channel/shared/stream/tests/terminal_deadline.zig": "485b6e3aa4a8479eaab772faf4cae8f7adc696c2cae9796a6357f3f01a6c1c0a",
+    "src/grpc/channel/least_request_channel_tests.zig": "80993f9b2fc5cc7e8857183d5f24c59eeb4a649e8c105d2ec34481f6a38dbf48",
+    "src/grpc/service_config/least_request_tests.zig": "7f8fa1c79d01f36dd085f7d54a1298f1a33b79731335b6c7febea44c8c8c3e53",
+    "src/grpc/channel/shared.zig": "79786f800896ae25e03c72bd5e226f8407630130c3b1adeaf5dc360f88fb4fc1",
+    "src/grpc/mod.zig": "4bdf38e28c00ff34fc0c9b774b728117b91d3e86be3d73994f6c8b4d63db22f5",
+    "test/package_test.zig": "87c82224bce70852e404a03e302f33fd396b909fe2c54bb3d013c20ab6ce4fe2"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC least request' --summary all",
+    "for run in 1 2 3 4 5; do zig build test-lib -Dtest-filter='gRPC least request shifts' --summary all || exit 1; done",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "BAZEL=/nav_env/.cache/rattler/cache/pkgs/bazel-8.7.0-h5e4162e_2/bin/bazel-real TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/nav_env/.pixi/.pixi/envs/bazel/lib JAVA_HOME=/nav_env/.cache/rattler/cache/pkgs/openjdk-25.0.2-hd4191a3_26/lib/jvm CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "A48 intentionally covers equal endpoint weights only; weighted least-request and broader xDS control-plane policy translation remain separate integration work"
+}

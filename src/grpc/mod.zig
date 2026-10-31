@@ -93,6 +93,7 @@ pub const ServiceConfigParseOptions = service_config.ParseOptions;
 pub const MethodPolicy = service_config.MethodPolicy;
 pub const LoadBalancingPolicy = service_config.LoadBalancingPolicy;
 pub const LoadBalancingConfig = service_config.LoadBalancingConfig;
+pub const LeastRequestConfig = service_config.LeastRequestConfig;
 pub const WeightedRoundRobinConfig = service_config.WeightedRoundRobinConfig;
 pub const OutlierDetectionConfig = service_config.OutlierDetectionConfig;
 pub const SuccessRateEjection = service_config.SuccessRateEjection;
@@ -171,6 +172,8 @@ test {
     _ = @import("channel_tests.zig");
     _ = @import("channel/outlier_detection_tests.zig");
     _ = @import("channel/weighted_round_robin_tests.zig");
+    _ = @import("channel/least_request_channel_tests.zig");
+    _ = @import("service_config/least_request_tests.zig");
     _ = @import("channel/host_tests.zig");
     _ = @import("channel/connect_race.zig");
     _ = @import("channel/connect_race/tests.zig");

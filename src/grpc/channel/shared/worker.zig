@@ -28,6 +28,10 @@ pub fn Worker(comptime State: type) type {
         wake: *Wake,
         published: connectivity.State = .idle,
         capacity: usize = 0,
+        /// RPCs picked for this endpoint, including work claimed but not yet
+        /// materialized as an HTTP/2 stream. This is policy-instance-local as
+        /// required by gRFC A48.
+        outstanding_requests: usize = 0,
         local_state: connectivity.State = .idle,
         connection: ?*http2.runtime.Connection = null,
         active: std.ArrayList(Active) = .empty,

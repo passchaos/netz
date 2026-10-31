@@ -8,13 +8,15 @@ const State = @import("state.zig").State;
 const Error = @import("state.zig").Error;
 const Options = @import("options.zig").Options;
 const orca_config = @import("orca/config.zig");
+const least_request = @import("../least_request.zig");
 
 pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!*State {
     if (options.max_queued_calls == 0 or options.max_active_calls_per_endpoint == 0 or options.max_write_bytes_per_turn == 0 or options.max_buffered_stream_bytes == 0 or options.operation_timeout.nanoseconds <= 0) return error.InvalidSharedOptions;
     if (options.keepalive) |keepalive| try keepalive.validate();
     try options.channel.validate();
-    const count = if (target == .resolved) target.resolved.endpoints.len else 1;
-    if (count == 0) return error.InvalidSharedOptions;
+    if (target == .resolved and target.resolved.endpoints.len == 0) {
+        return error.InvalidSharedOptions;
+    }
     var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parseWithOptions(
         allocator,
         json,
@@ -58,6 +60,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .policy = options.channel.selection_policy orelse (if (balancing.configured) switch (balancing.policy) {
             .pick_first => channel.SelectionPolicy.pick_first,
             .round_robin => channel.SelectionPolicy.round_robin,
+            .least_request => channel.SelectionPolicy.least_request,
             .weighted_round_robin => channel.SelectionPolicy.weighted_round_robin,
         } else if (target == .resolved) target.resolved.policy else .pick_first),
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
@@ -70,6 +73,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             balancing.weighted_round_robin
         else
             null,
+        .least_request_config = balancing.least_request,
         .outlier_config = balancing.outlier_detection,
         .outlier_next_evaluation_ns = if (balancing.outlier_detection) |outlier|
             if (outlier.countingEnabled()) std.Io.Clock.awake.now(io)
@@ -87,6 +91,13 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         state.stopResolution();
         state.release();
     }
+    const count = switch (target) {
+        .resolved => |resolved| if (state.policy == .least_request)
+            least_request.exactUniqueCount(resolved.endpoints)
+        else
+            resolved.endpoints.len,
+        else => 1,
+    };
     const sources = try allocator.alloc(State.Source, count);
     var initialized: usize = 0;
     var sources_transferred = false;
@@ -95,7 +106,14 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         allocator.free(sources);
     };
     var has_host = false;
-    for (sources, 0..) |*source, index| {
+    var source_index: usize = 0;
+    for (0..if (target == .resolved) target.resolved.endpoints.len else 1) |index| {
+        if (target == .resolved and state.policy == .least_request and
+            least_request.isExactDuplicate(target.resolved.endpoints, index))
+        {
+            continue;
+        }
+        const source = &sources[source_index];
         const endpoint: channel.Endpoint = switch (target) {
             .resolved => |set| set.endpoints[index],
             .cleartext_ip => |v| .{ .cleartext_ip = v },
@@ -107,7 +125,9 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         source.* = try State.Source.init(allocator, io, endpoint, options.channel);
         initialized += 1;
         has_host = has_host or source.resolver != null;
+        source_index += 1;
     }
+    std.debug.assert(source_index == sources.len);
     if (options.channel.address_resolver != null and !has_host) return error.InvalidChannelOptions;
     if (state.shuffle_addresses) {
         var remaining = sources.len;
