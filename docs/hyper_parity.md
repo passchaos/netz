@@ -3320,7 +3320,10 @@ state and returns transport `MAX_STREAMS` credit.
    fresh reverse connection, netz sends `GOAWAY(last_stream_id=7, NO_ERROR)`,
    completes stream 7, and Hyper refuses a subsequent request. Both cases run
    over h2c and certificate-verified TLS, so this is peer-visible draining
-   evidence rather than inference from local GOAWAY tests.
+   evidence rather than inference from local GOAWAY tests. A fresh 2026-11-01
+   run passed all nine endpoint, proxy, pool, redirect, keep-alive,
+   cancellation, KeyUpdate and GOAWAY transcripts in both directions; see
+   `docs/evidence/http2_hyper/2026-11-01.json`.
    The connection API also exposes Hyper/h2-style two-phase graceful shutdown:
    `gracefulShutdown`, `gracefulShutdownWithTimeout`, and
    `gracefulShutdownWithDeadline` first send `GOAWAY(2^31-1, NO_ERROR)`, wait
