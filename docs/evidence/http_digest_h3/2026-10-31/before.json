@@ -1,0 +1,7 @@
+{
+  "expected_status": "failed",
+  "base_commit": "b186c304",
+  "error": "FlowControlBlocked followed by ConnectionClosed",
+  "trigger": "paced stored-gzip response larger than a 2048-byte initial stream window",
+  "binary_sha256": "5bda510df588345cb1b54e1be6269d7fec8cdccd050ca86a21ac38613539250d"
+}

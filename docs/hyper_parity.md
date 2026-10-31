@@ -4171,3 +4171,23 @@ recorded in `docs/evidence/http_digest/2026-10-31.json`.
 
 The focused HTTP digest tests pass 150/150 in Debug and ReleaseFast. Both
 independent HTTPS peer runs verify all 16 requests.
+
+
+## HTTP/3 digest interoperability and paced-body flow control
+
+The independent RFC9530 digest matrix now covers actual HTTP/3 QUIC/TLS with
+quic-go 0.59.0 in both endpoint roles and both QUIC versions. The fixed-window
+32-request transcript checks content-coded bytes, trailers, streamed hashes,
+HEAD/206 representation scope, conflicting digests and later connection reuse.
+It exposed a paced response whose oversized atomic DATA transaction partially
+reached the peer before flow control blocked its suffix. The common blocking
+sender now sizes complete DATA contributions against current path, stream,
+connection and congestion budgets, preserving exact progress at a framing
+boundary. Deadline failure leaves a sent prefix owned and the connection usable.
+The same helper coordinates request, response and pushed-body owners, while
+all transport/routing cancellation checks remain in those owners. Scope and
+reproduction are in `docs/http_digest.md`; evidence is in
+`docs/evidence/http_digest_h3/2026-10-31.json`.
+
+The focused paced-body regression bundle passes 147/147 in Debug and
+ReleaseFast. Each independent quic-go matrix verifies all 32 requests.

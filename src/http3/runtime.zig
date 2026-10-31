@@ -34,6 +34,7 @@ const ticket_receiver = @import("runtime/ticket_receiver.zig");
 const runtime_error = @import("runtime/error.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
 const server_response = @import("runtime/server/response.zig");
+const paced_body = @import("runtime/send/paced_body.zig");
 const body_sender = @import("runtime/send/body.zig");
 const body_fragment = @import("runtime/send/body_fragment.zig");
 const message_sender = @import("runtime/send/message.zig");
@@ -9158,80 +9159,26 @@ pub const HandshakeServerSession = struct {
         fin: bool,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!bool {
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const end = @min(data.len, offset + chunk_limit);
-            while (true) {
-                if (self.control.pushCancelled(push_id) or
-                    self.established.connection.streamStopped(
-                        push_stream_id,
-                    ) != null)
-                {
-                    try self.finishCancelledPacedPush(
-                        push_id,
-                        push_stream_id,
-                        deadline,
-                    );
+        const Context = struct {
+            owner: *HandshakeServerSession,
+            push_id: u64,
+            fn before(context: *@This(), id: u62, before_deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!bool {
+                if (context.owner.control.pushCancelled(context.push_id) or context.owner.established.connection.streamStopped(id) != null) {
+                    try context.owner.finishCancelledPacedPush(context.push_id, id, before_deadline);
                     return true;
                 }
-                if (deadline) |absolute| {
-                    sendConnectionBodyChunkWithDeadline(
-                        &self.established.connection,
-                        &self.outbound_bodies,
-                        push_stream_id,
-                        data[offset..end],
-                        fin and end == data.len,
-                        self.options,
-                        absolute,
-                    ) catch |err| switch (err) {
-                        error.FlowControlBlocked, error.CongestionLimited => {
-                            try self.receiveRequestPacketUntil(deadline);
-                            continue;
-                        },
-                        error.StreamStopped => {
-                            try self.finishCancelledPacedPush(
-                                push_id,
-                                push_stream_id,
-                                deadline,
-                            );
-                            return true;
-                        },
-                        else => |other| return @errorCast(other),
-                    };
-                } else {
-                    sendConnectionBodyChunk(
-                        &self.established.connection,
-                        &self.outbound_bodies,
-                        push_stream_id,
-                        data[offset..end],
-                        fin and end == data.len,
-                        self.options,
-                    ) catch |err| switch (err) {
-                        error.FlowControlBlocked, error.CongestionLimited => {
-                            try self.receiveRequestPacketUntil(deadline);
-                            continue;
-                        },
-                        error.StreamStopped => {
-                            try self.finishCancelledPacedPush(
-                                push_id,
-                                push_stream_id,
-                                deadline,
-                            );
-                            return true;
-                        },
-                        else => |other| return @errorCast(other),
-                    };
-                }
-                break;
+                return false;
             }
-            offset = end;
-        }
-        if (fin) {
-            _ = try self.established.connection
-                .requestCompletedLocalStreamRelease(push_stream_id);
-        }
-        return false;
+            fn receive(context: *@This(), _: u62, before_deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+                try context.owner.receiveRequestPacketUntil(before_deadline);
+            }
+            fn finish(context: *@This(), id: u62) ReceiveTimeoutError!void {
+                _ = try context.owner.established.connection.requestCompletedLocalStreamRelease(id);
+            }
+        };
+        var context = Context{ .owner = self, .push_id = push_id };
+        var progress: BodyWriteProgress = .{};
+        return try paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, &context, push_stream_id, data, fin, deadline, &progress, .{ .before = Context.before, .receive = Context.receive, .finish = Context.finish }) == .cancelled;
     }
 
     fn finishPushTrailersPacedUntil(
@@ -9911,46 +9858,20 @@ pub const HandshakeServerSession = struct {
         progress.* = .{};
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        if (data.len == 0) {
-            var committed_chunks: usize = 0;
-            self.sendResponseBodyBatchPacedWithDeadline(
-                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
-                &committed_chunks,
-                deadline,
-            ) catch |err| {
-                progress.fin_committed = committed_chunks == 1 and fin;
-                return err;
-            };
-            progress.fin_committed = fin;
-            return;
-        }
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        while (progress.committed_bytes < data.len) {
-            const end = @min(
-                data.len,
-                progress.committed_bytes + chunk_limit,
-            );
-            const last = end == data.len;
-            var committed_chunks: usize = 0;
-            self.sendResponseBodyBatchPacedWithDeadline(
-                &.{.{
-                    .stream_id = stream_id,
-                    .data = data[progress.committed_bytes..end],
-                    .fin = fin and last,
-                }},
-                &committed_chunks,
-                deadline,
-            ) catch |err| {
-                if (committed_chunks == 1) {
-                    progress.committed_bytes = end;
-                    progress.fin_committed = fin and last;
-                }
-                return err;
-            };
-            std.debug.assert(committed_chunks == 1);
-            progress.committed_bytes = end;
-            progress.fin_committed = fin and last;
-        }
+        _ = try paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, deadline, progress, paced_response_hooks);
+    }
+
+    const paced_response_hooks = .{ .before = beforePacedResponseBody, .receive = receivePacedResponseBody, .finish = finishPacedResponseBody };
+
+    fn beforePacedResponseBody(self: *HandshakeServerSession, id: u62, _: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!bool {
+        if (try self.finishPeerResponseCancellation(id)) |cancel| return responseResetError(cancel.application_error_code);
+        return false;
+    }
+    fn receivePacedResponseBody(self: *HandshakeServerSession, _: u62, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        try self.receiveRequestPacketUntil(deadline);
+    }
+    fn finishPacedResponseBody(self: *HandshakeServerSession, id: u62) ReceiveTimeoutError!void {
+        finishServerRequest(&self.control, &self.request_lifecycle, id);
     }
 
     fn sendResponseBodyPacedUntil(
@@ -9960,27 +9881,8 @@ pub const HandshakeServerSession = struct {
         fin: bool,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (data.len == 0) {
-            try self.sendResponseBodyPacedChunkUntil(
-                stream_id,
-                data,
-                fin,
-                deadline,
-            );
-            return;
-        }
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const end = @min(data.len, offset + chunk_limit);
-            try self.sendResponseBodyPacedChunkUntil(
-                stream_id,
-                data[offset..end],
-                fin and end == data.len,
-                deadline,
-            );
-            offset = end;
-        }
+        var progress: BodyWriteProgress = .{};
+        _ = try paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, deadline, &progress, paced_response_hooks);
     }
 
     /// Send one logical Extended CONNECT byte sequence as packet-sized HTTP/3
@@ -15749,22 +15651,23 @@ pub const HandshakeClient = struct {
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.callback_reader_active) return error.ConcurrentRead;
-        if (data.len == 0) {
-            try self.sendRequestBodyPacedChunk(stream_id, data, fin);
-            return;
-        }
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const end = @min(data.len, offset + chunk_limit);
-            try self.sendRequestBodyPacedChunk(
-                stream_id,
-                data[offset..end],
-                fin and end == data.len,
-            );
-            offset = end;
-        }
+        var progress: BodyWriteProgress = .{};
+        _ = paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, null, &progress, paced_request_hooks) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => return @errorCast(err),
+        };
     }
+
+    const paced_request_hooks = .{ .before = beforePacedRequestBody, .receive = receivePacedRequestBody, .finish = finishPacedRequestBody };
+
+    fn beforePacedRequestBody(self: *HandshakeClient, id: u62, _: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!bool {
+        try self.failIfRequestResetForSend(id);
+        return false;
+    }
+    fn receivePacedRequestBody(self: *HandshakeClient, id: u62, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (deadline) |absolute| try self.receiveResponseProgressForSendUntil(id, absolute) else try self.receiveResponseProgressForSend(id);
+    }
+    fn finishPacedRequestBody(_: *HandshakeClient, _: u62) ReceiveTimeoutError!void {}
 
     pub fn sendRequestBodyPacedWithTimeout(
         self: *HandshakeClient,
@@ -15801,50 +15704,11 @@ pub const HandshakeClient = struct {
         progress: *BodyWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
         progress.* = .{};
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        if (data.len == 0) {
-            var committed_chunks: usize = 0;
-            self.sendRequestBodyBatchPacedWithDeadline(
-                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
-                &committed_chunks,
-                deadline,
-            ) catch |err| {
-                progress.fin_committed = committed_chunks == 1 and fin;
-                return err;
-            };
-            progress.fin_committed = fin;
-            return;
-        }
-        const chunk_limit = pacedBodyChunkLimit(self.options);
-        while (progress.committed_bytes < data.len) {
-            const end = @min(
-                data.len,
-                progress.committed_bytes + chunk_limit,
-            );
-            const last = end == data.len;
-            var committed_chunks: usize = 0;
-            self.sendRequestBodyBatchPacedWithDeadline(
-                &.{.{
-                    .stream_id = stream_id,
-                    .data = data[progress.committed_bytes..end],
-                    .fin = fin and last,
-                }},
-                &committed_chunks,
-                deadline,
-            ) catch |err| {
-                if (committed_chunks == 1) {
-                    progress.committed_bytes = end;
-                    progress.fin_committed = fin and last;
-                }
-                return err;
-            };
-            std.debug.assert(committed_chunks == 1);
-            progress.committed_bytes = end;
-            progress.fin_committed = fin and last;
-        }
+        _ = try paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, deadline, progress, paced_request_hooks);
     }
 
     /// Client counterpart to `sendResponseBodyPartsPaced`; packet-sized
@@ -36059,6 +35923,7 @@ test {
     _ = @import("runtime/receive/tests/connection_error.zig");
     _ = @import("runtime/receive/tests/runtime_close.zig");
     _ = @import("runtime/send/tests/body.zig");
+    _ = @import("runtime/send/tests/paced_body.zig");
     _ = @import("runtime/send/tests/message.zig");
     _ = @import("runtime/send/tests/partial_send.zig");
     _ = @import("runtime/stream/reader_tests.zig");

@@ -1,0 +1,68 @@
+{
+  "status": "verified",
+  "date": "2026-10-31",
+  "feature": "HTTP3 digest independent network interoperability and paced DATA flow-control fix",
+  "base_commit": "b186c304",
+  "peer": "quic-go v0.59.0",
+  "roles": 2,
+  "versions": [
+    1,
+    2
+  ],
+  "requests_per_mode": 32,
+  "source_sha256": {
+    "src/http3/runtime.zig": "120e01c6b48be0c581522df24e9fdb30f82cb999f01499d5fab220c6b74d84eb",
+    "src/http3/runtime/send/paced_body.zig": "1ad6d5e22a673addc2c4ff700e25f2412327406178662c753e5b4a7fadf04202",
+    "src/http3/runtime/send/tests/paced_body.zig": "1c7166c874a644f9aa07b0414117b6e505ef9916a5253b0aae80685a3acb5fa1",
+    "tools/interop/http_digest/build.zig": "2bdb9137b676282094f74bd0f6c1f02fd326d3e51212e106879deb8d27926161",
+    "tools/interop/http_digest/h3/client.zig": "0f2cd250d17443ea8c42b02b4f735611ca6eedba4897b86cb322f651f9f5b3db",
+    "tools/interop/http_digest/h3/server.zig": "a4857adb4c19362b892ac17a3d93594157bb281ff8c64716c796a738ba882aa2",
+    "tools/interop/http_digest/h3/main.zig": "5ba10717cadc9c61c6c2e7caa1627739c00b894a417f9e7fed476078d4167cf2",
+    "tools/interop/http_digest/h3/run.py": "9b65ae45de8ec8780bfbcde4955b1a3a457be5a396ff98e9a88a0e2cb719ed15",
+    "tools/interop/http_digest/h3/common.zig": "90d5bb0009b6953e03e67128e95debbd9b88ede51b49d8ccab555e9c2d05f815",
+    "tools/interop/quic_go_module/http3_digest/digest.go": "a71561a47a40284b6b526eda22c2d7e31b111aa5760d2abb702d8fed659e4495",
+    "tools/interop/quic_go_module/http3_digest/client.go": "c17030946ba2d681c03d8501b48a0f5ea099546ad1d44d5ad93309c50ea21ac7",
+    "tools/interop/quic_go_module/http3_digest/server.go": "8ad918b9271cbc6fbd313757e284ca750ef541f49a438655f2925be474fd8ccf",
+    "tools/interop/quic_go_module/http3_digest/digest_test.go": "f29b46b1c0f4f4e8c8c9ee4ea746f8e91ddb33125ac150773991e932829a6415",
+    "tools/interop/quic_go_module/http3_digest/main.go": "a14039c187446cf4d7404d3d47b94c4af1abf62a14169079358ce8e3264233dc"
+  },
+  "verification": {
+    "Debug": {
+      "tests_passed": 147,
+      "tests_total": 147,
+      "interop_report": "2026-10-31/Debug.json",
+      "requests": 32
+    },
+    "ReleaseFast": {
+      "tests_passed": 147,
+      "tests_total": 147,
+      "interop_report": "2026-10-31/ReleaseFast.json",
+      "requests": 32
+    }
+  },
+  "counterexample": "2026-10-31/before.json",
+  "test_filters": [
+    "HTTP/3 paced DATA deadline",
+    "HTTP/3 handshake body parts deadline",
+    "HTTP/3 paced request send",
+    "HTTP/3 handshake client streams promised push",
+    "HTTP/3 handshake server streams large request",
+    "HTTP/3 handshake client streams dynamic response"
+  ],
+  "regression": {
+    "flow_credit": 128,
+    "committed_body_bytes_before_timeout": 125,
+    "data_frame_header_bytes": 3,
+    "connection_usable": true
+  },
+  "interop_command": "zig build interop-http-digest-quic-go --summary all",
+  "limitations": [
+    "This is bounded loopback protocol and lifecycle evidence; no throughput superiority is claimed."
+  ],
+  "aggregate_gate": {
+    "command": "zig build interop-http-digest --summary all",
+    "build_steps_passed": 10,
+    "http1_http2_requests": 16,
+    "http3_requests": 32
+  }
+}
