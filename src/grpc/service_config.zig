@@ -72,6 +72,10 @@ pub const WeightedRoundRobinConfig = struct {
     metric_names: []const []const u8 = &.{},
 };
 
+pub const PickFirstConfig = struct {
+    shuffle_address_list: bool = false,
+};
+
 pub const SuccessRateEjection = struct {
     stdev_factor: u32 = 1900,
     enforcement_percentage: u32 = 100,
@@ -100,6 +104,33 @@ pub const OutlierDetectionConfig = struct {
     }
 };
 
+/// Arena-owned recursive representation of the selected service-config LB
+/// policy. Leaf policies retain their complete parsed configuration; composite
+/// policies point at child nodes in the same ServiceConfig arena. This is the
+/// ownership foundation for grpc-core-style recursive policy composition.
+pub const LoadBalancingNode = union(enum) {
+    pick_first: PickFirstConfig,
+    round_robin,
+    least_request: LeastRequestConfig,
+    ring_hash: RingHashConfig,
+    weighted_round_robin: WeightedRoundRobinConfig,
+    outlier_detection: struct {
+        config: OutlierDetectionConfig,
+        child: *const LoadBalancingNode,
+    },
+
+    pub fn leafPolicy(self: *const LoadBalancingNode) LoadBalancingPolicy {
+        return switch (self.*) {
+            .pick_first => .pick_first,
+            .round_robin => .round_robin,
+            .least_request => .least_request,
+            .ring_hash => .ring_hash,
+            .weighted_round_robin => .weighted_round_robin,
+            .outlier_detection => |wrapper| wrapper.child.leafPolicy(),
+        };
+    }
+};
+
 pub const LoadBalancingConfig = struct {
     policy: LoadBalancingPolicy = .pick_first,
     shuffle_address_list: bool = false,
@@ -108,6 +139,9 @@ pub const LoadBalancingConfig = struct {
     ring_hash: RingHashConfig = .{},
     weighted_round_robin: WeightedRoundRobinConfig = .{},
     outlier_detection: ?OutlierDetectionConfig = null,
+    /// Null means no LB policy was configured. The pointed tree is owned by
+    /// the ServiceConfig arena and remains valid until `ServiceConfig.deinit`.
+    root: ?*const LoadBalancingNode = null,
 };
 
 pub const ParseOptions = struct {
@@ -539,6 +573,14 @@ fn parseLoadBalancing(
                     return error.InvalidServiceConfig;
                 }
                 child.outlier_detection = parsed.config;
+                child.root = try allocateLoadBalancingNode(
+                    allocator,
+                    .{ .outlier_detection = .{
+                        .config = parsed.config,
+                        .child = child.root orelse
+                            return error.InvalidServiceConfig,
+                    } },
+                );
                 return child;
             }
             if (std.mem.eql(u8, item.key_ptr.*, "round_robin")) {
@@ -547,7 +589,11 @@ fn parseLoadBalancing(
                     else => return error.InvalidServiceConfig,
                 };
                 if (options.count() != 0) return error.InvalidServiceConfig;
-                return .{ .policy = .round_robin, .configured = true };
+                return configuredLoadBalancing(
+                    allocator,
+                    .{ .policy = .round_robin, .configured = true },
+                    .round_robin,
+                );
             }
             if (std.mem.eql(
                 u8,
@@ -578,11 +624,11 @@ fn parseLoadBalancing(
                         LeastRequestConfig.max_choice_count,
                     ));
                 }
-                return .{
+                return configuredLoadBalancing(allocator, .{
                     .policy = .least_request,
                     .configured = true,
                     .least_request = least_request,
-                };
+                }, .{ .least_request = least_request });
             }
             if (std.mem.eql(
                 u8,
@@ -616,11 +662,11 @@ fn parseLoadBalancing(
                 if (ring.min_ring_size > ring.max_ring_size) {
                     return error.InvalidServiceConfig;
                 }
-                return .{
+                return configuredLoadBalancing(allocator, .{
                     .policy = .ring_hash,
                     .configured = true,
                     .ring_hash = ring,
-                };
+                }, .{ .ring_hash = ring });
             }
             if (std.mem.eql(u8, item.key_ptr.*, "pick_first")) {
                 const options = switch (item.value_ptr.*) {
@@ -640,11 +686,13 @@ fn parseLoadBalancing(
                         else => return error.InvalidServiceConfig,
                     };
                 }
-                return .{
+                return configuredLoadBalancing(allocator, .{
                     .policy = .pick_first,
                     .shuffle_address_list = shuffle,
                     .configured = true,
-                };
+                }, .{ .pick_first = .{
+                    .shuffle_address_list = shuffle,
+                } });
             }
             if (std.mem.eql(u8, item.key_ptr.*, "weighted_round_robin")) {
                 const options = switch (item.value_ptr.*) {
@@ -706,11 +754,11 @@ fn parseLoadBalancing(
                     }
                     weighted.metric_names = names;
                 }
-                return .{
+                return configuredLoadBalancing(allocator, .{
                     .policy = .weighted_round_robin,
                     .configured = true,
                     .weighted_round_robin = weighted,
-                };
+                }, .{ .weighted_round_robin = weighted });
             }
             // gRPC selects the first policy implemented by the client.
         }
@@ -718,14 +766,41 @@ fn parseLoadBalancing(
     }
     if (config.loadBalancingPolicy) |name| {
         if (std.ascii.eqlIgnoreCase(name, "pick_first")) {
-            return .{ .configured = true };
+            return configuredLoadBalancing(
+                allocator,
+                .{ .configured = true },
+                .{ .pick_first = .{} },
+            );
         }
         if (std.ascii.eqlIgnoreCase(name, "round_robin")) {
-            return .{ .policy = .round_robin, .configured = true };
+            return configuredLoadBalancing(
+                allocator,
+                .{ .policy = .round_robin, .configured = true },
+                .round_robin,
+            );
         }
         return error.InvalidServiceConfig;
     }
     return .{};
+}
+
+fn configuredLoadBalancing(
+    allocator: std.mem.Allocator,
+    config: LoadBalancingConfig,
+    node: LoadBalancingNode,
+) std.mem.Allocator.Error!LoadBalancingConfig {
+    var result = config;
+    result.root = try allocateLoadBalancingNode(allocator, node);
+    return result;
+}
+
+fn allocateLoadBalancingNode(
+    allocator: std.mem.Allocator,
+    node: LoadBalancingNode,
+) std.mem.Allocator.Error!*const LoadBalancingNode {
+    const owned = try allocator.create(LoadBalancingNode);
+    owned.* = node;
+    return owned;
 }
 
 fn parseRingSize(value: std.json.Value) Error!usize {
@@ -1319,6 +1394,21 @@ test "gRPC service config parses outlier detection and child policy" {
         @as(u32, 5),
         outlier.failure_percentage_ejection.?.threshold,
     );
+    const root = balancing.root.?;
+    try std.testing.expectEqual(
+        LoadBalancingPolicy.round_robin,
+        root.leafPolicy(),
+    );
+    switch (root.*) {
+        .outlier_detection => |wrapper| {
+            try std.testing.expectEqual(
+                @as(u32, 3),
+                wrapper.config.max_ejection_percent,
+            );
+            try std.testing.expect(wrapper.child.* == .round_robin);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     var defaults = try ServiceConfig.parse(std.testing.allocator,
         \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
@@ -1361,6 +1451,7 @@ test "gRPC service config selects the first supported balancing policy" {
     var defaults = try ServiceConfig.parse(std.testing.allocator, "{}");
     defer defaults.deinit();
     try std.testing.expect(!defaults.loadBalancingConfig().configured);
+    try std.testing.expect(defaults.loadBalancingConfig().root == null);
 
     var round_robin = try ServiceConfig.parse(std.testing.allocator,
         \\{"loadBalancingConfig":[
@@ -1372,6 +1463,9 @@ test "gRPC service config selects the first supported balancing policy" {
         round_robin.loadBalancingConfig().policy,
     );
     try std.testing.expect(round_robin.loadBalancingConfig().configured);
+    try std.testing.expect(
+        round_robin.loadBalancingConfig().root.?.* == .round_robin,
+    );
 
     var pick_first = try ServiceConfig.parse(std.testing.allocator,
         \\{"loadBalancingConfig":[
@@ -1418,13 +1512,28 @@ test "gRPC service config owns parsed selectors" {
         \\{"methodConfig": [{"name": [{"service": "demo.Owned"}],
         \\  "retryPolicy": {"maxAttempts": 2, "initialBackoff": "1s",
         \\    "maxBackoff": "2s", "backoffMultiplier": 2,
-        \\    "retryableStatusCodes": ["UNAVAILABLE"]}}]}
+        \\    "retryableStatusCodes": ["UNAVAILABLE"]}}],
+        \\ "loadBalancingConfig":[{"outlier_detection_experimental":{
+        \\  "childPolicy":[{"least_request_experimental":{
+        \\   "choiceCount":4}}]}}]}
     );
     var config = try ServiceConfig.parse(std.testing.allocator, json);
     defer config.deinit();
     @memset(json, 'x');
     std.testing.allocator.free(json);
     try std.testing.expect(config.retryPolicy("/demo.Owned/Call") != null);
+    const root = config.loadBalancingConfig().root.?;
+    try std.testing.expectEqual(LoadBalancingPolicy.least_request, root.leafPolicy());
+    switch (root.*) {
+        .outlier_detection => |wrapper| switch (wrapper.child.*) {
+            .least_request => |least| try std.testing.expectEqual(
+                @as(u8, 4),
+                least.choice_count,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "gRPC service config parsing is transactional on allocation failure" {
@@ -1437,7 +1546,9 @@ test "gRPC service config parsing is transactional on allocation failure" {
                 \\ "retryPolicy": {"maxAttempts": 4,
                 \\ "initialBackoff": "0.010s", "maxBackoff": "1s",
                 \\ "backoffMultiplier": 1.5,
-                \\ "retryableStatusCodes": ["UNAVAILABLE", "ABORTED"]}}]}
+                \\ "retryableStatusCodes": ["UNAVAILABLE", "ABORTED"]}}],
+                \\ "loadBalancingConfig":[{"outlier_detection_experimental":{
+                \\  "childPolicy":[{"round_robin":{}}]}}]}
             );
             defer config.deinit();
             try std.testing.expect(config.retryPolicy("/demo.A/Call") != null);

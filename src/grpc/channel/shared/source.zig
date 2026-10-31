@@ -92,6 +92,7 @@ pub fn Source(comptime Worker: type) type {
                     .limits = v.limits,
                     .ring_hash_key = v.ring_hash_key,
                     .ring_hash_weight = self.ring_hash_weight,
+                    .hierarchical_path = v.hierarchical_path,
                 } },
                 .tls_host => |v| if (v.proxy != null or
                     v.socks5_proxy != null)
@@ -105,6 +106,7 @@ pub fn Source(comptime Worker: type) type {
                         .tls = v.tls,
                         .ring_hash_key = v.ring_hash_key,
                         .ring_hash_weight = self.ring_hash_weight,
+                        .hierarchical_path = v.hierarchical_path,
                     } },
                 .cleartext_ip => |v| .{ .cleartext_ip = v },
                 .tls_address => |v| .{ .tls_address = v },
@@ -112,4 +114,30 @@ pub fn Source(comptime Worker: type) type {
             };
         }
     };
+}
+
+test "SharedChannel source preserves hierarchical path through resolution" {
+    const Worker = struct {};
+    const path = [_][]const u8{ "region-west", "zone-a" };
+    var source = try Source(Worker).init(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .cleartext_host = .{
+            .host = "hierarchy.shared.example",
+            .port = 8443,
+            .hierarchical_path = &path,
+        } },
+        .{},
+    );
+    defer source.deinit(std.testing.allocator);
+    const target = source.target(.{ .ip4 = .loopback(8443) });
+    try std.testing.expectEqual(@as(usize, 2), target.cleartext_ip.hierarchical_path.len);
+    try std.testing.expectEqualStrings(
+        "region-west",
+        target.cleartext_ip.hierarchical_path[0],
+    );
+    try std.testing.expectEqualStrings(
+        "zone-a",
+        target.cleartext_ip.hierarchical_path[1],
+    );
 }

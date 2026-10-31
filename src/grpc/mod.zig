@@ -95,6 +95,7 @@ pub const ServiceConfigParseOptions = service_config.ParseOptions;
 pub const MethodPolicy = service_config.MethodPolicy;
 pub const LoadBalancingPolicy = service_config.LoadBalancingPolicy;
 pub const LoadBalancingConfig = service_config.LoadBalancingConfig;
+pub const LoadBalancingNode = service_config.LoadBalancingNode;
 pub const LeastRequestConfig = service_config.LeastRequestConfig;
 pub const RingHashConfig = service_config.RingHashConfig;
 pub const ringHash = @import("channel/ring_hash.zig").hash;

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "recursive gRPC load-balancing policy ownership and hierarchical endpoint paths",
+  "decision": "accepted foundation",
+  "scope": {
+    "service_config": "arena-owned recursive tree for every currently implemented leaf and outlier wrapper",
+    "compatibility": "existing flat LoadBalancingConfig view and runtime selection remain unchanged",
+    "endpoint_metadata": "bounded borrowed hierarchical path on every endpoint variant",
+    "resolution": "ordinary Channel and SharedChannel preserve the complete path across hostname-to-address replacement"
+  },
+  "reference": {
+    "grpc_core": {
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "files": {
+        "src/core/load_balancing/address_filtering.h": "0402f4252f70c4b475e6e29dbcf2804eba8ec9d084e9d884c9a63728af29dca1",
+        "src/core/load_balancing/address_filtering.cc": "2c5cd86579afef9f06a1657300f80d67c1ef87719e2f5b37d78475cb33a0c454",
+        "src/core/load_balancing/weighted_target/weighted_target.cc": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e"
+      }
+    },
+    "observed_contract": [
+      "each composite policy consumes the first hierarchical path element and delegates the suffix",
+      "addresses without a path or with an empty path are excluded from hierarchical children",
+      "weighted_target childPolicy is recursively parsed through the global LB policy registry",
+      "weighted_target aggregates child connectivity and chooses only READY children by configured weight",
+      "removed weighted_target children are retained for delayed reuse"
+    ]
+  },
+  "implementation": {
+    "tree": "LoadBalancingNode stores pick_first, round_robin, least_request, ring_hash, weighted_round_robin, and outlier_detection child ownership",
+    "flat_view": "LoadBalancingConfig continues to expose the selected leaf policy and configuration used by existing Channel implementations",
+    "ownership": "all nodes and parsed strings live in the ServiceConfig arena; deinit releases them transactionally",
+    "inspection": "LoadBalancingNode.leafPolicy walks wrappers without flattening away their structure",
+    "path": "Endpoint hierarchical_path is borrowed for the Channel lifetime, capped at 32 levels, and rejects empty elements",
+    "ordinary_resolution": "HostResolution carries hierarchical_path into generated cleartext_ip and tls_address endpoints",
+    "shared_resolution": "SharedChannel Source carries hierarchical_path into every physical worker target",
+    "identity": "origin authority, TLS identity, proxy routing, ring-hash key/weight, and all existing picker semantics remain unchanged"
+  },
+  "negative_boundary": {
+    "weighted_target_advertised": false,
+    "reason": "parsing a policy name before both Channel owners execute arbitrary recursive childPolicy would be false parity",
+    "next_required_work": "recursive ordinary and SharedChannel runtime nodes with child connectivity aggregation, READY-only weighted selection, suffix consumption, and delayed child retention"
+  },
+  "tests": [
+    "outlier_detection tree owns and exposes its round_robin child",
+    "outlier_detection tree owns a configured least_request child after the input JSON is overwritten and freed",
+    "allocation-failure sweep includes wrapper and child node allocation",
+    "unconfigured service config has a null policy root",
+    "unknown-policy fallback still selects the first implemented leaf",
+    "ordinary host resolution preserves a two-element hierarchical path",
+    "SharedChannel source resolution preserves the same path shape",
+    "empty path elements and paths deeper than 32 are rejected"
+  ],
+  "results": {
+    "policy_tree_focus": "139/139 passed",
+    "hierarchical_path_focus": "137/137 passed",
+    "complete_grpc_debug": "482/482 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/service_config.zig": "926ee9285360d3660e71f5fc79fbfa6712997cb77e870d7fcd73fcaecb2ffee6",
+    "src/grpc/channel.zig": "1610adeaaff243b469a73b739cc7f11043e8d563ee509ccc4c1668b43edd289f",
+    "src/grpc/channel/shared/source.zig": "227118ca1ddd043a6668ad643cb608000069b278738ad12b418e6746e47d1c3b",
+    "src/grpc/mod.zig": "7e959b0fe1e89aa290c62c24be1f392ac552f20d84e11ed341861bd0d8252d27",
+    "test/package_test.zig": "f46363c981e30e8b4a8724c4bb6ea9054b0518c34079346de798fd967d8aa7d0",
+    "docs/grpc_parity.md": "74a27cb02b1e17dded373a161012f7fe7e7e08a68d665b3301e3aa2ef564f2f1"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC service config owns parsed selectors' --summary all",
+    "zig build test-lib -Dtest-filter='hierarchical' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "weighted_target_experimental remains intentionally unsupported until the retained tree drives both runtime owners"
+}

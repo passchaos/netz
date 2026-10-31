@@ -609,6 +609,33 @@ The current tests establish concurrent shared unary and streaming calls,
 sequential streaming, and single-owner step-driven bidirectional streaming; broader gRPC Core feature
 parity remains open.
 
+## Recursive load-balancing policy ownership foundation
+
+Service-config parsing now retains an arena-owned `LoadBalancingNode` tree in
+addition to the existing flat compatibility view. Every implemented leaf keeps
+its complete configuration, and `outlier_detection_experimental` is represented
+as an actual wrapper pointing to its child rather than only two unrelated flat
+fields. `leafPolicy()` preserves the old selection result for ordinary and
+SharedChannel while callers preparing composite policies can inspect the exact
+owned tree. Unknown-policy fallback, strict known-policy validation, JSON
+ownership and allocation-failure cleanup remain unchanged.
+
+Every gRPC endpoint variant now also carries a borrowed `hierarchical_path`,
+matching grpc-core's `address.hierarchical_path` model. Paths are bounded to 32
+levels and reject empty elements. Hostname resolution in both Channel owners
+preserves the complete path while replacing only the transport address, so each
+future composite level can consume one element and delegate the suffix without
+losing origin authority, TLS identity, proxy routing or ring-hash metadata.
+
+This is deliberately not a `weighted_target_experimental` completion claim.
+The pinned grpc-core policy accepts arbitrary recursive child policies,
+aggregates child connectivity, chooses only READY children by configured weight
+and retains removed children for delayed reuse. Netz will advertise that policy
+only after ordinary Channel and SharedChannel both execute the retained tree;
+parsing the name while continuing to use one flat picker would be false parity.
+Machine evidence for the ownership and address-routing foundation is recorded
+in `docs/evidence/grpc_lb_policy_tree/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper

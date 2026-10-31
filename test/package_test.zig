@@ -645,6 +645,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
+        "LoadBalancingNode",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
         "LeastRequestConfig",
     ));
     try std.testing.expect(@hasDecl(
@@ -665,6 +669,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc,
         "ChannelHttpConnectProxy",
+    ));
+    try std.testing.expect(@hasField(
+        @FieldType(netz.grpc.ChannelEndpoint, "tls_host"),
+        "hierarchical_path",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,

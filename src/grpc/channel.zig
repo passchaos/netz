@@ -59,7 +59,12 @@ pub const CustomConnector = struct {
     /// connector participates in `ring_hash_experimental`.
     ring_hash_key: ?[]const u8 = null,
     ring_hash_weight: u32 = 1,
+    /// grpc-core hierarchical address path. Composite policies consume one
+    /// element per level before delegating to a child policy.
+    hierarchical_path: []const []const u8 = &.{},
 };
+
+pub const max_hierarchical_path_depth: usize = 32;
 
 pub const SelectionPolicy = enum {
     pick_first,
@@ -83,6 +88,7 @@ pub const Endpoint = union(enum) {
         limits: http2.runtime.Limits = .{},
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
     },
     cleartext_host: struct {
         /// DNS name or IP literal. IPv6 accepts bare or bracketed text;
@@ -92,6 +98,7 @@ pub const Endpoint = union(enum) {
         limits: http2.runtime.Limits = .{},
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
     },
     tls_host: struct {
         /// DNS/IP certificate identity, independent of a custom resolver's
@@ -110,6 +117,7 @@ pub const Endpoint = union(enum) {
         socks5_proxy: ?Socks5Proxy = null,
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
     },
     tls_address: struct {
         address: net.IpAddress,
@@ -119,6 +127,7 @@ pub const Endpoint = union(enum) {
         tls: http2.runtime.TlsConnectOptions = .{},
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
+        hierarchical_path: []const []const u8 = &.{},
     },
     custom: CustomConnector,
 
@@ -212,6 +221,16 @@ pub const Endpoint = union(enum) {
         };
     }
 
+    pub fn hierarchicalPath(self: Endpoint) []const []const u8 {
+        return switch (self) {
+            .cleartext_ip => |target| target.hierarchical_path,
+            .cleartext_host => |target| target.hierarchical_path,
+            .tls_host => |target| target.hierarchical_path,
+            .tls_address => |target| target.hierarchical_path,
+            .custom => |target| target.hierarchical_path,
+        };
+    }
+
     fn validate(self: Endpoint) error{InvalidChannelOptions}!void {
         switch (self) {
             .cleartext_host => |target| if (target.port == 0) {
@@ -231,6 +250,13 @@ pub const Endpoint = union(enum) {
             },
             else => {},
         }
+        const path = self.hierarchicalPath();
+        if (path.len > max_hierarchical_path_depth) {
+            return error.InvalidChannelOptions;
+        }
+        for (path) |element| if (element.len == 0) {
+            return error.InvalidChannelOptions;
+        };
         const enables_push = switch (self) {
             .cleartext_ip => |target| target.limits.enable_push,
             .cleartext_host => |target| target.limits.enable_push,
@@ -429,6 +455,7 @@ const HostResolution = struct {
             limits: http2.runtime.Limits,
             ring_hash_key: ?[]const u8,
             ring_hash_weight: u32,
+            hierarchical_path: []const []const u8,
         },
         tls: struct {
             host: []const u8,
@@ -436,6 +463,7 @@ const HostResolution = struct {
             options: http2.runtime.TlsConnectOptions,
             ring_hash_key: ?[]const u8,
             ring_hash_weight: u32,
+            hierarchical_path: []const []const u8,
         },
     },
 
@@ -457,6 +485,7 @@ const HostResolution = struct {
                         .limits = value.limits,
                         .ring_hash_key = value.ring_hash_key,
                         .ring_hash_weight = value.ring_hash_weight,
+                        .hierarchical_path = value.hierarchical_path,
                     },
                 },
             },
@@ -469,6 +498,7 @@ const HostResolution = struct {
                     .options = value.tls,
                     .ring_hash_key = value.ring_hash_key,
                     .ring_hash_weight = value.ring_hash_weight,
+                    .hierarchical_path = value.hierarchical_path,
                 } },
             },
             else => return null,
@@ -508,6 +538,7 @@ const HostResolution = struct {
                 .limits = value.limits,
                 .ring_hash_key = value.ring_hash_key,
                 .ring_hash_weight = value.ring_hash_weight,
+                .hierarchical_path = value.hierarchical_path,
             } },
             .tls => |value| .{ .tls_address = .{
                 .address = address,
@@ -517,6 +548,7 @@ const HostResolution = struct {
                 .tls = value.options,
                 .ring_hash_key = value.ring_hash_key,
                 .ring_hash_weight = value.ring_hash_weight,
+                .hierarchical_path = value.hierarchical_path,
             } },
         };
     }
@@ -2206,6 +2238,52 @@ fn connectionLost(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+test "gRPC hierarchical endpoint paths validate and survive host resolution" {
+    const path = [_][]const u8{ "priority-0", "locality-a" };
+    const target: Target = .{ .cleartext_host = .{
+        .host = "hierarchy.example",
+        .port = 443,
+        .hierarchical_path = &path,
+    } };
+    try target.validate();
+    var resolution = (try HostResolution.init(
+        std.testing.allocator,
+        std.testing.io,
+        target,
+        .{},
+    )).?;
+    defer resolution.deinit(std.testing.allocator);
+    const resolved = resolution.endpoint(.{ .ip4 = .loopback(443) });
+    try std.testing.expectEqual(@as(usize, 2), resolved.hierarchicalPath().len);
+    try std.testing.expectEqualStrings(
+        "priority-0",
+        resolved.hierarchicalPath()[0],
+    );
+    try std.testing.expectEqualStrings(
+        "locality-a",
+        resolved.hierarchicalPath()[1],
+    );
+
+    try std.testing.expectError(
+        error.InvalidChannelOptions,
+        (Target{ .cleartext_host = .{
+            .host = "hierarchy.example",
+            .port = 443,
+            .hierarchical_path = &.{""},
+        } }).validate(),
+    );
+    var too_deep: [max_hierarchical_path_depth + 1][]const u8 = undefined;
+    @memset(&too_deep, "child");
+    try std.testing.expectError(
+        error.InvalidChannelOptions,
+        (Target{ .cleartext_host = .{
+            .host = "hierarchy.example",
+            .port = 443,
+            .hierarchical_path = &too_deep,
+        } }).validate(),
+    );
 }
 
 test {
