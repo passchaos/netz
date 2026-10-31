@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "gRPC ring-hash test metadata lifetime",
+  "decision": "accepted fixture ownership repair",
+  "problem": "A runtime-valued key made headerRequest return metadata pointing to a temporary array; the pre-change ReleaseFast test failed with InvalidMetadata and the canonical-inventory candidate crashed while cloning metadata.",
+  "repair": "The test helper takes a compile-time key, so its literal metadata array has static storage for the entire unary request.",
+  "regression": "The existing loopback test validates header-over-explicit-hash routing, duplicate endpoint collapse, canonical inventory count, repeated unary calls and duplex routing.",
+  "results": {
+    "debug_ring_and_mqtt_uri": "148/148 passed",
+    "release_fast_ring_constructor_and_qos2": "152/152 passed"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='MQTT URI' -Dtest-filter='gRPC SharedChannel ring hash' -Dtest-filter='gRPC SharedChannel weighted target ring hash' --summary all",
+    "zig build test-lib -Doptimize=ReleaseFast -Dtest-filter='gRPC SharedChannel ring hash' -Dtest-filter='gRPC SharedChannel weighted target ring hash' -Dtest-filter='gRPC shared channel constructor' -Dtest-filter='QoS 2 store' -Dtest-filter='broker routes inbound QoS 2' -Dtest-filter='MQTT released QoS 2' -Dtest-filter='MQTT durable QoS 2' --summary all",
+    "git diff --check"
+  ],
+  "source_sha256": {
+    "src/grpc/channel/ring_hash_tests.zig": "4f2dbb38c602444a94af27bbd31bdb02ffbc16c2959f0aca355f14ea73e54eaa",
+    "src/grpc/channel/shared/weighted_target/ring_hash_tests.zig": "043f58bfcb110d291b63cc1bb2c2c33cc5a560d48022c6789ac092db95f89ce4",
+    "docs/grpc_parity.md": "b8368c18e918e6735ca465d50ad2292846c59d0a19cd1a8fe38c59eef78ea442"
+  },
+  "remaining_scope": "Live SharedChannel configuration updates and grpc-core removed-child retention remain unimplemented; passing these tests does not establish broad gRPC parity."
+}

@@ -188,7 +188,7 @@ fn request(hash: ?u64, message: []const u8) grpc.UnaryCallOptions {
 }
 
 fn headerRequest(
-    key: []const u8,
+    comptime key: []const u8,
     ignored_explicit_hash: ?u64,
 ) grpc.UnaryCallOptions {
     return .{

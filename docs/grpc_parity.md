@@ -883,6 +883,14 @@ lifetime contract; the inventory owns the endpoint value array itself.
 Evidence is in
 `docs/evidence/grpc_shared_canonical_sources/2026-10-31.json`.
 
+The top-level ring metadata fixture now retains static header storage across
+request construction. Its earlier helper returned a slice into a temporary
+array, causing `InvalidMetadata` or a crash in ReleaseFast while Debug happened
+to pass. The corrected fixture and weighted-target ring case pass in both
+modes; the ReleaseFast bundle also covers constructor allocation failure and
+MQTT QoS 2 ownership. Evidence is in
+`docs/evidence/grpc_ring_metadata_lifetime/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper
