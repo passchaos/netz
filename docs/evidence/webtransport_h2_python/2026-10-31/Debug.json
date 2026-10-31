@@ -1,0 +1,60 @@
+{
+  "alpn": "h2",
+  "driver_sha256": "f977da3f4e80a184729d43243b435dfd19cf334a0b3969fc99c28e59784fbec6",
+  "protocol": "draft-ietf-webtrans-http2-15",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "f2d38a705a4e74e224cafa06f846fa582349e4d3432aef3da06ffd359567ae66",
+    "peer.py": "0871230ce5e0f281f92739908d9065f9bb947239d4f61e83b0f537bd081139ac",
+    "run.py": "cbce2d7b1d7cdd901e3900d3dc2d238e47d303a080d0f6dc9ca579593be4f0d2",
+    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "status": "passed",
+  "tls": "TLSv1.3",
+  "traces": [
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 4,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "server",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    },
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 4,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "client",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    }
+  ]
+}

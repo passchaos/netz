@@ -1,0 +1,41 @@
+Traceback (most recent call last):
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/run.py", line 83, in main
+    traces.append(peer.run())
+                  ^^^^^^^^^^
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/peer.py", line 267, in run
+    result = self.exchange(self.establish())
+                           ^^^^^^^^^^^^^^^^
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/peer.py", line 112, in establish
+    kind, sid, code = self.event()
+                      ^^^^^^^^^^^^
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/peer.py", line 78, in event
+    self.pump()
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/peer.py", line 53, in pump
+    raise EOFError("TLS closed before transcript completed")
+EOFError: TLS closed before transcript completed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/run.py", line 119, in <module>
+    main()
+  File "/nav_env/project-z/netz/tools/interop/webtransport_h2/run.py", line 94, in main
+    raise RuntimeError(f"Python client failed: {error}\nNetz server:\n{stdout}{stderr}") from error
+RuntimeError: Python client failed: TLS closed before transcript completed
+Netz server:
+debug(zio): Spawning thread 0
+debug(zio): Removing thread 0
+error: UnexpectedFrame
+/nav_env/project-z/netz/src/http2/runtime.zig:10216:25: 0x1a2dd33 in readExtendedConnectRequestUntil (netz-webtransport-h2-interop)
+                else => return error.UnexpectedFrame,
+                        ^
+/nav_env/project-z/netz/src/http2/runtime.zig:10103:9: 0x1a2d65f in readExtendedConnectRequestWithDeadline (netz-webtransport-h2-interop)
+        return self.readExtendedConnectRequestUntil(
+        ^
+/nav_env/project-z/netz/src/webtransport/h2/runtime.zig:326:19: 0x1a2cf97 in readRequestWithDeadline (netz-webtransport-h2-interop)
+    var request = try connection.readExtendedConnectRequestWithDeadline("webtransport", deadline);
+                  ^
+/nav_env/project-z/netz/tools/interop/webtransport_h2/driver.zig:172:27: 0x18ba5e7 in main (netz-webtransport-h2-interop)
+            var pending = try wt.runtime.readRequestWithDeadline(&connection, until);
+                          ^
+

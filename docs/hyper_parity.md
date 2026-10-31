@@ -4122,3 +4122,28 @@ public initial `Limits.webtransport` value. Ordinary SETTINGS allocate nothing,
 while a peer WebTransport setting or local quota update creates and reuses one
 owned snapshot state. Failed validation remains allocation-free and failed
 output leaves submitted/acknowledged quotas unchanged.
+
+
+## Extended CONNECT rejection and later admission
+
+A complete HTTP/2 Extended CONNECT rejection now ends its still-open request
+half with RST_STREAM(NO_ERROR), as permitted by RFC 9113 section 8.1. The
+response status, body and trailers are sent through END_STREAM before that
+reset. Reset-history capacity is reserved before response output; one original
+deadline covers the entity and final reset. Late DATA is discarded with its
+connection credit restored, and late request trailers are decoded for HPACK
+order before their fields are discarded. A later CONNECT can therefore be
+admitted on the same connection.
+
+The independent WebTransport HTTP/2 Python client reproduced the previous
+UnexpectedFrame after a 429 rejection with optimistic request DATA. Its current
+bidirectional gate checks the complete rejected entity, exact NO_ERROR reset,
+and succeeding accepted Session. An adjacent HTTP/2 regression also covers
+late DATA FIN and late HPACK trailers whose dynamic entry is referenced by the
+next CONNECT. The same rejection primitive serves RFC 8441 WebSocket and
+HTTP/2 WebTransport. Evidence is recorded in
+`docs/evidence/webtransport_h2_python/2026-10-31.json`.
+
+The focused Extended CONNECT, HTTP2 WebTransport and RFC 8441 test bundle
+passes 201/201 in Debug and ReleaseFast. The independent Python peer gate
+passes both directions in both modes.

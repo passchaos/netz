@@ -10944,7 +10944,10 @@ pub const H2Connection = struct {
 test "WebSocket RFC 8441 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingH2Write));
-        try std.testing.expectEqual(@as(usize, 1640), @sizeOf(H2Connection));
+        // OwnedTunnelData now keeps the read-ahead backing pointer introduced
+        // by HTTP/2 retained frames (a597be32), including while reads resume.
+        try std.testing.expectEqual(@sizeOf(http2_runtime.OwnedFrame) + @sizeOf(usize), @sizeOf(http2_runtime.RetainedFrame));
+        try std.testing.expectEqual(@as(usize, 1648), @sizeOf(H2Connection));
     }
 }
 

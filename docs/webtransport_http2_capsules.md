@@ -132,8 +132,9 @@ updates, reset, stop, drain, close, application protocols, accepted response
 metadata, and explicit WebTransport-Init credit. A second regression preserves
 a complete 429 response entity, proves 400 rejections for invalid CONNECT
 metadata and Init syntax, and then accepts a succeeding sibling Session.
-Independent draft-15 implementation or browser/proxy interop remains external
-evidence work; the local gate does not claim that evidence.
+The later independent Python peer gate described below adds bidirectional
+draft-15 transcript evidence. Browser/proxy protocol interop remains open;
+this original local gate does not claim that evidence.
 
 The multiplexing transport, Session adapters and background endpoints pass
 175/175 focused Debug tests; the combined endpoint ReleaseFast gate passes
@@ -197,3 +198,37 @@ accepted Sessions, server-side capacity rejection, virtual streams, DATAGRAM,
 independent CLOSE/FIN, handle generation reuse, exporters and shutdown with a
 live Session. Both client and server concurrency regressions pass three
 consecutive focused reruns.
+
+
+## Independent draft-15 Python interoperability
+
+`zig build interop-webtransport-h2-python` uses an independent Python Capsule
+codec and scripted virtual-stream peer with hyper-h2, hpack and hyperframe
+pinned by the runner. Both client/server directions use fresh CA-verified TLS
+1.3, h2 ALPN and the production zio-backed Netz APIs. Its transcript covers
+asymmetric acknowledged SETTINGS/Init credit, application protocol selection,
+DATA-fragmented Capsule integers and bodies, unknown/PADDING skips, both stream
+initiators, a write blocked by Session and stream credit, retained unrelated
+DATAGRAM, RESET Reliable Size, full 32-bit STOP/RESET, stream-count grants,
+DRAIN and Unicode CLOSE/FIN. A wrong Reliable Size must terminate only its
+CONNECT; the next accepted Session exchanges DATAGRAM on the same connection.
+
+The Python client additionally sends optimistic DATA on a rejected CONNECT and
+checks a complete 429 entity before RST_STREAM(NO_ERROR). That transcript
+exposed and guards the old next-admission UnexpectedFrame defect. The HTTP/2
+fix preserves late DATA connection credit and late trailer HPACK order while
+retiring the request half. Fixed independent byte vectors validate the Python
+codec, including the full 16-bit SETTINGS identifiers that hyperframe 6.1.0's
+outgoing serializer truncates; the peer encodes its initial extension SETTINGS
+frame directly while retaining hyper-h2's state and ACK tracking.
+
+The runner can emit a JSON transcript with exact package versions and
+binary/source SHA-256 digests through `--report`. Scope and reproduction are in
+`tools/interop/webtransport_h2/README.md`; verified results are in
+`docs/evidence/webtransport_h2_python/2026-10-31.json`. This closes the missing
+independent scripted HTTP/2 protocol gate. Broader draft conformance and
+browser deployment coverage remain separate completion requirements.
+
+The focused Extended CONNECT, HTTP2 WebTransport and RFC 8441 test bundle
+passes 201/201 in Debug and ReleaseFast. The independent Python peer gate
+passes both directions in both modes.

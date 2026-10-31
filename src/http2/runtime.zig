@@ -10307,8 +10307,9 @@ pub const Connection = struct {
     }
 
     /// Reject an Extended CONNECT request with an ordinary HTTP response
-    /// entity. The stream ends after DATA or trailers while the parent HTTP/2
-    /// connection remains available for sibling requests.
+    /// entity. After response DATA/trailers FIN, NO_ERROR stops the open
+    /// request direction. Late DATA/trailers retain connection credit and
+    /// HPACK ordering while sibling requests remain available.
     pub fn rejectExtendedConnectWithBody(
         self: *Connection,
         stream_id: u31,
@@ -10360,6 +10361,11 @@ pub const Connection = struct {
         if (status < 300 or statusIsInformational(status)) {
             return error.InvalidStatus;
         }
+        // RFC 9113 section 8.1 permits NO_ERROR after a complete response to
+        // stop an unfinished request. CONNECT has an open request direction;
+        // preflight reset history before exposing any response bytes so late
+        // DATA/trailers keep their connection-credit and HPACK obligations.
+        try self.prepareLocallyResetStreams(1);
         try self.writeResponseInternalUntil(stream_id, .{
             .status = status,
             .headers = response_headers,
@@ -10368,6 +10374,8 @@ pub const Connection = struct {
             .request_method = "CONNECT",
             .extended_connect = true,
         }, true, deadline);
+        try self.writeResetStreamFrameUntil(stream_id, .no_error, deadline);
+        self.forgetStreamWindows(stream_id);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -40334,6 +40342,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/connect/rejection_tests.zig");
     _ = @import("runtime/frame/retention_tests.zig");
     _ = @import("runtime/headers/limit_reuse_tests.zig");
     _ = @import("runtime/headers/reset_deadline_tests.zig");

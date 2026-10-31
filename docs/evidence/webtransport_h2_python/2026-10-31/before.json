@@ -1,0 +1,9 @@
+{
+  "expected_status": "failed",
+  "exit_code": 1,
+  "error": "UnexpectedFrame",
+  "baseline_commit": "fa5d956d",
+  "baseline_driver_sha256": "83a9adcf9a01e60950107e4034f9559ea2933c51a44f59a807f80c9b7ec308b8",
+  "log": "before.log",
+  "trigger": "complete 429 response followed by optimistic CONNECT request DATA and later Session admission"
+}

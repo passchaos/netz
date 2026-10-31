@@ -1662,6 +1662,8 @@ pub fn build(b: *std.Build) void {
     );
     test_step.dependOn(&websocket_socks5_redirect.step);
 
+    @import("tools/interop/webtransport_h2/build.zig").add(b, target, optimize, netz_mod, test_step);
+
     const http_socks5_client = b.addExecutable(.{
         .name = "netz-http-socks5-client",
         .root_module = b.createModule(.{

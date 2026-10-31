@@ -1941,9 +1941,19 @@ and resumable deadline-owned output. Authenticated loopback regressions cover
 the complete exchange and prove malformed request streams do not poison a
 healthy sibling Session.
 
-HTTP/2 still lacks an independent draft-15 implementation or browser/proxy
-interop gate comparable to the HTTP/3 Chrome, Firefox, Safari, and wtransport
-matrix. The HTTP/2 connection now exposes
+HTTP/2 now has an independent scripted draft-15 Python peer through
+`interop-webtransport-h2-python`, described in
+`tools/interop/webtransport_h2/README.md`. Its bidirectional TLS/h2 transcript
+checks exact SETTINGS and Init limits, protocol selection, fragmented Capsules,
+both virtual-stream initiators, blocked-write credit grants, DATAGRAM,
+RESET Reliable Size, the full 32-bit STOP code, DRAIN and Unicode CLOSE/FIN.
+A malformed RESET must remain scoped to its CONNECT, with a succeeding Session
+on the same connection. This gate also exposed and now guards rejected CONNECT
+request DATA interfering with later admission: a complete rejection now ends
+the request direction with RFC 9113's NO_ERROR reset, while late DATA/trailers
+retain connection credit and HPACK ordering. Browser/proxy draft-15 protocol
+coverage comparable to the HTTP/3 matrix remains open.
+The HTTP/2 connection now exposes
 `startExtendedConnectDuplexWith{Timeout,Deadline}` as the transport foundation
 for a pooled endpoint: multiple CONNECT request/response halves register with
 the existing single-owner duplex router, retain out-of-order HPACK and DATA by
@@ -2054,10 +2064,11 @@ requires the direct HTTP/2 API to negotiate TLS 1.3/h2 through a domain-form
 SOCKS request. Evidence is recorded in
 `docs/evidence/http2_socks5_proxy/2026-10-31.json`.
 
-Independent draft-15 browser protocol interop remains open; the local
-reference set still has no second WebTransport-over-HTTP2 implementation. The
-proxy transport layer is independently covered, but the Capsule/virtual-stream
-state machine remains cross-checked by Netz peers.
+Independent draft-15 browser protocol interop remains open. The new Python
+peer independently checks the named Capsule/virtual-stream transcript in both
+directions; the local reference libraries still provide HTTP/3 WebTransport.
+The separate proxy gates cover transport composition. Broad HTTP/2 draft
+conformance remains unproven by those focused checks.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and

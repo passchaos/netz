@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-31",
+  "feature": "HTTP2 Extended CONNECT rejection lifecycle and independent WebTransport draft-15 interoperability",
+  "validated_base_commit": "fa5d956d1e87f8bd817e4aa9ebd1a281afee40c0",
+  "specifications": {
+    "http2": {
+      "name": "RFC 9113 section 8.1",
+      "sha256": "a00ef91b64e111a282e77ec66980f5242e77c0bb5e33e0927e3b6757080506de"
+    },
+    "webtransport": {
+      "name": "draft-ietf-webtrans-http2-15",
+      "sha256": "39c3b0a5845b492255fdaa0214f06c9537ffd9434e98337737fde5332d9e3e42"
+    }
+  },
+  "source_sha256": {
+    "build.zig": "ac024817f295bfce359d4b15b0f5efadc499047d3fddb3aff13644edb7f90d9d",
+    "src/http2/runtime.zig": "2be37682c326d6ee7c9857a260d45b2c386bb0ef975434a5c052d614820069cd",
+    "src/http2/runtime/connect/rejection_tests.zig": "5871b24d12b384b348319e3b3586f72a1a3c78600161145257d3966e196a50a8",
+    "src/websocket/runtime.zig": "d86e4ad43d794eb818559116c19d663618757bddc74cbf24d1a765fb86228d0f",
+    "tools/interop/webtransport_h2/build.zig": "1ad5e44009630aabf0914da498919a45c962420fd153f26a2e0fdaa5eed3df8b",
+    "tools/interop/webtransport_h2/driver.zig": "f2d38a705a4e74e224cafa06f846fa582349e4d3432aef3da06ffd359567ae66",
+    "tools/interop/webtransport_h2/peer.py": "0871230ce5e0f281f92739908d9065f9bb947239d4f61e83b0f537bd081139ac",
+    "tools/interop/webtransport_h2/run.py": "cbce2d7b1d7cdd901e3900d3dc2d238e47d303a080d0f6dc9ca579593be4f0d2",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "interoperability_reports": {
+    "Debug": "2026-10-31/Debug.json",
+    "ReleaseFast": "2026-10-31/ReleaseFast.json"
+  },
+  "unfixed_counterexample": "2026-10-31/before.json",
+  "scope": {
+    "directions": 2,
+    "tls": "TLSv1.3",
+    "alpn": "h2",
+    "connect_requests_per_direction": 4,
+    "virtual_streams_per_healthy_session": 4,
+    "broad_browser_or_complete_draft_conformance": false
+  },
+  "layout_guard": {
+    "H2Connection_bytes": 1648,
+    "PendingH2Write_bytes": 296,
+    "retained_frame_extra_bytes": 8,
+    "prior_retained_frame_commit": "a597be32"
+  },
+  "verification": {
+    "Debug": {
+      "tests_passed": 201,
+      "tests_total": 201,
+      "isolated_from_unrelated_edits": true
+    },
+    "ReleaseFast": {
+      "tests_passed": 201,
+      "tests_total": 201,
+      "isolated_from_unrelated_edits": true
+    }
+  },
+  "test_command": "zig build test-lib -Dtest-filter='HTTP/2 Extended CONNECT' -Dtest-filter='WebTransport HTTP2' -Dtest-filter='WebSocket RFC 8441' --summary all",
+  "assertion_disabled_mode": "gate refuses Python optimization",
+  "limitations": [
+    "The independent peer implements the tested transcript; broader draft conformance and browser deployment matrices remain open."
+  ],
+  "status": "verified"
+}
