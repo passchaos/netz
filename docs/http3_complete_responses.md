@@ -37,6 +37,24 @@ and `src/http3/runtime/send/complete_trailers.zig` shares trailer submission
 between native client and server owners. Explicit streaming and dispatcher
 one-packet APIs retain their separate contracts.
 
+## Aggregate server push timeout scoping
+
+The deadline-bounded aggregate push APIs preflight both the parent and pushed
+responses and reserve parent cancellation storage before either head becomes
+visible. A timeout after the heads are visible now resets only the push stream
+or the parent request that failed, preserves the connection and any completed
+sibling response, and returns the original error. A peer push cancellation
+still completes the parent response before returning `RequestCancelled`.
+`tryResetStream` retires the server-initiated push send side without requiring
+a receive half that HTTP/3 never opens. The non-paced one-packet push API and
+the protected server retain their separate contracts.
+
+A regression blocks the push body on flow control, advances the server's awake
+clock past the original deadline, and requires both the push and parent
+streams to reset while the connection stays open and a later request on the
+same connection completes. Evidence is recorded in
+`docs/evidence/http3_push_timeout/2026-11-01.json`.
+
 ## Evidence
 
 The local Rust h3 server reference at

@@ -1,0 +1,45 @@
+{
+  "base_commit": "809ad153",
+  "boundaries": [
+    "The non-paced one-packet aggregate push API and the protected server retain their separate send contracts.",
+    "Aggregate push still sends the pushed response before the parent body, preserving the existing push-first reader expectation.",
+    "A peer push cancellation still completes the parent response before returning RequestCancelled."
+  ],
+  "commands": [
+    "zig build test-lib -Dtest-filter=HTTP/3 -Dtest-filter=HTTP3 --summary all",
+    "zig build test-lib -Dtest-filter=HTTP/3 -Dtest-filter=HTTP3 -Doptimize=ReleaseFast --summary all",
+    "zig build test-lib --summary all",
+    "zig build test-package --summary all"
+  ],
+  "date": "2026-11-01",
+  "feature": "Aggregate HTTP/3 server push timeout retires only its streams",
+  "regression": {
+    "connection_survives": true,
+    "deadline": "The original awake-clock deadline is not renewed by packet or flow-control progress.",
+    "parent_reset_code": "H3_INTERNAL_ERROR",
+    "push_body_bytes": 1048576,
+    "push_reset_code": "H3_REQUEST_CANCELLED",
+    "sibling_after_timeout": "A later request on the same connection receives 204.",
+    "timeout_phase": "Push DATA after the parent and push heads are visible"
+  },
+  "source_sha256": {
+    "src/http3/runtime.zig": "2d2f265fe8f4dd0a743f59c184f856940777c3aa4c90e6859d687b2860374bf9",
+    "src/http3/runtime/stream/push/tests/send.zig": "f1baa8505ab21fe0448f6d6eca9f1297c495a564688f57654f92cb75037fdef6"
+  },
+  "status": "verified",
+  "verification": {
+    "Debug": {
+      "full_suite_log": "2026-11-01/tests.Full.Debug.log",
+      "full_suite_tests_passed": 6144,
+      "full_suite_tests_total": 6144,
+      "test_log": "2026-11-01/tests.Debug.log",
+      "tests_passed": 999,
+      "tests_total": 999
+    },
+    "ReleaseFast": {
+      "test_log": "2026-11-01/tests.ReleaseFast.log",
+      "tests_passed": 999,
+      "tests_total": 999
+    }
+  }
+}

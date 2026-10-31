@@ -8877,9 +8877,11 @@ pub const HandshakeServerSession = struct {
         );
     }
 
-    /// Deadline-bounded aggregate server push. Once either response head is
-    /// visible, non-cancellation failures close the connection because this
-    /// convenience API does not expose separate parent/push byte cursors.
+    /// Deadline-bounded aggregate server push. A timeout after the heads are
+    /// visible resets only the affected push or parent stream, preserves the
+    /// connection and any completed sibling response, and returns the original
+    /// error. A peer push cancellation still returns RequestCancelled after the
+    /// parent response completes.
     pub fn sendResponseWithPushPacedAndDeadline(
         self: *HandshakeServerSession,
         request_stream_id: u62,
@@ -8908,6 +8910,10 @@ pub const HandshakeServerSession = struct {
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
         }
+        const allocator = self.established.connection.endpoint.allocator;
+        // Reserve parent-response cancellation storage before either response
+        // becomes visible, so a later timeout can retire only that stream.
+        try self.pending_response_cancellations.ensureUnusedCapacity(allocator, 1);
         const push_stream_id = self.next_push_stream_id;
         if (deadline) |absolute| {
             try sendConnectionSettingsWithDeadline(
@@ -8990,10 +8996,9 @@ pub const HandshakeServerSession = struct {
         prepared_push.response = prepared_push_response.value;
 
         var heads_committed = false;
-        var clean_push_cancellation = false;
-        errdefer if (heads_committed and
-            !clean_push_cancellation)
-        {
+        var push_scoped = false;
+        var parent_scoped = false;
+        errdefer if (heads_committed and !push_scoped and !parent_scoped) {
             self.established.connection.failClosedApplication(
                 http3.ApplicationErrorCode.internal_error,
                 "partial-http3-push",
@@ -9059,44 +9064,60 @@ pub const HandshakeServerSession = struct {
         self.next_push_stream_id = next_push_stream_id;
 
         var push_cancelled = false;
+        var push_timeout: ?ReceiveTimeoutError = null;
         if (self.outbound_bodies.find(push_stream_id) != null) {
             if (prepared_push.response.body.len != 0) {
-                push_cancelled = try self.sendPushBodyPacedUntil(
+                push_cancelled = self.sendPushBodyPacedUntil(
                     push.push_id,
                     push_stream_id,
                     prepared_push.response.body,
                     prepared_push.response.trailers.len == 0,
                     deadline,
-                );
+                ) catch |err| blk: {
+                    if (err != error.Timeout or
+                        !self.tryAbandonPush(push.push_id, push_stream_id))
+                    {
+                        return err;
+                    }
+                    push_scoped = true;
+                    push_timeout = err;
+                    break :blk true;
+                };
             }
             if (!push_cancelled and prepared_push.response.trailers.len != 0) {
-                push_cancelled = try self.finishPushTrailersPacedUntil(
+                push_cancelled = self.finishPushTrailersPacedUntil(
                     push.push_id,
                     push_stream_id,
                     prepared_push.response.trailers,
                     deadline,
-                );
+                ) catch |err| blk: {
+                    if (err != error.Timeout or
+                        !self.tryAbandonPush(push.push_id, push_stream_id))
+                    {
+                        return err;
+                    }
+                    push_scoped = true;
+                    push_timeout = err;
+                    break :blk true;
+                };
             }
         } else {
             _ = try self.established.connection
                 .requestCompletedLocalStreamRelease(push_stream_id);
         }
+        if (push_cancelled) push_scoped = true;
         if (self.outbound_bodies.find(request_stream_id) != null) {
-            if (prepared_response.value.body.len != 0) {
-                try self.sendResponseBodyPacedUntil(
-                    request_stream_id,
-                    prepared_response.value.body,
-                    prepared_response.value.trailers.len == 0,
-                    deadline,
-                );
-            }
-            if (prepared_response.value.trailers.len != 0) {
-                try self.finishResponseTrailersPacedUntil(
-                    request_stream_id,
-                    prepared_response.value.trailers,
-                    deadline,
-                );
-            }
+            self.sendParentResponsePacedUntil(
+                request_stream_id,
+                prepared_response.value,
+                deadline,
+            ) catch |err| {
+                // The parent HEAD is already visible. Retire only this request;
+                // the push is already complete or scoped above.
+                self.abandonCompleteResponse(request_stream_id);
+                parent_scoped = true;
+                return err;
+            };
         } else {
             finishServerRequest(
                 &self.control,
@@ -9108,11 +9129,57 @@ pub const HandshakeServerSession = struct {
             self.established.connection.endpoint.allocator,
             push.push_id,
         );
-        if (push_cancelled) {
-            clean_push_cancellation = true;
-            return error.RequestCancelled;
-        }
+        if (push_timeout) |err| return err;
+        if (push_cancelled) return error.RequestCancelled;
         return push_stream_id;
+    }
+
+    fn sendParentResponsePacedUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (response.body.len != 0) {
+            try self.sendResponseBodyPacedUntil(
+                stream_id,
+                response.body,
+                response.trailers.len == 0,
+                deadline,
+            );
+        }
+        if (response.trailers.len != 0) {
+            try self.finishResponseTrailersPacedUntil(
+                stream_id,
+                response.trailers,
+                deadline,
+            );
+        }
+    }
+
+    fn tryAbandonPush(
+        self: *HandshakeServerSession,
+        push_id: u64,
+        push_stream_id: u62,
+    ) bool {
+        const application_error_code =
+            if (self.established.connection.streamStopped(push_stream_id)) |stopped|
+                stopped.application_error_code
+            else
+                http3.ApplicationErrorCode.request_cancelled;
+        self.established.connection.tryResetStream(
+            push_stream_id,
+            application_error_code,
+        ) catch return false;
+        _ = self.outbound_bodies.finish(push_stream_id);
+        _ = self.established.connection.requestCompletedLocalStreamRelease(
+            push_stream_id,
+        ) catch false;
+        self.control.retirePushPriority(
+            self.established.connection.endpoint.allocator,
+            push_id,
+        );
+        return true;
     }
 
     fn sendPushBodyPacedUntil(

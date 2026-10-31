@@ -4244,7 +4244,14 @@ The [complete response gate](http3_complete_responses.md) checks exact large
 informational/final/trailing fields, body bytes, scoped timeout cleanup, deferred
 cancellation and sibling reuse. The independent quic-go digest transcript checks
 5-KiB field values in both directions and QUIC versions. Debug and ReleaseFast
-HTTP/3 regression gates each pass 998/998, the full Debug library suite passes
-6143/6143, public-package checks pass 26/26, and each independent quic-go gate
+HTTP/3 regression gates each pass 999/999, the full Debug library suite passes
+6144/6144, public-package checks pass 26/26, and each independent quic-go gate
 completes 36 requests. Detailed verification is recorded in
 `docs/evidence/http3_complete_responses/2026-11-01.json`.
+
+Aggregate paced server push now shares the same scoped cleanup: a timeout after
+the heads resets only the affected push or parent stream, preserves the
+connection and any completed sibling response, and returns the original error.
+The non-paced one-packet and protected push paths retain their separate
+contracts. The push regression is recorded in
+`docs/evidence/http3_push_timeout/2026-11-01.json`.

@@ -716,3 +716,236 @@ test "HTTP/3 handshake paced push stops after client cancellation" {
     try std.testing.expect(shared.cancelled);
     try std.testing.expect(shared.pushed_bytes < body_len);
 }
+
+test "HTTP/3 handshake paced push timeout retires only its streams" {
+    const allocator = std.testing.allocator;
+    const body_len: usize = 1024 * 1024;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac };
+    const client_cid = [_]u8{ 0xad, 0xae, 0xaf, 0xb0 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.initial_max_data = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
+    server_transport.initial_max_stream_data_uni = 16 * 1024;
+    var client_transport = quic.practical_transport_parameters;
+    client_transport.initial_max_data = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
+    client_transport.initial_max_stream_data_uni = 16 * 1024;
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .local_transport_parameters = server_transport,
+                .initial_one_rtt_config = .{ .max_datagram_size = 1200 },
+                .random = [_]u8{0xb5} ** 32,
+                .x25519_secret_key = [_]u8{0xb6} ** 32,
+            },
+            .session = .{
+                .max_stream_buffer = 512,
+                .max_stream_frame_data = 480,
+                .paced_body_chunk_bytes = 400,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const AdvanceIo = struct {
+        delegate: std.Io,
+        base_ns: i96 = 1_000_000,
+        advance: *std.atomic.Value(bool),
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            const advanced = self.advance.load(.acquire);
+            const offset: i96 = if (advanced)
+                10 * std.time.ns_per_s
+            else
+                0;
+            return .fromNanoseconds(self.base_ns + offset);
+        }
+    };
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        advance: *std.atomic.Value(bool),
+        err: ?anyerror = null,
+        push_reset: ?u64 = null,
+        parent_reset: ?u64 = null,
+        sibling_status: u16 = 0,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var session = try shared.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            while (session.control.peer_max_push_id != 0) {
+                try session.pollControlWithTimeout(.fromSeconds(2));
+            }
+            const body = try allocator.alloc(u8, body_len);
+            defer allocator.free(body);
+            @memset(body, 0x5a);
+            var timed = AdvanceIo{
+                .delegate = session.established.connection.endpoint.io,
+                .advance = shared.advance,
+            };
+            var timed_vtable = timed.delegate.vtable.*;
+            timed_vtable.now = AdvanceIo.now;
+            session.established.connection.endpoint.io = .{
+                .userdata = &timed,
+                .vtable = &timed_vtable,
+            };
+            defer session.established.connection.endpoint.io = timed.delegate;
+            const result = session.sendResponseWithPushPacedAndTimeout(
+                request.stream_id,
+                .{ .status = 200, .body = "parent" },
+                .{
+                    .push_id = 0,
+                    .request = .{
+                        .method = "GET",
+                        .path = "/timeout-push.bin",
+                        .authority = "localhost",
+                    },
+                    .response = .{ .status = 200, .body = body },
+                },
+                .fromSeconds(5),
+            );
+            try std.testing.expectError(error.Timeout, result);
+            try std.testing.expect(!session.established.connection.closed());
+            const push_stats = session.established.connection.sendStreamStats(
+                first_server_push_stream_id,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(push_stats.reset != null);
+            shared.push_reset = push_stats.reset.?.application_error_code;
+            const parent_stats = session.established.connection.sendStreamStats(
+                request.stream_id,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(parent_stats.reset != null);
+            shared.parent_reset = parent_stats.reset.?.application_error_code;
+            try std.testing.expect(
+                session.outbound_bodies.find(first_server_push_stream_id) == null,
+            );
+            try std.testing.expect(!session.request_lifecycle.contains(
+                request.stream_id,
+            ));
+            session.established.connection.endpoint.io = timed.delegate;
+            var sibling = try session.receiveRequestWithTimeout(.fromSeconds(5));
+            defer sibling.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            shared.sibling_status = 204;
+            try session.sendResponse(sibling.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var advance = std.atomic.Value(bool).init(false);
+    var shared = Shared{ .server = &server, .advance = &advance };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .local_transport_parameters = client_transport,
+                .initial_one_rtt_config = .{ .max_datagram_size = 1200 },
+                .random = [_]u8{0xb7} ** 32,
+                .x25519_secret_key = [_]u8{0xb8} ** 32,
+            },
+            .session = .{
+                .max_stream_buffer = 128 * 1024,
+                .max_stream_frame_data = 480,
+            },
+        },
+    );
+    defer client.deinit();
+
+    try client.sendMaxPushId(0);
+    const request_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/",
+        .authority = "localhost",
+    });
+    var promise = while (true) {
+        if (try client.receiveResponseEventWithTimeout(
+            request_stream_id,
+            .fromSeconds(5),
+        )) |event| break event;
+    };
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
+
+    advance.store(true, .release);
+    try client.established.connection.trySend(&.{.{ .ping = {} }});
+    const sibling_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    var saw_sibling = false;
+    while (!saw_sibling) {
+        const event = (try client.receiveResponseEventWithTimeout(
+            sibling_stream_id,
+            .fromSeconds(5),
+        )) orelse continue;
+        var owned = event;
+        defer owned.deinit(allocator);
+        switch (owned) {
+            .head => |head| {
+                try std.testing.expect(head == .response);
+                try std.testing.expectEqual(@as(u16, 204), head.response.status);
+                saw_sibling = true;
+            },
+            .finished => {},
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.request_cancelled),
+        shared.push_reset.?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.internal_error),
+        shared.parent_reset.?,
+    );
+    try std.testing.expectEqual(@as(u16, 204), shared.sibling_status);
+}
