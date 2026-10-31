@@ -478,11 +478,29 @@ pub const Store = struct {
         publisher_id: router.SubscriberId,
         packet_id: u16,
     ) ?Pending {
-        const removed = self.entries.fetchRemove(.{
+        var pending: Pending = undefined;
+        if (!self.takeInto(publisher_id, packet_id, &pending)) return null;
+        return pending;
+    }
+
+    /// Remove one transaction directly into caller-owned final storage.
+    /// `fetchRemove` returns a full key/value aggregate and large `Pending`
+    /// values can then cross multiple optional/result return slots. The broker
+    /// already has stable stack storage for the transaction, so copy it once
+    /// from the table before tombstoning that exact entry.
+    pub fn takeInto(
+        self: *Store,
+        publisher_id: router.SubscriberId,
+        packet_id: u16,
+        out: *Pending,
+    ) bool {
+        const entry = self.entries.getEntry(.{
             .publisher_id = publisher_id,
             .packet_id = packet_id,
-        }) orelse return null;
-        return removed.value;
+        }) orelse return false;
+        out.* = entry.value_ptr.*;
+        self.entries.removeByPtr(entry.key_ptr);
+        return true;
     }
 
     pub fn recycle(self: *Store, pending: *Pending) void {

@@ -6338,10 +6338,12 @@ pub const Broker = struct {
         const persistent_publisher = self.publisherIsPersistentLocked(
             durable_publisher_id,
         );
-        var pending = self.pending_qos2.take(
+        var pending: qos2_mod.Pending = undefined;
+        if (!self.pending_qos2.takeInto(
             durable_publisher_id,
             ack.packet_id,
-        ) orelse {
+            &pending,
+        )) {
             self.state_mutex.unlock(self.io);
             self.persistence_mutex.unlock(self.io);
             persistence_locked = false;
@@ -6358,7 +6360,7 @@ pub const Broker = struct {
             // Connection and cannot be reconstructed from a PUBREL flag.
             try publisher.writePubComp(ack.packet_id, 0);
             return;
-        };
+        }
         var persistent_changed = persistent_publisher;
         self.state_mutex.unlock(self.io);
         var pending_owned = true;
