@@ -753,22 +753,22 @@ Evidence is recorded in
 
 The single-owner Channel now executes the first weighted-target runtime subset
 for static resolved endpoints: arbitrary nested weighted targets with
-`pick_first`, `round_robin` and `least_request_experimental` leaves. Unlike
-SharedChannel it has no background endpoint owners, so each RPC performs
-bounded composite warming before the pick. Every reachable child is established
-within the caller's absolute deadline, while each blackholed child is capped by
-the configured connection attempt delay instead of consuming the whole RPC
-budget. Selection then uses only READY children and delegates to child-local
-picker state.
+`pick_first`, `round_robin`, `least_request_experimental` and
+`ring_hash_experimental` leaves. Unlike SharedChannel it has no background
+endpoint owners, so each RPC performs bounded composite warming before the
+pick. Every reachable child is established within the caller's absolute
+deadline, while each blackholed child is capped by the configured connection
+attempt delay instead of consuming the whole RPC budget. Selection then uses
+only READY children and delegates to child-local picker state.
 
 The runtime deep-copies every target path element; applications may destroy the
 ServiceConfig immediately after Channel initialization. A real three-server
 test does so, then proves nested 1:3 parent weighting and exact alternation
 below the low-weight child across 400 RPCs. Another keeps all traffic on a
 weight-1 healthy child while a weight-100 sibling remains unavailable. Runtime
-construction passes every induced allocation failure. Ring-hash, WRR and
-outlier leaves remain explicit ordinary-Channel initialization errors, so broad
-support still belongs to SharedChannel. Evidence is recorded in
+construction passes every induced allocation failure. WRR and outlier leaves
+remain explicit ordinary-Channel initialization errors, so broad support still
+belongs to SharedChannel. Evidence is recorded in
 `docs/evidence/grpc_ordinary_weighted_target_core/2026-10-31.json`.
 
 The ordinary least-request leaf keeps its configured `choiceCount`, samples
@@ -787,6 +787,32 @@ ServiceConfig immediately after initialization and completes 200 RPCs through
 the least-request child, with both READY endpoints remaining reachable after
 each sequential completion returns its count. Evidence is in
 `docs/evidence/grpc_ordinary_weighted_target_least_request/2026-10-31.json`.
+
+The ordinary runtime now also owns child-local `ring_hash_experimental`
+leaves. Every leaf deep-copies its optional request-hash header and builds an
+independent capped grpc-core ketama ring from only its hierarchical endpoint
+set. Exact duplicate identities collapse into one logical ring owner while
+their weights are summed; a READY duplicate may serve the logical identity
+when its first slot is in backoff. Replacement address sets rebuild the rings
+transactionally before later picks.
+
+Unary, sequential-streaming and duplex call descriptions pass their explicit
+request hash and metadata into the composite picker. The weighted parent first
+chooses a READY child; only then does that leaf apply its own
+header-over-explicit precedence, so sibling ring policies cannot reinterpret
+the request.
+An absent configured header uses grpc-core's random fallback. An explicit hash
+sticks to an eligible connection attempt, walks clockwise past failed/backoff
+identities, and never escapes into another target path.
+
+A deterministic ring test merges weights 1 and 2 for duplicate `a`, preserves
+`b` at weight 1, excludes a weight-100 `a` from another target and obtains the
+exact 9:3 virtual-node split. A real two-server plus failed-primary test proves
+exact `a_0`/`b_0` unary routing, header precedence over the opposite explicit
+hash, random missing-header fallback, clockwise recovery from `c_0`, duplex
+routing and ServiceConfig destruction immediately after Channel init. Evidence
+is in
+`docs/evidence/grpc_ordinary_weighted_target_ring_hash/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

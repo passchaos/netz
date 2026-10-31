@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "ring-hash child policy inside ordinary Channel weighted_target",
+  "decision": "accepted bounded single-owner runtime support",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "ring_hash_experimental",
+    "targets": "static resolved endpoints",
+    "rpc_shapes": [
+      "unary",
+      "sequential streaming",
+      "duplex"
+    ]
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "contracts": [
+      "weighted_target chooses only READY children before delegating the request to a child picker",
+      "each ring child interprets metadata and explicit request hash with its own config",
+      "exact duplicate endpoint identities collapse and contribute summed weight",
+      "explicit hashes stick to pending primaries but advance clockwise past failed primaries",
+      "a missing configured header uses a random fallback hash"
+    ]
+  },
+  "implementation": {
+    "ownership": "each leaf deep-copies requestHashHeader and independently owns its capped ketama ring",
+    "membership": "ring construction includes only slots under the leaf hierarchical prefix",
+    "deduplication": "exact identities share one logical ring index and saturating-sum their weights",
+    "duplicate_readiness": "any reusable duplicate can serve its logical identity when the representative is in backoff",
+    "request_input": "ordinary unary and stream descriptions pass borrowed metadata plus explicit hash into the synchronous picker",
+    "selection_order": "the weighted parent selects a READY child before that leaf resolves its request hash",
+    "fallback": "backoff, disabled, or failed logical identities advance clockwise while an eligible pending primary remains sticky",
+    "reconciliation": "replacement address sets rebuild all child rings transactionally before publication"
+  },
+  "native_cases": [
+    "duplicate a weights 1 and 2 plus b weight 1 produce an exact 9:3 virtual-node split on a 12-entry ring",
+    "a weight-100 endpoint under another target contributes zero entries",
+    "a READY duplicate serves a while its first identical slot remains in backoff",
+    "header a_0 and b_0 route to exact real h2c backends even when the explicit hash names the opposite backend",
+    "header c_0 advances from a failed primary to a healthy clockwise successor",
+    "missing x-shard metadata uses random fallback and still reaches a READY child endpoint",
+    "duplex metadata selects b and completes one message plus OK terminal",
+    "ServiceConfig is destroyed immediately after Channel initialization",
+    "ring header and recursive runtime construction pass every induced allocation failure"
+  ],
+  "negative_boundary": {
+    "unsupported_leaves": [
+      "weighted_round_robin",
+      "outlier_detection_experimental"
+    ],
+    "hostname_targets": "ordinary weighted-target remains limited to static resolved endpoints",
+    "dynamic_child_retention": false,
+    "silent_fallback": false
+  },
+  "results": {
+    "ordinary_ring_hash_network": "143/143 passed",
+    "logical_ring_unit": "137/137 passed",
+    "ordinary_weighted_target": "146/146 passed",
+    "runtime_allocation_sweep": "137/137 passed",
+    "complete_grpc_debug": "499/499 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/weighted_target.zig": "286f2d6e6df09c9b67d4a9f801c5d4d79ebc4e9a15c5aedda55f45619ed00d83",
+    "src/grpc/channel/weighted_target/ring_hash.zig": "ea0ce8050430ec61c079c9a3cc3ba0fcaf829c039eb9ed0975cb2eba4ae3bae9",
+    "src/grpc/channel/weighted_target_tests.zig": "addb6b169cd9f041d8fe2a8fe4f4a7c05427c4ee9f7d6991495f1ba73457d54f",
+    "src/grpc/channel.zig": "99441a0c47d0ebd3e3a030af6fa56b437bdaf550cd3c1c1955525100c105db6a",
+    "src/grpc/service_config/weighted_target_tests.zig": "a7c734c9d33a211629bf7aad9d13a108289a92b52b1a79960fd08e2293fd902e",
+    "src/grpc/channel/ring_hash.zig": "82d5d7379e00869d212e4640a4ed71d9071e857e545914c5289de71f19d48da5",
+    "docs/grpc_parity.md": "09e1e3451e397ba96b224706f560645e0da4b3ac34f0c1448ea1ecc06efc4ef4"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='ordinary weighted target ring hash collapses child endpoints' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target ring hash' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target' --summary all",
+    "zig build test-lib -Dtest-filter='ordinary weighted target runtime deep copy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "ordinary WRR, outlier, hostname runtime support and dynamic service-config child retention remain before broad parity"
+}

@@ -5,8 +5,32 @@
 //! deep-copied so the caller may destroy ServiceConfig immediately after
 //! Channel init.
 const std = @import("std");
+const http2 = @import("../../http2/mod.zig");
 const least_request = @import("least_request.zig");
+const ring_hash = @import("ring_hash.zig");
+const ring_support = @import("weighted_target/ring_hash.zig");
 const service_config = @import("../service_config.zig");
+
+pub const RequestInput = struct {
+    request_hash: ?u64 = null,
+    metadata: []const http2.Hpack.HeaderField = &.{},
+    random_if_missing: bool = false,
+
+    pub fn resolveHash(
+        self: RequestInput,
+        io: std.Io,
+        config: ring_hash.Config,
+    ) error{MissingRequestHash}!ring_hash.RequestHash {
+        if (self.random_if_missing and config.request_hash_header == null and
+            self.request_hash == null)
+        {
+            var random: u64 = undefined;
+            io.random(std.mem.asBytes(&random));
+            return .{ .value = random, .random = true };
+        }
+        return ring_hash.requestHash(io, config, self);
+    }
+};
 
 pub fn Runtime(comptime Slot: type) type {
     return struct {
@@ -25,8 +49,11 @@ pub fn Runtime(comptime Slot: type) type {
         };
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin, least_request },
+            policy: enum { pick_first, round_robin, least_request, ring_hash },
             least_request_config: least_request.Config = .{},
+            ring_hash_config: ring_hash.Config = .{},
+            ring_hash_header: ?[]u8 = null,
+            ring: ring_hash.Ring = .{},
             selected: ?usize = null,
             next_pick: usize = 0,
         };
@@ -58,21 +85,27 @@ pub fn Runtime(comptime Slot: type) type {
             self.* = undefined;
         }
 
-        pub fn pick(self: *Self, slots: []Slot, io: std.Io) ?usize {
-            return self.pickNode(self.root, slots, io);
+        pub fn pick(
+            self: *Self,
+            slots: []Slot,
+            io: std.Io,
+            input: RequestInput,
+        ) error{MissingRequestHash}!?usize {
+            return self.pickNode(self.root, slots, io, input);
         }
 
         pub fn hasReady(self: *Self, slots: []Slot) bool {
             return self.aggregate(self.root, slots) == .ready;
         }
 
-        pub fn configureSlots(self: *Self, slots: []Slot) void {
+        pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
             for (slots) |*slot| {
                 slot.least_request_enabled = self.pathUsesLeastRequest(
                     self.root,
                     slot.endpoint.hierarchicalPath(),
                 );
             }
+            try self.rebuildRings(self.root, slots);
         }
 
         fn build(
@@ -84,6 +117,10 @@ pub fn Runtime(comptime Slot: type) type {
                 .pick_first => self.buildLeaf(path, .pick_first),
                 .round_robin => self.buildLeaf(path, .round_robin),
                 .least_request => |config_value| self.buildLeastRequest(
+                    path,
+                    config_value,
+                ),
+                .ring_hash => |config_value| self.buildRingHash(
                     path,
                     config_value,
                 ),
@@ -117,6 +154,23 @@ pub fn Runtime(comptime Slot: type) type {
         ) BuildError!*Node {
             const node = try self.buildLeaf(path, .least_request);
             node.kind.leaf.least_request_config = config;
+            return node;
+        }
+
+        fn buildRingHash(
+            self: *Self,
+            path: []const []const u8,
+            config: ring_hash.Config,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .ring_hash);
+            errdefer self.destroy(node);
+            var retained = config;
+            if (config.request_hash_header) |header| {
+                const owned = try self.allocator.dupe(u8, header);
+                node.kind.leaf.ring_hash_header = owned;
+                retained.request_hash_header = owned;
+            }
+            node.kind.leaf.ring_hash_config = retained;
             return node;
         }
 
@@ -157,7 +211,12 @@ pub fn Runtime(comptime Slot: type) type {
 
         fn destroy(self: *Self, node: *Node) void {
             switch (node.kind) {
-                .leaf => {},
+                .leaf => |*leaf| {
+                    leaf.ring.deinit(self.allocator);
+                    if (leaf.ring_hash_header) |header| {
+                        self.allocator.free(header);
+                    }
+                },
                 .weighted => |children| {
                     for (children) |child| self.destroy(child.node);
                     self.allocator.free(children);
@@ -172,9 +231,16 @@ pub fn Runtime(comptime Slot: type) type {
             node: *Node,
             slots: []Slot,
             io: std.Io,
-        ) ?usize {
+            input: RequestInput,
+        ) error{MissingRequestHash}!?usize {
             return switch (node.kind) {
-                .leaf => |*leaf| pickLeaf(node.path, leaf, slots, io),
+                .leaf => |*leaf| try self.pickLeaf(
+                    node,
+                    leaf,
+                    slots,
+                    io,
+                    input,
+                ),
                 .weighted => |children| blk: {
                     var total: u64 = 0;
                     for (children) |child| {
@@ -192,7 +258,12 @@ pub fn Runtime(comptime Slot: type) type {
                             continue;
                         }
                         if (sample < child.weight) {
-                            break :blk self.pickNode(child.node, slots, io);
+                            break :blk try self.pickNode(
+                                child.node,
+                                slots,
+                                io,
+                                input,
+                            );
                         }
                         sample -= child.weight;
                     }
@@ -255,11 +326,14 @@ pub fn Runtime(comptime Slot: type) type {
         }
 
         fn pickLeaf(
-            path: []const []const u8,
+            self: *Self,
+            node: *Node,
             leaf: *Leaf,
             slots: []Slot,
             io: std.Io,
-        ) ?usize {
+            input: RequestInput,
+        ) error{MissingRequestHash}!?usize {
+            const path = node.path;
             if (leaf.policy == .pick_first) {
                 if (leaf.selected) |selected| {
                     if (slotReady(&slots[selected]) and
@@ -276,6 +350,16 @@ pub fn Runtime(comptime Slot: type) type {
                     leaf.least_request_config,
                     slots,
                     io,
+                );
+            }
+            if (leaf.policy == .ring_hash) {
+                return try ring_support.pick(
+                    self,
+                    node,
+                    leaf,
+                    slots,
+                    io,
+                    input,
                 );
             }
             var count: usize = 0;
@@ -361,6 +445,30 @@ pub fn Runtime(comptime Slot: type) type {
             };
         }
 
+        fn rebuildRings(
+            self: *Self,
+            node: *Node,
+            slots: []Slot,
+        ) BuildError!void {
+            switch (node.kind) {
+                .leaf => |*leaf| if (leaf.policy == .ring_hash) {
+                    ring_support.rebuild(
+                        self.allocator,
+                        self,
+                        node,
+                        leaf,
+                        slots,
+                    ) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.InvalidChannelOptions,
+                    };
+                },
+                .weighted => |children| for (children) |child| {
+                    try self.rebuildRings(child.node, slots);
+                },
+            }
+        }
+
         fn slotReady(slot: *Slot) bool {
             if (slot.disabled) return false;
             const connection = if (slot.connection) |*value| value else return false;
@@ -408,6 +516,11 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
     const least_leaf = service_config.LoadBalancingNode{ .least_request = .{
         .choice_count = 4,
     } };
+    const ring_leaf = service_config.LoadBalancingNode{ .ring_hash = .{
+        .min_ring_size = 16,
+        .max_ring_size = 16,
+        .request_hash_header = "x-shard",
+    } };
     const nested_targets = [_]service_config.WeightedTargetConfig.Target{.{
         .name = "inner",
         .weight = 1,
@@ -420,6 +533,7 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
         .{ .name = "a", .weight = 1, .child = &leaf },
         .{ .name = "b", .weight = 3, .child = &nested },
         .{ .name = "least", .weight = 2, .child = &least_leaf },
+        .{ .name = "ring", .weight = 4, .child = &ring_leaf },
     };
     const root = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &targets,
@@ -486,7 +600,7 @@ test "ordinary weighted target least request is child local" {
     };
     var runtime = try Runtime(FakeSlot).init(std.testing.allocator, &root);
     defer runtime.deinit();
-    runtime.configureSlots(&slots);
+    try runtime.configureSlots(&slots);
     try std.testing.expect(slots[0].least_request_enabled);
     try std.testing.expect(slots[1].least_request_enabled);
     try std.testing.expect(!slots[2].least_request_enabled);
@@ -495,7 +609,11 @@ test "ordinary weighted target least request is child local" {
     defer threaded.deinit();
     var low_load_picks: usize = 0;
     for (0..4096) |_| {
-        const picked = runtime.pick(&slots, threaded.io()).?;
+        const picked = (try runtime.pick(
+            &slots,
+            threaded.io(),
+            .{},
+        )).?;
         try std.testing.expect(picked != 2);
         low_load_picks += @intFromBool(picked == 1);
     }

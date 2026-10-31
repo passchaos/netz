@@ -788,7 +788,7 @@ pub const Channel = struct {
                 balancing.root orelse return error.InvalidChannelOptions,
             );
             result.selection_policy = .weighted_target;
-            result.weighted_target_runtime.?.configureSlots(result.slots);
+            try result.weighted_target_runtime.?.configureSlots(result.slots);
         }
         if (result.selection_policy == .weighted_round_robin and
             balancing.policy == .weighted_round_robin)
@@ -987,6 +987,7 @@ pub const Channel = struct {
                 .{ .value = random, .random = true }
             else
                 null,
+            .{ .random_if_missing = true },
         )).connection;
     }
 
@@ -1141,6 +1142,7 @@ pub const Channel = struct {
             options.wait_for_ready orelse false,
             attempt_deadline,
             routing_hash,
+            weightedTargetInput(options),
         );
         self.beginRequest(ready_connection.index);
         defer self.finishRequest(ready_connection.index);
@@ -1201,6 +1203,7 @@ pub const Channel = struct {
             resolved.wait_for_ready,
             deadline,
             routing_hash,
+            weightedTargetInput(resolved.options),
         );
         self.beginRequest(ready_connection.index);
         var owns_request = self.slots[ready_connection.index]
@@ -1257,6 +1260,7 @@ pub const Channel = struct {
             resolved.wait_for_ready,
             deadline,
             routing_hash,
+            weightedTargetInput(resolved.options),
         );
         self.beginRequest(ready_connection.index);
         var owns_request = self.slots[ready_connection.index]
@@ -1288,10 +1292,15 @@ pub const Channel = struct {
         wait_for_ready: bool,
         deadline: ?std.Io.Clock.Timestamp,
         routing_hash: ?ring_hash.RequestHash,
+        weighted_input: weighted_target.RequestInput,
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
         if (self.selection_policy == .weighted_target) {
-            return self.readyWeightedTarget(wait_for_ready, deadline);
+            return self.readyWeightedTarget(
+                wait_for_ready,
+                deadline,
+                weighted_input,
+            );
         }
         self.exitIdle();
         errdefer if (!self.hasReadyConnection()) self.setConnectivityState(.transient_failure);
@@ -1473,6 +1482,7 @@ pub const Channel = struct {
         self: *Channel,
         wait_for_ready: bool,
         deadline: ?std.Io.Clock.Timestamp,
+        input: weighted_target.RequestInput,
     ) Error!ReadyConnection {
         const runtime = &self.weighted_target_runtime.?;
         while (true) {
@@ -1497,7 +1507,7 @@ pub const Channel = struct {
                 error.Timeout, error.ConnectionUnavailable => {},
                 else => if (!wait_for_ready) return err,
             };
-            if (runtime.pick(self.slots, self.io)) |index| {
+            if (try runtime.pick(self.slots, self.io, input)) |index| {
                 return self.selectWeighted(
                     index,
                     &self.slots[index].connection.?,
@@ -1903,7 +1913,7 @@ pub const Channel = struct {
         self.allocator.free(old_slots);
         self.slots = replacement;
         if (self.weighted_target_runtime) |*runtime| {
-            runtime.configureSlots(self.slots);
+            try runtime.configureSlots(self.slots);
         }
         if (self.selection_policy == .ring_hash) {
             self.rebuildRing() catch |err| {
@@ -2199,6 +2209,13 @@ fn leastRequestSlotReady(self: *Channel, index: usize) bool {
 
 fn leastRequestSlotOutstanding(self: *Channel, index: usize) usize {
     return self.slots[index].outstanding_requests;
+}
+
+fn weightedTargetInput(options: anytype) weighted_target.RequestInput {
+    return .{
+        .request_hash = options.request_hash,
+        .metadata = options.metadata,
+    };
 }
 
 fn ringSlotKey(
