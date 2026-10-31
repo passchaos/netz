@@ -3,6 +3,7 @@ const call = @import("../../call.zig");
 const inputs = @import("request_inputs.zig");
 const Wake = @import("wake.zig").Wake;
 const State = @import("state.zig").State;
+const ring_hash = @import("../ring_hash.zig");
 
 pub const Job = struct {
     pub const Completion = enum(u32) { waiting, completed, abandoned };
@@ -17,6 +18,7 @@ pub const Job = struct {
     rpc_deadline: ?std.Io.Clock.Timestamp = null,
     wait_for_ready: bool,
     previous_attempts: ?u8,
+    routing_hash: ?ring_hash.RequestHash = null,
     stream: ?*@import("state.zig").State.StreamCall = null,
     next: ?*Job = null,
     result: ?call.UnaryResponse = null,
@@ -29,8 +31,16 @@ pub const Job = struct {
         deadline: ?std.Io.Clock.Timestamp,
         rpc_deadline: ?std.Io.Clock.Timestamp,
         previous: ?u8,
-    ) std.mem.Allocator.Error!*Job {
+    ) (std.mem.Allocator.Error || error{MissingRequestHash})!*Job {
         const allocator = parent.allocator;
+        const routing_hash = if (parent.policy == .ring_hash)
+            try ring_hash.requestHash(
+                parent.io,
+                parent.ring_hash_config,
+                options,
+            )
+        else
+            null;
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
         var request = try inputs.clone(allocator, options);
@@ -38,15 +48,23 @@ pub const Job = struct {
         const message = try allocator.dupe(u8, options.message);
         request.options.message = message;
         parent.retain();
-        job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .rpc_deadline = rpc_deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .owned_inputs = request.inputs, .owned_message = message };
+        job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .rpc_deadline = rpc_deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .routing_hash = routing_hash, .owned_inputs = request.inputs, .owned_message = message };
         return job;
     }
 
-    pub fn createStream(parent: *State, stream: *State.StreamCall, deadline: ?std.Io.Clock.Timestamp, ready: bool) std.mem.Allocator.Error!*Job {
+    pub fn createStream(parent: *State, stream: *State.StreamCall, deadline: ?std.Io.Clock.Timestamp, ready: bool) (std.mem.Allocator.Error || error{MissingRequestHash})!*Job {
+        const routing_hash = if (parent.policy == .ring_hash)
+            try ring_hash.requestHash(
+                parent.io,
+                parent.ring_hash_config,
+                stream.options,
+            )
+        else
+            null;
         const job = try parent.allocator.create(Job);
         parent.retain();
         stream.retain();
-        job.* = .{ .parent = parent, .options = .{ .path = stream.options.path, .message = &.{} }, .deadline = deadline, .rpc_deadline = null, .wait_for_ready = ready, .previous_attempts = null, .stream = stream };
+        job.* = .{ .parent = parent, .options = .{ .path = stream.options.path, .message = &.{} }, .deadline = deadline, .rpc_deadline = null, .wait_for_ready = ready, .previous_attempts = null, .routing_hash = routing_hash, .stream = stream };
         return job;
     }
     pub fn retain(self: *Job) void {

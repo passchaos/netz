@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "grpc-core-compatible ring_hash_experimental endpoint selection",
+  "decision": "accepted",
+  "scope": {
+    "owners": [
+      "single-owner grpc.runtime.Channel",
+      "background grpc.SharedChannel"
+    ],
+    "rpc_shapes": [
+      "unary",
+      "client streaming",
+      "server streaming",
+      "bidirectional streaming"
+    ],
+    "routing_inputs": [
+      "precomputed request_hash matching grpc-core RequestHashAttribute",
+      "configured ASCII requestHashHeader with random fallback when absent"
+    ]
+  },
+  "reference": {
+    "implementation": "grpc-core C++ ring_hash_experimental",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "files": {
+      "src/core/load_balancing/ring_hash/ring_hash.cc": "af4790ab136f6dca6eda1a223cfe377710866e2e73fa60951b1ee2f067048d0d",
+      "src/core/load_balancing/ring_hash/ring_hash.h": "f3207776fdd1940219fe0733ba6f0221a968d8dfd33ed844464e7177a0b5dd3b",
+      "test/core/load_balancing/ring_hash_test.cc": "0e8596896984ecad3a60ccf76aa185b098a7981c9dc6dbd031878bfe4b72859b"
+    },
+    "observed_contract": [
+      "minRingSize defaults to 1024, maxRingSize defaults to 4096, both validate in [1, 8388608], and min cannot exceed max",
+      "the default independent channel ring cap is 4096",
+      "virtual nodes hash endpoint key plus underscore plus ordinal with seed-zero XXH64 and use sorted lower-bound lookup with wraparound",
+      "duplicate endpoints combine weight and keep one connection-owning child",
+      "an explicit request hash sticks to the selected endpoint while it connects and walks clockwise only after failure",
+      "requestHashHeader hashes the final metadata value and uses a random hash when the header is absent",
+      "one logical endpoint may own several physical addresses through an inner pick-first policy"
+    ]
+  },
+  "implementation": {
+    "module": "channel/ring_hash.zig owns allocation-bounded weighted ketama construction, lookup, unique endpoint walks, request-hash resolution, endpoint identity, and XXH64 helpers",
+    "configuration": "service config validates canonical integer or integer-string ring sizes and lowercase non-reserved ASCII requestHashHeader names",
+    "endpoint_policy": "every endpoint supports an optional stable ring_hash_key and positive ring_hash_weight; duplicate identities merge weight without creating another owner",
+    "ordinary_channel": "the selected endpoint is connected serially before clockwise failure fallback; unrelated Happy Eyeballs races cannot override an explicit hash; the configured header is deep-owned beyond ServiceConfig lifetime",
+    "shared_channel": "the ring indexes logical resolver sources, while source-local physical workers preserve multi-address pick-first ownership; membership promotion invalidates and transactionally rebuilds the ring",
+    "ownership": "queued SharedChannel jobs retain their resolved hash, unary and streaming inputs clone the scalar attribute, and header-missing random fallback is chosen once per submitted physical attempt",
+    "resource_bound": "runtime ring entries are capped at 4096 even when an untrusted service config supplies the protocol maximum"
+  },
+  "native_cases": [
+    "official XXH64 hello vector and virtual-node equality",
+    "equal 3-endpoint and weighted 1:3 ring construction",
+    "lower-bound wraparound and duplicate virtual-node traversal",
+    "explicit attribute, final header value, ignored explicit attribute under header policy, missing attribute rejection, and missing-header random fallback",
+    "default/configured/invalid parser sizes, reserved or malformed header names, and outlier child composition",
+    "ordinary real h2c selection with an unavailable primary and clockwise fallback",
+    "ordinary ServiceConfig destruction before later hash-header use",
+    "SharedChannel duplicate endpoint collapse with combined weight",
+    "SharedChannel exact header routing for unary and duplex calls"
+  ],
+  "results": {
+    "ring_module": "3/3 passed",
+    "focused_debug": "142/142 passed",
+    "grpc_debug": "461/461 passed",
+    "package": "26/26 passed",
+    "grpc_core_reference": "//test/core/load_balancing:ring_hash_test passed",
+    "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
+    "external_boundary": "the official grpc-core unit target independently validates the reference ring and picker state machine; the grpc-cpp process matrix independently guards Netz HTTP/2 and TLS transport composition"
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "3c443b4d3543536dea9b09dcbb865900d9de33cd3bbfb28a571d6e6f6faa34b0",
+    "src/grpc/channel.zig": "687e11c885f1ca84d8f3866081ff61baeb6d1384e46fd333d705cf3567dc75f4",
+    "src/grpc/channel/ring_hash.zig": "82d5d7379e00869d212e4640a4ed71d9071e857e545914c5289de71f19d48da5",
+    "src/grpc/channel/ring_hash_tests.zig": "64b3ce1feb0e39fcda3ba97111c0d673007f7a38d4dd37fda749366354738d52",
+    "src/grpc/channel/shared/init.zig": "1f1d47fee3378d0a8f5d4df7ef074af838ce4a64c90cc749894ca27b0e48209d",
+    "src/grpc/channel/shared/job.zig": "664f3c54068084dafa355affb237bbed0fdd50c5b8898f468ef9796775106607",
+    "src/grpc/channel/shared/membership.zig": "db640943b2a1f44e7ec350530759f2489ca2b2f1bbef8450481916aa989215d5",
+    "src/grpc/channel/shared/source.zig": "c847e243faf92dcd26543f348734517db8c66831db3de00f6c001200abc45c7c",
+    "src/grpc/channel/shared/state.zig": "60a456910842b0c0f2c47ec09832ae0d6ccc33b7ad2af48e1eea3368a0c0938f",
+    "src/grpc/mod.zig": "606431eaadec7d11ef28339140ee352e67eaeda003f33e262c898d7ce26eea61",
+    "src/grpc/service_config.zig": "8b22c8fd0983a813e246c1775baf133c804d7a6ca4aa711c3d07b979022e3995",
+    "src/grpc/service_config/ring_hash_tests.zig": "cb30efe96a52c111211e5b1cd65d27acf4d8acbeec8c91705cc9902019921de8",
+    "src/grpc/stream/runtime.zig": "262ebc54d07ca6a275574470aa87cd7b6861022c4dafe8021fce6a51a53e3b10",
+    "test/package_test.zig": "f6f8fdf193f8ccae3ec52f0ab099fa8ea1d6e2036c1c98d1706b67df6878996c"
+  },
+  "verification_commands": [
+    "zig test src/grpc/channel/ring_hash.zig",
+    "zig build test-lib -Dtest-filter='gRPC ring hash' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all",
+    "LD_LIBRARY_PATH=/nav_env/.pixi/.pixi/envs/bazel/lib JAVA_HOME=/nav_env/.cache/rattler/cache/pkgs/openjdk-25.0.2-hd4191a3_26/lib/jvm /nav_env/.cache/rattler/cache/pkgs/bazel-8.7.0-h5e4162e_2/bin/bazel-real --output_user_root=/nav_env/Temp/netz-grpc-bazel test --compilation_mode=opt --test_output=errors //test/core/load_balancing:ring_hash_test",
+    "BAZEL=/nav_env/.cache/rattler/cache/pkgs/bazel-8.7.0-h5e4162e_2/bin/bazel-real TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel LD_LIBRARY_PATH=/nav_env/.pixi/.pixi/envs/bazel/lib JAVA_HOME=/nav_env/.cache/rattler/cache/pkgs/openjdk-25.0.2-hd4191a3_26/lib/jvm CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "xDS route-action hash-policy translation, weighted_target, and priority control-plane composition remain separate integration work; the standalone ring policy and both native Channel owners are complete"
+}

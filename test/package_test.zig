@@ -649,6 +649,11 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
+        "RingHashConfig",
+    ));
+    try std.testing.expect(@hasDecl(netz.grpc, "ringHash"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
         "WeightedRoundRobinConfig",
     ));
     try std.testing.expect(@hasDecl(

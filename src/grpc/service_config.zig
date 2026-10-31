@@ -48,10 +48,12 @@ pub const LoadBalancingPolicy = enum {
     pick_first,
     round_robin,
     least_request,
+    ring_hash,
     weighted_round_robin,
 };
 
 pub const LeastRequestConfig = @import("channel/least_request.zig").Config;
+pub const RingHashConfig = @import("channel/ring_hash.zig").Config;
 
 pub const WeightedRoundRobinConfig = struct {
     enable_oob_load_report: bool = false,
@@ -96,6 +98,7 @@ pub const LoadBalancingConfig = struct {
     shuffle_address_list: bool = false,
     configured: bool = false,
     least_request: LeastRequestConfig = .{},
+    ring_hash: RingHashConfig = .{},
     weighted_round_robin: WeightedRoundRobinConfig = .{},
     outlier_detection: ?OutlierDetectionConfig = null,
 };
@@ -525,6 +528,44 @@ fn parseLoadBalancing(
                     .least_request = least_request,
                 };
             }
+            if (std.mem.eql(
+                u8,
+                item.key_ptr.*,
+                "ring_hash_experimental",
+            )) {
+                const options = switch (item.value_ptr.*) {
+                    .object => |value| value,
+                    else => return error.InvalidServiceConfig,
+                };
+                var ring: RingHashConfig = .{};
+                var fields = options.iterator();
+                while (fields.next()) |field| {
+                    const key = field.key_ptr.*;
+                    const value = field.value_ptr.*;
+                    if (std.mem.eql(u8, key, "minRingSize")) {
+                        ring.min_ring_size = try parseRingSize(value);
+                    } else if (std.mem.eql(u8, key, "maxRingSize")) {
+                        ring.max_ring_size = try parseRingSize(value);
+                    } else if (std.mem.eql(u8, key, "requestHashHeader")) {
+                        const header = switch (value) {
+                            .string => |text| text,
+                            else => return error.InvalidServiceConfig,
+                        };
+                        if (!validRequestHashHeader(header)) {
+                            return error.InvalidServiceConfig;
+                        }
+                        ring.request_hash_header = header;
+                    } else return error.InvalidServiceConfig;
+                }
+                if (ring.min_ring_size > ring.max_ring_size) {
+                    return error.InvalidServiceConfig;
+                }
+                return .{
+                    .policy = .ring_hash,
+                    .configured = true,
+                    .ring_hash = ring,
+                };
+            }
             if (std.mem.eql(u8, item.key_ptr.*, "pick_first")) {
                 const options = switch (item.value_ptr.*) {
                     .object => |value| value,
@@ -629,6 +670,47 @@ fn parseLoadBalancing(
         return error.InvalidServiceConfig;
     }
     return .{};
+}
+
+fn parseRingSize(value: std.json.Value) Error!usize {
+    const raw: u64 = switch (value) {
+        .integer => |number| if (number >= 0)
+            @intCast(number)
+        else
+            return error.InvalidServiceConfig,
+        .number_string, .string => |text| std.fmt.parseInt(
+            u64,
+            text,
+            10,
+        ) catch return error.InvalidServiceConfig,
+        else => return error.InvalidServiceConfig,
+    };
+    if (raw == 0 or
+        raw > @import("channel/ring_hash.zig").max_configured_ring_size)
+    {
+        return error.InvalidServiceConfig;
+    }
+    return @intCast(raw);
+}
+
+fn validRequestHashHeader(name: []const u8) bool {
+    if (name.len == 0 or std.mem.endsWith(u8, name, "-bin") or
+        std.mem.startsWith(u8, name, "grpc-") or
+        std.mem.eql(u8, name, "content-type") or
+        std.mem.eql(u8, name, "te"))
+    {
+        return false;
+    }
+    for (name) |byte| {
+        if ((byte >= '0' and byte <= '9') or
+            (byte >= 'a' and byte <= 'z') or
+            byte == '_' or byte == '-' or byte == '.')
+        {
+            continue;
+        }
+        return false;
+    }
+    return true;
 }
 
 const ParsedOutlierDetection = struct {

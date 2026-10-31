@@ -701,6 +701,53 @@ rolling concurrent calls to complete through the idle endpoint; five repeated
 runs guard its probabilistic boundary. Evidence is recorded in
 `docs/evidence/grpc_least_request/2026-10-31.json`.
 
+## Ring-hash endpoint selection
+
+Service config now accepts grpc-core's `ring_hash_experimental` policy in both
+Channel owners. `minRingSize` and `maxRingSize` preserve the upstream defaults
+of 1024/4096, accept canonical JSON integer strings as well as integers,
+validate the `[1, 8388608]` configuration domain, and reject an inverted range.
+The runtime retains grpc-core's separate default ring-size cap of 4096 so an
+untrusted service config cannot manufacture an eight-million-entry allocation.
+
+`channel/ring_hash.zig` ports grpc-core's weighted ketama construction: endpoint
+weights are normalized, the least-weighted endpoint determines the scale,
+virtual nodes hash `endpoint-key + "_" + ordinal` with XXH64, and the sorted
+ring uses a lower-bound lookup with wraparound. Exact duplicate endpoint
+definitions share one connection owner and combine weight. Public endpoint
+variants expose optional `ring_hash_key` and positive `ring_hash_weight`; IP or
+host targets otherwise derive the same stable textual identity used for their
+transport, while custom connectors must provide an explicit key.
+
+Calls can supply a precomputed `request_hash`, matching grpc-core's
+`RequestHashAttribute`, and `grpc.ringHash(bytes)` exposes the exact XXH64
+primitive. Without a configured `requestHashHeader`, a missing attribute fails
+with `MissingRequestHash` before network selection. When that experimental
+header is configured, its final metadata value wins and is hashed internally;
+an absent header takes the upstream random-fallback path. Ordinary Channel
+deep-owns the configured header after the caller destroys its ServiceConfig.
+
+Ordinary Channel connects the selected ring endpoint first and walks clockwise
+only across endpoints that are ejected, disabled, backed off, or have failed.
+It deliberately does not race unrelated ring successors with Happy Eyeballs,
+because connection latency must not override an explicit routing hash.
+SharedChannel builds its ring over logical sources rather than physical
+workers: a hostname with several resolved addresses occupies one weighted
+virtual endpoint, and its existing per-source pick-first ownership chooses the
+actual address. Membership promotion invalidates and transactionally rebuilds
+the ring; unresolved initial sources keep the exact job queued instead of
+temporarily changing its mapping. The inner physical Channel remains
+`pick_first`, avoiding one redundant 1024-entry ring per worker.
+
+Unit coverage checks the official XXH64 vector, equal and 1:3 weighted rings,
+wraparound, header precedence/random fallback and parser boundaries. Real h2c
+tests prove missing-attribute rejection, an unavailable selected endpoint's
+clockwise fallback, exact ordinary routing, duplicate endpoint collapse,
+header-over-attribute precedence, and unary plus duplex routing through
+SharedChannel. The pinned grpc-core `//test/core/load_balancing:ring_hash_test`
+also passes independently. Evidence is recorded in
+`docs/evidence/grpc_ring_hash/2026-10-31.json`.
+
 The 2026-10-26 gRPC-Web verification exposed an HTTP/2 aggregate deadline
 regression: the terminal CANCEL reused the expired read deadline, and a partial
 response could first exhaust that deadline trying to return connection credit.
@@ -1128,8 +1175,8 @@ healthy siblings, and a non-retryable endpoint remains disabled until
 
 Top-level service config now accepts the standard ordered
 `loadBalancingConfig` list plus deprecated `loadBalancingPolicy`, chooses the
-first supported `pick_first`, `round_robin`, `least_request_experimental`, or
-`weighted_round_robin` entry,
+first supported `pick_first`, `round_robin`, `least_request_experimental`,
+`ring_hash_experimental`, or `weighted_round_robin` entry,
 and supports `pick_first.shuffleAddressList`. WRR owns all grpc-core fields,
 including the 100-ms minimum weight-update period and custom utilization names.
 Explicit Channel options override service config. Real two-server tests prove
@@ -1406,8 +1453,10 @@ workers connect in parallel and expose independent health-derived connectivity
 through `watchEndpointConnectivity`. `pick_first` stays with a ready selected
 endpoint, while `round_robin` advances across ready endpoints with available
 concurrency credit. `least_request` samples READY endpoints by their exact
-policy-local outstanding RPC counts. `weighted_round_robin` applies per-RPC or
-OOB endpoint weights through the shared static-stride scheduler; a choice is
+policy-local outstanding RPC counts. `ring_hash` maps an explicit attribute or
+configured metadata value onto a weighted consistent-hash ring and preserves
+logical multi-address endpoints. `weighted_round_robin` applies per-RPC or OOB
+endpoint weights through the shared static-stride scheduler; a choice is
 committed only when its selected worker claims the queued RPC, so competing
 worker wakeups cannot consume one another's sequence. Connection and health retries use the
 existing gRPC backoff defaults. Each hostname source has an independent background resolver,

@@ -3,10 +3,12 @@ const std = @import("std");
 const channel = @import("../../channel.zig");
 const resolver = @import("../resolver.zig");
 const endpoint_host = @import("../../../internal/endpoint_host.zig");
+const ring_hash = @import("../ring_hash.zig");
 
 pub fn Source(comptime Worker: type) type {
     return struct {
         endpoint: channel.Endpoint,
+        ring_hash_weight: u32 = 1,
         resolver: ?*resolver.State = null,
         authority: ?[]u8 = null,
         current: []*Worker = &.{},
@@ -21,7 +23,10 @@ pub fn Source(comptime Worker: type) type {
             const host, const port, const push = switch (endpoint) {
                 .cleartext_host => |v| .{ v.host, v.port, v.limits.enable_push },
                 .tls_host => |v| .{ v.host, v.port, v.limits.enable_push },
-                else => return .{ .endpoint = endpoint },
+                else => return .{
+                    .endpoint = endpoint,
+                    .ring_hash_weight = ring_hash.endpointWeight(endpoint),
+                },
             };
             if (port == 0 or push) return error.InvalidChannelOptions;
             const parsed = try endpoint_host.parse(host, port);
@@ -30,7 +35,12 @@ pub fn Source(comptime Worker: type) type {
             const state = try resolver.State.create(allocator, io, host, port, options.address_resolver, options.resolver_min_refresh_interval, options.backoff);
             var normalized = endpoint;
             if (normalized == .tls_host) normalized.tls_host.host = parsed.host;
-            return .{ .endpoint = normalized, .resolver = state, .authority = authority };
+            return .{
+                .endpoint = normalized,
+                .ring_hash_weight = ring_hash.endpointWeight(endpoint),
+                .resolver = state,
+                .authority = authority,
+            };
         }
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.resolver) |state| state.deinit();
@@ -42,9 +52,47 @@ pub fn Source(comptime Worker: type) type {
             return self.pending orelse self.current;
         }
         pub fn target(self: *const Self, address: ?std.Io.net.IpAddress) channel.Target {
+            return switch (self.resolvedEndpoint(address)) {
+                .cleartext_ip => |v| .{ .cleartext_ip = v },
+                .cleartext_host => |v| .{ .cleartext_host = v },
+                .tls_host => |v| .{ .tls_host = v },
+                .tls_address => |v| .{ .tls_address = v },
+                .custom => |v| .{ .custom = v },
+            };
+        }
+        pub fn ringHashKey(
+            self: *const Self,
+            address: ?std.Io.net.IpAddress,
+            out: []u8,
+        ) error{ InvalidChannelOptions, BufferTooSmall }![]const u8 {
+            if (address == null and
+                (self.endpoint == .cleartext_host or self.endpoint == .tls_host))
+            {
+                return ring_hash.endpointKey(self.endpoint, out);
+            }
+            return ring_hash.endpointKey(self.resolvedEndpoint(address), out);
+        }
+        fn resolvedEndpoint(
+            self: *const Self,
+            address: ?std.Io.net.IpAddress,
+        ) channel.Endpoint {
             return switch (self.endpoint) {
-                .cleartext_host => |v| .{ .cleartext_ip = .{ .address = address.?, .authority = self.authority, .limits = v.limits } },
-                .tls_host => |v| .{ .tls_address = .{ .address = address.?, .tls_host = v.host, .authority = self.authority.?, .limits = v.limits, .tls = v.tls } },
+                .cleartext_host => |v| .{ .cleartext_ip = .{
+                    .address = address.?,
+                    .authority = self.authority,
+                    .limits = v.limits,
+                    .ring_hash_key = v.ring_hash_key,
+                    .ring_hash_weight = self.ring_hash_weight,
+                } },
+                .tls_host => |v| .{ .tls_address = .{
+                    .address = address.?,
+                    .tls_host = v.host,
+                    .authority = self.authority.?,
+                    .limits = v.limits,
+                    .tls = v.tls,
+                    .ring_hash_key = v.ring_hash_key,
+                    .ring_hash_weight = self.ring_hash_weight,
+                } },
                 .cleartext_ip => |v| .{ .cleartext_ip = v },
                 .tls_address => |v| .{ .tls_address = v },
                 .custom => |v| .{ .custom = v },

@@ -13,6 +13,11 @@ pub fn Membership(comptime State: type) type {
             errdefer allocator.destroy(worker);
             var options = state.options.channel;
             options.address_resolver = null;
+            // The SharedChannel state owns endpoint selection. Each worker's
+            // child Channel owns exactly one physical target and must not
+            // instantiate the outer least-request, ring, or WRR scheduler.
+            options.selection_policy = .pick_first;
+            options.shuffle_address_list = false;
             const target = state.sources[source_index].target(address);
             var owner = if (state.config) |*config|
                 try channel.Channel.initWithServiceConfigChild(allocator, state.io, target, options, config)
@@ -70,6 +75,7 @@ pub fn Membership(comptime State: type) type {
             const old = source.current;
             source.current = pending;
             source.pending = null;
+            state.ring_hash_dirty = true;
             for (pending) |worker| worker.eligible = true;
             for (old) |worker| if (!contains(pending, worker)) retireLocked(state, worker);
             state.allocator.free(old);

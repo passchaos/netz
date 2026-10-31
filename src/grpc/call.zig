@@ -228,6 +228,9 @@ pub const UnaryCallOptions = struct {
     /// Explicit channel readiness policy. Null permits a service config to
     /// supply its method policy; direct connected clients do not need to wait.
     wait_for_ready: ?bool = null,
+    /// Precomputed grpc-core `RequestHashAttribute` value used by
+    /// `ring_hash_experimental` when no requestHashHeader is configured.
+    request_hash: ?u64 = null,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

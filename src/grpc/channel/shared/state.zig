@@ -9,6 +9,7 @@ const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const least_request = @import("../least_request.zig");
+const ring_hash = @import("../ring_hash.zig");
 const outlier_detection = @import("../outlier_detection.zig");
 const orca = @import("../../orca.zig");
 const orca_oob = @import("../../orca/oob.zig");
@@ -51,6 +52,9 @@ pub const State = struct {
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
     least_request_config: least_request.Config = .{},
     least_request_selected: ?*Worker = null,
+    ring_hash_config: ring_hash.Config = .{},
+    ring_hash_ring: ring_hash.Ring = .{},
+    ring_hash_dirty: bool = true,
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
 
@@ -114,6 +118,7 @@ pub const State = struct {
         std.debug.assert(self.workers.items.len == 0);
         self.workers.deinit(self.allocator);
         self.wrr_scheduler.deinit(self.allocator);
+        self.ring_hash_ring.deinit(self.allocator);
         for (self.sources) |*source| source.deinit(self.allocator);
         self.allocator.free(self.sources);
         if (self.config) |*config| config.deinit();
@@ -442,6 +447,7 @@ pub const State = struct {
         };
         worker.tracker.setState(.shutdown);
         self.wrr_scheduler.remove(worker);
+        self.ring_hash_dirty = true;
         if (self.selected == worker) self.selected = null;
         if (self.least_request_selected == worker) {
             self.least_request_selected = null;
@@ -484,7 +490,7 @@ pub const State = struct {
             cursor = next;
         }
     }
-    fn pickLocked(self: *State, claimant: *Worker) ?*Worker {
+    fn pickLocked(self: *State, claimant: *Worker) Error!?*Worker {
         self.evaluateOutliersLocked();
         if (self.policy == .pick_first) {
             if (self.selected) |worker| if (worker.eligible and worker.published == .ready) {
@@ -539,6 +545,25 @@ pub const State = struct {
             self.least_request_selected = selected;
             return selected;
         }
+        if (self.policy == .ring_hash) {
+            try self.ensureRingLocked();
+            const job = self.head orelse return null;
+            const request_hash = job.routing_hash.?;
+            const start = self.ring_hash_ring.start(request_hash.value) orelse
+                return null;
+            for (0..self.sources.len) |ordinal| {
+                const source_index = self.ring_hash_ring.uniqueEndpointAt(
+                    start,
+                    ordinal,
+                ) orelse return null;
+                switch (self.pickRingSourceLocked(source_index)) {
+                    .worker => |worker| return worker,
+                    .pending => if (!request_hash.random) return null,
+                    .failed => {},
+                }
+            }
+            return null;
+        }
         var count: usize = 0;
         for (self.sources) |source| count += source.current.len;
         for (0..count) |offset| {
@@ -586,6 +611,75 @@ pub const State = struct {
     }
     fn leastRequestOrdinalOutstanding(self: *State, ordinal: usize) usize {
         return self.currentWorkerAt(ordinal).outstanding_requests;
+    }
+    fn ensureRingLocked(self: *State) Error!void {
+        if (!self.ring_hash_dirty) return;
+        for (self.sources) |source| {
+            if (source.resolver != null and source.generation == 0 and
+                source.current.len == 0)
+            {
+                return;
+            }
+        }
+        self.ring_hash_ring.rebuild(
+            self.allocator,
+            self,
+            self.sources.len,
+            self.ring_hash_config,
+            ring_hash.default_ring_size_cap,
+            ringSourceKey,
+            ringSourceWeight,
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidSharedOptions,
+        };
+        self.ring_hash_dirty = false;
+    }
+    const RingSourcePick = union(enum) {
+        worker: *Worker,
+        pending,
+        failed,
+    };
+    fn pickRingSourceLocked(
+        self: *State,
+        source_index: usize,
+    ) RingSourcePick {
+        const source = &self.sources[source_index];
+        var pending = source.resolver != null and source.current.len == 0;
+        for (source.current) |worker| {
+            if (!worker.eligible or worker.retired or
+                worker.outlier.isEjected())
+            {
+                continue;
+            }
+            switch (worker.published) {
+                .ready => if (worker.capacity != 0) {
+                    return .{ .worker = worker };
+                } else {
+                    pending = true;
+                },
+                .idle, .connecting => pending = true,
+                .transient_failure, .shutdown => {},
+            }
+        }
+        return if (pending) .pending else .failed;
+    }
+    fn ringSourceKey(
+        self: *State,
+        source_index: usize,
+        buffer: *[256]u8,
+    ) ![]const u8 {
+        const source = &self.sources[source_index];
+        return source.ringHashKey(
+            if (source.current.len == 0)
+                null
+            else
+                source.current[0].address,
+            buffer,
+        );
+    }
+    fn ringSourceWeight(self: *State, source_index: usize) u32 {
+        return self.sources[source_index].ring_hash_weight;
     }
     fn outlierEndpoint(
         workers: []const *Worker,
@@ -646,7 +740,12 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or self.head == null) return null;
-        const picked = self.pickLocked(worker) orelse return null;
+        const picked = self.pickLocked(worker) catch |err| {
+            const job = self.head.?;
+            self.removeQueuedLocked(job);
+            self.finishLocked(job, null, err);
+            return null;
+        } orelse return null;
         if (picked != worker) return null;
         const job = self.head.?;
         self.removeQueuedLocked(job);

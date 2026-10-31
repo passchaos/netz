@@ -34,6 +34,9 @@ pub const RequestOptions = struct {
     timeout: ?wire.Timeout = null,
     /// Explicit channel readiness policy. Null permits service-config policy.
     wait_for_ready: ?bool = null,
+    /// Precomputed grpc-core `RequestHashAttribute` value used by
+    /// `ring_hash_experimental` when no requestHashHeader is configured.
+    request_hash: ?u64 = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     /// Compatibility ceiling used for both directions unless a directional

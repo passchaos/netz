@@ -16,6 +16,7 @@ const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
 const weighted_round_robin = @import("channel/weighted_round_robin.zig");
 const least_request = @import("channel/least_request.zig");
+const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
@@ -26,6 +27,7 @@ pub const AddressResolver = resolver.AddressResolver;
 
 pub const Error = streaming.Error || resolver.Error || error{
     InvalidChannelOptions,
+    MissingRequestHash,
     ChannelBusy,
     ConnectionUnavailable,
     Canceled,
@@ -43,12 +45,17 @@ pub const CustomConnector = struct {
         context: ?*anyopaque,
         err: anyerror,
     ) bool = null,
+    /// Stable grpc-core ring-hash endpoint identity. Required when a custom
+    /// connector participates in `ring_hash_experimental`.
+    ring_hash_key: ?[]const u8 = null,
+    ring_hash_weight: u32 = 1,
 };
 
 pub const SelectionPolicy = enum {
     pick_first,
     round_robin,
     least_request,
+    ring_hash,
     weighted_round_robin,
 };
 
@@ -64,6 +71,8 @@ pub const Endpoint = union(enum) {
         /// Optional logical authority retained across address resolution.
         authority: ?[]const u8 = null,
         limits: http2.runtime.Limits = .{},
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
     },
     cleartext_host: struct {
         /// DNS name or IP literal. IPv6 accepts bare or bracketed text;
@@ -71,6 +80,8 @@ pub const Endpoint = union(enum) {
         host: []const u8,
         port: u16,
         limits: http2.runtime.Limits = .{},
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
     },
     tls_host: struct {
         /// DNS/IP certificate identity, independent of a custom resolver's
@@ -79,6 +90,8 @@ pub const Endpoint = union(enum) {
         port: u16,
         limits: http2.runtime.Limits = .{},
         tls: http2.runtime.TlsConnectOptions = .{},
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
     },
     tls_address: struct {
         address: net.IpAddress,
@@ -86,6 +99,8 @@ pub const Endpoint = union(enum) {
         authority: []const u8,
         limits: http2.runtime.Limits = .{},
         tls: http2.runtime.TlsConnectOptions = .{},
+        ring_hash_key: ?[]const u8 = null,
+        ring_hash_weight: u32 = 1,
     },
     custom: CustomConnector,
 
@@ -165,6 +180,9 @@ pub const Endpoint = union(enum) {
             .custom => false,
         };
         if (enables_push) return error.InvalidChannelOptions;
+        if (ring_hash.endpointWeight(self) == 0) {
+            return error.InvalidChannelOptions;
+        }
     }
 };
 
@@ -247,6 +265,7 @@ const Slot = struct {
     outstanding_requests: usize = 0,
     least_request_enabled: bool = false,
     outlier_enabled: bool = false,
+    ring_hash_weight: u32 = 1,
 
     fn closeConnection(self: *Slot) void {
         if (self.connection) |*connection| connection.close();
@@ -272,11 +291,15 @@ const HostResolution = struct {
     transport: union(enum) {
         cleartext: struct {
             limits: http2.runtime.Limits,
+            ring_hash_key: ?[]const u8,
+            ring_hash_weight: u32,
         },
         tls: struct {
             host: []const u8,
             limits: http2.runtime.Limits,
             options: http2.runtime.TlsConnectOptions,
+            ring_hash_key: ?[]const u8,
+            ring_hash_weight: u32,
         },
     },
 
@@ -291,7 +314,11 @@ const HostResolution = struct {
                 value.host,
                 value.port,
                 @FieldType(HostResolution, "transport"){
-                    .cleartext = .{ .limits = value.limits },
+                    .cleartext = .{
+                        .limits = value.limits,
+                        .ring_hash_key = value.ring_hash_key,
+                        .ring_hash_weight = value.ring_hash_weight,
+                    },
                 },
             },
             .tls_host => |value| .{
@@ -301,6 +328,8 @@ const HostResolution = struct {
                     .host = value.host,
                     .limits = value.limits,
                     .options = value.tls,
+                    .ring_hash_key = value.ring_hash_key,
+                    .ring_hash_weight = value.ring_hash_weight,
                 } },
             },
             else => return null,
@@ -338,6 +367,8 @@ const HostResolution = struct {
                 .address = address,
                 .authority = self.authority,
                 .limits = value.limits,
+                .ring_hash_key = value.ring_hash_key,
+                .ring_hash_weight = value.ring_hash_weight,
             } },
             .tls => |value| .{ .tls_address = .{
                 .address = address,
@@ -345,6 +376,8 @@ const HostResolution = struct {
                 .authority = self.authority,
                 .limits = value.limits,
                 .tls = value.options,
+                .ring_hash_key = value.ring_hash_key,
+                .ring_hash_weight = value.ring_hash_weight,
             } },
         };
     }
@@ -387,6 +420,9 @@ pub const Channel = struct {
     wrr_sequence: u32 = 0,
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
     least_request_config: least_request.Config = .{},
+    ring_hash_config: ring_hash.Config = .{},
+    ring_hash_header: ?[]u8 = null,
+    ring_hash_ring: ring_hash.Ring = .{},
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
     canceled: std.Io.Event = .unset,
@@ -414,7 +450,9 @@ pub const Channel = struct {
         const slot_count = if (host_resolution != null)
             0
         else switch (target) {
-            .resolved => |resolved| if (selection_policy == .least_request)
+            .resolved => |resolved| if (selection_policy == .ring_hash)
+                ring_hash.uniqueEndpointCount(resolved.endpoints)
+            else if (selection_policy == .least_request)
                 least_request.exactUniqueCount(resolved.endpoints)
             else
                 resolved.endpoints.len,
@@ -433,6 +471,28 @@ pub const Channel = struct {
         if (host_resolution == null) {
             var slot_index: usize = 0;
             for (0..target.count()) |index| {
+                if (target == .resolved and selection_policy == .ring_hash) {
+                    const endpoint = target.resolved.endpoints[index];
+                    for (slots[0..slot_index]) |*slot| {
+                        if (!ring_hash.sameEndpointIdentity(
+                            slot.endpoint,
+                            endpoint,
+                        )) continue;
+                        slot.ring_hash_weight = std.math.add(
+                            u32,
+                            slot.ring_hash_weight,
+                            ring_hash.endpointWeight(endpoint),
+                        ) catch return error.InvalidChannelOptions;
+                        break;
+                    } else {
+                        slots[slot_index] = .{
+                            .endpoint = endpoint,
+                            .ring_hash_weight = ring_hash.endpointWeight(endpoint),
+                        };
+                        slot_index += 1;
+                    }
+                    continue;
+                }
                 if (target == .resolved and selection_policy == .least_request and
                     least_request.isExactDuplicate(
                         target.resolved.endpoints,
@@ -441,7 +501,11 @@ pub const Channel = struct {
                 {
                     continue;
                 }
-                slots[slot_index] = .{ .endpoint = target.endpoint(index) };
+                const endpoint = target.endpoint(index);
+                slots[slot_index] = .{
+                    .endpoint = endpoint,
+                    .ring_hash_weight = ring_hash.endpointWeight(endpoint),
+                };
                 slot_index += 1;
             }
             std.debug.assert(slot_index == slots.len);
@@ -460,6 +524,12 @@ pub const Channel = struct {
         for (result.slots) |*slot| {
             slot.least_request_enabled =
                 result.selection_policy == .least_request;
+        }
+        if (result.selection_policy == .ring_hash) {
+            result.rebuildRing() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidChannelOptions,
+            };
         }
         if (result.shuffle_address_list) result.shuffleSlots();
         return result;
@@ -517,6 +587,7 @@ pub const Channel = struct {
                 .pick_first => .pick_first,
                 .round_robin => .round_robin,
                 .least_request => .least_request,
+                .ring_hash => .ring_hash,
                 .weighted_round_robin => .weighted_round_robin,
             };
         }
@@ -536,6 +607,20 @@ pub const Channel = struct {
             balancing.policy == .least_request)
         {
             result.least_request_config = balancing.least_request;
+        }
+        if (result.selection_policy == .ring_hash and
+            balancing.policy == .ring_hash)
+        {
+            result.ring_hash_config = balancing.ring_hash;
+            if (balancing.ring_hash.request_hash_header) |header| {
+                result.ring_hash_header = try allocator.dupe(u8, header);
+                result.ring_hash_config.request_hash_header =
+                    result.ring_hash_header;
+            }
+            result.rebuildRing() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidChannelOptions,
+            };
         }
         if (!composite_owned) if (balancing.outlier_detection) |outlier| {
             result.outlier_config = outlier;
@@ -558,6 +643,8 @@ pub const Channel = struct {
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
         self.wrr_scheduler.deinit(self.allocator);
+        self.ring_hash_ring.deinit(self.allocator);
+        if (self.ring_hash_header) |header| self.allocator.free(header);
         if (self.wrr_metric_names) |names| {
             for (names) |name| self.allocator.free(name);
             self.allocator.free(names);
@@ -694,7 +781,18 @@ pub const Channel = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!*http2.runtime.Connection {
         if (deadline.clock != .awake) return error.Timeout;
-        return (try self.ready(false, deadline)).connection;
+        var random: u64 = undefined;
+        if (self.selection_policy == .ring_hash) {
+            self.io.random(std.mem.asBytes(&random));
+        }
+        return (try self.ready(
+            false,
+            deadline,
+            if (self.selection_policy == .ring_hash)
+                .{ .value = random, .random = true }
+            else
+                null,
+        )).connection;
     }
 
     pub fn negotiatedAlpn(self: *Channel) ?[]const u8 {
@@ -840,9 +938,11 @@ pub const Channel = struct {
         _: ?wire.Timeout,
         previous_attempts: ?u8,
     ) Error!call.UnaryResponse {
+        const routing_hash = try self.requestHash(options);
         const ready_connection = try self.ready(
             options.wait_for_ready orelse false,
             attempt_deadline,
+            routing_hash,
         );
         self.beginRequest(ready_connection.index);
         defer self.finishRequest(ready_connection.index);
@@ -896,9 +996,11 @@ pub const Channel = struct {
         resolved: service_config.ResolvedStreaming,
     ) Error!streaming.ClientWriter {
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
             deadline,
+            routing_hash,
         );
         self.beginRequest(ready_connection.index);
         var owns_request = self.selection_policy == .least_request;
@@ -947,9 +1049,11 @@ pub const Channel = struct {
         resolved: service_config.ResolvedStreaming,
     ) Error!duplex.ClientDuplex {
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
             deadline,
+            routing_hash,
         );
         self.beginRequest(ready_connection.index);
         var owns_request = self.selection_policy == .least_request;
@@ -979,6 +1083,7 @@ pub const Channel = struct {
         self: *Channel,
         wait_for_ready: bool,
         deadline: ?std.Io.Clock.Timestamp,
+        routing_hash: ?ring_hash.RequestHash,
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
         self.exitIdle();
@@ -998,7 +1103,14 @@ pub const Channel = struct {
                 return ready_connection;
             }
         }
-        if (self.selection_policy != .pick_first) {
+        if (self.selection_policy == .ring_hash) {
+            if (self.pickReadyRingHash(routing_hash.?)) |ready_connection| {
+                return ready_connection;
+            }
+        }
+        if (self.selection_policy != .pick_first and
+            self.selection_policy != .ring_hash)
+        {
             if (self.pickReadyRoundRobin()) |ready_connection| {
                 return ready_connection;
             }
@@ -1020,53 +1132,75 @@ pub const Channel = struct {
                     return ready_connection;
                 }
             }
-            if (self.selection_policy != .pick_first) {
+            if (self.selection_policy == .ring_hash) {
+                if (self.pickReadyRingHash(routing_hash.?)) |ready_connection| {
+                    return ready_connection;
+                }
+            }
+            if (self.selection_policy != .pick_first and
+                self.selection_policy != .ring_hash)
+            {
                 if (self.pickReadyRoundRobin()) |ready_connection| {
                     return ready_connection;
                 }
             }
             var retryable_failure = self.hasEjectedSlots();
-            const start = self.pickStart();
-            if (self.connection_attempt_delay) |delay| {
-                if (self.slots.len > 1) {
-                    for (0..self.slots.len) |offset| {
-                        const index = (start + offset) % self.slots.len;
-                        if (self.slots[index].outlier.isEjected()) continue;
-                        if (self.slots[index].connection) |*connection| return self.select(index, connection);
-                    }
-                    var retryable: std.atomic.Value(bool) = .init(false);
-                    if (self.connect_allocator == null) {
-                        const guard = try self.allocator.create(ConnectAllocator);
-                        guard.* = .{ .child = self.allocator, .io = self.io };
-                        self.connect_allocator = guard;
-                    }
-                    const context = ConnectRaceContext{ .channel = self, .deadline = deadline, .retryable = &retryable };
-                    const winner = connect_race.connect(Error, self.allocator, self.io, context, start, delay, deadline, &self.canceled) catch |err| switch (err) {
-                        error.Canceled, error.Timeout, error.OutOfMemory, error.ConcurrencyUnavailable => return err,
-                        else => null,
-                    };
-                    if (winner) |index| {
-                        if (self.canceled.isSet() or deadlineExpired(self.io, deadline)) {
-                            self.slots[index].closeConnection();
-                            return if (self.canceled.isSet()) error.Canceled else error.Timeout;
+            const ring_start = if (routing_hash) |hash_value|
+                self.ring_hash_ring.start(hash_value.value)
+            else
+                null;
+            const start = if (ring_start) |ring_index|
+                self.ring_hash_ring.endpointAt(ring_index, 0)
+            else
+                self.pickStart();
+            if (self.selection_policy != .ring_hash) {
+                if (self.connection_attempt_delay) |delay| {
+                    if (self.slots.len > 1) {
+                        for (0..self.slots.len) |offset| {
+                            const index = (start + offset) % self.slots.len;
+                            if (self.slots[index].outlier.isEjected()) continue;
+                            if (self.slots[index].connection) |*connection| return self.select(index, connection);
                         }
-                        return self.select(index, &self.slots[index].connection.?);
+                        var retryable: std.atomic.Value(bool) = .init(false);
+                        if (self.connect_allocator == null) {
+                            const guard = try self.allocator.create(ConnectAllocator);
+                            guard.* = .{ .child = self.allocator, .io = self.io };
+                            self.connect_allocator = guard;
+                        }
+                        const context = ConnectRaceContext{ .channel = self, .deadline = deadline, .retryable = &retryable };
+                        const winner = connect_race.connect(Error, self.allocator, self.io, context, start, delay, deadline, &self.canceled) catch |err| switch (err) {
+                            error.Canceled, error.Timeout, error.OutOfMemory, error.ConcurrencyUnavailable => return err,
+                            else => null,
+                        };
+                        if (winner) |index| {
+                            if (self.canceled.isSet() or deadlineExpired(self.io, deadline)) {
+                                self.slots[index].closeConnection();
+                                return if (self.canceled.isSet()) error.Canceled else error.Timeout;
+                            }
+                            return self.select(index, &self.slots[index].connection.?);
+                        }
+                        retryable_failure = retryable_failure or
+                            retryable.load(.acquire);
+                        if (self.host_resolution) |*resolution| {
+                            resolution.state.requestRefresh();
+                            retryable_failure = true;
+                        }
+                        self.setConnectivityState(.transient_failure);
+                        if (!wait_for_ready or !retryable_failure) return error.ConnectionUnavailable;
+                        try self.waitForProgress(deadline);
+                        continue;
                     }
-                    retryable_failure = retryable_failure or
-                        retryable.load(.acquire);
-                    if (self.host_resolution) |*resolution| {
-                        resolution.state.requestRefresh();
-                        retryable_failure = true;
-                    }
-                    self.setConnectivityState(.transient_failure);
-                    if (!wait_for_ready or !retryable_failure) return error.ConnectionUnavailable;
-                    try self.waitForProgress(deadline);
-                    continue;
                 }
             }
             const pass_deadline = try self.connectDeadline(deadline);
             for (0..self.slots.len) |offset| {
-                const index = (start + offset) % self.slots.len;
+                const index = if (ring_start) |ring_index|
+                    self.ring_hash_ring.uniqueEndpointAt(
+                        ring_index,
+                        offset,
+                    ) orelse break
+                else
+                    (start + offset) % self.slots.len;
                 const slot = &self.slots[index];
                 if (slot.disabled) continue;
                 if (slot.outlier.isEjected()) {
@@ -1164,6 +1298,7 @@ pub const Channel = struct {
         return switch (self.selection_policy) {
             .pick_first => self.selected_index orelse 0,
             .round_robin, .least_request, .weighted_round_robin => self.next_pick_index,
+            .ring_hash => 0,
         };
     }
 
@@ -1179,6 +1314,60 @@ pub const Channel = struct {
             leastRequestSlotOutstanding,
         ) orelse return null;
         return self.select(index, &self.slots[index].connection.?);
+    }
+
+    fn requestHash(
+        self: *Channel,
+        options: anytype,
+    ) error{MissingRequestHash}!?ring_hash.RequestHash {
+        if (self.selection_policy != .ring_hash) return null;
+        return try ring_hash.requestHash(
+            self.io,
+            self.ring_hash_config,
+            options,
+        );
+    }
+
+    fn pickReadyRingHash(
+        self: *Channel,
+        request_hash: ring_hash.RequestHash,
+    ) ?ReadyConnection {
+        const start = self.ring_hash_ring.start(request_hash.value) orelse
+            return null;
+        for (0..self.slots.len) |ordinal| {
+            const index = self.ring_hash_ring.uniqueEndpointAt(
+                start,
+                ordinal,
+            ) orelse return null;
+            const slot = &self.slots[index];
+            if (slot.outlier.isEjected() or slot.disabled or
+                !slotMayAttempt(slot, self.io))
+            {
+                continue;
+            }
+            if (slot.connection) |*connection| {
+                if (connection.isReusable()) {
+                    return self.select(index, connection);
+                }
+            }
+            // An explicit hash sticks to the first eligible endpoint while
+            // it connects. Header-missing random fallback may use any READY
+            // successor, matching grpc-core's separate random path.
+            if (!request_hash.random) return null;
+        }
+        return null;
+    }
+
+    fn rebuildRing(self: *Channel) !void {
+        try self.ring_hash_ring.rebuild(
+            self.allocator,
+            self.slots,
+            self.slots.len,
+            self.ring_hash_config,
+            ring_hash.default_ring_size_cap,
+            ringSlotKey,
+            ringSlotWeight,
+        );
     }
 
     fn beginRequest(self: *Channel, index: usize) void {
@@ -1456,6 +1645,9 @@ pub const Channel = struct {
                     .endpoint = resolution.endpoint(address),
                     .least_request_enabled = self.selection_policy == .least_request,
                     .outlier_enabled = self.outlier_config != null,
+                    .ring_hash_weight = ring_hash.endpointWeight(
+                        resolution.endpoint(address),
+                    ),
                 };
             }
         }
@@ -1463,6 +1655,15 @@ pub const Channel = struct {
         self.wrr_scheduler.invalidate();
         self.allocator.free(old_slots);
         self.slots = replacement;
+        if (self.selection_policy == .ring_hash) {
+            self.rebuildRing() catch |err| {
+                self.ring_hash_ring.deinit(self.allocator);
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidChannelOptions,
+                };
+            };
+        }
         self.selected_index = selected;
         if (self.selected_index == null) {
             for (self.slots, 0..) |slot, index| {
@@ -1748,6 +1949,18 @@ fn leastRequestSlotReady(self: *Channel, index: usize) bool {
 
 fn leastRequestSlotOutstanding(self: *Channel, index: usize) usize {
     return self.slots[index].outstanding_requests;
+}
+
+fn ringSlotKey(
+    slots: []Slot,
+    index: usize,
+    buffer: *[256]u8,
+) ![]const u8 {
+    return ring_hash.endpointKey(slots[index].endpoint, buffer);
+}
+
+fn ringSlotWeight(slots: []Slot, index: usize) u32 {
+    return slots[index].ring_hash_weight;
 }
 
 fn callDeadline(
