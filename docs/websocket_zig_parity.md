@@ -1855,7 +1855,12 @@ applying TCP-only socket options.
    external RFC 6455/RFC 7692 conformance evidence for both cleartext HTTP/1.1
    Upgrade and WSS. RFC 8441 now has the separate Hyper process gate described
    above, although it is a focused lifecycle check rather than the 517-case
-   Autobahn suite. The remaining three non-OK Autobahn results are
+   Autobahn suite. A fresh real-socket Autobahn adapter smoke on 2026-11-01
+   passed both cleartext and TLS with eight concurrent clients, fragmented
+   control frames, context/no-context compression, 9-bit windows, isolated
+   protocol errors, UTF-8 close 1007 and two recovery connections; see
+   `docs/evidence/websocket_autobahn/2026-11-01.json`. The remaining three
+   non-OK Autobahn results are
    inherently
    informational in Testsuite source: 7.1.6 explicitly allows implementation-
    defined close ordering, while 7.13.1 and 7.13.2 state that behavior for

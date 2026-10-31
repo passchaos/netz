@@ -1,0 +1,3 @@
+Autobahn zio smoke passed: transport=cleartext concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io
+Autobahn zio smoke passed: transport=tls concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io
+exit=0

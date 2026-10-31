@@ -5,20 +5,40 @@
   "commands": [
     "CHROME=/usr/bin/chromium zig build interop-websocket-chrome",
     "CHROME=/usr/bin/chromium zig build interop-websocket-chrome -- --tls",
-    "zig build interop-grpc-web-chrome"
+    "zig build interop-grpc-web-chrome",
+    "zig build interop-grpc-web-chrome -- --tls",
+    "zig build interop-grpc-web-chrome -- --tls --http2"
   ],
   "date": "2026-11-01",
   "grpc_web": {
     "client": "grpc-web-2.1.1",
     "details": "google.rpc.Status",
     "error": "UNAUTHENTICATED",
-    "log": "2026-11-01/grpc_web_chrome.http1.log",
-    "preflight": 5,
-    "protocols": [
-      "http/1.1"
-    ],
-    "rejected_origin": true,
+    "http1": {
+      "log": "2026-11-01/grpc_web_chrome.http1.log",
+      "preflight": 5,
+      "protocols": [
+        "http/1.1"
+      ],
+      "rejected_origin": true
+    },
     "stream": "incremental-text",
+    "tls_h2": {
+      "log": "2026-11-01/grpc_web_chrome.h2.log",
+      "preflight": 4,
+      "protocols": [
+        "h2"
+      ],
+      "rejected_origin": true
+    },
+    "tls_http1": {
+      "log": "2026-11-01/grpc_web_chrome.tls.log",
+      "preflight": 5,
+      "protocols": [
+        "http/1.1"
+      ],
+      "rejected_origin": true
+    },
     "unary": [
       "binary",
       "text"

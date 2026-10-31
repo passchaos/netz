@@ -1,0 +1,8 @@
+browser: Access to fetch at 'https://localhost:34375/demo.Echo/Unary' from origin 'http://127.0.0.1:35371' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+browser: Failed to load resource: net::ERR_FAILED
+{"client":"grpc-web-2.1.1","unary":["binary","text"],"stream":"incremental-text","error":"UNAUTHENTICATED","details":"google.rpc.Status","browser":"Chrome/149.0.7827.196","rejectedOrigin":true,"protocols":["http/1.1"]}
+gRPC-Web browser listening port=34375 scheme=https io=zio-std-io protocol=http/1.1
+debug(zio): Spawning thread 0
+gRPC-Web browser complete rpc=6 preflight=5 rejected=1 io=zio-std-io
+debug(zio): Removing thread 0
+exit=0

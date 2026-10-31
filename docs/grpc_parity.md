@@ -1446,10 +1446,11 @@ close_notify and requires the endpoint to continue serving all RPCs. Partial
 HTTP requests retain their failure behavior. The HTTPS gate pins only its
 temporary certificate's SPKI in Chromium. The
 runner defaults to `/usr/bin/chromium`; set `CHROME` to another compatible
-Chromium executable. A fresh headless Chromium 149.0.7827.196 HTTP/1.1 run on
-2026-11-01 passed binary/text unary, incremental text streaming, the blocked
-foreign-Origin preflight, and trailers-only UNAUTHENTICATED; see
-`docs/evidence/browser_interop/2026-11-01.json`.
+Chromium executable. Fresh headless Chromium 149.0.7827.196 HTTP/1.1, TLS
+HTTP/1.1 and TLS HTTP/2 runs on 2026-11-01 passed binary/text unary,
+incremental text streaming, the blocked foreign-Origin preflight, and
+trailers-only UNAUTHENTICATED; the HTTP/2 run reports `protocol=h2` with four
+preflights. See `docs/evidence/browser_interop/2026-11-01.json`.
 
 `grpc.web.http2` now provides the same owned-request/handled-status dispatch on
 HTTP/2. `grpc.runtime.ServerConnection.readWebRequest`, `readWebRequestWithTimeout`
