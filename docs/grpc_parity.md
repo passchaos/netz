@@ -2329,6 +2329,14 @@ non-fatal completion debits one token, and an OK winner replenishes the
 configured ratio. One logical deadline caps running attempts and pending
 pushback timers; no per-attempt completion or timer can renew it.
 
+`SharedChannel.hedgingStats()` exposes a lock-free, monotonic snapshot of
+logical calls, physical attempts, delayed and accelerated launches, throttled
+attempts, pushback delays/stops, OK and fatal winners, exhausted non-fatal
+calls, backend failures, deadline expirations, and canceled losers. Counters
+advance at the scheduler ownership boundary rather than inferred transport
+events, so retries, stale timers and cleanup races cannot double-count them.
+Channels without hedged calls pay no scheduler or allocation cost.
+
 The policy is deliberately unary-only because arbitrary client streams lack a
 complete replay buffer. Ordinary Channel rejects it with
 `InvalidChannelOptions`, and SharedChannel streaming entry points return

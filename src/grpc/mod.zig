@@ -88,6 +88,7 @@ pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
 pub const RetryPolicy = call.RetryPolicy;
 pub const HedgingPolicy = call.HedgingPolicy;
+pub const HedgingStats = @import("channel/shared.zig").HedgingStats;
 pub const RetryThrottler = call.RetryThrottler;
 pub const ServiceConfig = service_config.ServiceConfig;
 pub const ServiceConfigParseOptions = service_config.ParseOptions;

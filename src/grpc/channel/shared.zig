@@ -15,6 +15,7 @@ pub const Error = state_module.Error;
 pub const Options = state_module.Options;
 pub const KeepAliveOptions = @import("shared/keepalive.zig").Options;
 pub const KeepAliveStats = @import("shared/keepalive.zig").Stats;
+pub const HedgingStats = state_module.State.HedgingStats;
 pub const OrcaOobOptions = @import("shared/orca/config.zig").Options;
 pub const OrcaOobWatch = state_module.orca_tracker.Watch;
 pub const OrcaOobUpdate = state_module.orca_tracker.Update;
@@ -106,6 +107,9 @@ pub const SharedChannel = struct {
     /// connections owned by this SharedChannel.
     pub fn keepAliveStats(self: SharedChannel) KeepAliveStats {
         return self.state.keepalive_counters.snapshot();
+    }
+    pub fn hedgingStats(self: SharedChannel) HedgingStats {
+        return self.state.hedging_counters.snapshot();
     }
     pub fn keepAliveInterval(self: SharedChannel) ?std.Io.Duration {
         return self.state.keepAliveInterval();

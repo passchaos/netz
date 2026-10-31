@@ -98,6 +98,12 @@ test "gRPC SharedChannel hedging delay races endpoints and cancels the loser" {
     });
     try slow.await(io);
     try fast.await(io);
+    const stats = client.hedgingStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.calls);
+    try std.testing.expectEqual(@as(u64, 2), stats.attempts_started);
+    try std.testing.expectEqual(@as(u64, 1), stats.delayed_attempts);
+    try std.testing.expectEqual(@as(u64, 1), stats.ok_winners);
+    try std.testing.expectEqual(@as(u64, 1), stats.canceled_losers);
 }
 
 test "gRPC SharedChannel non-fatal hedge accelerates and honors positive pushback" {
@@ -172,6 +178,10 @@ test "gRPC SharedChannel returns the last non-fatal hedge after exhaustion" {
     try std.testing.expectEqualStrings("last", response.status_message);
     try first.await(io);
     try second.await(io);
+    const stats = client.hedgingStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.calls);
+    try std.testing.expectEqual(@as(u64, 2), stats.attempts_started);
+    try std.testing.expectEqual(@as(u64, 1), stats.exhausted_non_fatal);
 }
 
 const Suppression = enum {
@@ -258,6 +268,19 @@ fn runSuppressed(mode: Suppression) !void {
     try first.await(io);
     try second.await(io);
     try std.testing.expect(!second_seen.load(.acquire));
+    const stats = client.hedgingStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.calls);
+    try std.testing.expectEqual(@as(u64, 1), stats.attempts_started);
+    switch (mode) {
+        .negative_pushback => {
+            try std.testing.expectEqual(@as(u64, 1), stats.pushback_stops);
+            try std.testing.expectEqual(@as(u64, 1), stats.exhausted_non_fatal);
+        },
+        .throttled => {
+            try std.testing.expectEqual(@as(u64, 1), stats.throttled_attempts);
+            try std.testing.expectEqual(@as(u64, 1), stats.ok_winners);
+        },
+    }
 }
 
 fn runNonFatal(
@@ -329,6 +352,16 @@ fn runNonFatal(
     try std.testing.expect(elapsed_ns < maximum_ns);
     try first.await(io);
     try second.await(io);
+    const stats = client.hedgingStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.calls);
+    try std.testing.expectEqual(@as(u64, 2), stats.attempts_started);
+    try std.testing.expectEqual(@as(u64, 1), stats.ok_winners);
+    if (pushback_ms == null) {
+        try std.testing.expectEqual(@as(u64, 1), stats.accelerated_attempts);
+    } else {
+        try std.testing.expectEqual(@as(u64, 1), stats.delayed_attempts);
+        try std.testing.expectEqual(@as(u64, 1), stats.pushback_delays);
+    }
 }
 
 fn request() grpc.UnaryCallOptions {

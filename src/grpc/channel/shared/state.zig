@@ -7,6 +7,7 @@ const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
 const retry = @import("../../call/retry.zig");
 const keepalive = @import("keepalive.zig");
+const hedging_stats = @import("hedging/stats.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const least_request = @import("../least_request.zig");
 const ring_hash = @import("../ring_hash.zig");
@@ -44,6 +45,7 @@ pub const State = struct {
     selected: ?*Worker = null,
     next_pick: usize = 0,
     keepalive_counters: keepalive.Counters = .{},
+    hedging_counters: hedging_stats.Counters = .{},
     /// Zero means disabled. Config validation keeps enabled intervals within
     /// i64 nanoseconds so endpoint workers can observe throttling lock-free.
     keepalive_interval_ns: std.atomic.Value(i64) = .init(0),
@@ -63,6 +65,7 @@ pub const State = struct {
     pub const Membership = @import("membership.zig").Membership(State);
     pub const Resolution = @import("resolution.zig").Resolution(State);
     pub const Failure = @import("state.zig").Error;
+    pub const HedgingStats = hedging_stats.Snapshot;
     pub const StreamCall = @import("stream/call.zig").Call(State);
     pub const OrcaTracker = orca_tracker.Tracker;
 

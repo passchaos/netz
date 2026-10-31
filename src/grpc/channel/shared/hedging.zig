@@ -4,6 +4,7 @@ const std = @import("std");
 const call = @import("../../call.zig");
 const retry = @import("../../call/retry.zig");
 const wire = @import("../../wire.zig");
+const stats = @import("hedging/stats.zig");
 
 pub fn run(
     state: anytype,
@@ -99,6 +100,8 @@ pub fn run(
             overall: ?std.Io.Clock.Timestamp,
             launched: *u8,
             active: *u8,
+            counters: *stats.Counters,
+            reason: stats.Launch,
         ) State.Failure!void {
             const index = launched.*;
             try select.concurrent(
@@ -108,6 +111,7 @@ pub fn run(
             );
             launched.* += 1;
             active.* += 1;
+            counters.recordLaunch(reason);
         }
 
         fn timer(
@@ -132,13 +136,20 @@ pub fn run(
             pending.* = false;
         }
 
-        fn drain(select: *std.Io.Select(Wake)) void {
+        fn drain(
+            select: *std.Io.Select(Wake),
+            counters: *stats.Counters,
+        ) void {
             while (select.cancel()) |wake| switch (wake) {
                 .attempt => |outcome| {
                     if (outcome.result) |response_value| {
                         var response = response_value;
                         response.deinit();
-                    } else |_| {}
+                    } else |err| {
+                        if (err == error.Canceled) {
+                            counters.recordCanceledLoser();
+                        }
+                    }
                 },
                 .timer => |result| _ = result catch {},
             };
@@ -146,9 +157,11 @@ pub fn run(
     };
 
     try policy.validate();
+    const counters = &state.hedging_counters;
+    counters.recordCall();
     var storage: [12]Wake = undefined;
     var select: std.Io.Select(Wake) = .init(state.io, &storage);
-    defer Scheduler.drain(&select);
+    defer Scheduler.drain(&select, counters);
     var launched: u8 = 0;
     var active: u8 = 0;
     var timer_generation: u64 = 0;
@@ -165,6 +178,8 @@ pub fn run(
         deadline,
         &launched,
         &active,
+        counters,
+        .original,
     );
     if (policy.max_attempts > 1 and hedgingAllowed(policy)) {
         try Scheduler.timer(
@@ -176,6 +191,7 @@ pub fn run(
             &timer_pending,
         );
     } else {
+        if (policy.max_attempts > 1) counters.recordThrottle();
         scheduling_stopped = true;
     }
 
@@ -185,10 +201,14 @@ pub fn run(
             !timer_pending)
         {
             if (last_non_fatal) |response| {
+                counters.recordExhausted();
                 last_non_fatal = null;
                 return response;
             }
-            if (last_error) |err| return @errorCast(err);
+            if (last_error) |err| {
+                counters.recordExhausted();
+                return @errorCast(err);
+            }
             return error.ConnectionUnavailable;
         }
         const wake = select.await() catch |err| switch (err) {
@@ -199,12 +219,16 @@ pub fn run(
                 const timer = try result;
                 if (timer.generation != timer_generation) continue;
                 timer_pending = false;
-                if (timer.deadline) return error.Timeout;
+                if (timer.deadline) {
+                    counters.recordDeadline();
+                    return error.Timeout;
+                }
                 if (scheduling_stopped or launched >= policy.max_attempts) {
                     scheduling_stopped = true;
                     continue;
                 }
                 if (!hedgingAllowed(policy)) {
+                    counters.recordThrottle();
                     scheduling_stopped = true;
                     continue;
                 }
@@ -215,6 +239,8 @@ pub fn run(
                     deadline,
                     &launched,
                     &active,
+                    counters,
+                    .delayed,
                 );
                 if (launched < policy.max_attempts) {
                     try Scheduler.timer(
@@ -233,11 +259,13 @@ pub fn run(
                 std.debug.assert(active != 0);
                 active -= 1;
                 const response = outcome.result catch |err| {
+                    if (err == error.Timeout) counters.recordDeadline();
                     if (!policy.isNonFatal(.unavailable) or
                         !hedgeableAttemptError(err))
                     {
                         return @errorCast(err);
                     }
+                    counters.recordBackendFailure();
                     last_error = err;
                     const throttle_allows = if (policy.throttler) |throttler|
                         throttler.recordFailure()
@@ -245,6 +273,7 @@ pub fn run(
                         true;
                     Scheduler.invalidate(&timer_generation, &timer_pending);
                     if (!throttle_allows or launched >= policy.max_attempts) {
+                        if (!throttle_allows) counters.recordThrottle();
                         scheduling_stopped = true;
                         continue;
                     }
@@ -255,6 +284,8 @@ pub fn run(
                         deadline,
                         &launched,
                         &active,
+                        counters,
+                        .accelerated,
                     );
                     if (launched < policy.max_attempts) {
                         try Scheduler.timer(
@@ -273,9 +304,12 @@ pub fn run(
                 if (response.status == .ok or
                     !policy.isNonFatal(response.status))
                 {
-                    if (response.status == .ok) if (policy.throttler) |throttler| {
-                        throttler.recordSuccess();
-                    };
+                    if (response.status == .ok) {
+                        counters.recordOkWinner();
+                        if (policy.throttler) |throttler| {
+                            throttler.recordSuccess();
+                        }
+                    } else counters.recordFatalWinner();
                     return response;
                 }
 
@@ -290,19 +324,24 @@ pub fn run(
                 if (!throttle_allows or launched >= policy.max_attempts or
                     pushback == .stop)
                 {
+                    if (!throttle_allows) counters.recordThrottle();
+                    if (pushback == .stop) counters.recordPushbackStop();
                     scheduling_stopped = true;
                     continue;
                 }
                 switch (pushback) {
                     .stop => unreachable,
-                    .delay => |delay| try Scheduler.timer(
-                        &select,
-                        state.io,
-                        delay,
-                        deadline,
-                        &timer_generation,
-                        &timer_pending,
-                    ),
+                    .delay => |delay| {
+                        counters.recordPushbackDelay();
+                        try Scheduler.timer(
+                            &select,
+                            state.io,
+                            delay,
+                            deadline,
+                            &timer_generation,
+                            &timer_pending,
+                        );
+                    },
                     .absent => {
                         try Scheduler.launch(
                             &select,
@@ -311,6 +350,8 @@ pub fn run(
                             deadline,
                             &launched,
                             &active,
+                            counters,
+                            .accelerated,
                         );
                         if (launched < policy.max_attempts) {
                             try Scheduler.timer(

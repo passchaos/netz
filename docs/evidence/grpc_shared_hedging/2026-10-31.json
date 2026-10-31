@@ -43,6 +43,7 @@
     "pushback": "retry and hedging share a strict signed-int32 canonical grpc-retry-pushback-ms parser with no plus sign or redundant leading zeros",
     "throttling": "first attempt always runs; later timers and acceleration require a balance above half; qualifying failures debit one token and an OK winner replenishes tokenRatio",
     "deadline": "running attempts and pending pushback timers share one awake-clock absolute deadline and cannot renew it",
+    "telemetry": "SharedChannel exposes lock-free monotonic counters for calls, attempts, delayed and accelerated launches, throttling, pushback, winners, exhaustion, backend failures, deadlines, and canceled losers",
     "streaming_boundary": "ordinary Channel and all streaming APIs reject hedging explicitly instead of silently serializing or ignoring the policy"
   },
   "native_cases": [
@@ -55,11 +56,12 @@
     "pre-exhausted retry throttle prevents a scheduled second hedge",
     "two non-fatal attempts return the deliberately delayed final response",
     "backend-local connection errors are separated from OOM and validation failures",
-    "service-config activation, direct API activation, ordinary Channel rejection, and Shared streaming rejection"
+    "service-config activation, direct API activation, ordinary Channel rejection, and Shared streaming rejection",
+    "exact HedgingStats snapshots for delayed winner cancellation, non-fatal acceleration, pushback, throttle suppression, and exhaustion"
   ],
   "results": {
-    "focused_debug": "150/150 passed",
-    "grpc_debug": "469/469 passed",
+    "focused_debug": "151/151 passed",
+    "grpc_debug": "470/470 passed",
     "package": "26/26 passed",
     "grpc_cpp_release_fast": "9/9 build steps passed over h2c and certificate-verified TLS",
     "reference_status": "grpc-core C++ has no complete hedging runner at the pinned revision, so gRFC A6 is normative and real Netz multi-endpoint tests provide the behavioral proof"
@@ -68,15 +70,16 @@
     "src/grpc/call.zig": "8f032c560181b0f9d551eab38584a29677551bc81ed2e75eb5b6f09eeb282de3",
     "src/grpc/call/retry.zig": "8a20293d55d1c6b307c68a9cf59676be1b87bfe261ade7eb0b0a25be1565c553",
     "src/grpc/channel.zig": "d4fca96ef22f9354d591605e7238eaddf011b0fae19c6b3016e8d95492d40772",
-    "src/grpc/channel/shared.zig": "a88c7ff10632b195bfb91179c00051ba88d8285c7fd04a77884d87a6c206ae42",
-    "src/grpc/channel/shared/state.zig": "207891836afc04f20cdd0463e0d559ffea7f4e6d32ab73efb3c51dc55bf8ce14",
-    "src/grpc/channel/shared/hedging.zig": "b46d7141b984dadc6ff02d94954c1fa8ab88bf4040c88bf6aef36ebd84563ab8",
-    "src/grpc/channel/shared/hedging_tests.zig": "8d0fa098ce9307ff3ae899d7c7ff0296809fcf5b7d04c389efc80ca97bcd5c66",
+    "src/grpc/channel/shared.zig": "5f98a8ee32ccccbeffe313aa733a71bc5b098eb685c37d33b84cb7f7e8d61a7f",
+    "src/grpc/channel/shared/state.zig": "6d7dcda6a1bd12c0fe4cf1abc8264b323a62b5ddf7d7bac22b0d4304433421c6",
+    "src/grpc/channel/shared/hedging.zig": "d4ffbcf9fdb7fe5466b7dc6725afe75eece2f29160f3e71e641a53ec5e0bbc5f",
+    "src/grpc/channel/shared/hedging/stats.zig": "60b4c36c353cdb6da755ba9392ce948d6fe57585ba3a320da77d018cd6d19f6a",
+    "src/grpc/channel/shared/hedging_tests.zig": "a4a88e1de9f793a22b36c19e28400997e516550bcb95c0105db7d998eda565ec",
     "src/grpc/channel/shared/stream/open.zig": "b7afb12652ed1fb5b31f94fc3288c5e371a7bd73d2bcd3e6a0091de8abf75ff6",
-    "src/grpc/mod.zig": "5dfc2294df4d2427d6903283b93ff39d74179363144bc8e79624a482fdb44596",
+    "src/grpc/mod.zig": "210eeed17ea20be0a9ae6e10e5d027dc201f8ef5a5e1818ee5be0c5bd8d432d7",
     "src/grpc/service_config.zig": "d9b2056ff24c097218ce87df8ed7d8296c212b686c5d77a22778ce0e4bc09c9c",
     "src/grpc/service_config/hedging_tests.zig": "e57c04dbd92fbf90d141e23c0b2c6c93a45a3bf782d838430563c94956ba608f",
-    "test/package_test.zig": "9ec05553db2771ffeeff47afeda9fc4df52c39db01f2098b675ed2b61460e979"
+    "test/package_test.zig": "e79b840e1b81348e972477e3be32be24c4903152c7bc54b548dd579c072a6c15"
   },
   "verification_commands": [
     "zig build test-lib -Dtest-filter='hedging' --summary all",
