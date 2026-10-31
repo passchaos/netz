@@ -2116,7 +2116,12 @@ handle routing, both-session progress and payload isolation.
    wtransport-client half also skips a netz WT_DRAIN_SESSION and checks the
    immediately following detailed session-close capsule, while its
    wtransport-server half
-   checks netz's peer QUIC application-close code and reason handling. A
+   checks netz's peer QUIC application-close code and reason handling. A fresh
+   headless Chromium 149.0.7827.196 run on 2026-11-01 passed both directions
+   with exact launcher/process-image SHA-256 and User-Agent binding, including
+   DATAGRAM, both stream directions, RESET code 71, STOP code 72, concurrent
+   sibling survival, reuse, DRAIN-before-close and close code 77; see
+   `docs/evidence/webtransport_chrome/2026-11-01.json`. A
    separate Firefox 156.0.1 gate now binds its output to Puppeteer's actual
    launched-browser version, launcher/process-image SHA-256, and page/server
    User-Agent before covering

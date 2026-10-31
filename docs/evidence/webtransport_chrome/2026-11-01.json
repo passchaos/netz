@@ -1,0 +1,18 @@
+{
+  "browser": "Chromium 149.0.7827.196 (headless)",
+  "browser_launcher_sha256": "36cbbb620daeb933ae7861de07fcff05b5e1f7527303b5992459b8aa6707b845",
+  "browser_process_sha256": "3a7459ac6edc2ed80101d3b5a0492cae71a0097012a4f236b308d0a9b848290f",
+  "commands": [
+    "BROWSER_EXECUTABLE=/usr/bin/chromium zig build interop-webtransport-chrome"
+  ],
+  "date": "2026-11-01",
+  "notes": [
+    "Both directions run: Chromium client against the netz WebTransport server, and the netz client against a Chromium-hosted server.",
+    "The local Firefox gate was not rerun because /usr/bin/firefox is not runnable in this environment; the checked-in Firefox gate remains unchanged."
+  ],
+  "status": "passed",
+  "transcripts": [
+    "Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=1024 bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done browser_version=Chrome/149.0.7827.196 browser_launcher_sha256=36cbbb620daeb933ae7861de07fcff05b5e1f7527303b5992459b8aa6707b845 browser_process_sha256=3a7459ac6edc2ed80101d3b5a0492cae71a0097012a4f236b308d0a9b848290f browser_ua=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36",
+    "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1178 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=chromium-network-service server_io=zio-std-io"
+  ]
+}
