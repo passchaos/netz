@@ -764,6 +764,7 @@ pub const Channel = struct {
                 .least_request => .least_request,
                 .ring_hash => .ring_hash,
                 .weighted_round_robin => .weighted_round_robin,
+                .weighted_target => return error.InvalidChannelOptions,
             };
         }
         if (resolved.shuffle_address_list == null and balancing.configured) {

@@ -57,7 +57,10 @@ pub const LoadBalancingPolicy = enum {
     least_request,
     ring_hash,
     weighted_round_robin,
+    weighted_target,
 };
+
+pub const max_load_balancing_depth: usize = 32;
 
 pub const LeastRequestConfig = @import("channel/least_request.zig").Config;
 pub const RingHashConfig = @import("channel/ring_hash.zig").Config;
@@ -104,6 +107,16 @@ pub const OutlierDetectionConfig = struct {
     }
 };
 
+pub const WeightedTargetConfig = struct {
+    targets: []const Target = &.{},
+
+    pub const Target = struct {
+        name: []const u8,
+        weight: u32,
+        child: *const LoadBalancingNode,
+    };
+};
+
 /// Arena-owned recursive representation of the selected service-config LB
 /// policy. Leaf policies retain their complete parsed configuration; composite
 /// policies point at child nodes in the same ServiceConfig arena. This is the
@@ -114,6 +127,7 @@ pub const LoadBalancingNode = union(enum) {
     least_request: LeastRequestConfig,
     ring_hash: RingHashConfig,
     weighted_round_robin: WeightedRoundRobinConfig,
+    weighted_target: WeightedTargetConfig,
     outlier_detection: struct {
         config: OutlierDetectionConfig,
         child: *const LoadBalancingNode,
@@ -126,6 +140,7 @@ pub const LoadBalancingNode = union(enum) {
             .least_request => .least_request,
             .ring_hash => .ring_hash,
             .weighted_round_robin => .weighted_round_robin,
+            .weighted_target => .weighted_target,
             .outlier_detection => |wrapper| wrapper.child.leafPolicy(),
         };
     }
@@ -138,6 +153,7 @@ pub const LoadBalancingConfig = struct {
     least_request: LeastRequestConfig = .{},
     ring_hash: RingHashConfig = .{},
     weighted_round_robin: WeightedRoundRobinConfig = .{},
+    weighted_target: WeightedTargetConfig = .{},
     outlier_detection: ?OutlierDetectionConfig = null,
     /// Null means no LB policy was configured. The pointed tree is owned by
     /// the ServiceConfig arena and remains valid until `ServiceConfig.deinit`.
@@ -550,6 +566,17 @@ fn parseLoadBalancing(
     allocator: std.mem.Allocator,
     config: JsonServiceConfig,
 ) Error!LoadBalancingConfig {
+    return parseLoadBalancingAt(allocator, config, 0);
+}
+
+fn parseLoadBalancingAt(
+    allocator: std.mem.Allocator,
+    config: JsonServiceConfig,
+    depth: usize,
+) Error!LoadBalancingConfig {
+    if (depth > max_load_balancing_depth) {
+        return error.InvalidServiceConfig;
+    }
     if (config.loadBalancingConfig) |entries| {
         if (entries.len == 0) return error.InvalidServiceConfig;
         for (entries) |entry| {
@@ -566,9 +593,9 @@ fn parseLoadBalancing(
                 "outlier_detection_experimental",
             )) {
                 const parsed = try parseOutlierDetection(item.value_ptr.*);
-                var child = try parseLoadBalancing(allocator, .{
+                var child = try parseLoadBalancingAt(allocator, .{
                     .loadBalancingConfig = parsed.child_policy,
-                });
+                }, depth + 1);
                 if (child.outlier_detection != null) {
                     return error.InvalidServiceConfig;
                 }
@@ -582,6 +609,22 @@ fn parseLoadBalancing(
                     } },
                 );
                 return child;
+            }
+            if (std.mem.eql(
+                u8,
+                item.key_ptr.*,
+                "weighted_target_experimental",
+            )) {
+                const weighted_target = try parseWeightedTarget(
+                    allocator,
+                    item.value_ptr.*,
+                    depth,
+                );
+                return configuredLoadBalancing(allocator, .{
+                    .policy = .weighted_target,
+                    .configured = true,
+                    .weighted_target = weighted_target,
+                }, .{ .weighted_target = weighted_target });
             }
             if (std.mem.eql(u8, item.key_ptr.*, "round_robin")) {
                 const options = switch (item.value_ptr.*) {
@@ -782,6 +825,77 @@ fn parseLoadBalancing(
         return error.InvalidServiceConfig;
     }
     return .{};
+}
+
+fn parseWeightedTarget(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    depth: usize,
+) Error!WeightedTargetConfig {
+    const options = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidServiceConfig,
+    };
+    if (options.count() != 1) return error.InvalidServiceConfig;
+    const targets_value = options.get("targets") orelse
+        return error.InvalidServiceConfig;
+    const targets_object = switch (targets_value) {
+        .object => |object| object,
+        else => return error.InvalidServiceConfig,
+    };
+    const targets = try allocator.alloc(
+        WeightedTargetConfig.Target,
+        targets_object.count(),
+    );
+    var index: usize = 0;
+    var iterator = targets_object.iterator();
+    while (iterator.next()) |entry| : (index += 1) {
+        const name = entry.key_ptr.*;
+        if (name.len == 0) return error.InvalidServiceConfig;
+        const child_object = switch (entry.value_ptr.*) {
+            .object => |object| object,
+            else => return error.InvalidServiceConfig,
+        };
+        if (child_object.count() != 2) return error.InvalidServiceConfig;
+        const weight_value = child_object.get("weight") orelse
+            return error.InvalidServiceConfig;
+        const raw_weight = switch (weight_value) {
+            .integer => |number| number,
+            else => return error.InvalidServiceConfig,
+        };
+        if (raw_weight <= 0 or raw_weight > std.math.maxInt(u32)) {
+            return error.InvalidServiceConfig;
+        }
+        const child_policy = child_object.get("childPolicy") orelse
+            return error.InvalidServiceConfig;
+        const child_entries = switch (child_policy) {
+            .array => |array| array.items,
+            else => return error.InvalidServiceConfig,
+        };
+        const child = try parseLoadBalancingAt(allocator, .{
+            .loadBalancingConfig = child_entries,
+        }, depth + 1);
+        targets[index] = .{
+            .name = name,
+            .weight = @intCast(raw_weight),
+            .child = child.root orelse return error.InvalidServiceConfig,
+        };
+    }
+    std.mem.sort(
+        WeightedTargetConfig.Target,
+        targets,
+        {},
+        lessWeightedTarget,
+    );
+    return .{ .targets = targets };
+}
+
+fn lessWeightedTarget(
+    _: void,
+    left: WeightedTargetConfig.Target,
+    right: WeightedTargetConfig.Target,
+) bool {
+    return std.mem.order(u8, left.name, right.name) == .lt;
 }
 
 fn configuredLoadBalancing(

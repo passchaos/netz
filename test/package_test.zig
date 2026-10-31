@@ -711,6 +711,10 @@ test "public modules are reachable" {
         "WeightedRoundRobinConfig",
     ));
     try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "WeightedTargetConfig",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Channel,
         "startStreamingWithServiceConfig",
     ));

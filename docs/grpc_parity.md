@@ -636,6 +636,20 @@ parsing the name while continuing to use one flat picker would be false parity.
 Machine evidence for the ownership and address-routing foundation is recorded
 in `docs/evidence/grpc_lb_policy_tree/2026-10-31.json`.
 
+The recursive parser layer is now complete without weakening that boundary.
+`weighted_target_experimental.targets` accepts positive uint32 weights and a
+standard childPolicy list, skips unknown child policies, sorts target names for
+deterministic ownership, and recursively retains any implemented leaf,
+outlier wrapper or nested weighted target. Empty target maps remain valid so
+the runtime can report grpc-core's no-children transient-failure state. Missing
+fields, zero/overflow weights, unknown-only children, extra fields, empty names
+and nesting beyond 32 policy levels fail transactionally. Until runtime nodes
+land, ordinary and SharedChannel initialization both reject a parsed weighted
+target synchronously instead of silently flattening it. That rejection test
+also exposed and fixed a pre-existing SharedChannel leak when a State initializer
+returned before cleanup ownership was installed. Parser evidence is recorded in
+`docs/evidence/grpc_weighted_target_parser/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper

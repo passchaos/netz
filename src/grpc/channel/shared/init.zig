@@ -46,6 +46,8 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
     const state = try allocator.create(State);
+    var state_initialized = false;
+    errdefer if (!state_initialized) allocator.destroy(state);
     var retained = options;
     retained.service_config_json = null;
     retained.health_service = owned_name;
@@ -65,6 +67,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             .least_request => channel.SelectionPolicy.least_request,
             .ring_hash => channel.SelectionPolicy.ring_hash,
             .weighted_round_robin => channel.SelectionPolicy.weighted_round_robin,
+            .weighted_target => return error.InvalidSharedOptions,
         } else if (target == .resolved) target.resolved.policy else .pick_first),
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
         .keepalive_interval_ns = .init(if (options.keepalive) |keepalive|
@@ -88,6 +91,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         else
             null,
     };
+    state_initialized = true;
     transferred = true;
     errdefer {
         state.close();

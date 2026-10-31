@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "grpc-core-compatible weighted_target recursive service-config parser",
+  "decision": "accepted parser with explicit runtime rejection",
+  "scope": {
+    "policy": "weighted_target_experimental",
+    "configuration": "targets map with positive uint32 weight and standard childPolicy list",
+    "recursion": "implemented leaves, outlier wrapper, and nested weighted_target up to 32 levels",
+    "runtime_boundary": "ordinary Channel and SharedChannel reject parsed weighted_target until recursive runtime nodes land"
+  },
+  "reference": {
+    "grpc_core": {
+      "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+      "files": {
+        "src/core/load_balancing/weighted_target/weighted_target.cc": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+        "src/core/load_balancing/address_filtering.cc": "2c5cd86579afef9f06a1657300f80d67c1ef87719e2f5b37d78475cb33a0c454"
+      }
+    },
+    "observed_contract": [
+      "targets is an object keyed by child name",
+      "each target owns a weight and recursively parsed childPolicy list",
+      "unknown policies are skipped until the first implemented policy",
+      "empty target maps parse successfully and become a runtime no-children failure",
+      "child configuration ownership outlives the input JSON"
+    ]
+  },
+  "implementation": {
+    "node": "LoadBalancingNode adds a weighted_target variant containing sorted arena-owned targets",
+    "target": "each target retains name, positive uint32 weight, and child node pointer",
+    "determinism": "target names are sorted bytewise after JSON object parsing",
+    "depth": "one shared 32-level limit bounds outlier and weighted-target recursion",
+    "fallback": "unknown child policies are skipped using the same parser registry semantics as top-level policy selection",
+    "strictness": "missing fields, extra fields, empty names, zero/overflow/non-integer weights, non-object targets, and unknown-only children fail",
+    "allocation": "all arrays and nodes use the ServiceConfig arena and allocation-failure sweeps prove transactional cleanup",
+    "compatibility": "LoadBalancingConfig retains its flat view while exposing the recursive root and weighted_target config"
+  },
+  "failure_boundary": {
+    "ordinary_channel": "InvalidChannelOptions",
+    "shared_channel": "InvalidSharedOptions",
+    "silent_flattening": false,
+    "shared_init_fix": "State allocation is now destroyed if its initializer returns before cleanup ownership transfers"
+  },
+  "tests": [
+    "three deterministically sorted targets with round_robin, outlier plus least_request, and nested weighted_target plus pick_first",
+    "unknown policy fallback inside childPolicy",
+    "empty targets accepted",
+    "invalid target shape, names, fields, child list, and weights rejected",
+    "33-level recursive input rejected",
+    "complete allocation-failure sweep over two children",
+    "ordinary and Shared runtimes reject instead of selecting a flat fallback",
+    "Shared rejection is leak-free"
+  ],
+  "results": {
+    "weighted_target_parser_debug": "146/146 passed",
+    "complete_grpc_debug": "486/486 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/service_config.zig": "6ee873eaab33401444f06fae58d73d0e769c1e6d47604878d25b44fa9fd52825",
+    "src/grpc/service_config/weighted_target_tests.zig": "6d9a5f2d2275d843b974ab1b257035311f40c2f79780edd04216fed949d3aa9e",
+    "src/grpc/channel.zig": "c88da6560503b34c3a6646e304d0ddeb4ad94e99dce34b6965aa8fde0bbb5759",
+    "src/grpc/channel/shared/init.zig": "b2b29190968dc12a1b91a7035608ffe981c59bcb54e0d6010fc003a27ef7de1f",
+    "src/grpc/mod.zig": "d091858c590c456ba2d3b144b630432ce47a39425f5329eed5a72eef650e8d98",
+    "test/package_test.zig": "7986c03d0b0c9212dc68a368fbaaf4657cb427cc82c9eb08c447aad717fd966b",
+    "docs/grpc_parity.md": "c13cb60f6c39ff4b1041790704377cc99dc977dffd62897c132d99d39af04cc5"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC weighted target' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "recursive runtime state aggregation and weighted child delegation remain required before the policy is advertised as executable"
+}

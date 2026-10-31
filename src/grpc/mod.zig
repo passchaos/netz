@@ -100,6 +100,7 @@ pub const LeastRequestConfig = service_config.LeastRequestConfig;
 pub const RingHashConfig = service_config.RingHashConfig;
 pub const ringHash = @import("channel/ring_hash.zig").hash;
 pub const WeightedRoundRobinConfig = service_config.WeightedRoundRobinConfig;
+pub const WeightedTargetConfig = service_config.WeightedTargetConfig;
 pub const OutlierDetectionConfig = service_config.OutlierDetectionConfig;
 pub const SuccessRateEjection = service_config.SuccessRateEjection;
 pub const FailurePercentageEjection =
@@ -193,6 +194,7 @@ test {
     _ = @import("channel/socks5_tests.zig");
     _ = @import("service_config/least_request_tests.zig");
     _ = @import("service_config/ring_hash_tests.zig");
+    _ = @import("service_config/weighted_target_tests.zig");
     _ = @import("service_config/hedging_tests.zig");
     _ = @import("channel/host_tests.zig");
     _ = @import("channel/connect_race.zig");
