@@ -4559,7 +4559,10 @@ PUBACK is observed. MQTT 3.1.1 uses Clean Session false, while MQTT 5 uses
 Clean Start false and a nonzero Session Expiry Interval. The MQTT 5 path also
 requires Response Topic, binary Correlation Data, and User Property to survive
 broker fanout as typed rumqttc values. This keeps libmosquitto and rumqttc
-evidence independent.
+evidence independent. A fresh 2026-11-01 run passed both MQTT 3.1.1 and MQTT 5
+with QoS 0/1/2, retained single delivery, automatic acknowledgement, Response
+Topic/Correlation Data/User Property, Session Present resume and offline QoS 1
+delivery; see `docs/evidence/mqtt_rumqttc/2026-11-01.json`.
 `zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast` extends that
 independent-client boundary across process failure. A first rumqttc process
 creates MQTT 3.1.1 and MQTT 5 persistent QoS 1/2 subscriptions, disconnects

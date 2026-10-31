@@ -922,7 +922,11 @@ the repaired path consumes all ten before the missing prefix arrives, preserves
 sibling delivery, reports one reset, and rejects invalid late final-size data.
 The independent wtransport gate also remains green in both endpoint roles,
 including exact reset/stop codes, concurrent sibling reuse, and recovery after
-one dropped STOP_SENDING packet.
+one dropped STOP_SENDING packet. A fresh 2026-11-01 run passed both roles with
+CONNECT admission headers, 404 rejection, DATAGRAM and oversized rejection,
+bidi/uni streams, reset 71/73, stop 72/74, dropped-STOP_SENDING recovery,
+sibling reuse, DRAIN-before-close and exact close; see
+`docs/evidence/webtransport_wtransport/2026-11-01.json`.
 The focused WebTransport and QUIC reliable-reset/stopped-receive/reset-prefix
 Debug gate passes 479/479 tests; public-module checks pass 2/2.
 The compact-storage assertions in `runtime/layout_tests.zig` retain their

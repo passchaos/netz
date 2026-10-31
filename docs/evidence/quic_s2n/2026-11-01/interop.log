@@ -1,0 +1,170 @@
+Certificate request self-signature ok
+subject=CN=localhost
+warning: unused import: `Random`
+  --> /nav_env/Work/s2n-quic/quic/s2n-quic/src/provider/random.rs:14:43
+   |
+14 | pub use self::rand::{Provider as Default, Random};
+   |                                           ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: linker stderr: lto-wrapper: using serial compilation of 10 LTRANS jobs
+         lto-wrapper: note: see the '-flto' option documentation for more information
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=false alpn=hq-interop streams=2 bytes=10 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:52435
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:55025
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:37523
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:43984
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:45577
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:33451
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:57002
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 dropped_datagrams=2 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:43883
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 reordered_pairs=2 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:48303
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 flow_blocked=true stream_bytes=12288 echo_bytes=12288 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:39771
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio
+debug(zio): Spawning thread 0
+netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57
+debug(zio): Removing thread 0
+s2n-quic interop server listening=127.0.0.1:60445
+s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio
+s2n-quic server interoperated with netz: version=1 retry=true alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop streams=2 bytes=10 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:41840
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io
+netz QUIC interop server listening on 127.0.0.1:48126
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC server interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:51708
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:49249
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:51156
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:38976
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:35122
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:48431
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58
+netz QUIC interop server listening on 127.0.0.1:53885
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:46996
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 dropped_datagrams=2 peer_close=58
+debug(zio): Removing thread 0
+s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io
+s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=58
+netz QUIC interop server listening on 127.0.0.1:37899
+netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io
+debug(zio): Spawning thread 0
+netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 reordered_pairs=2 peer_close=58
+debug(zio): Removing thread 0
+exit=0

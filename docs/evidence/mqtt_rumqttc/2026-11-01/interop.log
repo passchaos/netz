@@ -1,0 +1,3 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true session-resume=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io
+exit=0

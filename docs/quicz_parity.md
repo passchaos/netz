@@ -41,6 +41,16 @@ ORIGIN, connection reuse, and both-direction two-phase GOAWAY(4) drain with
 Retry disabled and forced; see
 `docs/evidence/http3_tquic/2026-11-01.json`.
 
+A fresh 2026-11-01 `interop-quic-quinn` run passed both roles with certificate
+verification, `hq-interop` ALPN, DATAGRAM, deterministic loss and reorder on
+netz outbound, a surviving stream sibling, and exact peer close; see
+`docs/evidence/quic_quinn/2026-11-01.json`.
+
+A fresh 2026-11-01 `interop-quic-s2n` run passed both roles with 32-stream
+mixed churn, 16 FIN and 16 reset terminals, exact bytes/checksum/reset mask,
+and deterministic loss/reorder on netz outbound; see
+`docs/evidence/quic_s2n/2026-11-01.json`.
+
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
 headers, Version Negotiation, Retry parsing and integrity verification, typed
 and untyped transport parameters, owned and caller-storage frame parsing,

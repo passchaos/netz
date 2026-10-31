@@ -1,0 +1,11 @@
+{
+  "command": "zig build interop-mqtt-rumqttc",
+  "date": "2026-11-01",
+  "log": "2026-11-01/interop.log",
+  "peer": "rumqttc 0.25.1",
+  "status": "passed",
+  "transcripts": [
+    "rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true session-resume=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io",
+    "exit=0"
+  ]
+}
