@@ -4161,7 +4161,9 @@ username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
 same durable Session. The 294-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
-Present, takeover DISCONNECT and missing-username refusal bytes.
+Present, takeover DISCONNECT and missing-username refusal bytes. A fresh
+2026-11-01 run passed all 294 scenarios with 5000 ms CONNECT deadlines; see
+`docs/evidence/mqtt_mosquitto_vectors/2026-11-01.json`.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific

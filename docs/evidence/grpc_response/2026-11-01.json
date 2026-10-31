@@ -1,0 +1,18 @@
+{
+  "cases": 26,
+  "command": "zig build interop-grpc-response",
+  "date": "2026-11-01",
+  "known_reference_differences": [
+    "grpc-js maps DATA FIN without grpc-status to INTERNAL; netz applies the documented UNKNOWN fallback.",
+    "grpc-js maps the HTML fixture body to RESOURCE_EXHAUSTED as an oversized message envelope; netz discards the non-gRPC entity."
+  ],
+  "log": "2026-11-01/response.log",
+  "native_rpcs": 74,
+  "reference": "grpc-js 1.14.0",
+  "shared_rpcs": 2,
+  "status": "passed",
+  "transcripts": [
+    "netz gRPC response policy complete io=zio-std-io cases=26 shared=2 shapes=unary+streaming+duplex+shared reuse=true",
+    "{\"reference\":\"grpc-js-1.14.0\",\"cases\":26,\"nativeRpcs\":74,\"sharedRpcs\":2,\"sharedReadAfterRpcDeadline\":true,\"transparentRetries\":2,\"maxConcurrentStreams\":1,\"noErrorAfterEndStream\":2,\"differences\":[{\"case\":\"data-fin-no-status\",\"netz\":2,\"grpcJs\":13},{\"case\":\"html-entity-no-status\",\"netz\":2,\"grpcJs\":8}]}"
+  ]
+}

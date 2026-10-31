@@ -1,0 +1,3 @@
+netz gRPC response policy complete io=zio-std-io cases=26 shared=2 shapes=unary+streaming+duplex+shared reuse=true
+{"reference":"grpc-js-1.14.0","cases":26,"nativeRpcs":74,"sharedRpcs":2,"sharedReadAfterRpcDeadline":true,"transparentRetries":2,"maxConcurrentStreams":1,"noErrorAfterEndStream":2,"differences":[{"case":"data-fin-no-status","netz":2,"grpcJs":13},{"case":"html-entity-no-status","netz":2,"grpcJs":8}]}
+exit=0

@@ -1,0 +1,11 @@
+{
+  "command": "zig build interop-mqtt-mosquitto-vectors",
+  "connect_deadline_ms": 5000,
+  "date": "2026-11-01",
+  "log": "2026-11-01/vectors.log",
+  "scenarios": 294,
+  "status": "passed",
+  "transcripts": [
+    "Mosquitto-derived MQTT wire vectors passed: 294 scenarios with 5000 ms CONNECT deadlines"
+  ]
+}

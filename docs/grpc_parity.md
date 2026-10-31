@@ -1596,7 +1596,9 @@ INTERNAL on DATA FIN without `grpc-status`, and RESOURCE_EXHAUSTED when it reads
 the fixture's HTML body as an oversized message envelope. Netz applies the
 documented UNKNOWN fallback and discards that non-gRPC entity. The gate checks
 the pinned SDK's actual outcomes alongside netz's required behavior and does
-not claim those malformed responses have identical SDK results.
+not claim those malformed responses have identical SDK results. A fresh
+2026-11-01 run passed all 26 cases, 74 native RPCs and 2 shared RPCs; see
+`docs/evidence/grpc_response/2026-11-01.json`.
 
 The owning h2c client's IP-address connection now also supplies its numeric
 `address:port` authority automatically through the HTTP/2 runtime. Unary,
