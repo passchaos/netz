@@ -109,8 +109,9 @@ fn Context(comptime NodePointer: type, comptime StatePointer: type) type {
 }
 
 fn workerMatches(state: anytype, worker: anytype, path: []const []const u8) bool {
+    _ = state;
     return pathMatches(
-        state.sources[worker.source_index].endpoint.hierarchicalPath(),
+        worker.source.endpoint.hierarchicalPath(),
         path,
     );
 }

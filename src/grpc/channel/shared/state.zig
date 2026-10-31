@@ -30,11 +30,15 @@ pub const State = struct {
     group: std.Io.Group = .init,
     workers: std.ArrayList(*Worker) = .empty,
     canonical_endpoints: []channel.Endpoint = &.{},
-    sources: []Source = &.{},
+    sources: []*Source = &.{},
     shuffle_addresses: bool = false,
     resolution_changed: std.Io.Event = .unset,
-    config: std.atomic.Value(?*ConfigGeneration) = .init(null),
-    config_readers: std.atomic.Value(usize) = .init(0),
+    config: @import("config_generation.zig").Publication = .init(null),
+    update_mutex: std.Io.Mutex = .init,
+    config_revision: u64 = 1,
+    health_explicit: bool = false,
+    orca_explicit: bool = false,
+    resolver_policy: channel.SelectionPolicy = .pick_first,
     health_service: ?[]u8 = null,
     orca_oob: ?orca_config.Config = null,
     tracker: *connectivity.Tracker,
@@ -129,10 +133,10 @@ pub const State = struct {
         self.wrr_scheduler.deinit(self.allocator);
         self.ring_hash_ring.deinit(self.allocator);
         if (self.weighted_target) |*runtime| runtime.deinit();
-        for (self.sources) |*source| source.deinit(self.allocator);
+        for (self.sources) |source| source.release();
         self.allocator.free(self.sources);
         self.allocator.free(self.canonical_endpoints);
-        if (self.config.load(.acquire)) |config| config.release();
+        self.config.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
         self.tracker.release();
@@ -145,11 +149,10 @@ pub const State = struct {
     }
 
     pub fn retainConfig(self: *State) ?*ConfigGeneration {
-        _ = self.config_readers.fetchAdd(1, .acq_rel);
-        const generation = self.config.load(.acquire);
-        if (generation) |config| _ = config.retain();
-        _ = self.config_readers.fetchSub(1, .acq_rel);
-        return generation;
+        return self.config.retain();
+    }
+    pub fn publishConfigLocked(self: *State, config: ?*ConfigGeneration) void {
+        self.config.publish(config);
     }
     pub fn unlock(self: *State) void {
         // A departure can race the owner's last notification. Check once
@@ -161,6 +164,7 @@ pub const State = struct {
         }
     }
     fn pruneAbandonedLocked(self: *State) void {
+        self.config.reclaim();
         if (!self.abandoned_pending.swap(false, .acq_rel)) return;
         var current = self.head;
         while (current) |job| {
@@ -184,10 +188,12 @@ pub const State = struct {
     pub fn endpointCountLocked(self: *State) usize {
         if (self.closed) return 0;
         var count: usize = 0;
-        for (self.sources) |*source| count += source.latest().len;
+        for (self.sources) |source| count += source.latest().len;
         return count;
     }
-    pub fn selectionPolicy(self: *const State) channel.SelectionPolicy {
+    pub fn selectionPolicy(self: *State) channel.SelectionPolicy {
+        self.lock();
+        defer self.unlock();
         return self.policy;
     }
     pub fn endpointCount(self: *State) usize {
@@ -240,7 +246,7 @@ pub const State = struct {
     fn endpointTrackerLocked(self: *State, index: usize) ?*connectivity.Tracker {
         if (self.closed) return null;
         var ordinal = index;
-        for (self.sources) |*source| {
+        for (self.sources) |source| {
             const members = source.latest();
             if (ordinal < members.len) return members[ordinal].tracker;
             ordinal -= members.len;
@@ -252,7 +258,7 @@ pub const State = struct {
         index: usize,
     ) ?*orca_tracker.Tracker {
         var ordinal = index;
-        for (self.sources) |*source| {
+        for (self.sources) |source| {
             const members = source.latest();
             if (ordinal < members.len) return members[ordinal].orca_tracker;
             ordinal -= members.len;
@@ -267,13 +273,9 @@ pub const State = struct {
         self: *State,
         worker: *Worker,
     ) ?*orca_config.Config {
-        self.lock();
-        defer self.unlock();
-        if (self.orca_oob) |*config| return config;
-        return if (self.weighted_target) |*runtime|
-            runtime.orcaConfig(self, worker)
-        else
-            null;
+        _ = self;
+        // Only the endpoint owner reads its currently adopted settings.
+        return if (worker.settings.orca_oob) |*config| config else null;
     }
     pub fn requestNameResolution(self: *State) Error!void {
         return Resolution.request(self);
@@ -283,7 +285,7 @@ pub const State = struct {
     }
     pub fn wakeAllLocked(self: *State) void {
         for (self.workers.items) |worker| worker.wake.set(self.io);
-        for (self.sources) |*source| source.wake.set(self.io);
+        for (self.sources) |source| source.wake.set(self.io);
     }
     pub fn isClosed(self: *State) bool {
         self.lock();
@@ -307,7 +309,7 @@ pub const State = struct {
     /// channel is destroyed, even when Sender references retain this state.
     /// Call after the endpoint/manager group has been joined.
     pub fn stopResolution(self: *State) void {
-        for (self.sources) |*source| {
+        for (self.sources) |source| {
             self.lock();
             const resolver = source.resolver;
             source.resolver = null;
@@ -354,11 +356,10 @@ pub const State = struct {
     }
     pub fn finishOutstandingLocked(self: *State, worker: anytype) void {
         if (comptime @TypeOf(worker) == *Worker) {
-            if (self.weighted_target) |*runtime| {
-                runtime.finishOutstanding(self, worker);
-                self.wakeAllLocked();
-                return;
-            }
+            std.debug.assert(worker.outstanding_requests != 0);
+            worker.outstanding_requests -= 1;
+            self.wakeAllLocked();
+            return;
         }
         if (self.policy != .least_request) return;
         std.debug.assert(worker.outstanding_requests != 0);
@@ -371,6 +372,7 @@ pub const State = struct {
         success: bool,
     ) void {
         if (comptime @TypeOf(worker) == *Worker) {
+            if (worker.retired) return;
             if (self.weighted_target) |*runtime| {
                 runtime.recordOutlier(self, worker, success);
                 return;
@@ -419,15 +421,17 @@ pub const State = struct {
         self.evaluateOutliersLocked();
         const effective_state: connectivity.State = if (worker.outlier.isEjected())
             .transient_failure
+        else if (worker.pending_settings != null and worker.pending_settings.?.health_service != null)
+            .connecting
         else
             state;
-        const effective_capacity = if (worker.outlier.isEjected()) 0 else capacity;
+        const effective_capacity = if (effective_state == .ready) capacity else 0;
         const changed = worker.published != effective_state or
             worker.capacity != effective_capacity;
         worker.published = effective_state;
         worker.capacity = effective_capacity;
         worker.tracker.setState(if (self.closed or worker.retired) .shutdown else effective_state);
-        Membership.promoteLocked(self, worker.source_index);
+        if (!worker.retired) Membership.promoteLocked(self, worker.source_index);
         self.recomputeLocked();
         if (changed) self.wakeAllLocked();
     }
@@ -457,6 +461,7 @@ pub const State = struct {
         self: *State,
         worker: *Worker,
     ) ?service_config.WeightedRoundRobinConfig {
+        if (worker.retired) return null;
         return if (self.weighted_target) |*runtime|
             runtime.wrrConfig(self, worker)
         else
@@ -508,7 +513,7 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or worker.retired) return;
-        const source = &self.sources[worker.source_index];
+        const source = worker.source;
         if (source.resolver != null) {
             source.refresh_requested = true;
             source.wake.set(self.io);
@@ -524,7 +529,7 @@ pub const State = struct {
         worker.tracker.setState(.shutdown);
         self.wrr_scheduler.remove(worker);
         self.ring_hash_dirty = true;
-        if (self.weighted_target) |*runtime| runtime.invalidateRings();
+        if (self.weighted_target) |*runtime| runtime.invalidatePickers();
         if (self.selected == worker) self.selected = null;
         if (self.weighted_target_selected == worker) {
             self.weighted_target_selected = null;
@@ -644,7 +649,8 @@ pub const State = struct {
         if (self.policy == .ring_hash) {
             try self.ensureRingLocked();
             const job = self.head orelse return null;
-            const request_hash = job.routing_hash.?;
+            const request_hash = job.routing_hash orelse try job.requestHash(self.io, self.ring_hash_config);
+            job.routing_hash = request_hash;
             const start = self.ring_hash_ring.start(request_hash.value) orelse
                 return null;
             for (0..self.sources.len) |ordinal| {
@@ -680,7 +686,7 @@ pub const State = struct {
         return null;
     }
     fn wrrReady(worker: *Worker) bool {
-        return worker.eligible and worker.published == .ready;
+        return !worker.retired and worker.eligible and worker.published == .ready;
     }
     fn wrrAvailable(worker: *Worker) bool {
         return wrrReady(worker) and worker.capacity != 0;
@@ -740,7 +746,7 @@ pub const State = struct {
         self: *State,
         source_index: usize,
     ) RingSourcePick {
-        const source = &self.sources[source_index];
+        const source = self.sources[source_index];
         var pending = source.resolver != null and source.current.len == 0;
         for (source.current) |worker| {
             if (!worker.eligible or worker.retired or
@@ -765,7 +771,7 @@ pub const State = struct {
         source_index: usize,
         buffer: *[256]u8,
     ) ![]const u8 {
-        const source = &self.sources[source_index];
+        const source = self.sources[source_index];
         return source.ringHashKey(
             if (source.current.len == 0)
                 null
@@ -839,7 +845,7 @@ pub const State = struct {
     pub fn claim(self: *State, worker: *Worker) ?*Job {
         self.lock();
         defer self.unlock();
-        if (self.closed or self.head == null) return null;
+        if (self.closed or worker.retired or worker.pending_settings != null or self.head == null) return null;
         const picked = self.pickLocked(worker) catch |err| {
             const job = self.head.?;
             self.removeQueuedLocked(job);
@@ -851,8 +857,8 @@ pub const State = struct {
         self.removeQueuedLocked(job);
         job.setOwnerWake(worker.wake);
         worker.capacity -= 1;
+        worker.outstanding_requests += 1;
         if (self.policy == .least_request) {
-            worker.outstanding_requests += 1;
             self.least_request_selected = null;
         }
         if (self.weighted_target) |*runtime| {
@@ -877,6 +883,12 @@ pub const State = struct {
         if (self.closed) {
             self.unlock();
             return error.SharedChannelClosed;
+        }
+        if (self.policy == .ring_hash) {
+            job.routing_hash = job.requestHash(self.io, self.ring_hash_config) catch |err| {
+                self.unlock();
+                return err;
+            };
         }
         if (self.queued >= self.options.max_queued_calls) {
             self.unlock();

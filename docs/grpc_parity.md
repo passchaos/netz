@@ -858,15 +858,15 @@ an `a` slot belongs to wrapper indexes 0 and 1 but not 2, while a `b` slot
 belongs only to index 2. Evidence is in
 `docs/evidence/grpc_ordinary_weighted_target_outlier/2026-10-31.json`.
 
-SharedChannel service-config ownership is now generation-based in preparation
-for live updates. State publishes one reference-counted immutable parsed arena;
+SharedChannel service-config ownership uses immutable generations.
+State publishes one reference-counted parsed arena;
 unary and streaming admission enter a short atomic reader epoch, retain the
 current generation, resolve method policy outside the mutex, and release it
 only after all borrowed timeout/retry/hedging data has been consumed. Endpoint worker creation
 also borrows the published generation rather than a movable optional value.
-This removes the use-after-free boundary that a future atomic config swap would
-otherwise create for concurrent senders. It does not yet expose a dynamic
-update API or claim grpc-core's 15-minute removed-child retention. Evidence is
+Atomic publication defers old State references until the short reader epoch
+has ended; each logical RPC retains its own method-policy generation across
+retries and completion. The initial ownership foundation is recorded
 in `docs/evidence/grpc_shared_config_generation/2026-10-31.json`.
 
 SharedChannel now also retains a policy-independent canonical endpoint
@@ -875,13 +875,54 @@ current policy's derived owner set, so existing ring identity collapse,
 endpoint watches and picker cardinality do not change. The new
 `configuredEndpointCount()` reports the complete input: a top-level ring case
 keeps three configured endpoints while exposing two logical owners, and a
-weighted-target ring keeps four while exposing three. Future live updates can
+weighted-target ring keeps four while exposing three. Live updates can
 therefore rebuild ring, RR or other source layouts without guessing members
 that a prior policy destructively collapsed. Endpoint-internal strings,
 connector contexts and TLS/proxy options retain the public Channel target
 lifetime contract; the inventory owns the endpoint value array itself.
 Evidence is in
 `docs/evidence/grpc_shared_canonical_sources/2026-10-31.json`.
+
+`SharedChannel.update`, `updateWithTimeout` and `updateWithDeadline` now
+publish an optional replacement target and service config together. Keeping
+either field preserves its current value; `.service_config.replace = null`
+clears service config, while an empty resolved target removes every endpoint.
+Successful updates return the new `configurationRevision`, starting at two
+after initial construction. Original explicit Channel policy, Health and ORCA
+options retain precedence over the replacement service config.
+
+Preparation owns the canonical endpoint value array, parsed arena, recursive
+LB runtime and control settings before taking the publication lock. Under
+that lock it stages worker settings plus every fallible endpoint and resolver
+task admission behind activation events before changing active state.
+Malformed config, allocation failure,
+expired/canceled admission and task-capacity failure therefore preserve the
+published revision and topology, including failure after one candidate task
+has already started. Config updates rebuild pick-first, RR, least-request,
+ring, WRR and recursive weighted/outlier source layouts from the complete
+inventory. Queued requests recompute their ring input after a picker change.
+
+Sources are independently reference-counted objects. Unchanged targets reuse
+their resolver, watches, worker and physical connection, including ring-weight
+changes and source-array reorder. Removed sources leave the new picker and
+publish endpoint SHUTDOWN immediately, while their admitted unary and duplex
+work keeps the old source alive until request/response completion. Resolver
+refresh operations similarly retain their original source snapshot across a
+concurrent topology replacement. The owning channel still bounds the lifetime
+of caller-borrowed endpoint strings, TLS/proxy policy and connector context;
+updates copy endpoint values rather than taking ownership of those nested
+objects.
+
+Each endpoint owner adopts an immutable Health/ORCA snapshot between turns,
+retaining unchanged watches and restarting changed control streams on its
+existing connection. A changed Health service gates later business admission
+until SERVING, while active RPCs continue. Request counters are independent
+of the current picker so completions remain balanced across policy changes.
+Identical config and endpoint-only updates retain current detector buckets,
+child schedules and a still-healthy pick-first selection. Changed config
+builds a fresh policy runtime. grpc-core's 15-minute removed-child cache and
+policy-state restoration on reactivation remain separate unfinished work.
+Evidence is in `docs/evidence/grpc_shared_live_update/2026-11-01.json`.
 
 The top-level ring metadata fixture now retains static header storage across
 request construction. Its earlier helper returned a slice into a temporary

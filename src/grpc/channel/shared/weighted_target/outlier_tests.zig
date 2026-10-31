@@ -146,7 +146,7 @@ test "gRPC SharedChannel weighted target sibling outlier buckets are isolated" {
         client.state.lock();
         defer client.state.unlock();
         for (client.state.workers.items) |worker| {
-            const path = client.state.sources[worker.source_index]
+            const path = worker.source
                 .endpoint.hierarchicalPath();
             try std.testing.expectEqual(
                 @as(usize, 2),

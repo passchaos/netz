@@ -11,7 +11,7 @@ pub fn reset(state: *State, deadline: ?std.Io.Clock.Timestamp) State.Failure!voi
         worker.backoff_reset_requested.store(true, .release);
         worker.wake.set(state.io);
     }
-    for (state.sources) |*source| {
+    for (state.sources) |source| {
         if (source.resolver == null) continue;
         source.backoff_reset_requested = true;
         source.wake.set(state.io);

@@ -7,6 +7,10 @@ const ring_hash = @import("../ring_hash.zig");
 
 pub fn Source(comptime Worker: type) type {
     return struct {
+        allocator: std.mem.Allocator,
+        refs: std.atomic.Value(usize) = .init(1),
+        retired: bool = false,
+        activation: std.Io.Event = .unset,
         endpoint: channel.Endpoint,
         ring_hash_weight: u32 = 1,
         resolver: ?*resolver.State = null,
@@ -20,12 +24,28 @@ pub fn Source(comptime Worker: type) type {
         last_error: ?anyerror = null,
 
         const Self = @This();
-        pub fn init(allocator: std.mem.Allocator, io: std.Io, endpoint: channel.Endpoint, options: channel.Options) channel.Error!Self {
+        pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoint: channel.Endpoint, options: channel.Options) channel.Error!*Self {
+            const source = try allocator.create(Self);
+            errdefer allocator.destroy(source);
+            source.* = try init(allocator, io, endpoint, options);
+            return source;
+        }
+        pub fn retain(self: *Self) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+        pub fn release(self: *Self) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            const allocator = self.allocator;
+            self.deinit(allocator);
+            allocator.destroy(self);
+        }
+        fn init(allocator: std.mem.Allocator, io: std.Io, endpoint: channel.Endpoint, options: channel.Options) channel.Error!Self {
             if (endpoint == .tls_host and
                 (endpoint.tls_host.proxy != null or
                     endpoint.tls_host.socks5_proxy != null))
             {
                 return .{
+                    .allocator = allocator,
                     .endpoint = endpoint,
                     .ring_hash_weight = ring_hash.endpointWeight(endpoint),
                 };
@@ -34,6 +54,7 @@ pub fn Source(comptime Worker: type) type {
                 .cleartext_host => |v| .{ v.host, v.port, v.limits.enable_push },
                 .tls_host => |v| .{ v.host, v.port, v.limits.enable_push },
                 else => return .{
+                    .allocator = allocator,
                     .endpoint = endpoint,
                     .ring_hash_weight = ring_hash.endpointWeight(endpoint),
                 },
@@ -46,6 +67,7 @@ pub fn Source(comptime Worker: type) type {
             var normalized = endpoint;
             if (normalized == .tls_host) normalized.tls_host.host = parsed.host;
             return .{
+                .allocator = allocator,
                 .endpoint = normalized,
                 .ring_hash_weight = ring_hash.endpointWeight(endpoint),
                 .resolver = state,

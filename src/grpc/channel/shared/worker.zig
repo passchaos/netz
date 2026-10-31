@@ -14,11 +14,16 @@ const Wake = @import("wake.zig").Wake;
 const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const outlier_detection = @import("../outlier_detection.zig");
+const Settings = @import("worker_settings.zig").Settings;
 
 pub fn Worker(comptime State: type) type {
     return struct {
         parent: *State,
         source_index: usize,
+        source: *State.Source,
+        activation: std.Io.Event = .unset,
+        settings: *Settings,
+        pending_settings: ?*Settings = null,
         address: ?std.Io.net.IpAddress = null,
         eligible: bool = false,
         retired: bool = false,
@@ -72,8 +77,12 @@ pub fn Worker(comptime State: type) type {
                 self.orca_tracker.release();
                 self.wake.release();
                 parent.allocator.free(self.weighted_outliers);
+                self.settings.destroy();
+                if (self.pending_settings) |settings| settings.destroy();
+                self.source.release();
                 parent.allocator.destroy(self);
             }
+            try self.activation.wait(parent.io);
             while (!self.parent.shouldStop(self, self.active.items.len == 0 and self.streams.items.len == 0)) {
                 self.tick() catch |err| {
                     if (err == error.Canceled and (self.parent.isClosed() or self.parent.isRetired(self))) return error.Canceled;
@@ -170,6 +179,31 @@ pub fn Worker(comptime State: type) type {
 
         fn tick(self: *Self) !void {
             const demand = self.parent.needsConnection(self);
+            self.parent.lock();
+            const updated = self.pending_settings;
+            self.pending_settings = null;
+            var previous: ?*Settings = null;
+            if (updated) |settings| {
+                if (self.settings.equivalent(settings)) settings.destroy() else {
+                    previous = self.settings;
+                    self.settings = settings;
+                }
+            }
+            self.parent.unlock();
+            if (previous) |settings| {
+                self.dropWatch();
+                self.dropOrca();
+                settings.destroy();
+                self.health_disabled = false;
+                self.health_at = null;
+                self.health_seen = false;
+                self.orca_disabled = false;
+                self.orca_at = null;
+                self.orca_seen = false;
+                if (self.connection != null) {
+                    self.local_state = if (self.settings.health_service == null) .ready else .connecting;
+                }
+            }
             const retiring = self.parent.isRetired(self);
             if (!retiring and self.backoff_reset_requested.swap(false, .acq_rel)) {
                 self.connect_at = null;
@@ -199,7 +233,7 @@ pub fn Worker(comptime State: type) type {
                 self.connect_failures = 0;
                 self.health_failures = 0;
                 self.orca_failures = 0;
-                self.local_state = if (self.parent.health_service == null) .ready else .connecting;
+                self.local_state = if (self.settings.health_service == null) .ready else .connecting;
             }
             const connection = self.connection.?;
             self.keep_alive.observeAcknowledgement(
@@ -228,9 +262,9 @@ pub fn Worker(comptime State: type) type {
                     self.connect_at = null;
                     return;
                 }
-            } else if (!retiring and self.parent.health_service != null and !self.health_disabled and self.watch == null and (self.health_at == null or self.expired(self.health_at))) {
+            } else if (!retiring and self.settings.health_service != null and !self.health_disabled and self.watch == null and (self.health_at == null or self.expired(self.health_at))) {
                 var options = self.parent.options.health_metadata;
-                options.service = self.parent.health_service.?;
+                options.service = self.settings.health_service.?;
                 self.watch = try health.startWatchWithDeadline(connection, self.parent.allocator, options, self.outputDeadline());
                 self.health_at = null;
                 self.health_seen = false;

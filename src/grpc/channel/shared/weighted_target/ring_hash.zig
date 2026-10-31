@@ -93,7 +93,7 @@ fn Context(
                 self.state,
                 index,
             ).?;
-            const source = &self.state.sources[source_index];
+            const source = self.state.sources[source_index];
             return source.ringHashKey(
                 if (source.current.len == 0)
                     null
@@ -194,7 +194,7 @@ fn pickSource(
 ) SourcePick(@TypeOf(
     state.sources[0].current[0],
 )) {
-    const source = &state.sources[source_index];
+    const source = state.sources[source_index];
     var pending = source.resolver != null and source.current.len == 0;
     for (source.current) |worker| {
         if (!worker.eligible or worker.retired or

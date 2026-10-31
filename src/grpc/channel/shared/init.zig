@@ -8,8 +8,6 @@ const State = @import("state.zig").State;
 const Error = @import("state.zig").Error;
 const Options = @import("options.zig").Options;
 const orca_config = @import("orca/config.zig");
-const least_request = @import("../least_request.zig");
-const ring_hash = @import("../ring_hash.zig");
 const ConfigGeneration = @import("config_generation.zig").Generation;
 
 pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, options: Options) Error!*State {
@@ -34,8 +32,10 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     }
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
-    const balancing = if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{};
-    var weighted_target = if (balancing.policy == .weighted_target)
+    const balancing = @import("balancing.zig").resolve(if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{}, options.channel.selection_policy);
+    const policy = @import("balancing.zig").select(balancing, options.channel.selection_policy, if (target == .resolved) target.resolved.policy else .pick_first);
+    if (policy == .weighted_target and balancing.policy != .weighted_target) return error.InvalidSharedOptions;
+    var weighted_target = if (policy == .weighted_target)
         State.WeightedTarget.init(
             allocator,
             balancing.root orelse return error.InvalidSharedOptions,
@@ -49,7 +49,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     errdefer if (!weighted_target_transferred) if (weighted_target) |*runtime| {
         runtime.deinit();
     };
-    const requested_orca = options.orca_oob orelse if (balancing.policy == .weighted_round_robin and
+    const requested_orca = options.orca_oob orelse if (policy == .weighted_round_robin and
         balancing.weighted_round_robin.enable_oob_load_report) @import("../../orca/oob.zig").ClientOptions{
         .report_interval = balancing.weighted_round_robin.oob_reporting_period,
     } else null;
@@ -61,7 +61,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
     const config_generation = if (config) |value|
-        try ConfigGeneration.create(allocator, value)
+        try ConfigGeneration.createWithJson(allocator, value, options.service_config_json.?)
     else
         null;
     config = null;
@@ -98,25 +98,21 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .io = io,
         .options = retained,
         .config = .init(config_generation),
+        .health_explicit = options.health_service != null or options.health_metadata.service.len != 0,
+        .orca_explicit = options.orca_oob != null,
+        .resolver_policy = if (target == .resolved) target.resolved.policy else .pick_first,
         .canonical_endpoints = canonical_endpoints,
         .health_service = owned_name,
         .orca_oob = owned_orca,
         .tracker = tracker,
-        .policy = options.channel.selection_policy orelse (if (balancing.configured) switch (balancing.policy) {
-            .pick_first => channel.SelectionPolicy.pick_first,
-            .round_robin => channel.SelectionPolicy.round_robin,
-            .least_request => channel.SelectionPolicy.least_request,
-            .ring_hash => channel.SelectionPolicy.ring_hash,
-            .weighted_round_robin => channel.SelectionPolicy.weighted_round_robin,
-            .weighted_target => channel.SelectionPolicy.weighted_target,
-        } else if (target == .resolved) target.resolved.policy else .pick_first),
+        .policy = policy,
         .shuffle_addresses = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list),
         .keepalive_interval_ns = .init(if (options.keepalive) |keepalive|
             @intCast(keepalive.interval.nanoseconds)
         else
             0),
         .demand = owned_orca != null,
-        .wrr_config = if (balancing.policy == .weighted_round_robin)
+        .wrr_config = if (policy == .weighted_round_robin)
             balancing.weighted_round_robin
         else
             null,
@@ -147,135 +143,17 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         state.stopResolution();
         state.release();
     }
-    const count = switch (target) {
-        .resolved => |resolved| if (state.policy == .ring_hash)
-            ring_hash.uniqueEndpointCount(resolved.endpoints)
-        else if (state.policy == .weighted_target)
-            weightedTargetEndpointCount(
-                &state.weighted_target.?,
-                resolved.endpoints,
-            )
-        else if (state.policy == .least_request)
-            least_request.exactUniqueCount(resolved.endpoints)
-        else
-            resolved.endpoints.len,
-        else => 1,
-    };
-    const sources = try allocator.alloc(State.Source, count);
-    var initialized: usize = 0;
-    var sources_transferred = false;
-    errdefer if (!sources_transferred) {
-        for (sources[0..initialized]) |*source| source.deinit(allocator);
-        allocator.free(sources);
-    };
-    var has_host = false;
-    var source_index: usize = 0;
-    for (0..if (target == .resolved) target.resolved.endpoints.len else 1) |index| {
-        if (target == .resolved and state.policy == .ring_hash) {
-            const endpoint = target.resolved.endpoints[index];
-            for (sources[0..source_index]) |*source| {
-                if (!ring_hash.sameEndpointIdentity(
-                    source.endpoint,
-                    endpoint,
-                )) continue;
-                source.ring_hash_weight = std.math.add(
-                    u32,
-                    source.ring_hash_weight,
-                    ring_hash.endpointWeight(endpoint),
-                ) catch return error.InvalidSharedOptions;
-                break;
-            } else {
-                sources[source_index] = try State.Source.init(
-                    allocator,
-                    io,
-                    endpoint,
-                    options.channel,
-                );
-                initialized += 1;
-                has_host = has_host or
-                    sources[source_index].resolver != null;
-                source_index += 1;
-            }
-            continue;
-        }
-        if (target == .resolved and state.policy == .weighted_target and
-            state.weighted_target.?.usesRing(
-                target.resolved.endpoints[index].hierarchicalPath(),
-            ))
-        {
-            const endpoint = target.resolved.endpoints[index];
-            for (sources[0..source_index]) |*source| {
-                if (!ring_hash.sameEndpointIdentity(
-                    source.endpoint,
-                    endpoint,
-                )) continue;
-                source.ring_hash_weight = std.math.add(
-                    u32,
-                    source.ring_hash_weight,
-                    ring_hash.endpointWeight(endpoint),
-                ) catch return error.InvalidSharedOptions;
-                break;
-            } else {
-                sources[source_index] = try State.Source.init(
-                    allocator,
-                    io,
-                    endpoint,
-                    options.channel,
-                );
-                initialized += 1;
-                has_host = has_host or
-                    sources[source_index].resolver != null;
-                source_index += 1;
-            }
-            continue;
-        }
-        if (target == .resolved and state.policy == .least_request and
-            least_request.isExactDuplicate(target.resolved.endpoints, index))
-        {
-            continue;
-        }
-        const source = &sources[source_index];
-        const endpoint: channel.Endpoint = switch (target) {
-            .resolved => |set| set.endpoints[index],
-            .cleartext_ip => |v| .{ .cleartext_ip = v },
-            .cleartext_host => |v| .{ .cleartext_host = v },
-            .tls_host => |v| .{ .tls_host = v },
-            .tls_address => |v| .{ .tls_address = v },
-            .custom => |v| .{ .custom = v },
-        };
-        source.* = try State.Source.init(allocator, io, endpoint, options.channel);
-        initialized += 1;
-        has_host = has_host or source.resolver != null;
-        source_index += 1;
-    }
-    std.debug.assert(source_index == sources.len);
-    var proxy_resolves_origin = false;
-    for (sources) |source| {
-        proxy_resolves_origin = proxy_resolves_origin or
-            (source.endpoint == .tls_host and
-                (source.endpoint.tls_host.proxy != null or
-                    source.endpoint.tls_host.socks5_proxy != null));
-    }
-    if (options.channel.address_resolver != null and !has_host and
-        !proxy_resolves_origin)
-    {
-        return error.InvalidChannelOptions;
-    }
-    if (state.shuffle_addresses) {
-        var remaining = sources.len;
-        while (remaining > 1) {
-            remaining -= 1;
-            var random: usize = undefined;
-            io.random(std.mem.asBytes(&random));
-            std.mem.swap(State.Source, &sources[remaining], &sources[random % (remaining + 1)]);
-        }
-    }
+    const sources = try @import("layout.zig").create(allocator, io, target, options, state.policy, if (state.weighted_target) |*runtime| runtime else null, state.shuffle_addresses, true);
     state.sources = sources;
-    sources_transferred = true;
-    for (sources, 0..) |*source, index| {
+    for (sources, 0..) |source, index| {
         if (source.resolver) |resolver| {
             resolver.notifyPublication(&source.wake);
-            try state.group.concurrent(io, State.Resolution.run, .{ state, index });
+            source.retain();
+            state.group.concurrent(io, State.Resolution.run, .{ state, source }) catch |err| {
+                source.release();
+                return err;
+            };
+            source.activation.set(io);
         } else {
             source.current = try allocator.alloc(*State.Worker, 1);
             state.lock();
@@ -289,24 +167,4 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         }
     }
     return state;
-}
-
-fn weightedTargetEndpointCount(
-    runtime: *State.WeightedTarget,
-    endpoints: []const channel.Endpoint,
-) usize {
-    var count: usize = 0;
-    for (endpoints, 0..) |endpoint, index| {
-        if (!runtime.usesRing(endpoint.hierarchicalPath())) {
-            count += 1;
-            continue;
-        }
-        for (endpoints[0..index]) |prior| {
-            if (runtime.usesRing(prior.hierarchicalPath()) and
-                ring_hash.sameEndpointIdentity(prior, endpoint)) break;
-        } else {
-            count += 1;
-        }
-    }
-    return count;
 }

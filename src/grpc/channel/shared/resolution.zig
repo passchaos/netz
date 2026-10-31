@@ -6,7 +6,7 @@ pub fn Resolution(comptime State: type) type {
         fn requestLocked(state: *State) State.Failure!void {
             if (state.closed) return error.SharedChannelClosed;
             var found = false;
-            for (state.sources) |*source| if (source.resolver != null) {
+            for (state.sources) |source| if (source.resolver != null) {
                 source.refresh_requested = true;
                 source.wake.set(state.io);
                 found = true;
@@ -23,9 +23,21 @@ pub fn Resolution(comptime State: type) type {
         }
         pub fn refresh(state: *State, deadline: std.Io.Clock.Timestamp) State.Failure!usize {
             _ = try @import("../../../internal/deadline.zig").usableAwake(state.io, deadline);
-            const generations = try state.allocator.alloc(u64, state.sources.len);
-            defer state.allocator.free(generations);
             try state.lockBefore(deadline);
+            const sources = state.allocator.dupe(*State.Source, state.sources) catch |err| {
+                state.unlock();
+                return err;
+            };
+            for (sources) |source| source.retain();
+            defer {
+                for (sources) |source| source.release();
+                state.allocator.free(sources);
+            }
+            const generations = state.allocator.alloc(u64, sources.len) catch |err| {
+                state.unlock();
+                return err;
+            };
+            defer state.allocator.free(generations);
             for (state.sources, generations) |source, *generation| generation.* = source.generation;
             requestLocked(state) catch |err| {
                 state.unlock();
@@ -40,8 +52,8 @@ pub fn Resolution(comptime State: type) type {
                 }
                 var complete = true;
                 var failure: ?anyerror = null;
-                for (state.sources, generations) |source, generation| {
-                    if (source.resolver == null) continue;
+                for (sources, generations) |source, generation| {
+                    if (source.retired or source.resolver == null) continue;
                     if (source.generation == generation) complete = false else if (source.last_error) |err| {
                         failure = err;
                     }
@@ -57,13 +69,14 @@ pub fn Resolution(comptime State: type) type {
                 };
             }
         }
-        pub fn run(state: *State, source_index: usize) std.Io.Cancelable!void {
-            const source = &state.sources[source_index];
+        pub fn run(state: *State, source: *State.Source) std.Io.Cancelable!void {
+            defer source.release();
+            try source.activation.wait(state.io);
             const resolver = source.resolver.?;
             var retry_at: ?std.Io.Clock.Timestamp = null;
             while (true) {
                 state.lock();
-                if (state.closed) {
+                if (state.closed or source.retired) {
                     state.unlock();
                     return;
                 }
@@ -101,7 +114,7 @@ pub fn Resolution(comptime State: type) type {
                     switch (published.result) {
                         .addresses => |addresses| {
                             defer state.allocator.free(addresses);
-                            State.Membership.reconcile(state, source_index, addresses) catch |err| {
+                            State.Membership.reconcile(state, source, addresses) catch |err| {
                                 failure = err;
                                 accepted = false;
                             };

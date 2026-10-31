@@ -20,6 +20,7 @@ pub const OrcaOobOptions = @import("shared/orca/config.zig").Options;
 pub const OrcaOobWatch = state_module.orca_tracker.Watch;
 pub const OrcaOobUpdate = state_module.orca_tracker.Update;
 pub const OrcaOobStatus = state_module.orca_tracker.Status;
+pub const Update = @import("shared/update.zig").Update;
 
 pub const Sender = struct {
     state: *State,
@@ -165,6 +166,24 @@ pub const SharedChannel = struct {
     pub fn selectionPolicy(self: SharedChannel) channel.SelectionPolicy {
         return self.state.selectionPolicy();
     }
+    /// Atomically publish service config and/or resolver endpoints. Endpoint
+    /// values are copied; their internal slices retain Channel's target lifetime.
+    /// Retained Sender handles adopt new method policy on their next RPC.
+    pub fn update(self: SharedChannel, change: Update) Error!u64 {
+        return @import("shared/update.zig").apply(self.state, change, null);
+    }
+    pub fn updateWithDeadline(self: SharedChannel, change: Update, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        return @import("shared/update.zig").apply(self.state, change, deadline);
+    }
+    pub fn updateWithTimeout(self: SharedChannel, change: Update, timeout: std.Io.Duration) Error!u64 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.updateWithDeadline(change, .fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    pub fn configurationRevision(self: SharedChannel) u64 {
+        self.state.lock();
+        defer self.state.unlock();
+        return self.state.config_revision;
+    }
     pub fn endpointCountWithDeadline(self: SharedChannel, deadline: std.Io.Clock.Timestamp) Error!usize {
         return self.state.endpointCountWithDeadline(deadline);
     }
@@ -211,6 +230,7 @@ test {
     _ = @import("shared/job_tests.zig");
     _ = @import("shared/control_deadline_tests.zig");
     _ = @import("shared/backoff_tests.zig");
+    _ = @import("shared/update/tests.zig");
     _ = @import("shared/keepalive_tests.zig");
     _ = @import("shared/keepalive_throttle_tests.zig");
     _ = @import("shared/resolution/tests.zig");

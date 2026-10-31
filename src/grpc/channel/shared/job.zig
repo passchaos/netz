@@ -33,14 +33,7 @@ pub const Job = struct {
         previous: ?u8,
     ) (std.mem.Allocator.Error || error{MissingRequestHash})!*Job {
         const allocator = parent.allocator;
-        const routing_hash = if (parent.policy == .ring_hash)
-            try ring_hash.requestHash(
-                parent.io,
-                parent.ring_hash_config,
-                options,
-            )
-        else
-            null;
+        const routing_hash: ?ring_hash.RequestHash = null;
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
         var request = try inputs.clone(allocator, options);
@@ -53,14 +46,7 @@ pub const Job = struct {
     }
 
     pub fn createStream(parent: *State, stream: *State.StreamCall, deadline: ?std.Io.Clock.Timestamp, ready: bool) (std.mem.Allocator.Error || error{MissingRequestHash})!*Job {
-        const routing_hash = if (parent.policy == .ring_hash)
-            try ring_hash.requestHash(
-                parent.io,
-                parent.ring_hash_config,
-                stream.options,
-            )
-        else
-            null;
+        const routing_hash: ?ring_hash.RequestHash = null;
         const job = try parent.allocator.create(Job);
         parent.retain();
         stream.retain();

@@ -75,13 +75,17 @@ pub fn orcaConfig(
     state: anytype,
     worker: anytype,
 ) ?*orca_config.Config {
-    if (!workerMatches(state, worker, node.path)) return null;
+    _ = state;
+    return orcaForPath(node, worker.source.endpoint.hierarchicalPath());
+}
+pub fn orcaForPath(node: anytype, path: []const []const u8) ?*orca_config.Config {
+    if (!pathMatches(path, node.path)) return null;
     return switch (node.kind) {
         .leaf => |*leaf| if (leaf.wrr_oob) |*value| value else null,
         .weighted => |weighted| for (weighted.children) |child| {
-            if (orcaConfig(child.node, state, worker)) |value| return value;
+            if (orcaForPath(child.node, path)) |value| return value;
         } else null,
-        .outlier => |wrapper| orcaConfig(wrapper.child, state, worker),
+        .outlier => |wrapper| orcaForPath(wrapper.child, path),
     };
 }
 
@@ -119,8 +123,9 @@ fn Context(
 }
 
 fn workerMatches(state: anytype, worker: anytype, path: []const []const u8) bool {
+    _ = state;
     return pathMatches(
-        state.sources[worker.source_index].endpoint.hierarchicalPath(),
+        worker.source.endpoint.hierarchicalPath(),
         path,
     );
 }

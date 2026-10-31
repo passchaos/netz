@@ -54,4 +54,12 @@ pub const Config = struct {
         self.allocator.free(self.request);
         self.* = undefined;
     }
+    pub fn clone(self: *const Config) oob.Error!Config {
+        var result = try init(self.allocator, self.options);
+        errdefer result.deinit();
+        const request = try self.allocator.dupe(u8, self.request);
+        self.allocator.free(result.request);
+        result.request = request;
+        return result;
+    }
 };

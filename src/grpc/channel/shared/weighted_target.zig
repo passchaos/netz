@@ -107,8 +107,8 @@ pub fn Runtime(comptime State: type) type {
             self.removeNode(self.root, worker);
         }
 
-        pub fn invalidateRings(self: *Self) void {
-            self.invalidateNodeRings(self.root);
+        pub fn invalidatePickers(self: *Self) void {
+            self.invalidateNodePickers(self.root);
         }
 
         pub fn usesRing(self: *Self, path: []const []const u8) bool {
@@ -137,6 +137,9 @@ pub fn Runtime(comptime State: type) type {
             worker: *Worker,
         ) ?*orca_config.Config {
             return wrr_support.orcaConfig(self.root, state, worker);
+        }
+        pub fn orcaForPath(self: *Self, path: []const []const u8) ?*orca_config.Config {
+            return wrr_support.orcaForPath(self.root, path);
         }
 
         pub fn hasOob(self: *Self) bool {
@@ -519,7 +522,6 @@ pub fn Runtime(comptime State: type) type {
             switch (node.kind) {
                 .leaf => |*leaf| {
                     if (leaf.policy == .least_request) {
-                        worker.outstanding_requests += 1;
                         return;
                     }
                     if (leaf.policy != .round_robin and
@@ -536,7 +538,7 @@ pub fn Runtime(comptime State: type) type {
                 .weighted => |weighted| {
                     for (weighted.children) |child| {
                         if (!pathMatches(
-                            state.sources[worker.source_index]
+                            worker.source
                                 .endpoint.hierarchicalPath(),
                             child.node.path,
                         )) continue;
@@ -567,7 +569,7 @@ pub fn Runtime(comptime State: type) type {
                 .weighted => |weighted| {
                     for (weighted.children) |child| {
                         if (!pathMatches(
-                            state.sources[worker.source_index]
+                            worker.source
                                 .endpoint.hierarchicalPath(),
                             child.node.path,
                         )) continue;
@@ -675,15 +677,17 @@ pub fn Runtime(comptime State: type) type {
             );
         }
 
-        fn invalidateNodeRings(self: *Self, node: *Node) void {
+        fn invalidateNodePickers(self: *Self, node: *Node) void {
             switch (node.kind) {
                 .leaf => |*leaf| if (leaf.policy == .ring_hash) {
                     leaf.ring_dirty = true;
+                } else if (leaf.policy == .weighted_round_robin) {
+                    leaf.wrr_scheduler.next_update_ns = 0;
                 },
                 .weighted => |weighted| for (weighted.children) |child| {
-                    self.invalidateNodeRings(child.node);
+                    self.invalidateNodePickers(child.node);
                 },
-                .outlier => |wrapper| self.invalidateNodeRings(wrapper.child),
+                .outlier => |wrapper| self.invalidateNodePickers(wrapper.child),
             }
         }
 
@@ -709,8 +713,9 @@ pub fn Runtime(comptime State: type) type {
             worker: *Worker,
             path: []const []const u8,
         ) bool {
+            _ = state;
             return pathMatches(
-                state.sources[worker.source_index]
+                worker.source
                     .endpoint.hierarchicalPath(),
                 path,
             );

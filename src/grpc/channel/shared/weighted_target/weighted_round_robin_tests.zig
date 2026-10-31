@@ -70,7 +70,7 @@ test "gRPC SharedChannel weighted target WRR filters per-RPC ORCA workers" {
         var matching_updates: usize = 0;
         var outside_updates: usize = 0;
         for (client.state.workers.items) |worker| {
-            const worker_path = client.state.sources[worker.source_index]
+            const worker_path = worker.source
                 .endpoint.hierarchicalPath();
             if (std.mem.eql(u8, worker_path[0], "wrr")) {
                 matching_updates += @intFromBool(
@@ -168,7 +168,7 @@ test "gRPC SharedChannel weighted target WRR owns child OOB stream" {
         var matching_updates: usize = 0;
         var outside_updates: usize = 0;
         for (client.state.workers.items) |worker| {
-            const path = client.state.sources[worker.source_index]
+            const path = worker.source
                 .endpoint.hierarchicalPath();
             if (std.mem.eql(u8, path[0], "wrr")) {
                 matching_updates += @intFromBool(worker.wrr_weight.last_update_ns != null);

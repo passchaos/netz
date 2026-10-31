@@ -109,6 +109,7 @@ pub const Channel = runtime.Channel;
 pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
 pub const SharedChannelSender = @import("channel/shared.zig").Sender;
 pub const SharedChannelOptions = @import("channel/shared.zig").Options;
+pub const SharedChannelUpdate = @import("channel/shared.zig").Update;
 pub const SharedChannelKeepAliveOptions =
     @import("channel/shared.zig").KeepAliveOptions;
 pub const SharedChannelKeepAliveStats =
