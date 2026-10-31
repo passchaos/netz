@@ -143,6 +143,12 @@ pub fn applyServerRequestPacketFrames(
     var first_reset: ?RequestStreamReset = null;
     for (frames) |frame| {
         try rejectCriticalStreamClosureFrame(control.*, frame, .server);
+        if (frame == .stop_sending) {
+            request_lifecycle.observePeerResponseCancellation(
+                @intCast(frame.stop_sending.stream_id),
+                frame.stop_sending.application_error_code,
+            );
+        }
         const maybe_stream_id: ?u62 = switch (frame) {
             .stream => |stream| @intCast(stream.stream_id),
             .reset_stream => |reset| @intCast(reset.stream_id),

@@ -1,0 +1,25 @@
+test-lib
++- run test 142 pass, 1 fail (143 total)
+error: 'http3.runtime.server.complete_response_tests.test.HTTP/3 complete response timeout retires its stream and preserves siblings' failed:
+       /nav_env/Temp/zig-aarch64-linux-0.16.0/lib/std/testing.zig:615:14: 0x14749c3 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /nav_env/project-z/netz/src/http3/runtime/server/complete_response_tests.zig:31:9: 0x147523b in test.HTTP/3 complete response timeout retires its stream and preserves siblings (test)
+               try std.testing.expect(!connection.closed());
+               ^
+failed command: ./.zig-cache/o/32ba8d47e68643fa55b7ef1df1669fe6/test --cache-dir=./.zig-cache --seed=0x1a2324fd --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 142/143 tests passed (1 failed)
+test-lib transitive failure
++- run test 142 pass, 1 fail (143 total)
+   +- compile test Debug native success 7s MaxRSS:856M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/d74715ec3a78b2745342ff6dbbb99d75/build /nav_env/Temp/zig-aarch64-linux-0.16.0/zig /nav_env/Temp/zig-aarch64-linux-0.16.0/lib /nav_env/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x1a2324fd -Z84ace1fd7b5f1d1b test-lib -Dtest-filter=HTTP/3 complete response --summary all

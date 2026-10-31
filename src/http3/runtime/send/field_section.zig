@@ -1,14 +1,15 @@
 //! Flow-aware borrowed HEADERS fragments for complete and streaming sends.
 const std = @import("std");
 const quic = @import("../../../quic/mod.zig");
+const pending_ack = @import("pending_ack.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const Error = @import("../error.zig").Error;
 const ReceiveTimeoutError = @import("../error.zig").ReceiveTimeoutError;
 
-pub fn sendProgress(connection: *quic.one_rtt.Connection, id: u62, encoded: []const u8, base_offset: u64, fin: bool, committed: *usize, max_frame_data: usize, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+pub fn sendProgress(connection: *quic.one_rtt.Connection, id: u62, encoded: []const u8, base_offset: u64, fin: bool, committed: *usize, max_frame_data: usize, frame_limit: usize, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
     while (committed.* < encoded.len) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
-        writeFragment(connection, id, encoded, fin, base_offset, committed, max_frame_data) catch |err| switch (err) {
+        writeFragment(connection, id, encoded, fin, base_offset, committed, max_frame_data, frame_limit) catch |err| switch (err) {
             error.PacingLimited => {
                 if (deadline) |absolute| try connection.waitForPacingAvailabilityWithDeadline(absolute) else try connection.waitForPacingAvailability();
                 continue;
@@ -26,6 +27,7 @@ fn writeFragment(
     base_offset: u64,
     committed: *usize,
     max_frame_data: usize,
+    frame_limit: usize,
 ) Error!void {
     if (max_frame_data == 0 or committed.* > encoded.len) return error.InvalidStreamRange;
     const credit = @min(connection.connectionSendAvailable(), connection.streamSendAvailable(stream_id));
@@ -52,6 +54,6 @@ fn writeFragment(
         frame.stream.data = encoded[committed.*..][0..length];
         frame.stream.fin = fin and committed.* + length == encoded.len;
     }
-    try connection.trySend(&.{frame});
+    if (!try pending_ack.trySend(connection, &.{frame}, frame_limit)) try connection.trySend(&.{frame});
     committed.* += length;
 }

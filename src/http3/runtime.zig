@@ -34,6 +34,7 @@ const ticket_receiver = @import("runtime/ticket_receiver.zig");
 const runtime_error = @import("runtime/error.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
 const server_response = @import("runtime/server/response.zig");
+const complete_response = @import("runtime/server/complete_response.zig");
 const paced_body = @import("runtime/send/paced_body.zig");
 const body_sender = @import("runtime/send/body.zig");
 const body_fragment = @import("runtime/send/body_fragment.zig");
@@ -374,10 +375,6 @@ const trySendConnectionRequestLiteral =
     message_sender.trySendConnectionRequestLiteral;
 const trySendConnectionStreamingRequestHeadLiteral =
     message_sender.trySendConnectionStreamingRequestHeadLiteral;
-const sendConnectionResponseSequence =
-    message_sender.sendConnectionResponseSequence;
-const sendConnectionResponseSequenceWithDeadline =
-    message_sender.sendConnectionResponseSequenceWithDeadline;
 const trySendConnectionResponseLiteral =
     message_sender.trySendConnectionResponseLiteral;
 const trySendConnectionStreamingResponseHeadLiteral =
@@ -6474,6 +6471,7 @@ pub const HandshakeServerSession = struct {
     request_streams: RequestStreamSet,
     streaming_requests: StreamingRequestSet,
     pending_request_failures: request_failure.Pending = .{},
+    pending_response_cancellations: std.ArrayList(complete_response.Cancellation) = .empty,
     receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     connect_datagrams: connect_datagram.Registry,
@@ -6700,6 +6698,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.pending_response_cancellations.deinit(self.established.connection.endpoint.allocator);
         self.pending_request_failures.deinit(self.established.connection.endpoint.allocator);
         self.critical_stream_send_scratch.deinit(
             self.established.connection.endpoint.allocator,
@@ -8818,57 +8817,23 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        try response.validateBodySemantics();
-        if (deadline) |absolute| {
-            _ = try deadline_policy.usableAwake(
-                self.connectionIo(),
-                absolute,
-            );
-        }
-        while (true) {
-            self.startResponseInternalUntil(
-                stream_id,
-                .{
-                    .status = response.status,
-                    .headers = response.headers,
-                    .request_method = response.request_method,
-                    .extended_connect = response.extended_connect,
-                },
-                response.body.len,
-                response.trailers.len != 0,
-                deadline,
-            ) catch |err| switch (err) {
-                error.FlowControlBlocked, error.CongestionLimited => {
-                    if (self.established.connection.closed()) return err;
-                    try self.receiveRequestPacketUntil(deadline);
-                    continue;
-                },
-                else => |other| return other,
-            };
-            break;
-        }
-        // The aggregate API exposes no committed-byte cursor. Once HEADERS is
-        // visible, a later DATA/trailer failure cannot be retried from the
-        // original Response without duplicating the head or body prefix.
-        errdefer self.established.connection.failClosedApplication(
-            http3.ApplicationErrorCode.internal_error,
-            "partial-http3-response",
-        );
-        if (!response.suppressesBody() and response.body.len != 0) {
-            try self.sendResponseBodyPacedUntil(
-                stream_id,
-                response.body,
-                response.trailers.len == 0,
-                deadline,
-            );
-        }
-        if (!response.suppressesBody() and response.trailers.len != 0) {
-            try self.finishResponseTrailersPacedUntil(
-                stream_id,
-                response.trailers,
-                deadline,
-            );
-        }
+        return self.sendCompleteResponseUntil(stream_id, &.{}, response, deadline);
+    }
+
+    fn sendCompleteResponseUntil(self: *HandshakeServerSession, id: u62, informational: []const http3.InformationalResponse, response: http3.Response, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        return complete_response.send(self, id, informational, response, deadline, .{
+            .before = beforePacedResponseBody,
+            .receive = receivePacedResponseBody,
+            .body = sendResponseBodyPacedUntil,
+            .finish = finishCompleteResponse,
+            .abandon = abandonCompleteResponse,
+            .flush = flushResponseCancellations,
+        });
+    }
+
+    fn finishCompleteResponse(self: *HandshakeServerSession, id: u62) void {
+        finishServerRequest(&self.control, &self.request_lifecycle, id);
     }
 
     /// Send a parent response and one promised response while advancing both
@@ -10467,8 +10432,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?PeerResponseCancellation {
-        const stopped = self.established.connection.streamStopped(stream_id) orelse
-            return null;
+        const code = self.peerResponseCancellationCode(stream_id) orelse return null;
         // Do the only fallible cleanup first. If sending MAX_STREAMS is
         // temporarily blocked, the caller can retry without losing the
         // cancellation or partially retiring HTTP/3 bookkeeping.
@@ -10479,7 +10443,7 @@ pub const HandshakeServerSession = struct {
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         return .{
             .stream_id = stream_id,
-            .application_error_code = stopped.application_error_code,
+            .application_error_code = code,
         };
     }
 
@@ -10490,8 +10454,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?PeerResponseCancellation {
-        const stopped = self.established.connection.streamStopped(stream_id) orelse
-            return null;
+        const code = self.peerResponseCancellationCode(stream_id) orelse return null;
         _ = try self.established.connection.requestCompletedPeerStreamRelease(
             stream_id,
         );
@@ -10503,8 +10466,13 @@ pub const HandshakeServerSession = struct {
         );
         return .{
             .stream_id = stream_id,
-            .application_error_code = stopped.application_error_code,
+            .application_error_code = code,
         };
+    }
+
+    fn peerResponseCancellationCode(self: *HandshakeServerSession, id: u62) ?u64 {
+        return self.request_lifecycle.peerResponseCancellation(id) orelse
+            if (self.established.connection.streamStopped(id)) |stopped| stopped.application_error_code else null;
     }
 
     /// Blocking counterpart to `finishResponseTrailers` that keeps receiving
@@ -10671,81 +10639,7 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        if (deadline) |absolute| {
-            try sendConnectionSettingsWithDeadline(
-                &self.established.connection,
-                &self.critical_stream_send_scratch,
-                &self.control,
-                &self.control_send,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-                &self.qpack_decoder_send,
-                &self.qpack_decoder_prefix_sent,
-                self.options,
-                server_control_stream_id,
-                absolute,
-            );
-        } else {
-            try sendConnectionSettings(
-                &self.established.connection,
-                &self.critical_stream_send_scratch,
-                &self.control,
-                &self.control_send,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-                &self.qpack_decoder_send,
-                &self.qpack_decoder_prefix_sent,
-                self.options,
-                server_control_stream_id,
-            );
-        }
-        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
-            undefined;
-        var prepared = try server_response.prepare(
-            self.established.connection.endpoint.allocator,
-            response,
-            server_response.automaticDate(
-                self.options.auto_date_header,
-                self.established.connection.endpoint.io,
-                response,
-            ),
-            &response_headers_stack,
-        );
-        defer prepared.deinit(
-            self.established.connection.endpoint.allocator,
-        );
-        if (deadline) |absolute| {
-            try sendConnectionResponseSequenceWithDeadline(
-                &self.established.connection,
-                &self.stream_send_scratch,
-                &self.critical_stream_send_scratch,
-                stream_id,
-                informational,
-                prepared.value,
-                self.options,
-                self.control.settings.peer,
-                &self.qpack_encode,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-                absolute,
-            );
-        } else {
-            try sendConnectionResponseSequence(
-                &self.established.connection,
-                &self.stream_send_scratch,
-                &self.critical_stream_send_scratch,
-                stream_id,
-                informational,
-                prepared.value,
-                self.options,
-                self.control.settings.peer,
-                &self.qpack_encode,
-                &self.qpack_encoder_send,
-                &self.qpack_encoder_prefix_sent,
-            );
-        }
-        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+        return self.sendCompleteResponseUntil(stream_id, informational, response, deadline);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
@@ -11018,7 +10912,8 @@ pub const HandshakeServerSession = struct {
     pub fn completeShutdown(self: *HandshakeServerSession) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.request_lifecycle.state() != .initial_goaway) return;
-        if (!self.request_streams.isEmpty() or
+        if (self.pending_response_cancellations.items.len != 0 or
+            !self.request_streams.isEmpty() or
             self.streaming_requests.retainedCount() != 0)
         {
             return error.RequestIncomplete;
@@ -11045,7 +10940,8 @@ pub const HandshakeServerSession = struct {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.request_lifecycle.state() != .initial_goaway) return;
-        if (!self.request_streams.isEmpty() or
+        if (self.pending_response_cancellations.items.len != 0 or
+            !self.request_streams.isEmpty() or
             self.streaming_requests.retainedCount() != 0)
         {
             return error.RequestIncomplete;
@@ -11071,7 +10967,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn drainComplete(self: HandshakeServerSession) bool {
-        return self.request_lifecycle.drainComplete(
+        return self.pending_response_cancellations.items.len == 0 and self.request_lifecycle.drainComplete(
             self.request_streams.lowestStream(),
             self.streaming_requests.lowestEntryStream(),
             self.streaming_requests.lowestResetStream(),
@@ -11216,6 +11112,43 @@ pub const HandshakeServerSession = struct {
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         _ = try self.established.connection.requestCompletedPeerStreamRelease(stream_id);
+    }
+
+    fn abandonCompleteResponse(self: *HandshakeServerSession, id: u62) void {
+        if (!self.request_lifecycle.contains(id)) return;
+        var pending = complete_response.Cancellation{ .stream_id = id };
+        self.tryCancelRequest(id, http3.ApplicationErrorCode.internal_error) catch {
+            pending.needs_cancel = self.request_lifecycle.contains(id);
+        };
+        if (!self.request_lifecycle.contains(id)) pending.needs_cancel = false;
+        const release_ready = !pending.needs_cancel and
+            (self.established.connection.requestCompletedPeerStreamRelease(id) catch false);
+        if (!release_ready and !self.established.connection.closed()) self.pending_response_cancellations.appendAssumeCapacity(pending);
+        self.request_streams.remove(id);
+        self.streaming_requests.remove(id);
+        _ = self.pending_request_failures.take(id);
+        finishServerRequest(&self.control, &self.request_lifecycle, id);
+        _ = self.outbound_bodies.finish(id);
+    }
+
+    fn flushResponseCancellations(self: *HandshakeServerSession) void {
+        var index: usize = 0;
+        while (index < self.pending_response_cancellations.items.len) {
+            const pending = &self.pending_response_cancellations.items[index];
+            if (pending.needs_cancel) {
+                self.tryCancelRequest(pending.stream_id, http3.ApplicationErrorCode.internal_error) catch {
+                    pending.needs_cancel = self.request_lifecycle.contains(pending.stream_id);
+                    index += 1;
+                    continue;
+                };
+                pending.needs_cancel = false;
+            }
+            if (!(self.established.connection.requestCompletedPeerStreamRelease(pending.stream_id) catch false)) {
+                index += 1;
+                continue;
+            }
+            _ = self.pending_response_cancellations.swapRemove(index);
+        }
     }
 
     pub fn rejectRequest(
@@ -26139,6 +26072,7 @@ fn visitStreamingServerRequestPacket(
     session: *HandshakeServerSession,
     packet: quic.one_rtt.ReceivedPacketView,
 ) Error!void {
+    session.flushResponseCancellations();
     _ = applyServerRequestPacketFrames(
         packet.from,
         packet.frames,
@@ -27459,7 +27393,8 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 self.body_timeout = true;
             }
             try std.testing.expect(fixed.send_calls >= 1);
-            try std.testing.expect(session.established.connection.closed());
+            try std.testing.expect(!session.established.connection.closed());
+            try std.testing.expect(!session.request_lifecycle.contains(body_request.stream_id));
             session.established.connection.endpoint.io = fixed.delegate;
         }
     };
@@ -32701,9 +32636,7 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
             var session = try server_ptr.accept();
             defer session.deinit();
             var encoded_capacity: usize = 0;
-            var frame_capacity: usize = 0;
             var encoded_ptr: [*]u8 = undefined;
-            var frame_ptr: [*]quic.Frame = undefined;
             var critical_capacity: usize = 0;
             var critical_frames_capacity: usize = 0;
             var critical_ptr: [*]u8 = undefined;
@@ -32757,16 +32690,12 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
                     }},
                     .body = "ok",
                 });
+                try std.testing.expectEqual(@as(usize, 0), session.stream_send_scratch.frames.capacity);
                 if (exchange == 0) {
                     encoded_capacity =
                         session.stream_send_scratch.encoded.capacity;
-                    frame_capacity =
-                        session.stream_send_scratch.frames.capacity;
                     try std.testing.expect(encoded_capacity != 0);
-                    try std.testing.expect(frame_capacity != 0);
                     encoded_ptr = session.stream_send_scratch.encoded
-                        .allocatedSlice().ptr;
-                    frame_ptr = session.stream_send_scratch.frames
                         .allocatedSlice().ptr;
                 } else {
                     try std.testing.expectEqual(
@@ -32774,17 +32703,8 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
                         session.stream_send_scratch.encoded.capacity,
                     );
                     try std.testing.expectEqual(
-                        frame_capacity,
-                        session.stream_send_scratch.frames.capacity,
-                    );
-                    try std.testing.expectEqual(
                         encoded_ptr,
                         session.stream_send_scratch.encoded
-                            .allocatedSlice().ptr,
-                    );
-                    try std.testing.expectEqual(
-                        frame_ptr,
-                        session.stream_send_scratch.frames
                             .allocatedSlice().ptr,
                     );
                 }
@@ -35470,6 +35390,7 @@ test {
     _ = @import("runtime/server/tests/lifecycle.zig");
     _ = @import("runtime/server/tests/streaming.zig");
     _ = @import("runtime/server/tests/receive.zig");
+    _ = @import("runtime/server/complete_response_tests.zig");
     _ = @import("runtime/client/tests/protected.zig");
     _ = @import("runtime/client/tests/deadline.zig");
     _ = @import("runtime/client/resolver_tests.zig");

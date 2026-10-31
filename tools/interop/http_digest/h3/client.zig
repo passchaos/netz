@@ -44,7 +44,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             .{ .name = "want-content-digest", .value = "sha-256=3, sha-512=10" },
         };
         const trailers = [_]netz.http3.Qpack.HeaderField{.{ .name = "content-digest", .value = try common.field(common.generated, false, true, &trailer_storage) }};
-        var response = try client.requestWithDeadline(.{
+        var early: common.Early = .{};
+        var response = try client.requestWithInformationalAndDeadline(.{
             .method = if (is_generated) "POST" else if (std.mem.eql(u8, path, "/head")) "HEAD" else "GET",
             .path = path,
             .scheme = "https",
@@ -52,8 +53,20 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             .body = if (is_generated) common.generated else "",
             .headers = if (is_generated) &headers else &.{},
             .trailers = if (is_generated) &trailers else &.{},
-        }, until);
+        }, .{ .context = &early, .on_response = common.Early.observe }, until);
         defer response.deinit(allocator);
+        if (std.mem.eql(u8, path, "/trailer")) {
+            try std.testing.expect(early.valid and early.count == 1);
+            var head_ok = false;
+            var trailer_ok = false;
+            for (response.response.headers) |field| if (std.mem.eql(u8, field.name, "x-large-head")) {
+                head_ok = std.mem.eql(u8, field.value, common.large_head);
+            };
+            for (response.response.trailers) |field| if (std.mem.eql(u8, field.name, "x-large-trailer")) {
+                trailer_ok = std.mem.eql(u8, field.value, common.large_trailer);
+            };
+            try std.testing.expect(head_ok and trailer_ok);
+        } else try std.testing.expectEqual(@as(usize, 0), early.count);
         if (std.mem.eql(u8, path, "/corrupt")) {
             try std.testing.expectError(error.DigestMismatch, response.verifyContentDigest(.{}));
             continue;

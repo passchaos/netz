@@ -1,4 +1,9 @@
 const std = @import("std");
+const cancellation = @import("../internal/cancellation.zig");
+
+test {
+    _ = @import("runtime/receive_cancel_tests.zig");
+}
 const builtin = @import("builtin");
 const quic = @import("mod.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -1619,6 +1624,7 @@ pub const Endpoint = struct {
             if (receive_error) |err| return err;
             unreachable;
         }
+        if (receive_error) |err| cancellation.preserveIgnored(self.io, err);
         // `std.Io` may report an error from a nonblocking drain after one or
         // more datagrams were already removed from the socket. Preserve that
         // visible prefix; a persistent socket error will be observed by the

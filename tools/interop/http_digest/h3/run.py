@@ -50,6 +50,7 @@ def pair(server_args, client_args, version, expected_server, expected_client):
         go_result = server_result[0] if expected_server.startswith("quic-go") else client_result[0]
         assert go_result["connections"] == 1 and go_result["paths"] == PATHS
         assert go_result["complete_request_bytes"] == 9216
+        assert go_result["large_field_bytes"] == 5000 and go_result["early_status"] == 103
         if expected_client == "netz-client":
             assert client_result[0]["complete_request_bytes"] == 9216
         assert go_result["tls"] == "TLSv1.3" and go_result["alpn"] == "h3"

@@ -3,7 +3,7 @@ const std = @import("std");
 const http3 = @import("../../mod.zig");
 const control_send = @import("../control/send.zig");
 const streaming_head = @import("../send/streaming_head.zig");
-const field_section = @import("../send/field_section.zig");
+const complete_trailers = @import("../send/complete_trailers.zig");
 const ReceiveTimeoutError = @import("../error.zig").ReceiveTimeoutError;
 
 pub fn send(client: anytype, request: http3.Request, deadline: ?std.Io.Clock.Timestamp, hooks: anytype) ReceiveTimeoutError!u62 {
@@ -99,39 +99,9 @@ pub fn send(client: anytype, request: http3.Request, deadline: ?std.Io.Clock.Tim
         }
     }
     if (trailers_pending) {
-        try sendTrailers(client, id, request.trailers, deadline, hooks);
+        try complete_trailers.send(client, id, request.trailers, deadline, hooks);
     }
     return id;
-}
-
-fn sendTrailers(client: anytype, id: u62, trailers: []const http3.Qpack.HeaderField, deadline: ?std.Io.Clock.Timestamp, hooks: anytype) ReceiveTimeoutError!void {
-    const base_offset = (try client.outbound_bodies.prepareTrailers(id)).send.next_offset;
-    const checkpoint = client.qpack_encode.checkpoint();
-    var committed: usize = 0;
-    errdefer if (committed == 0) client.qpack_encode.rollbackAfter(checkpoint);
-    client.stream_send_scratch.reset();
-    try http3.writeTrailersDynamic(&client.stream_send_scratch.encoded, client.allocator, trailers, client.control.settings.peer, id, &client.qpack_encode);
-    while (true) {
-        sendTrailerProgress(client, id, base_offset, &committed, deadline) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                if (client.established.connection.closed()) return err;
-                try hooks.receive(client, id, deadline);
-                continue;
-            },
-            else => return err,
-        };
-        break;
-    }
-    _ = client.outbound_bodies.finish(id);
-}
-
-fn sendTrailerProgress(client: anytype, id: u62, base_offset: u64, committed: *usize, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
-    if (deadline) |absolute| {
-        try control_send.sendConnectionQpackEncoderInstructionsWithDeadline(&client.established.connection, &client.critical_stream_send_scratch, &client.qpack_encode, &client.qpack_encoder_send, &client.qpack_encoder_prefix_sent, client.options, absolute);
-    } else {
-        try control_send.sendConnectionQpackEncoderInstructions(&client.established.connection, &client.critical_stream_send_scratch, &client.qpack_encode, &client.qpack_encoder_send, &client.qpack_encoder_prefix_sent, client.options);
-    }
-    try field_section.sendProgress(&client.established.connection, id, client.stream_send_scratch.encoded.items, base_offset, true, committed, client.options.max_stream_frame_data, deadline);
 }
 
 fn hasProtocol(headers: []const http3.Qpack.HeaderField) bool {

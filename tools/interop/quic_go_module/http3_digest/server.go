@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -87,6 +88,11 @@ func server(address, caPath, certPath, keyPath string, version int) error {
 		status := 200
 		if request.URL.Path == "/range" {
 			status = 206
+		}
+		if request.URL.Path == "/trailer" {
+			writer.Header().Set("X-Large-Early", strings.Repeat("e", 5000))
+			writer.WriteHeader(103)
+			writer.Header().Del("X-Large-Early")
 		}
 		writer.WriteHeader(status)
 		if request.Method != http.MethodHead {

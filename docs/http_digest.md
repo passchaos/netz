@@ -167,3 +167,10 @@ a separate fixed-vector input. Native complete requests send initial HEADERS,
 borrowed DATA and trailing HEADERS under one deadline with exact committed
 offsets. See [complete request behavior](http3_complete_requests.md) and
 `docs/evidence/http3_complete_requests/2026-11-01.json`.
+
+The `/trailer` exchange additionally checks a 103 response and final/trailing
+field values of 5,000 bytes through both native and quic-go owners. These field
+sections exceed the fixed stream receive window independently of DATA. Both
+clients check exact values, digest trailers and later connection reuse. See
+[complete response behavior](http3_complete_responses.md) and
+`docs/evidence/http3_complete_responses/2026-11-01.json`.

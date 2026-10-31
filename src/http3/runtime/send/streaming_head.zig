@@ -132,7 +132,7 @@ fn sendConnectionStreamingHeadUntil(
     var send = quic.stream_state.SendState.init(stream_id);
     const fin = !body_allowed or (!trailers_pending and expected_length != null and expected_length.? == 0);
     if (progress) |committed| {
-        try field_section.sendProgress(connection, stream_id, scratch.encoded.items, 0, fin, committed, options.max_stream_frame_data, deadline);
+        try field_section.sendProgress(connection, stream_id, scratch.encoded.items, 0, fin, committed, options.max_stream_frame_data, options.max_frames_per_packet, deadline);
         send.next_offset = committed.*;
     } else {
         try send.appendFrames(

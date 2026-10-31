@@ -2,6 +2,7 @@ const std = @import("std");
 const http3 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const tls_testing = @import("../../../tls/testing.zig");
+const quic = @import("../../../quic/mod.zig");
 
 test "HTTP/3 handshake batch correlates reversed responses and isolates deadline" {
     const allocator = std.testing.allocator;
@@ -45,6 +46,12 @@ test "HTTP/3 handshake batch correlates reversed responses and isolates deadline
         cancel_requests_ready: *std.Io.Event,
         cancellation_code: ?u64 = null,
         active_cancellation_code: ?u64 = null,
+        active_stream_id: ?u62 = null,
+        active_peer_closed: bool = false,
+        active_http_live: bool = false,
+        active_latched: ?u64 = null,
+        active_stopped: ?u64 = null,
+        active_trace: ?[]u8 = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -114,13 +121,27 @@ test "HTTP/3 handshake batch correlates reversed responses and isolates deadline
                 "/active-sibling",
                 active_sibling.request.path,
             );
+            var trace_storage: [64 * 1024]u8 = undefined;
+            var trace_output: std.Io.Writer = .fixed(&trace_storage);
+            var trace = quic.qlog.Trace.init(&trace_output, .{});
+            var trace_observer = quic.qlog.Observer.init(&trace);
+            session.established.connection.config.qlog_observer = &trace_observer;
             self.cancel_requests_ready.set(
                 self.server.quic_server.endpoint.io,
             );
-            const active = try session.receivePeerResponseCancellationWithTimeout(
+            self.active_stream_id = active_cancel.stream_id;
+            const active = session.receivePeerResponseCancellationWithTimeout(
                 active_cancel.stream_id,
                 .fromSeconds(5),
-            );
+            ) catch |err| {
+                self.active_peer_closed = session.established.connection.peerStreamClosed(active_cancel.stream_id);
+                self.active_http_live = session.request_lifecycle.contains(active_cancel.stream_id);
+                self.active_latched = session.request_lifecycle.peerResponseCancellation(active_cancel.stream_id);
+                if (session.established.connection.streamStopped(active_cancel.stream_id)) |stop| self.active_stopped = stop.application_error_code;
+                self.active_trace = try allocator.dupe(u8, trace_output.buffered());
+                std.debug.print("server cancellation stats={any}\n", .{session.established.connection.stats()});
+                return err;
+            };
             self.active_cancellation_code = active.application_error_code;
             try session.sendResponse(active_sibling.stream_id, .{
                 .status = 204,
@@ -133,6 +154,7 @@ test "HTTP/3 handshake batch correlates reversed responses and isolates deadline
         .server = &server,
         .cancel_requests_ready = &cancel_requests_ready,
     };
+    defer if (worker.active_trace) |trace| allocator.free(trace);
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     var joined = false;
     defer if (!joined) thread.join();
@@ -320,6 +342,11 @@ test "HTTP/3 handshake batch correlates reversed responses and isolates deadline
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
+    var client_trace_storage: [64 * 1024]u8 = undefined;
+    var client_trace_output: std.Io.Writer = .fixed(&client_trace_storage);
+    var client_trace = quic.qlog.Trace.init(&client_trace_output, .{});
+    var client_trace_observer = quic.qlog.Observer.init(&client_trace);
+    client.established.connection.config.qlog_observer = &client_trace_observer;
     try client.requestBatchWithPerStreamDeadlinesAndCancellation(
         &.{
             .{ .method = "GET", .path = "/active-cancel", .authority = "localhost" },
@@ -338,6 +365,15 @@ test "HTTP/3 handshake batch correlates reversed responses and isolates deadline
         error.Canceled,
         actively_canceled.errors[0].?,
     );
+    if (!actively_canceled.completed[1]) {
+        try canceler.await(io);
+        canceler_active = false;
+        thread.join();
+        joined = true;
+        std.debug.print("active sibling error={any} server={any} id={any} peer_closed={} http_live={} latched={any} stopped={any}\n", .{ actively_canceled.errors[1], worker.err, worker.active_stream_id, worker.active_peer_closed, worker.active_http_live, worker.active_latched, worker.active_stopped });
+        if (worker.active_stream_id) |id| std.debug.print("client cancellation send={any} receive={any} recovery={d}\n", .{ client.established.connection.sendStreamStats(id), client.established.connection.recvStreamStats(id), client.established.connection.pendingRecoveryCount() });
+        std.debug.print("CLIENT_TRACE\n{s}\nSERVER_TRACE\n{s}\n", .{ client_trace_output.buffered(), worker.active_trace orelse "" });
+    }
     try std.testing.expect(actively_canceled.completed[1]);
     try std.testing.expect(actively_canceled.errors[1] == null);
     try canceler.await(io);

@@ -2,6 +2,23 @@ const std = @import("std");
 const netz = @import("netz");
 
 pub const payload = "HTTP3 digest content " ** 512;
+pub const large_head = "h" ** 5000;
+pub const large_trailer = "t" ** 5000;
+pub const large_early = "e" ** 5000;
+pub const Early = struct {
+    count: usize = 0,
+    valid: bool = true,
+
+    pub fn observe(context: *anyopaque, head: netz.http3.InformationalResponseHead) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.count += 1;
+        var matched = false;
+        for (head.headers) |header| if (std.mem.eql(u8, header.name, "x-large-early")) {
+            matched = std.mem.eql(u8, header.value, large_early);
+        };
+        self.valid = self.valid and head.status == 103 and matched;
+    }
+};
 pub const generated = "{\"hello\": \"world\"}" ** 512;
 pub const paths = [_][]const u8{ "/encoded", "/trailer", "/corrupt", "/head", "/range", "/stream", "/generated", "/sliced", "/finish" };
 

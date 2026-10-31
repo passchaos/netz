@@ -75,6 +75,6 @@ func config(version int) *quic.Config {
 
 func summary(role string, version int, connections uint32) {
 	data, _ := json.Marshal(map[string]any{"role": role, "version": version, "connections": connections, "requests": len(paths), "paths": paths,
-		"tls": "TLSv1.3", "alpn": "h3", "generated_verified": true, "complete_request_bytes": len(generated), "corruption_detected": role == "quic-go-client", "injected_corruption": role == "quic-go-server", "stream_window": 2048})
+		"tls": "TLSv1.3", "alpn": "h3", "generated_verified": true, "complete_request_bytes": len(generated), "large_field_bytes": 5000, "early_status": 103, "corruption_detected": role == "quic-go-client", "injected_corruption": role == "quic-go-server", "stream_window": 2048})
 	fmt.Printf("RESULT %s\n", data)
 }

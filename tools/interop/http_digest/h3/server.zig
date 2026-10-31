@@ -58,7 +58,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
         var field_storage: [154]u8 = undefined;
         var representation_storage: [154]u8 = undefined;
         var headers: [4]netz.http3.Qpack.HeaderField = undefined;
-        var trailers: [1]netz.http3.Qpack.HeaderField = undefined;
+        var trailers: [2]netz.http3.Qpack.HeaderField = undefined;
         var header_count: usize = 0;
         var trailer_count: usize = 0;
         var content: []const u8 = common.payload;
@@ -96,13 +96,25 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             headers[header_count] = .{ .name = "content-length", .value = try std.fmt.bufPrint(&length_storage, "{d}", .{common.payload.len}) };
             header_count += 1;
         }
-        try session.sendResponsePacedWithDeadline(request.stream_id, .{
+        const large_fields = std.mem.eql(u8, path, "/trailer");
+        if (large_fields) {
+            headers[header_count] = .{ .name = "x-large-head", .value = common.large_head };
+            header_count += 1;
+            trailers[trailer_count] = .{ .name = "x-large-trailer", .value = common.large_trailer };
+            trailer_count += 1;
+        }
+        const reply = netz.http3.Response{
             .status = if (std.mem.eql(u8, path, "/range")) 206 else 200,
             .request_method = request.request.method,
             .body = content,
             .headers = headers[0..header_count],
             .trailers = trailers[0..trailer_count],
-        }, until);
+        };
+        if (large_fields) {
+            try session.sendResponseWithInformationalAndDeadline(request.stream_id, &.{.{ .status = 103, .headers = &.{.{ .name = "x-large-early", .value = common.large_early }} }}, reply, until);
+        } else {
+            try session.sendResponsePacedWithDeadline(request.stream_id, reply, until);
+        }
     }
     std.debug.print("RESULT {{\"role\":\"netz-server\",\"version\":{d},\"requests\":9,\"generated_verified\":true,\"io\":\"zio-std-io\"}}\n", .{if (version == .version_1) @as(u8, 1) else 2});
 }

@@ -3114,6 +3114,31 @@ pub const Response = struct {
         stream_id: u64,
         encoder: anytype,
     ) Error!void {
+        return self.writeCompleteDynamic(list, allocator, peer_settings, stream_id, encoder, true);
+    }
+
+    /// Validate the complete response and encode only its final HEADERS.
+    /// Complete runtimes then send borrowed DATA with transport flow control.
+    pub fn writeCompleteHeadDynamic(
+        self: Response,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+    ) Error!void {
+        return self.writeCompleteDynamic(list, allocator, peer_settings, stream_id, encoder, false);
+    }
+
+    fn writeCompleteDynamic(
+        self: Response,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+        include_body: bool,
+    ) Error!void {
         var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
         const fields_buf = try header_fields.acquire(
             allocator,
@@ -3169,17 +3194,21 @@ pub const Response = struct {
             declared_content_length,
             self.body.len,
         );
-        try writeHeadersAndDataDynamic(
-            list,
-            allocator,
-            fields,
-            if (responseSuppressesBody(self.status, semantics)) &.{} else self.body,
-            if (responseSuppressesBody(self.status, semantics)) &.{} else self.trailers,
-            stream_id,
-            encoder,
-        );
+        if (include_body) {
+            try writeHeadersAndDataDynamic(
+                list,
+                allocator,
+                fields,
+                if (responseSuppressesBody(self.status, semantics)) &.{} else self.body,
+                if (responseSuppressesBody(self.status, semantics)) &.{} else self.trailers,
+                stream_id,
+                encoder,
+            );
+        } else {
+            try writeHeadersFrameDynamic(list, allocator, fields, stream_id, encoder);
+        }
         try queueIndexableFields(encoder, fields);
-        try queueIndexableFields(encoder, self.trailers);
+        if (include_body) try queueIndexableFields(encoder, self.trailers);
     }
 
     /// Encode only final response HEADERS with literal/static QPACK for an

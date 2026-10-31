@@ -1,4 +1,5 @@
 const std = @import("std");
+const pending_ack = @import("pending_ack.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -375,33 +376,10 @@ const ConnectionBackend = struct {
                     deadline,
                 );
             }
-            const piggyback_extra_frames: usize = @as(usize, 1) +
-                @intFromBool(self.connection.handshakeDonePending());
-            if (offset == 0 and
-                packets[0].len <= self.frame_limit -| piggyback_extra_frames and
-                self.connection.ackDelayDeadline() != null)
-            {
-                self.connection.trySendWithPendingAck(
-                    packets[0],
-                    0,
-                ) catch |err| switch (err) {
-                    // The application packet was already sized without the
-                    // ACK. Preserve it and let the delayed-ACK timer send the
-                    // cumulative ACK separately when the combination does not
-                    // fit this path.
-                    error.OutOfMemory,
-                    error.DatagramTooLarge,
-                    error.AntiAmplificationLimited,
-                    error.CongestionLimited,
-                    error.PacingLimited,
-                    => {},
-                    else => return err,
-                };
-                if (self.connection.ackDelayDeadline() == null) {
-                    self.visible_packet_sent = true;
-                    offset += 1;
-                    continue;
-                }
+            if (offset == 0 and try pending_ack.trySend(self.connection, packets[0], self.frame_limit)) {
+                self.visible_packet_sent = true;
+                offset += 1;
+                continue;
             }
             const result = self.connection.sendManyProgress(
                 packets[offset..],

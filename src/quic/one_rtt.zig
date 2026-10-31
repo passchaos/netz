@@ -1,4 +1,5 @@
 const std = @import("std");
+const cancellation = @import("../internal/cancellation.zig");
 const quic = @import("mod.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const closed_streams = @import("one_rtt/closed_streams.zig");
@@ -8742,6 +8743,7 @@ pub const Connection = struct {
         err: Error,
         now_ns: u64,
     ) void {
+        cancellation.preserveIgnored(self.endpoint.io, err);
         if ((self.pending_peer_stream_credit_releases == 0 and
             self.pending_local_stream_releases == 0) or
             self.close_info != null or self.idle_timed_out)
@@ -8813,6 +8815,7 @@ pub const Connection = struct {
         err: Error,
         now_ns: u64,
     ) void {
+        cancellation.preserveIgnored(self.endpoint.io, err);
         if (self.pending_stop_sending_resets == 0 or
             self.close_info != null or self.idle_timed_out)
         {
@@ -8883,6 +8886,7 @@ pub const Connection = struct {
         err: Error,
         now_ns: u64,
     ) void {
+        cancellation.preserveIgnored(self.endpoint.io, err);
         if ((!self.pending_streams_blocked_bidi_response and
             !self.pending_streams_blocked_uni_response) or
             self.close_info != null or self.idle_timed_out)
@@ -8925,6 +8929,7 @@ pub const Connection = struct {
         err: Error,
         now_ns: u64,
     ) void {
+        cancellation.preserveIgnored(self.endpoint.io, err);
         if (!self.hasPendingReceiveCredit() or
             self.close_info != null or self.idle_timed_out)
         {

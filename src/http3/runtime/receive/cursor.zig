@@ -1,4 +1,5 @@
 const std = @import("std");
+const cancellation = @import("../../../internal/cancellation.zig");
 const builtin = @import("builtin");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -104,7 +105,8 @@ pub const Connection = struct {
                 _ = adapter.connection.sendAckForPacketIfNeeded(
                     packet.packet_number,
                     packet.frames,
-                ) catch {
+                ) catch |err| {
+                    cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
                     adapter.cursor.ack_pending = true;
                 };
                 try visitor(adapter.context, packet);
@@ -147,7 +149,8 @@ pub const Connection = struct {
                 _ = adapter.connection.sendAckForPacketIfNeeded(
                     packet.packet_number,
                     packet.frames,
-                ) catch {
+                ) catch |err| {
+                    cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
                     adapter.cursor.ack_pending = true;
                 };
                 try visitor(adapter.context, packet);
@@ -278,7 +281,8 @@ pub const Connection = struct {
         errdefer batch.deinit();
         _ = connection.sendAckForPacketsIfNeeded(
             batch.packets[batch.next_index..],
-        ) catch {
+        ) catch |err| {
+            cancellation.preserveIgnored(connection.endpoint.io, err);
             self.ack_pending = true;
         };
         var packet = batch.takeNext() orelse return error.MissingStreamFrame;
@@ -359,7 +363,8 @@ pub const Connection = struct {
         errdefer batch.deinit();
         _ = connection.sendAckForPacketsIfNeeded(
             batch.packets[batch.next_index..],
-        ) catch {
+        ) catch |err| {
+            cancellation.preserveIgnored(connection.endpoint.io, err);
             self.ack_pending = true;
         };
         var packet = batch.takeNext() orelse return error.MissingStreamFrame;

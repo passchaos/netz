@@ -15,7 +15,10 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"net/textproto"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -69,6 +72,17 @@ func client(address, caPath string, version int) error {
 			request.Header.Set("Want-Content-Digest", "sha-256=3, sha-512=10")
 			request.Trailer = http.Header{"Content-Digest": []string{digestField(data, "sha-512")}}
 		}
+		var earlyCount int
+		if path == "/trailer" {
+			trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
+				if code != 103 || header.Get("X-Large-Early") != strings.Repeat("e", 5000) {
+					return errors.New("bad early field section")
+				}
+				earlyCount++
+				return nil
+			}}
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+		}
 		response, err := client.Do(request)
 		if err != nil {
 			return err
@@ -113,6 +127,9 @@ func client(address, caPath string, version int) error {
 		}
 		if err != nil {
 			return err
+		}
+		if path == "/trailer" && (earlyCount != 1 || response.Header.Get("X-Large-Head") != strings.Repeat("h", 5000) || response.Trailer.Get("X-Large-Trailer") != strings.Repeat("t", 5000)) {
+			return errors.New("bad large response field sections")
 		}
 		switch path {
 		case "/encoded":

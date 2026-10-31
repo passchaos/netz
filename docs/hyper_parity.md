@@ -4229,3 +4229,22 @@ each send phase. Detailed evidence is recorded in
 
 Debug and ReleaseFast HTTP/3 regression gates each pass 991/991, public-package
 checks pass 26/26, and each independent quic-go gate completes 36 requests.
+
+## Complete HTTP/3 response ownership and field-section flow control
+
+Native complete server responses now share one flow-aware send path across
+ordinary, paced and informational entry points. It preflights all field sections
+and complete body semantics before output, sends borrowed DATA and field-section
+fragments under one deadline, and retires only the failed request after a partial
+send. Refused cancellation stays owned for packet/send-progress retry and blocks
+final drain until it completes. The previous aggregate response timeout closed
+the entire connection.
+
+The [complete response gate](http3_complete_responses.md) checks exact large
+informational/final/trailing fields, body bytes, scoped timeout cleanup, deferred
+cancellation and sibling reuse. The independent quic-go digest transcript checks
+5-KiB field values in both directions and QUIC versions. Debug and ReleaseFast
+HTTP/3 regression gates each pass 998/998, the full Debug library suite passes
+6143/6143, public-package checks pass 26/26, and each independent quic-go gate
+completes 36 requests. Detailed verification is recorded in
+`docs/evidence/http3_complete_responses/2026-11-01.json`.

@@ -9,8 +9,14 @@ pub const ShutdownState = enum {
 };
 
 pub const Server = struct {
+    const ActiveRequest = struct {
+        priority: http3.Priority,
+        peer_response_cancellation: ?u64 = null,
+    };
+
     allocator: std.mem.Allocator,
-    active: std.AutoHashMapUnmanaged(u62, http3.Priority) = .empty,
+    active: std.AutoHashMapUnmanaged(u62, ActiveRequest) = .empty,
+    peer_response_cancellations: usize = 0,
     lowest_active_stream_id: ?u62 = null,
     highest_processed_stream_id: ?u62 = null,
     shutdown_state: ShutdownState = .active,
@@ -53,7 +59,7 @@ pub const Server = struct {
     ) void {
         self.active.putAssumeCapacityNoClobber(
             stream_id,
-            initial_priority,
+            .{ .priority = initial_priority },
         );
         self.lowest_active_stream_id =
             if (self.lowest_active_stream_id) |lowest|
@@ -69,7 +75,8 @@ pub const Server = struct {
 
     pub fn markFinished(self: *Server, stream_id: u64) void {
         const key = std.math.cast(u62, stream_id) orelse return;
-        if (!self.active.remove(key)) return;
+        const removed = self.active.fetchRemove(key) orelse return;
+        if (removed.value.peer_response_cancellation != null) self.peer_response_cancellations -= 1;
         if (self.lowest_active_stream_id == key) {
             self.recomputeLowestActiveStream();
         }
@@ -85,8 +92,24 @@ pub const Server = struct {
         updated_priority: http3.Priority,
     ) bool {
         const stored = self.active.getPtr(stream_id) orelse return false;
-        stored.* = updated_priority;
+        stored.priority = updated_priority;
         return true;
+    }
+
+    /// Preserve the first peer STOP_SENDING until the HTTP owner consumes it.
+    /// QUIC may reclaim the acknowledged reset before the next application poll.
+    pub fn observePeerResponseCancellation(self: *Server, id: u62, code: u64) void {
+        const request = self.active.getPtr(id) orelse return;
+        if (request.peer_response_cancellation == null) {
+            request.peer_response_cancellation = code;
+            self.peer_response_cancellations += 1;
+        }
+    }
+
+    pub fn peerResponseCancellation(self: Server, id: u62) ?u64 {
+        if (self.peer_response_cancellations == 0) return null;
+        const request = self.active.get(id) orelse return null;
+        return request.peer_response_cancellation;
     }
 
     pub fn state(self: Server) ShutdownState {
@@ -137,7 +160,7 @@ pub const Server = struct {
     }
 
     pub fn priority(self: Server, stream_id: u62) http3.Priority {
-        return self.active.get(stream_id) orelse .{};
+        return if (self.active.get(stream_id)) |request| request.priority else .{};
     }
 
     fn recomputeLowestActiveStream(self: *Server) void {

@@ -1,0 +1,11 @@
+{
+  "status": "reproduced",
+  "base_commit": "af48cccb",
+  "command": "zig build test-lib -Dtest-filter='HTTP/3 complete response' --summary all",
+  "runtime": "HandshakeServerSession.sendResponsePacedWithTimeout",
+  "timeout_milliseconds": 30,
+  "response_body_bytes": 28672,
+  "stream_send_credit": 2048,
+  "counterexample": "Aggregate response body timeout closed the native connection before any sibling response could complete",
+  "log": "before.log"
+}

@@ -89,6 +89,8 @@ func reply(path string) ([]byte, http.Header, http.Header, error) {
 		headers.Set("Content-Encoding", "gzip")
 		headers.Set("Content-Digest", digestField(content, "sha-256"))
 	case "/trailer":
+		headers.Set("X-Large-Head", strings.Repeat("h", 5000))
+		trailers.Set("X-Large-Trailer", strings.Repeat("t", 5000))
 		trailers.Set("Content-Digest", digestField(content, "sha-512"))
 	case "/corrupt":
 		headers.Set("Content-Digest", digestField(content, "sha-256")+", "+digestField([]byte("different"), "sha-512"))
