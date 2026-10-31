@@ -638,7 +638,11 @@ so this is observable process-boundary evidence rather than an in-process state
 assertion. The netz HTTP/1 server uses the same parser, streaming-body state,
 vectored writer, persistent connection, and CONNECT tunnel surface over either
 raw TCP or its native TLS transport. This is functional HTTP/1.1 and HTTPS
-interoperability evidence rather than a benchmark proxy.
+interoperability evidence rather than a benchmark proxy. A fresh 2026-11-01
+run passed the cleartext/TLS POST-and-trailer, Expect 100-continue, CONNECT
+tunnel, generic Upgrade, extension-method, graceful-drain and
+connection-control/unnegotiated-trailer rejection transcripts; see
+`docs/evidence/http1_hyper/2026-11-01.json`.
 
 The same process gate now exercises that CONNECT surface directly in both
 endpoint roles over cleartext and TLS. Each server writes its protocol preface
@@ -1951,7 +1955,15 @@ resume without duplicating a prefix. Real HTTP/1.1 and HTTP/2 regressions cover
 bidirectional payloads, fragmentation, unknown extensions, timeout resumption,
 and strict Capsule negotiation; the authenticated HTTP/3 exchange additionally
 proves SETTINGS ordering, default and custom-template expansion, and two
-independent Sessions.
+independent Sessions. An independent Hyper process matrix now drives both
+HTTP/1.1 and HTTP/2 CONNECT-UDP over cleartext and TLS in both directions,
+checking SETTINGS_ENABLE_CONNECT_PROTOCOL, unknown capsules/contexts,
+fragmented capsules and exact 513/777-byte payloads. A fresh 2026-11-01 run
+passed every role/transport combination; see
+`docs/evidence/connect_udp_hyper/2026-11-01.json`. The independent h3/quinn
+HTTP/3 matrix also passed both directions with SETTINGS_DATAGRAM,
+SETTINGS_ENABLE_CONNECT_PROTOCOL, unknown Context IDs, proxied UDP and exact
+513/777-byte payloads; see `docs/evidence/connect_udp_h3/2026-11-01.json`.
 RFC 9484 CONNECT-IP now has a shared transport-neutral core at
 `http3.connect_ip`. It validates wildcard, DNS, IPv4-prefix, IPv6-prefix and
 Internet Protocol Number request scopes; supports the default and configured

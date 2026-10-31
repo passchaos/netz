@@ -1,0 +1,44 @@
+   Compiling netz-hyper-http2-flow v0.0.0 (/nav_env/project-z/netz/tools/hyper_http2_flow)
+    Finished `release` profile [optimized] target(s) in 3.32s
+netz HTTP/1 CONNECT-UDP client interoperated with Hyper: transport=cleartext sent=513 received=777 unknown_capsule=true unknown_context=true
+Hyper HTTP/1 CONNECT-UDP server listening transport=cleartext on 127.0.0.1:53331
+Hyper HTTP/1 CONNECT-UDP server interoperated with netz: transport=cleartext received=513 sent=777 unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/1 client -> Hyper cleartext server CONNECT-UDP passed
+Hyper HTTP/1 CONNECT-UDP client interoperated with netz: transport=cleartext sent=513 received=777 unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/1 CONNECT-UDP server listening transport=cleartext on 127.0.0.1:45179
+netz HTTP/1 CONNECT-UDP server interoperated with Hyper: transport=cleartext received=513 sent=777 unknown_capsule=true unknown_context=true
+Hyper HTTP/1 client -> netz cleartext server CONNECT-UDP passed
+debug(zio): Spawning thread 0
+netz HTTP/1 CONNECT-UDP client interoperated with Hyper: transport=tls sent=513 received=777 unknown_capsule=true unknown_context=true
+debug(zio): Removing thread 0
+Hyper HTTP/1 CONNECT-UDP server listening transport=tls on 127.0.0.1:53007
+Hyper HTTP/1 CONNECT-UDP server interoperated with netz: transport=tls received=513 sent=777 unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/1 client -> Hyper tls server CONNECT-UDP passed
+Hyper HTTP/1 CONNECT-UDP client interoperated with netz: transport=tls sent=513 received=777 unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/1 CONNECT-UDP server listening transport=tls on 127.0.0.1:48479
+debug(zio): Spawning thread 0
+netz HTTP/1 CONNECT-UDP server interoperated with Hyper: transport=tls received=513 sent=777 unknown_capsule=true unknown_context=true
+debug(zio): Removing thread 0
+Hyper HTTP/1 client -> netz tls server CONNECT-UDP passed
+netz HTTP/2 CONNECT-UDP client interoperated with Hyper: transport=cleartext sent=513 received=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true
+Hyper HTTP/2 CONNECT-UDP server listening transport=cleartext on 127.0.0.1:46927
+Hyper HTTP/2 CONNECT-UDP server interoperated with netz: transport=cleartext received=513 sent=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/2 client -> Hyper cleartext server CONNECT-UDP passed
+Hyper HTTP/2 CONNECT-UDP client interoperated with netz: transport=cleartext sent=513 received=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/2 CONNECT-UDP server listening transport=cleartext on 127.0.0.1:42799
+netz HTTP/2 CONNECT-UDP server interoperated with Hyper: transport=cleartext received=513 sent=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true
+Hyper HTTP/2 client -> netz cleartext server CONNECT-UDP passed
+debug(zio): Spawning thread 0
+netz HTTP/2 CONNECT-UDP client interoperated with Hyper: transport=tls sent=513 received=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true
+debug(zio): Removing thread 0
+Hyper HTTP/2 CONNECT-UDP server listening transport=tls on 127.0.0.1:41677
+Hyper HTTP/2 CONNECT-UDP server interoperated with netz: transport=tls received=513 sent=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/2 client -> Hyper tls server CONNECT-UDP passed
+Hyper HTTP/2 CONNECT-UDP client interoperated with netz: transport=tls sent=513 received=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true fragmented=true
+netz HTTP/2 CONNECT-UDP server listening transport=tls on 127.0.0.1:38959
+debug(zio): Spawning thread 0
+netz HTTP/2 CONNECT-UDP server interoperated with Hyper: transport=tls received=513 sent=777 settings_enable_connect_protocol=true unknown_capsule=true unknown_context=true
+debug(zio): Removing thread 0
+Hyper HTTP/2 client -> netz tls server CONNECT-UDP passed
+Hyper/netz CONNECT-UDP interoperability matrix passed: versions=HTTP/1,HTTP/2 transports=cleartext,tls directions=client,server
+exit=0

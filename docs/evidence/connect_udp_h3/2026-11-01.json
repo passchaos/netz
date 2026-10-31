@@ -1,0 +1,24 @@
+{
+  "command": "zig build interop-connect-udp-h3",
+  "date": "2026-11-01",
+  "log": "2026-11-01/h3_quinn.log",
+  "peer": "h3/quinn (tokio)",
+  "status": "passed",
+  "transcripts": [
+    "netz HTTP/3 CONNECT-UDP client interoperated with h3/quinn: verified=true sent=513 received=777 settings_datagram=true settings_extended_connect=true unknown_context=true response_terminal=true client_io=zio-std-io server_io=h3-quinn-tokio",
+    "h3/quinn CONNECT-UDP server listening on 127.0.0.1:42847",
+    "h3/quinn CONNECT-UDP server interoperated with netz: received=513 proxied_udp=true sent=777 settings_datagram=true settings_extended_connect=true unknown_context=true delivery_ack=true response_fin=true",
+    "netz HTTP/3 client -> h3/quinn CONNECT-UDP server passed",
+    "h3/quinn client received CONNECT-UDP response",
+    "h3/quinn client queued CONNECT-UDP datagrams",
+    "h3/quinn client received CONNECT-UDP datagrams",
+    "h3/quinn CONNECT-UDP client interoperated with netz: sent=513 received=777 settings_datagram=true settings_extended_connect=true unknown_context=true request_fin=true response_fin=true",
+    "netz HTTP/3 CONNECT-UDP server listening",
+    "netz HTTP/3 CONNECT-UDP server accepted QUIC",
+    "netz HTTP/3 CONNECT-UDP server accepted request",
+    "netz HTTP/3 CONNECT-UDP server interoperated with h3/quinn: received=513 proxied_udp=true sent=777 settings_datagram=true settings_extended_connect=true unknown_context=true request_terminal=true client_io=h3-quinn-tokio server_io=zio-std-io",
+    "h3/quinn HTTP/3 client -> netz CONNECT-UDP server passed",
+    "h3/quinn and netz bidirectional CONNECT-UDP interop passed",
+    "exit=0"
+  ]
+}

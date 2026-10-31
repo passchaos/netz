@@ -1,0 +1,62 @@
+   Compiling hyper v1.11.0 (/nav_env/Work/hyper)
+   Compiling netz-hyper-http1-body v0.0.0 (/nav_env/project-z/netz/tools/hyper_http1_body)
+    Finished `release` profile [optimized] target(s) in 4.12s
+response_head_timeout=5000ms
+netz HTTP/1 client interoperated with Hyper: transport=cleartext status=201 body=14 trailers=1
+netz HTTP/1 client sent extension method to Hyper: transport=cleartext method=PURGE response_body=15
+netz HTTP/1 client parsed Hyper quoted Transfer-Encoding: transport=cleartext aggregate=true streaming=true following_request=true
+netz HTTP/1 client observed Hyper informational responses: transport=cleartext statuses=103,102 headers=2 final=200 body=19
+netz HTTP/1 client observed Hyper 100 Continue: transport=cleartext interim=1 body=11 response_body=15
+netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=cleartext informational=103,100 early_final=417 body_sent=0 connection_reusable=false
+netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=cleartext buffered_server_bytes=18 client_bytes=17 reply_bytes=18
+netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=cleartext buffered_server_bytes=19 client_bytes=18 reply_bytes=19
+netz HTTP/1 pool reused Hyper connection through redirect: transport=cleartext requests=4 redirects=1 idle=1 client_io=zio-std-io server_io=hyper-tokio
+netz HTTP/1 client followed Hyper redirect: transport=cleartext status=200 redirects=1 method=POST->GET credentials=same-origin
+netz HTTP/1 client verified Hyper EOF response metadata: transport=cleartext aggregate=true streaming=true reusable=false
+Hyper HTTP/1 server -> netz client interop passed
+Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1
+Hyper HTTP/1 client sent extension method to netz: method=PURGE response_body=14
+Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14
+Hyper HTTP/1 client observed netz graceful drain: active_response=true connection_close=true next_request=false
+Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17
+Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io
+Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false
+Hyper HTTP/1 client observed netz reject unnegotiated response trailers: request_te=false response=false
+Hyper HTTP/1 client -> netz server interop passed
+response_head_timeout=5000ms
+debug(zio): Spawning thread 0
+netz HTTP/1 client interoperated with Hyper: transport=tls status=201 body=14 trailers=1
+netz HTTP/1 client interoperated with rustls KeyUpdate: received=1 sent=1 next_request=true
+netz HTTP/1 client sent extension method to Hyper: transport=tls method=PURGE response_body=15
+netz HTTP/1 client parsed Hyper quoted Transfer-Encoding: transport=tls aggregate=true streaming=true following_request=true
+netz HTTP/1 client observed Hyper informational responses: transport=tls statuses=103,102 headers=2 final=200 body=19
+netz HTTP/1 client observed Hyper 100 Continue: transport=tls interim=1 body=11 response_body=15
+netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=tls informational=103,100 early_final=417 body_sent=0 connection_reusable=false
+netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=tls buffered_server_bytes=18 client_bytes=17 reply_bytes=18
+netz HTTP/1 client interoperated with Hyper generic Upgrade: transport=tls buffered_server_bytes=19 client_bytes=18 reply_bytes=19
+netz HTTP/1 pool reused Hyper connection through redirect: transport=tls requests=4 redirects=1 idle=1 client_io=zio-std-io server_io=hyper-tokio
+netz HTTP/1 client followed Hyper redirect: transport=tls status=200 redirects=1 method=POST->GET credentials=same-origin
+netz HTTP/1 client verified Hyper EOF response metadata: transport=tls aggregate=true streaming=true reusable=false
+debug(zio): Removing thread 0
+Hyper HTTPS server -> netz client interop passed
+Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1
+Hyper HTTP/1 client sent extension method to netz: method=PURGE response_body=14
+Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14
+Hyper HTTP/1 client observed netz graceful drain: active_response=true connection_close=true next_request=false
+Hyper HTTP/1 client interoperated with netz CONNECT tunnel: server_preface=17 client_bytes=18 reply_bytes=17
+Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io
+Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false
+Hyper HTTP/1 client observed netz reject unnegotiated response trailers: request_te=false response=false
+netz HTTP/1 Hyper interop server listening transport=tls on 127.0.0.1:45217
+debug(zio): Spawning thread 0
+netz HTTP/1 server interoperated with Hyper: transport=tls method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1
+netz HTTP/1 server accepted Hyper extension method: transport=tls method=PURGE response_body=14
+netz HTTP/1 server completed Hyper Expect exchange: transport=tls interim=1 body=12 response_body=14
+netz HTTP/1 server gracefully drained Hyper: transport=tls active_response=true connection_close=true next_request=false
+netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=tls server_preface=17 client_bytes=18 reply_bytes=17
+netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=tls protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io
+netz HTTP/1 server rejected Hyper connection-control trailer: transport=tls field=connection error=InvalidTrailer
+netz HTTP/1 server rejected unnegotiated response trailers: transport=tls request_te=false bytes_written=0 error=InvalidTrailer
+debug(zio): Removing thread 0
+Hyper HTTP/1 client -> netz TLS server interop passed
+exit=0
