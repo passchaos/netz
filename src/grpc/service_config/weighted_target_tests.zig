@@ -141,7 +141,7 @@ test "gRPC weighted target parser is allocation transactional" {
     );
 }
 
-test "gRPC weighted target runtime boundary is explicit per channel owner" {
+test "gRPC weighted target runtime is selected by both channel owners" {
     const json =
         \\{"loadBalancingConfig":[{"weighted_target_experimental":{
         \\ "targets":{"a":{"weight":1,
@@ -159,15 +159,17 @@ test "gRPC weighted target runtime boundary is explicit per channel owner" {
         .address = .{ .ip4 = .loopback(9) },
         .hierarchical_path = &.{"a"},
     } };
-    try std.testing.expectError(
-        error.InvalidChannelOptions,
-        channel.Channel.initWithServiceConfig(
-            std.testing.allocator,
-            io,
-            target,
-            .{},
-            &config,
-        ),
+    var ordinary = try channel.Channel.initWithServiceConfig(
+        std.testing.allocator,
+        io,
+        target,
+        .{},
+        &config,
+    );
+    defer ordinary.deinit();
+    try std.testing.expectEqual(
+        channel.SelectionPolicy.weighted_target,
+        ordinary.selectionPolicy(),
     );
     var manager = try shared.SharedChannel.init(
         std.testing.allocator,

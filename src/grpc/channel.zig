@@ -15,6 +15,7 @@ const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
 const weighted_round_robin = @import("channel/weighted_round_robin.zig");
+const weighted_target = @import("channel/weighted_target.zig");
 const least_request = @import("channel/least_request.zig");
 const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
@@ -591,6 +592,7 @@ pub const Channel = struct {
     wrr_metric_names: ?[][]u8 = null,
     wrr_sequence: u32 = 0,
     wrr_scheduler: weighted_round_robin.Scheduler = .{},
+    weighted_target_runtime: ?weighted_target.Runtime(Slot) = null,
     least_request_config: least_request.Config = .{},
     ring_hash_config: ring_hash.Config = .{},
     ring_hash_header: ?[]u8 = null,
@@ -761,6 +763,8 @@ pub const Channel = struct {
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
         var resolved = options;
+        const owns_weighted_target = !composite_owned and
+            balancing.policy == .weighted_target;
         if (resolved.selection_policy == null and balancing.configured and
             !(composite_owned and balancing.policy == .weighted_target))
         {
@@ -770,7 +774,7 @@ pub const Channel = struct {
                 .least_request => .least_request,
                 .ring_hash => .ring_hash,
                 .weighted_round_robin => .weighted_round_robin,
-                .weighted_target => return error.InvalidChannelOptions,
+                .weighted_target => .round_robin,
             };
         }
         if (resolved.shuffle_address_list == null and balancing.configured) {
@@ -778,6 +782,13 @@ pub const Channel = struct {
         }
         var result = try init(allocator, io, target, resolved);
         errdefer result.deinit();
+        if (owns_weighted_target) {
+            result.weighted_target_runtime = try .init(
+                allocator,
+                balancing.root orelse return error.InvalidChannelOptions,
+            );
+            result.selection_policy = .weighted_target;
+        }
         if (result.selection_policy == .weighted_round_robin and
             balancing.policy == .weighted_round_robin)
         {
@@ -825,6 +836,7 @@ pub const Channel = struct {
         for (self.slots) |*slot| slot.closeConnection();
         self.allocator.free(self.slots);
         self.wrr_scheduler.deinit(self.allocator);
+        if (self.weighted_target_runtime) |*runtime| runtime.deinit();
         self.ring_hash_ring.deinit(self.allocator);
         if (self.ring_hash_header) |header| self.allocator.free(header);
         if (self.wrr_metric_names) |names| {
@@ -1275,6 +1287,9 @@ pub const Channel = struct {
         routing_hash: ?ring_hash.RequestHash,
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
+        if (self.selection_policy == .weighted_target) {
+            return self.readyWeightedTarget(wait_for_ready, deadline);
+        }
         self.exitIdle();
         errdefer if (!self.hasReadyConnection()) self.setConnectivityState(.transient_failure);
         try self.prepareSlots();
@@ -1447,6 +1462,45 @@ pub const Channel = struct {
                 return error.ConnectionUnavailable;
             }
             self.setConnectivityState(.transient_failure);
+            try self.waitForProgress(deadline);
+        }
+    }
+
+    fn readyWeightedTarget(
+        self: *Channel,
+        wait_for_ready: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ReadyConnection {
+        const runtime = &self.weighted_target_runtime.?;
+        while (true) {
+            const pass_duration = self.connection_attempt_delay orelse
+                self.backoff_policy.min_connect_timeout;
+            var pass_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = pass_duration,
+                .clock = .awake,
+            });
+            if (deadline) |outer| {
+                if (outer.clock != .awake or
+                    outer.durationFromNow(self.io).raw.nanoseconds <= 0)
+                {
+                    return error.Timeout;
+                }
+                if (std.Io.Clock.Timestamp.compare(outer, .lt, pass_deadline)) {
+                    pass_deadline = outer;
+                }
+            }
+            _ = self.warmWithDeadline(pass_deadline) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory, error.ConcurrencyUnavailable => return err,
+                error.Timeout, error.ConnectionUnavailable => {},
+                else => if (!wait_for_ready) return err,
+            };
+            if (runtime.pick(self.slots, self.io)) |index| {
+                return self.selectWeighted(
+                    index,
+                    &self.slots[index].connection.?,
+                );
+            }
+            if (!wait_for_ready) return error.ConnectionUnavailable;
             try self.waitForProgress(deadline);
         }
     }

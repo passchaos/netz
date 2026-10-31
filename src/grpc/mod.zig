@@ -193,6 +193,7 @@ test {
     _ = @import("channel/shared/weighted_target/weighted_round_robin_tests.zig");
     _ = @import("channel/shared/weighted_target/outlier_tests.zig");
     _ = @import("channel/shared/weighted_target/resolution_tests.zig");
+    _ = @import("channel/weighted_target_tests.zig");
     _ = @import("channel/least_request_channel_tests.zig");
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("channel/proxy_tests.zig");

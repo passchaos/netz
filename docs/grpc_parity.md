@@ -751,6 +751,25 @@ resolver's changed physical port never replaces the original logical authority.
 Evidence is recorded in
 `docs/evidence/grpc_shared_weighted_target_resolution/2026-10-31.json`.
 
+The single-owner Channel now executes the first weighted-target runtime subset
+for static resolved endpoints: arbitrary nested weighted targets with
+`pick_first` and `round_robin` leaves. Unlike SharedChannel it has no background
+endpoint owners, so each RPC performs bounded composite warming before the
+pick. Every reachable child is established within the caller's absolute
+deadline, while each blackholed child is capped by the configured connection
+attempt delay instead of consuming the whole RPC budget. Selection then uses
+only READY children and delegates to child-local sticky/round-robin state.
+
+The runtime deep-copies every target path element; applications may destroy the
+ServiceConfig immediately after Channel initialization. A real three-server
+test does so, then proves nested 1:3 parent weighting and exact alternation
+below the low-weight child across 400 RPCs. Another keeps all traffic on a
+weight-1 healthy child while a weight-100 sibling remains unavailable. Runtime
+construction passes every induced allocation failure. Least-request, ring-hash,
+WRR and outlier leaves remain explicit ordinary-Channel initialization errors,
+so broad support still belongs to SharedChannel. Evidence is recorded in
+`docs/evidence/grpc_ordinary_weighted_target_core/2026-10-31.json`.
+
 ## SharedChannel outlier detection
 
 Service config now parses grpc-core's `outlier_detection_experimental` wrapper
