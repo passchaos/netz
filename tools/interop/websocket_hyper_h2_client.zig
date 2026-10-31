@@ -12,10 +12,20 @@ pub fn main(init: std.process.Init) !void {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-client")) {
         return runBenchmark(init, args[2..]);
     }
-    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3 and args.len != 5) {
+        return error.InvalidArgument;
+    }
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const tls_enabled = args.len == 3;
+    const proxy_mode = args.len == 5 and
+        std.mem.eql(u8, args[3], "--proxy");
+    if (args.len == 5 and !proxy_mode) return error.InvalidArgument;
+    const proxy_port = if (proxy_mode)
+        try std.fmt.parseInt(u16, args[4], 10)
+    else
+        0;
+    if (proxy_mode and proxy_port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3 or proxy_mode;
     if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
     }
@@ -43,17 +53,46 @@ pub fn main(init: std.process.Init) !void {
             args[2],
         );
     }
-    var h2 = if (tls_enabled)
+    var proxy_uri_buffer: [64]u8 = undefined;
+    const proxy_uri = if (proxy_mode)
+        try std.fmt.bufPrint(
+            &proxy_uri_buffer,
+            "http://127.0.0.1:{d}",
+            .{proxy_port},
+        )
+    else
+        "";
+    const tls_options = netz.http2.runtime.TlsConnectOptions{
+        .ca_bundle = if (tls_enabled) .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } else null,
+    };
+    var h2 = if (proxy_mode)
+        try netz.http2.runtime.Client.connectTlsHostViaProxyWithTimeout(
+            allocator,
+            io,
+            "localhost",
+            port,
+            .{
+                .uri = proxy_uri,
+                .options = .{ .headers = &.{.{
+                    .name = "Proxy-Authorization",
+                    .value = "Basic aHlwZXItcHJveHk=",
+                }} },
+            },
+            limits,
+            tls_options,
+            .fromSeconds(5),
+        )
+    else if (tls_enabled)
         try netz.http2.runtime.Client.connectTlsHost(
             allocator,
             io,
             "localhost",
             port,
             limits,
-            .{ .ca_bundle = .{
-                .bundle = &ca_bundle,
-                .lock = &ca_lock,
-            } },
+            tls_options,
         )
     else
         try netz.http2.runtime.Client.connect(
@@ -63,13 +102,19 @@ pub fn main(init: std.process.Init) !void {
             limits,
         );
     defer h2.close();
+    var authority_buffer: [64]u8 = undefined;
+    const authority = try std.fmt.bufPrint(
+        &authority_buffer,
+        "localhost:{d}",
+        .{port},
+    );
     var websocket = try netz.websocket.runtime.H2Client.open(
         allocator,
         &h2,
         .{
-            .authority = "localhost",
+            .authority = authority,
             .path = "/websocket",
-            .scheme = "http",
+            .scheme = if (tls_enabled) "https" else "http",
             .limits = .{
                 .max_head_bytes = 4096,
                 .max_frame_bytes = 4096,
@@ -160,6 +205,12 @@ pub fn main(init: std.process.Init) !void {
             if (tls_enabled) "verified" else "n/a",
         },
     );
+    if (proxy_mode) {
+        std.debug.print(
+            "netz RFC 8441 client tunneled Hyper TLS through Hyper CONNECT proxy: origin=localhost:{d} scheme=https authority=exact proxy_authorization=isolated client_io=zio-std-io proxy_io=hyper-tokio server_io=hyper-tokio\n",
+            .{port},
+        );
+    }
 }
 
 fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {

@@ -48,6 +48,7 @@ fn main() {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let mut exporter = None;
+        let tls_enabled = tls_paths.is_some();
         let io = match tls_paths {
             Some((cert, key)) => {
                 let mut tls = TlsAcceptor::from(tls_server_config(&cert, &key))
@@ -73,10 +74,13 @@ fn main() {
         };
         let mut builder = server_http2::Builder::new(TokioExecutor);
         builder.enable_connect_protocol();
+        let authority = format!("localhost:{port}");
         builder
             .serve_connection(
                 TokioIo::new(io),
-                service_fn(move |request| handle(request, exporter)),
+                service_fn(move |request| {
+                    handle(request, exporter, tls_enabled, authority.clone())
+                }),
             )
             .await
             .expect("serve netz RFC 8441 client");
@@ -105,9 +109,20 @@ fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfi
 async fn handle(
     mut request: Request<hyper::body::Incoming>,
     exporter: Option<[u8; 32]>,
+    tls_enabled: bool,
+    authority: String,
 ) -> Result<Response<Empty<Bytes>>, Infallible> {
     assert_eq!(request.method(), Method::CONNECT);
     assert_eq!(request.version(), Version::HTTP_2);
+    assert_eq!(
+        request.uri().scheme_str(),
+        Some(if tls_enabled { "https" } else { "http" })
+    );
+    assert_eq!(
+        request.uri().authority().map(|value| value.as_str()),
+        Some(authority.as_str())
+    );
+    assert!(!request.headers().contains_key("proxy-authorization"));
     assert_eq!(
         request.uri().path_and_query().unwrap().as_str(),
         "/websocket"
@@ -148,7 +163,9 @@ async fn handle(
         write_frame(&mut stream, 0xA, b"unsolicited").await;
         write_frame(&mut stream, 0x2, b"during probe").await;
         write_frame(&mut stream, 0xA, &ping.payload).await;
-        println!("Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data");
+        println!(
+            "Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data"
+        );
 
         let close = read_frame(&mut stream, true).await;
         assert_eq!(close.opcode, 0x8);

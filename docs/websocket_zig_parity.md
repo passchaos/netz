@@ -50,6 +50,18 @@ checking Hyper's echoed close details. The Hyper fixture parses and writes RFC
 6455 framing independently, so this is external RFC 8441 wire evidence rather
 than a second netz endpoint.
 
+The same gate now adds a three-process proxy route. Netz establishes an
+HTTP/1.1 CONNECT tunnel through an independent Hyper proxy, authenticates the
+Hyper TLS origin with mandatory `h2` ALPN, then runs the complete RFC 8441
+exchange above. The origin requires `:scheme = https`, exact
+`localhost:<port>` authority, and absence of `Proxy-Authorization`; the proxy
+independently requires that credential and exact CONNECT authority. TLS
+KeyUpdate, exporter metadata, fragmented frames, interleaved application data
+during Ping, and bounded Close all traverse the tunnel. This proves the
+HTTP/2 proxy composition at the WebSocket protocol boundary instead of relying
+only on an ordinary HTTP request. Evidence is recorded in
+`docs/evidence/websocket_h2_hyper_proxy/2026-10-31.json`.
+
 RFC 9220 now has an owning authenticated HTTP/3 client/server runtime in
 `websocket.runtime.h3`. It enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`, waits
 for peer SETTINGS, and requires the server to advertise that capability before

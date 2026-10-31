@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "RFC 8441 WebSocket through an HTTP CONNECT proxy",
+  "decision": "accepted",
+  "scope": {
+    "client": "Netz RFC 8441 over TLS HTTP/2",
+    "proxy": "independent Hyper HTTP/1.1 CONNECT server",
+    "origin": "independent Hyper rustls HTTP/2 Extended CONNECT server",
+    "transport": "certificate-verified TLS 1.3 with mandatory h2 ALPN",
+    "websocket": "fragmented masked text, unmasked response, Ping/Pong with interleaved application data, and bounded Close 1000/done"
+  },
+  "reference": {
+    "implementation": "Hyper 1.11.0 plus rustls and Tokio",
+    "revision": "084473f728f9d07b3be5845475aa2f62ed9ff579",
+    "source_clean": true,
+    "files": [
+      "/nav_env/Work/hyper/examples/http_proxy.rs",
+      "/nav_env/Work/hyper/src/proto/h2/mod.rs",
+      "tools/hyper_http2_flow/src/bin/websocket_server.rs",
+      "tools/hyper_http2_flow/src/bin/interop_proxy.rs"
+    ]
+  },
+  "boundaries": {
+    "proxy": "requires exact localhost:port CONNECT authority and Basic proxy authentication",
+    "origin": "requires HTTP/2 CONNECT, protocol websocket, https scheme, exact localhost:port authority, WebSocket version 13, and no Proxy-Authorization",
+    "tls": "certificate hostname verification, h2 ALPN, TLS KeyUpdate, and exporter bytes remain bound to the origin rather than the proxy",
+    "deadline": "one bounded client setup spans proxy CONNECT, TLS, HTTP/2 bootstrap, and RFC 8441 negotiation"
+  },
+  "results": {
+    "build": "8/8 steps passed",
+    "h2c": "fragmented text, Ping/Pong with interleaved data, and bounded Close passed",
+    "direct_tls": "certificate verification, h2 ALPN, KeyUpdate, exporter, WebSocket exchange, and Close passed",
+    "proxied_tls": "Hyper CONNECT proxy, exact scheme and authority, credential isolation, TLS metadata, WebSocket exchange, and Close passed",
+    "runtime_identity": "client_io=zio-std-io proxy_io=hyper-tokio server_io=hyper-tokio"
+  },
+  "source_sha256": {
+    "tools/interop/websocket_hyper_h2_client.zig": "e90d3cba4e8cdabc613a74119affbcafd3577f05c25a32e9acfc7effae6554b1",
+    "tools/interop/websocket_hyper_h2.sh": "442e52126741d5eb13d09560faeef2709c2a4854f1d3574243b22872312f2889",
+    "tools/hyper_http2_flow/src/bin/websocket_server.rs": "ef1bcdb71f9d5b8ae8993b6cf4a59398df184e2d4cedee3ad1cadb3dce4f821a",
+    "tools/hyper_http2_flow/src/bin/interop_proxy.rs": "35b86802d812f7c7cb7b6b7b4982a83902fa3eb3437f256633ba8bd359ef30f4",
+    "tools/hyper_http2_flow/Cargo.toml": "0b4b7212b40b4e61b2dd950be4d689d5b83389f703c07f10e069522b9c31d130"
+  },
+  "verification_commands": [
+    "zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast --summary all"
+  ],
+  "remaining_gap": "browser API coverage for RFC 8441 remains limited by browser implementations; this gate independently covers the wire, proxy, TLS, and HTTP/2 layers"
+}
