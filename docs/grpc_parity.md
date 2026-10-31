@@ -753,21 +753,22 @@ Evidence is recorded in
 
 The single-owner Channel now executes the first weighted-target runtime subset
 for static resolved endpoints: arbitrary nested weighted targets with
-`pick_first`, `round_robin`, `least_request_experimental` and
-`ring_hash_experimental` leaves. Unlike SharedChannel it has no background
-endpoint owners, so each RPC performs bounded composite warming before the
-pick. Every reachable child is established within the caller's absolute
-deadline, while each blackholed child is capped by the configured connection
-attempt delay instead of consuming the whole RPC budget. Selection then uses
-only READY children and delegates to child-local picker state.
+`pick_first`, `round_robin`, `least_request_experimental`,
+`ring_hash_experimental` and `weighted_round_robin` leaves. Unlike
+SharedChannel it has no background endpoint owners, so each RPC performs
+bounded composite warming before the pick. Every reachable child is
+established within the caller's absolute deadline, while each blackholed child
+is capped by the configured connection attempt delay instead of consuming the
+whole RPC budget. Selection then uses only READY children and delegates to
+child-local picker state.
 
 The runtime deep-copies every target path element; applications may destroy the
 ServiceConfig immediately after Channel initialization. A real three-server
 test does so, then proves nested 1:3 parent weighting and exact alternation
 below the low-weight child across 400 RPCs. Another keeps all traffic on a
 weight-1 healthy child while a weight-100 sibling remains unavailable. Runtime
-construction passes every induced allocation failure. WRR and outlier leaves
-remain explicit ordinary-Channel initialization errors, so broad support still
+construction passes every induced allocation failure. Outlier wrappers remain
+an explicit ordinary-Channel initialization error, so broad support still
 belongs to SharedChannel. Evidence is recorded in
 `docs/evidence/grpc_ordinary_weighted_target_core/2026-10-31.json`.
 
@@ -813,6 +814,25 @@ hash, random missing-header fallback, clockwise recovery from `c_0`, duplex
 routing and ServiceConfig destruction immediately after Channel init. Evidence
 is in
 `docs/evidence/grpc_ordinary_weighted_target_ring_hash/2026-10-31.json`.
+
+Ordinary weighted targets now execute child-local `weighted_round_robin`
+leaves with the shared grpc-core static-stride scheduler. Every leaf owns its
+config, sequence and scheduler snapshot and deep-copies custom utilization
+metric names beyond ServiceConfig lifetime. Rebuild and pick both filter by the
+leaf's hierarchical path, so a READY slot under another target cannot
+contribute a report, mean-substitution weight, sequence step or fallback pick.
+Address replacement invalidates every leaf snapshot before later selection;
+transport disconnect generation changes also force a rebuild.
+
+Unary ORCA trailers update the selected slot using the config of its actual
+WRR leaf. A real three-endpoint case learns 1:3 weights from matching `a` and
+`b` while a READY outside endpoint configured to report weight 100 receives no
+pick. After reports stop and expire, 40 calls return to exact 20:20 leaf-local
+round robin. Ordinary Channel deliberately does not invent a background OOB
+owner: an `enableOobLoadReport:true` leaf opens no hidden stream, ignores
+per-RPC reports under that mode and produces exact RR. SharedChannel remains
+the owner for true OOB WRR. Evidence is in
+`docs/evidence/grpc_ordinary_weighted_target_wrr/2026-10-31.json`.
 
 ## SharedChannel outlier detection
 

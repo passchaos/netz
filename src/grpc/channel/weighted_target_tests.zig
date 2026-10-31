@@ -1,6 +1,7 @@
 const std = @import("std");
 const grpc = @import("../mod.zig");
 const channel = @import("../channel.zig");
+const http2 = @import("../../http2/mod.zig");
 const Peer = @import("shared/weighted_target/test_support.zig").Peer;
 
 const allocator = std.testing.allocator;
@@ -314,6 +315,195 @@ test "gRPC ordinary weighted target ring hash owns hash and fallback" {
     try b_peer.await(io);
 }
 
+test "gRPC ordinary weighted target WRR filters per-RPC ORCA slots" {
+    const weighted_calls = 200;
+    const fallback_calls = 40;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a_server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer a_server.deinit();
+    var b_server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer b_server.deinit();
+    var outside_server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer outside_server.deinit();
+    var reporting: std.atomic.Value(bool) = .init(true);
+    var a_task = io.async(WrrServer.run, .{
+        &a_server,
+        "a",
+        1.0,
+        &reporting,
+    });
+    defer _ = a_task.cancel(io) catch {};
+    var b_task = io.async(WrrServer.run, .{
+        &b_server,
+        "b",
+        3.0,
+        &reporting,
+    });
+    defer _ = b_task.cancel(io) catch {};
+    var outside_task = io.async(WrrServer.run, .{
+        &outside_server,
+        "outside",
+        100.0,
+        &reporting,
+    });
+    defer _ = outside_task.cancel(io) catch {};
+    const wrr_path = [_][]const u8{"wrr"};
+    const outside_path = [_][]const u8{"outside"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{
+            .address = a_server.address(),
+            .hierarchical_path = &wrr_path,
+        } },
+        .{ .cleartext_ip = .{
+            .address = b_server.address(),
+            .hierarchical_path = &wrr_path,
+        } },
+        .{ .cleartext_ip = .{
+            .address = outside_server.address(),
+            .hierarchical_path = &outside_path,
+        } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
+        \\ "targets":{"wrr":{"weight":1,"childPolicy":[
+        \\  {"weighted_round_robin":{"enableOobLoadReport":false,
+        \\   "blackoutPeriod":"0s","weightUpdatePeriod":"0.1s",
+        \\   "weightExpirationPeriod":"2s",
+        \\   "metricNamesForComputingUtilization":[
+        \\    "cpu_utilization"]}}]}}
+        \\ }}]}
+    );
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .connection_attempt_delay = .fromMilliseconds(100) },
+        &config,
+    );
+    config.deinit();
+    var client_live = true;
+    defer if (client_live) client.deinit();
+    var learned = [_]bool{ false, false };
+    for (0..20) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        learned[try weightedBackendIndex(&response)] = true;
+        if (learned[0] and learned[1]) break;
+    }
+    try std.testing.expect(learned[0] and learned[1]);
+    try std.Io.sleep(io, .fromMilliseconds(120), .awake);
+
+    var counts = [_]usize{ 0, 0 };
+    for (0..weighted_calls) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        counts[try weightedBackendIndex(&response)] += 1;
+    }
+    try std.testing.expect(counts[1] > weighted_calls * 6 / 10);
+    try std.testing.expect(counts[1] < weighted_calls * 9 / 10);
+
+    reporting.store(false, .release);
+    try std.Io.sleep(io, .fromMilliseconds(2100), .awake);
+    var fallback = [_]usize{ 0, 0 };
+    for (0..fallback_calls) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        fallback[try weightedBackendIndex(&response)] += 1;
+    }
+    try std.testing.expectEqual(fallback[0], fallback[1]);
+    client.deinit();
+    client_live = false;
+    try a_task.await(io);
+    try b_task.await(io);
+    try outside_task.await(io);
+}
+
+test "gRPC ordinary weighted target OOB WRR stays leaf local RR" {
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer a_server.deinit();
+    var b_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer b_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var a_peer = io.async(Peer.run, .{ &a_server, &stop, "a", null });
+    defer _ = a_peer.cancel(io) catch {};
+    var b_peer = io.async(Peer.run, .{ &b_server, &stop, "b", null });
+    defer _ = b_peer.cancel(io) catch {};
+    const path = [_][]const u8{"wrr"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{
+            .address = a_server.address(),
+            .hierarchical_path = &path,
+        } },
+        .{ .cleartext_ip = .{
+            .address = b_server.address(),
+            .hierarchical_path = &path,
+        } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"weighted_target_experimental":{
+        \\ "targets":{"wrr":{"weight":1,"childPolicy":[
+        \\  {"weighted_round_robin":{"enableOobLoadReport":true,
+        \\   "oobReportingPeriod":"1s","blackoutPeriod":"0s"}}]}}
+        \\ }}]}
+    );
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .connection_attempt_delay = .fromMilliseconds(100) },
+        &config,
+    );
+    config.deinit();
+    var client_live = true;
+    defer if (client_live) client.deinit();
+    var counts = [_]usize{ 0, 0 };
+    for (0..40) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        counts[try weightedBackendIndex(&response)] += 1;
+    }
+    try std.testing.expectEqualSlices(usize, &.{ 20, 20 }, &counts);
+    client.deinit();
+    client_live = false;
+    stop.set(io);
+    try a_peer.await(io);
+    try b_peer.await(io);
+}
+
 test "gRPC ordinary weighted target excludes unavailable heavy child" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -381,3 +571,58 @@ fn ringCall(
         .timeout = try grpc.Timeout.init(5, .second),
     });
 }
+
+fn weightedBackendIndex(response: *const grpc.UnaryResponse) !usize {
+    const label = response.message.?.payload;
+    if (std.mem.eql(u8, label, "a")) return 0;
+    if (std.mem.eql(u8, label, "b")) return 1;
+    return error.UnexpectedBackend;
+}
+
+const WrrServer = struct {
+    fn run(
+        listener: *http2.runtime.Server,
+        label: []const u8,
+        qps: f64,
+        reporting: *const std.atomic.Value(bool),
+    ) !void {
+        const encoded = try grpc.orca.encodeAlloc(listener.allocator, .{
+            .cpu_utilization = 1,
+            .rps_fractional = qps,
+        });
+        defer listener.allocator.free(encoded);
+        var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+        defer connection.close();
+        while (true) {
+            var request = connection.readRequestWithTimeout(
+                .fromSeconds(10),
+            ) catch |err| switch (err) {
+                error.ConnectionClosed,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                error.UnexpectedEof,
+                => return,
+                else => return err,
+            };
+            defer request.deinit(listener.allocator);
+            var parsed = try grpc.parseUnaryRequest(
+                listener.allocator,
+                &request,
+                1024,
+            );
+            defer parsed.deinit();
+            try grpc.writeUnaryResponse(
+                &connection,
+                listener.allocator,
+                request.stream_id,
+                if (reporting.load(.acquire)) .{
+                    .message = label,
+                    .trailing_binary_metadata = &.{.{
+                        .name = grpc.orca.name,
+                        .value = encoded,
+                    }},
+                } else .{ .message = label },
+            );
+        }
+    }
+};

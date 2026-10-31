@@ -1704,7 +1704,10 @@ pub const Channel = struct {
         index: usize,
         response: *const call.UnaryResponse,
     ) void {
-        const config = self.wrr_config orelse return;
+        const config = if (self.weighted_target_runtime) |*runtime|
+            runtime.wrrConfig(self.slots, index) orelse return
+        else
+            self.wrr_config orelse return;
         if (config.enable_oob_load_report) return;
         const transport = response.transport orelse return;
         if (orca.fromMetadataAlloc(

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "date": "2026-10-31",
+  "feature": "weighted-round-robin child policy inside ordinary Channel weighted_target",
+  "decision": "accepted per-RPC ORCA support with explicit OOB fallback boundary",
+  "scope": {
+    "parent": "arbitrarily nested weighted_target_experimental runtime",
+    "child": "weighted_round_robin",
+    "targets": "static resolved endpoints",
+    "owner": "single-owner grpc.runtime.Channel"
+  },
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "weighted_target_sha256": "c8a35308c8614a4b3e1ddad795d6bb4655f4579f5422a3efe487b011de2e2e6e",
+    "weighted_round_robin_sha256": "a46f6ab41c2cbf9979eb2bd57bdda01b079abf6793bd85ecb551263fbfae7d9a",
+    "static_stride_scheduler_sha256": "e486d311bd6fd7188150af972ebebca77f43782c7a7f04d041887679d5ea224c",
+    "contracts": [
+      "weighted_target delegates only to the selected READY child picker",
+      "every WRR policy instance owns its scheduler snapshot and sequence",
+      "ORCA reports update the endpoint using the selected child config",
+      "missing, blacked-out, or expired weights fall back to child-local round robin",
+      "single-owner ordinary Channel does not create a hidden OOB stream"
+    ]
+  },
+  "implementation": {
+    "ownership": "each leaf owns config, scheduler, sequence and deep-copied custom metric names",
+    "filtering": "scheduler rebuild and pick include only reusable slots under the leaf hierarchical prefix",
+    "per_rpc_orca": "unary trailers update the selected slot with its matching leaf config",
+    "lifecycle": "disconnect generations invalidate stale scheduler entries and address replacement clears every leaf snapshot",
+    "expiration": "weight expiration rebuilds an empty snapshot and delegates to leaf-local round robin",
+    "oob_boundary": "enableOobLoadReport disables per-RPC learning and deliberately remains round robin because ordinary Channel owns no background stream",
+    "failure": "scheduler allocation failure propagates OutOfMemory instead of silently changing policy"
+  },
+  "native_cases": [
+    "matching endpoints a and b publish per-RPC ORCA weights 1 and 3",
+    "a READY outside endpoint advertises weight 100 but never enters the leaf scheduler or receives a pick",
+    "200 learned picks keep b between 60 and 90 percent",
+    "after reports stop and expire, 40 calls split exactly 20 to 20",
+    "an OOB-configured leaf performs 40 exact alternating calls without opening a hidden report stream",
+    "ServiceConfig is destroyed immediately after both Channel initializations",
+    "custom metric-name ownership and recursive runtime construction pass every induced allocation failure"
+  ],
+  "negative_boundary": {
+    "ordinary_oob_owner": false,
+    "unsupported_wrappers": [
+      "outlier_detection_experimental"
+    ],
+    "hostname_targets": "ordinary weighted-target remains limited to static resolved endpoints",
+    "dynamic_child_retention": false,
+    "silent_fallback": false
+  },
+  "results": {
+    "per_rpc_wrr_network": "143/143 passed",
+    "oob_boundary_network": "143/143 passed",
+    "ordinary_weighted_target": "148/148 passed",
+    "runtime_allocation_sweep": "137/137 passed",
+    "complete_grpc_debug": "501/501 passed",
+    "package": "26/26 passed"
+  },
+  "source_sha256": {
+    "src/grpc/channel/weighted_target.zig": "387c8574d56147f9cbf0ed90a90387e73494ff18baf9a1aa4700d1a9d4d5ea29",
+    "src/grpc/channel/weighted_target/weighted_round_robin.zig": "a82a3bdba4891df762be6ba40b1b8dde1fb2f774dc0b3828c57e9b92a7b44c8c",
+    "src/grpc/channel/weighted_target_tests.zig": "a2ab9029a9d9fdb711b10955068826a7c0afe8bf933cdc5764b519f1000470bb",
+    "src/grpc/channel.zig": "276709339c5a2fe8811a46e1858448603dfbcb4eb229f91580ea5de646d04a26",
+    "src/grpc/channel/weighted_round_robin.zig": "bcf2e59fee863e816be704a943383c2a44d9a349cb127b3a707323ffa05ece7b",
+    "docs/grpc_parity.md": "4b58cedf27615fc544816990be42fb1104532034585a7373ade48fdf53ccbd2a"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target WRR' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target OOB WRR' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC ordinary weighted target' --summary all",
+    "zig build test-lib -Dtest-filter='ordinary weighted target runtime deep copy' --summary all",
+    "zig build test-lib -Dtest-filter='gRPC' --summary all",
+    "zig build test-package --summary all"
+  ],
+  "remaining_gap": "ordinary outlier wrappers, hostname runtime support and dynamic service-config child retention remain before broad parity"
+}

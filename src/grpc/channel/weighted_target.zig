@@ -9,6 +9,8 @@ const http2 = @import("../../http2/mod.zig");
 const least_request = @import("least_request.zig");
 const ring_hash = @import("ring_hash.zig");
 const ring_support = @import("weighted_target/ring_hash.zig");
+const weighted_round_robin = @import("weighted_round_robin.zig");
+const wrr_support = @import("weighted_target/weighted_round_robin.zig");
 const service_config = @import("../service_config.zig");
 
 pub const RequestInput = struct {
@@ -47,13 +49,20 @@ pub fn Runtime(comptime Slot: type) type {
         const BuildError = std.mem.Allocator.Error || error{
             InvalidChannelOptions,
         };
+        const PickError = std.mem.Allocator.Error || error{
+            MissingRequestHash,
+        };
 
         const Leaf = struct {
-            policy: enum { pick_first, round_robin, least_request, ring_hash },
+            policy: enum { pick_first, round_robin, least_request, ring_hash, weighted_round_robin },
             least_request_config: least_request.Config = .{},
             ring_hash_config: ring_hash.Config = .{},
             ring_hash_header: ?[]u8 = null,
             ring: ring_hash.Ring = .{},
+            wrr_config: service_config.WeightedRoundRobinConfig = .{},
+            wrr_metric_names: ?[][]u8 = null,
+            wrr_scheduler: weighted_round_robin.Scheduler = .{},
+            wrr_sequence: u32 = 0,
             selected: ?usize = null,
             next_pick: usize = 0,
         };
@@ -90,12 +99,20 @@ pub fn Runtime(comptime Slot: type) type {
             slots: []Slot,
             io: std.Io,
             input: RequestInput,
-        ) error{MissingRequestHash}!?usize {
+        ) PickError!?usize {
             return self.pickNode(self.root, slots, io, input);
         }
 
         pub fn hasReady(self: *Self, slots: []Slot) bool {
             return self.aggregate(self.root, slots) == .ready;
+        }
+
+        pub fn wrrConfig(
+            self: *Self,
+            slots: []Slot,
+            index: usize,
+        ) ?service_config.WeightedRoundRobinConfig {
+            return wrr_support.config(self.root, &slots[index]);
         }
 
         pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
@@ -105,6 +122,7 @@ pub fn Runtime(comptime Slot: type) type {
                     slot.endpoint.hierarchicalPath(),
                 );
             }
+            self.invalidateWrr(self.root);
             try self.rebuildRings(self.root, slots);
         }
 
@@ -121,6 +139,10 @@ pub fn Runtime(comptime Slot: type) type {
                     config_value,
                 ),
                 .ring_hash => |config_value| self.buildRingHash(
+                    path,
+                    config_value,
+                ),
+                .weighted_round_robin => |config_value| self.buildWrr(
                     path,
                     config_value,
                 ),
@@ -174,6 +196,37 @@ pub fn Runtime(comptime Slot: type) type {
             return node;
         }
 
+        fn buildWrr(
+            self: *Self,
+            path: []const []const u8,
+            config: service_config.WeightedRoundRobinConfig,
+        ) BuildError!*Node {
+            const node = try self.buildLeaf(path, .weighted_round_robin);
+            errdefer self.destroy(node);
+            if (config.metric_names.len == 0) {
+                node.kind.leaf.wrr_config = config;
+                return node;
+            }
+            const names = try self.allocator.alloc(
+                []u8,
+                config.metric_names.len,
+            );
+            var initialized: usize = 0;
+            errdefer {
+                for (names[0..initialized]) |name| self.allocator.free(name);
+                self.allocator.free(names);
+            }
+            for (config.metric_names, names) |name, *owned| {
+                owned.* = try self.allocator.dupe(u8, name);
+                initialized += 1;
+            }
+            var retained = config;
+            retained.metric_names = names;
+            node.kind.leaf.wrr_metric_names = names;
+            node.kind.leaf.wrr_config = retained;
+            return node;
+        }
+
         fn buildWeighted(
             self: *Self,
             config: service_config.WeightedTargetConfig,
@@ -213,8 +266,13 @@ pub fn Runtime(comptime Slot: type) type {
             switch (node.kind) {
                 .leaf => |*leaf| {
                     leaf.ring.deinit(self.allocator);
+                    leaf.wrr_scheduler.deinit(self.allocator);
                     if (leaf.ring_hash_header) |header| {
                         self.allocator.free(header);
+                    }
+                    if (leaf.wrr_metric_names) |names| {
+                        for (names) |name| self.allocator.free(name);
+                        self.allocator.free(names);
                     }
                 },
                 .weighted => |children| {
@@ -232,7 +290,7 @@ pub fn Runtime(comptime Slot: type) type {
             slots: []Slot,
             io: std.Io,
             input: RequestInput,
-        ) error{MissingRequestHash}!?usize {
+        ) PickError!?usize {
             return switch (node.kind) {
                 .leaf => |*leaf| try self.pickLeaf(
                     node,
@@ -332,7 +390,7 @@ pub fn Runtime(comptime Slot: type) type {
             slots: []Slot,
             io: std.Io,
             input: RequestInput,
-        ) error{MissingRequestHash}!?usize {
+        ) PickError!?usize {
             const path = node.path;
             if (leaf.policy == .pick_first) {
                 if (leaf.selected) |selected| {
@@ -362,6 +420,15 @@ pub fn Runtime(comptime Slot: type) type {
                     input,
                 );
             }
+            if (leaf.policy == .weighted_round_robin) {
+                if (try wrr_support.pick(
+                    self.allocator,
+                    node,
+                    leaf,
+                    slots,
+                    io,
+                )) |index| return index;
+            }
             var count: usize = 0;
             for (slots) |slot| {
                 if (pathMatches(
@@ -370,7 +437,8 @@ pub fn Runtime(comptime Slot: type) type {
                 )) count += 1;
             }
             for (0..count) |offset| {
-                const wanted = if (leaf.policy == .round_robin)
+                const wanted = if (leaf.policy == .round_robin or
+                    leaf.policy == .weighted_round_robin)
                     (leaf.next_pick + offset) % count
                 else
                     offset;
@@ -383,7 +451,9 @@ pub fn Runtime(comptime Slot: type) type {
                         if (!slotReady(slot)) break;
                         if (leaf.policy == .pick_first) {
                             leaf.selected = index;
-                        } else {
+                        } else if (leaf.policy == .round_robin or
+                            leaf.policy == .weighted_round_robin)
+                        {
                             leaf.next_pick = (wanted + 1) % count;
                         }
                         return index;
@@ -469,6 +539,17 @@ pub fn Runtime(comptime Slot: type) type {
             }
         }
 
+        fn invalidateWrr(self: *Self, node: *Node) void {
+            switch (node.kind) {
+                .leaf => |*leaf| if (leaf.policy == .weighted_round_robin) {
+                    leaf.wrr_scheduler.invalidate();
+                },
+                .weighted => |children| for (children) |child| {
+                    self.invalidateWrr(child.node);
+                },
+            }
+        }
+
         fn slotReady(slot: *Slot) bool {
             if (slot.disabled) return false;
             const connection = if (slot.connection) |*value| value else return false;
@@ -521,6 +602,11 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
         .max_ring_size = 16,
         .request_hash_header = "x-shard",
     } };
+    const wrr_leaf = service_config.LoadBalancingNode{
+        .weighted_round_robin = .{
+            .metric_names = &.{"named_metrics.queue"},
+        },
+    };
     const nested_targets = [_]service_config.WeightedTargetConfig.Target{.{
         .name = "inner",
         .weight = 1,
@@ -534,6 +620,7 @@ test "ordinary weighted target runtime deep copy is allocation transactional" {
         .{ .name = "b", .weight = 3, .child = &nested },
         .{ .name = "least", .weight = 2, .child = &least_leaf },
         .{ .name = "ring", .weight = 4, .child = &ring_leaf },
+        .{ .name = "wrr", .weight = 5, .child = &wrr_leaf },
     };
     const root = service_config.LoadBalancingNode{ .weighted_target = .{
         .targets = &targets,
