@@ -1952,6 +1952,17 @@ durable table for current code; the historical capture remains separately
 scoped. Full rows and hashes are in
 `docs/evidence/mqtt_broker_matrix/2026-11-01-qos2-durable.json`.
 
+A 100,000-message durable serial QoS 2 profile (3,072 zero-loss `cycles:Pu`
+samples) explains the remaining 0.731× as distributed runtime and session-path
+cost, not a single cheap hotspot: `__kernel_clock_gettime` is 12.58% self,
+the zio waiter/executor/loop stack accounts for roughly half the samples,
+`handlePubRel` is 22.04% children, the durable session packet drain/write path
+is about 7.8% (`writePreparedSessionTransmission` 5.78%,
+`writeSessionPublish` 3.90%, `drainOne...` 1.92%), and the delivery flush path
+is 11.72% children. Closing the gap requires reducing per-message runtime
+wakeups/clock reads or restructuring the durable session packet path. Evidence
+is in `docs/evidence/mqtt_broker_profile/2026-11-01-durable-serial-qos2.json`.
+
 The durable cross-connection target is now addressed by two serving-scope
 Session delivery workers rather than one coroutine per connected Session. A
 fixed ring has one entry and one compact state per broker slot, coalesces a

@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-01",
+  "status": "captured",
+  "purpose": "Profile the current durable QoS 2 serial throughput gap (21,292 vs 29,146/s, 0.731x Mosquitto).",
+  "workload": {
+    "broker": "netz-mqtt-vector-broker ReleaseFast (unstripped artifact)",
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "publisher_window": 1,
+    "server_queue_capacity": 1024,
+    "session_expiry_seconds": 3600,
+    "warmup_messages": 256,
+    "measured_messages": 100000,
+    "result": {
+      "publishes_per_s": 19964,
+      "p50_ns": 41287,
+      "p99_ns": 72649,
+      "p999_ns": 547782,
+      "checksum": 24562720,
+      "complete": true
+    }
+  },
+  "capture": {
+    "command": "perf record -F 999 -g --call-graph dwarf -o /tmp/mqtt-durable-serial-qos2b.perf.data -- <broker> --bind=127.0.0.1:18851 --connections=2 --max-queued-deliveries=1024 --max-outgoing-inflight=64",
+    "event": "cycles:Pu",
+    "samples": 3072,
+    "lost_samples": 0,
+    "host_load_note": "The shared host also ran unrelated jobs; absolute throughput is lower than the matrix median, but the zero-loss symbol ranking is stable."
+  },
+  "top_symbols": [
+    { "symbol": "common.Waiter.wait", "self_percent": 0.31, "children_percent": 53.24 },
+    { "symbol": "task.AnyTask.yield", "self_percent": 2.10, "children_percent": 52.93 },
+    { "symbol": "runtime.Executor.run", "self_percent": 3.35, "children_percent": 49.81 },
+    { "symbol": "sync.Futex.wait", "self_percent": 0.00, "children_percent": 49.79 },
+    { "symbol": "ev.loop.Loop.poll", "self_percent": 1.79, "children_percent": 40.63 },
+    { "symbol": "mqtt.broker.Broker.handlePubRel", "self_percent": 3.49, "children_percent": 22.04 },
+    { "symbol": "mqtt.broker.ClientTask.readNextBrokerEvent", "children_percent": 13.68 },
+    { "symbol": "__kernel_clock_gettime", "self_percent": 12.58 },
+    { "symbol": "mqtt.broker.Broker.flushSlotLockedMode", "self_percent": 4.80, "children_percent": 11.72 },
+    { "symbol": "mqtt.broker.Broker.dispatchNetworkPlan", "children_percent": 8.38 },
+    { "symbol": "mqtt.broker.Broker.enqueuePublishLocked", "self_percent": 2.44, "children_percent": 7.34 },
+    { "symbol": "mqtt.runtime.Connection.writePreparedSessionTransmission", "children_percent": 5.78 },
+    { "symbol": "runtime.Executor.processCleanup", "self_percent": 4.63 },
+    { "symbol": "mqtt.runtime.receive.events.Reader.read", "self_percent": 2.42, "children_percent": 9.04 },
+    { "symbol": "mqtt.runtime.Connection.writeSessionPublish", "children_percent": 3.90 },
+    { "symbol": "mqtt.session.mod.Store.drainOneForDetachTrackingSnapshotChange", "children_percent": 1.92 }
+  ],
+  "conclusions": [
+    "Durable serial QoS 2 is dominated by the same zio runtime wait/executor/loop/clock costs seen in transient serial QoS 2: clock_gettime alone is 12.58% self and the loop/executor/waiter stack accounts for roughly half the sampled cycles.",
+    "Protocol-side costs are distributed across handlePubRel (22.04% children), the durable session packet drain/write path (writePreparedSessionTransmission 5.78%, writeSessionPublish 3.90%, drainOne 1.92%) and the delivery flush path (11.72% children).",
+    "No single cheap protocol hotspot explains the 0.731x durable serial gap. Closing it requires reducing per-message runtime wakeups/clock reads or restructuring the durable session packet path, not a local micro-optimization.",
+    "The earlier queue-batching experiment and transient session-drain skip both failed for related reasons; future work must leave the QoS 2/session path structurally intact."
+  ],
+  "artifacts": "2026-11-01-durable-serial-qos2/",
+  "log": "2026-11-01-durable-serial-qos2/flat.txt"
+}
