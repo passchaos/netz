@@ -109,7 +109,8 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     std.debug.assert(source_index == sources.len);
     for (sources) |source| {
         if (source.endpoint == .custom and source.endpoint.custom.ring_hash_key == null and
-            (policy == .ring_hash or (policy == .weighted_target and weighted_target.?.usesRing(source.endpoint.hierarchicalPath())))) return error.InvalidSharedOptions;
+            (policy == .ring_hash or ((policy == .weighted_target or
+                policy == .priority) and weighted_target.?.usesRing(source.endpoint.hierarchicalPath())))) return error.InvalidSharedOptions;
     }
     var proxy_resolves_origin = false;
     for (sources) |source| {

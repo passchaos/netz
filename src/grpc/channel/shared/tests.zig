@@ -525,3 +525,53 @@ test "gRPC shared priority falls back to the lower ready child" {
     stop.set(io);
     try low_peer.await(io);
 }
+
+test "gRPC shared priority accepts least-request and WRR children" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var high_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer high_server.deinit();
+    var low_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer low_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var high_peer = io.async(PriorityPeer.run, .{ &high_server, &stop, "high" });
+    defer _ = high_peer.cancel(io) catch {};
+    var low_peer = io.async(PriorityPeer.run, .{ &low_server, &stop, "low" });
+    defer _ = low_peer.cancel(io) catch {};
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = high_server.address(), .hierarchical_path = &high_path } },
+        .{ .cleartext_ip = .{ .address = low_server.address(), .hierarchical_path = &low_path } },
+    };
+    var client = try shared.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .service_config_json =
+                \\{"loadBalancingConfig":[{"priority_experimental":{
+                \\ "children":{
+                \\  "high":{"config":[{"least_request_experimental":{"choiceCount":2}}]},
+                \\  "low":{"config":[{"weighted_round_robin":{}}]}},
+                \\ "priorities":["high","low"]}}]}
+            ,
+        },
+    );
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    client.connect();
+    var high_watch = client.watchEndpointConnectivity(0).?;
+    defer high_watch.deinit();
+    while ((try high_watch.nextWithTimeout(.fromSeconds(3))).state != .ready) {}
+    for (0..5) |_| {
+        var response = try Call.run(sender, "request");
+        defer response.deinit();
+        try std.testing.expectEqualStrings("high", response.message.?.payload);
+    }
+    stop.set(io);
+    try high_peer.await(io);
+    try low_peer.await(io);
+}

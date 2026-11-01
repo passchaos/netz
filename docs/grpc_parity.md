@@ -654,13 +654,17 @@ The recursive parser now also retains grpc-core's `priority_experimental`
 policy. Named children each own a recursively parsed child policy and an
 optional `ignoreReresolutionRequests` flag, while the ordered `priorities`
 list is validated against the child names. Both Channel owners execute the
-first priority slice: children are limited to `pick_first`/`round_robin`
-leaves, picks follow the configured priority order, only a READY child is
-selected, and a lower-priority child is used when the higher one cannot
-become ready. SharedChannel initializes the same composite runtime and applies
-it to background worker selection and live updates. Focused parser,
-high-priority selection and lower-priority fallback tests pass in the
-service-config, ordinary weighted-target and shared-channel suites.
+first priority slice: children may use any supported leaf (`pick_first`,
+`round_robin`, `least_request`, `ring_hash` or `weighted_round_robin`) plus
+outlier wrappers, while nested priority is rejected. Picks follow the
+configured priority order, only a READY child is selected, and a
+lower-priority child is used when the higher one cannot become ready.
+SharedChannel initializes the same composite runtime and applies it to
+background worker selection and live updates. Focused parser,
+high-priority selection, lower-priority fallback and least-request/WRR child
+tests pass in the service-config, ordinary weighted-target and
+shared-channel suites. grpc-core failover timers and child-retention
+semantics remain explicit integration work.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.

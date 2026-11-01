@@ -356,8 +356,7 @@ pub fn Runtime(comptime State: type) type {
                 self.allocator.free(children);
             }
             for (config.children, children) |child_config, *child| {
-                const leaf = child_config.child.leafPolicy();
-                if (leaf != .pick_first and leaf != .round_robin) {
+                if (child_config.child.leafPolicy() == .priority) {
                     return error.InvalidSharedOptions;
                 }
                 const child_path = try self.allocator.alloc(
@@ -851,7 +850,11 @@ pub fn Runtime(comptime State: type) type {
                         return self.pathUsesRing(child.node, path);
                     }
                 } else false,
-                .priority => false,
+                .priority => |priority| for (priority.children) |child| {
+                    if (pathMatches(path, child.node.path)) {
+                        return self.pathUsesRing(child.node, path);
+                    }
+                } else false,
                 .outlier => |wrapper| self.pathUsesRing(wrapper.child, path),
             };
         }
