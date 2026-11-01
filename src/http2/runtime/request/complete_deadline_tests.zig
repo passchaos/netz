@@ -227,9 +227,6 @@ test "HTTP/2 complete request cleanup separates premature timeout from OOM budge
         pub fn data(_: *Connection, _: u31, _: []const u8, _: bool, _: *usize, _: ?std.Io.Clock.Timestamp) !void {
             return error.UnexpectedFrame;
         }
-        pub fn slices(_: *Connection, _: u31, _: []const []const u8, _: bool, _: *usize, _: ?std.Io.Clock.Timestamp) !void {
-            return error.UnexpectedFrame;
-        }
         pub fn discard(self: *Connection, _: u31, before: ?std.Io.Clock.Timestamp) void {
             self.cleanup_deadline = before;
         }

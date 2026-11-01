@@ -2943,31 +2943,22 @@ pre-exhausted throttling, last-non-fatal selection, service-config activation,
 and both rejection boundaries. Evidence is recorded in
 `docs/evidence/grpc_shared_hedging/2026-10-31.json`.
 
-## Large unary message prefix slices
+## Rejected borrowed large-message writes
 
-`http2.runtime.RequestOptions` and `ResponseOptions` now accept a borrowed
-`body_prefix` slice that is emitted immediately before `body` as ordered DATA
-payload slices. Length validation and automatic `Content-Length` use the
-combined length, and the prefix remains inside the same flow-control and
-deadline transaction as the body. `writeResponseBatch` rejects a non-empty
-prefix because that path serializes one contiguous body.
+Two allocation-removal candidates were measured and rejected. A borrowed
+prefix-slice path for ordinary unary messages removed the payload-sized
+staging allocation from both request and response, but 256-KiB persistent
+roundtrips moved from a 295,547.5 ns baseline median to 301,345.5 ns (2.0%
+slower, 0/10 candidate wins) with the cached allocator. Cache hits fell from
+6,863 to 1,145, so the allocation removal was real; the separate request
+HEADERS/DATA writes and scatter assembly cost more than the removed copies.
+A similar server-duplex borrowed path moved the shared 256-KiB workload from
+457,074 ns to 470,244.5 ns (2.9% slower, 0/10 wins) even though cache hits
+fell from 1,337 to 897; the extra five-byte DATA frame and second response
+write dominated.
 
-Ordinary gRPC unary calls use this boundary for encoded messages of at least
-64 KiB. The five-byte gRPC frame prefix is built on the stack and the caller's
-encoded payload is passed directly to HTTP/2, so neither a request nor a
-response materializes a second payload-sized staging buffer. Smaller messages
-keep the previous single-allocation frame and combined HEADERS/DATA burst.
-Suspended request uploads retain both slices: a resumed upload writes the
-remaining prefix and then the remaining body under the original deadline, and
-a complete early response still cancels the unsent suffix.
-
-Focused HTTP/2 tests cover request and response ordering, automatic
-Content-Length, trailers, HEAD suppression, and a suspended prefixed upload
-with one byte of flow-control credit. A gRPC large-unary regression sends and
-receives a 100,000-byte payload through 4-KiB DATA frames and uses a counting
-allocator to prove that `writeUnaryResponse` makes no allocation at or above
-the payload size. The Debug gRPC filter passes 563/563, the HTTP/2 filter
-passes 955/955, package tests pass 26/26, and the grpc-cpp forward matrix
-passes. The reverse grpc-cpp matrix passes on rerun after one transient
-RST_STREAM race under host load. Evidence is recorded in
-`docs/evidence/grpc_unary_prefix/2026-11-02.json`.
+Both implementations and their focused tests were reverted. The reusable
+ordinary-unary benchmark remains at `examples/bench_grpc_unary.zig`. Rows,
+binary identities and commands are recorded in
+`docs/evidence/grpc_unary_prefix_rejected/2026-11-02.json` and
+`docs/evidence/grpc_duplex_borrowed_response_rejected/2026-11-02.json`.

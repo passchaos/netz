@@ -3456,6 +3456,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark shared gRPC persistent ping-pong and RPC creation",
         },
         .{
+            .exe_name = "netz-bench-grpc-unary",
+            .path = "examples/bench_grpc_unary.zig",
+            .run_step = "bench-grpc-unary",
+            .description = "Benchmark ordinary gRPC unary persistent round trips",
+        },
+        .{
             .exe_name = "netz-bench-http2-flow",
             .path = "examples/bench_http2_flow.zig",
             .run_step = "bench-http2-flow",

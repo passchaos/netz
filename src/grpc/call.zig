@@ -31,11 +31,6 @@ const encodeStatusMessageAlloc = wire.encodeStatusMessageAlloc;
 const decodeStatusMessageAlloc = wire.decodeStatusMessageAlloc;
 const isContentType = wire.isContentType;
 
-/// Large unary messages keep the five-byte gRPC frame prefix and payload as
-/// separate borrowed DATA slices instead of copying the payload into one
-/// staging buffer. Small messages retain the combined HEADERS/DATA burst.
-const large_message_prefix_threshold: usize = 64 * 1024;
-
 pub const UnaryRequest = struct {
     allocator: std.mem.Allocator,
     stream_id: u31,
@@ -568,26 +563,12 @@ pub fn unaryCallAttempt(
 
     var framed: std.ArrayList(u8) = .empty;
     defer framed.deinit(allocator);
-    var prefix_storage: [5]u8 = undefined;
-    var body_prefix: []const u8 = &.{};
-    if (encoded.bytes.len >= large_message_prefix_threshold) {
-        _ = try wire.encodedMessageLen(encoded.bytes.len);
-        prefix_storage[0] = @intFromBool(encoded.compressed);
-        std.mem.writeInt(
-            u32,
-            prefix_storage[1..5],
-            @intCast(encoded.bytes.len),
-            .big,
-        );
-        body_prefix = prefix_storage[0..];
-    } else {
-        try writeMessage(
-            &framed,
-            allocator,
-            encoded.bytes,
-            encoded.compressed,
-        );
-    }
+    try writeMessage(
+        &framed,
+        allocator,
+        encoded.bytes,
+        encoded.compressed,
+    );
 
     var header_storage: [16]http2.Hpack.HeaderField = undefined;
     const header_count = std.math.add(
@@ -658,8 +639,7 @@ pub fn unaryCallAttempt(
         .scheme = options.scheme,
         .authority = options.authority,
         .headers = headers.items,
-        .body = if (body_prefix.len != 0) encoded.bytes else framed.items,
-        .body_prefix = body_prefix,
+        .body = framed.items,
     };
     const response = (if (deadline) |absolute|
         connection.requestWithDeadline(request_options, absolute)
@@ -740,8 +720,6 @@ pub fn writeUnaryResponse(
 
     var framed: std.ArrayList(u8) = .empty;
     defer framed.deinit(allocator);
-    var prefix_storage: [5]u8 = undefined;
-    var body_prefix: []const u8 = &.{};
     var encoded_message: ?compression_mod.EncodedPayload = null;
     defer if (encoded_message) |*encoded| encoded.deinit(allocator);
     const response_algorithm: Algorithm =
@@ -762,25 +740,12 @@ pub fn writeUnaryResponse(
             message,
             options.compression_level,
         );
-        const payload = encoded_message.?.bytes;
-        if (payload.len >= large_message_prefix_threshold) {
-            _ = try wire.encodedMessageLen(payload.len);
-            prefix_storage[0] = @intFromBool(encoded_message.?.compressed);
-            std.mem.writeInt(
-                u32,
-                prefix_storage[1..5],
-                @intCast(payload.len),
-                .big,
-            );
-            body_prefix = prefix_storage[0..];
-        } else {
-            try writeMessage(
-                &framed,
-                allocator,
-                payload,
-                encoded_message.?.compressed,
-            );
-        }
+        try writeMessage(
+            &framed,
+            allocator,
+            encoded_message.?.bytes,
+            encoded_message.?.compressed,
+        );
     }
     var status_buffer: [2]u8 = undefined;
     const status_value = std.fmt.bufPrint(
@@ -899,8 +864,7 @@ pub fn writeUnaryResponse(
     }
     return connection.writeResponse(stream_id, .{
         .headers = initial.items,
-        .body = if (body_prefix.len != 0) encoded_message.?.bytes else framed.items,
-        .body_prefix = body_prefix,
+        .body = framed.items,
         .trailers = trailing.items,
     });
 }

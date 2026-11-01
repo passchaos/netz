@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "borrowed prefix slices for large ordinary gRPC unary messages",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "26c50abb",
+    "src/grpc/call.zig": "8f032c560181b0f9d551eab38584a29677551bc81ed2e75eb5b6f09eeb282de3",
+    "binary_sha256": "2ecce5865535f020f5fe7444eb32e057a5bfb6da04423f5acd435cbb8086d02d"
+  },
+  "candidate": {
+    "commit": "0e1cef27",
+    "src/grpc/call.zig": "a1c4e7537d7fadfa1f928c0b19c54d26f37b50766eb4ff72eb8a0b24b7435b9e",
+    "binary_sha256": "0a6de815c2d16e6a235e8c77c9f6c06b618fded8b066c8c56e24c09a4fd9050b",
+    "design": "RequestOptions and ResponseOptions accepted a borrowed body_prefix. A gRPC unary message of at least 64 KiB wrote the five-byte frame prefix and encoded payload as separate DATA slices instead of one staged allocation."
+  },
+  "scope": {
+    "workload": "ordinary gRPC unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 200,
+    "warmup": 20,
+    "frame_size": 16384,
+    "validation": "full request and response payload equality plus terminal OK"
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [284633, 285491, 287295, 289843, 295489, 295606, 298620, 299464, 301477, 309288],
+    "candidate_samples_ns": [298487, 299220, 300807, 300856, 300993, 301698, 302269, 302751, 303376, 304798],
+    "baseline_median_ns": 295547.5,
+    "candidate_median_ns": 301345.5,
+    "candidate_over_baseline": 1.0196,
+    "candidate_wins": "0/10; every candidate sample exceeded every baseline sample",
+    "baseline_cache": "hits=6863 misses=82",
+    "candidate_cache": "hits=1145 misses=82",
+    "allocations_removed_per_run": 5718,
+    "conclusion": "The candidate removed the payload-sized staging allocations, but the separate request HEADERS/DATA write path and scatter assembly cost more wall time than the removed copies."
+  },
+  "correctness": {
+    "gates_before_revert": "gRPC 563/563, HTTP/2 955/955, package 26/26, grpc-cpp forward and reverse interop passed",
+    "note": "correctness was not the reason for rejection; the measured wall-time regression was"
+  },
+  "resolution": "Commit 0e1cef27 was reverted. The ordinary unary benchmark and build step remain as reusable evidence tooling."
+}

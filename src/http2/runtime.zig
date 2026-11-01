@@ -141,14 +141,10 @@ const validateOutgoingResponseBodyForStatus =
     message_headers.validateOutgoingResponseBodyForStatus;
 const validateOutgoingResponseBodyForStatusWithLength =
     message_headers.validateOutgoingResponseBodyForStatusWithLength;
-const validateOutgoingResponseBodyForStatusWithBodyLength =
-    message_headers.validateOutgoingResponseBodyForStatusWithBodyLength;
 const validateResponseBodyForRequestSemantics =
     message_headers.validateResponseBodyForRequestSemantics;
 const validateResponseBodyForRequestSemanticsWithLength =
     message_headers.validateResponseBodyForRequestSemanticsWithLength;
-const validateResponseBodyForRequestSemanticsWithBodyLength =
-    message_headers.validateResponseBodyForRequestSemanticsWithBodyLength;
 const validateDeclaredResponseLength =
     message_headers.validateDeclaredResponseLength;
 const validateDeclaredResponseLengthValue =
@@ -5310,7 +5306,6 @@ pub const Connection = struct {
         return upload.progress(self, stream_id, deadline, .{
             .ErrorType = Error,
             .data = writeDataTrackedUntil,
-            .slices = writeDataSlicesTrackedUntil,
             .headers = writeHeadersUntil,
         });
     }
@@ -5346,7 +5341,6 @@ pub const Connection = struct {
             .headers = writeHeadersUntil,
             .burst = writeHeadersThenDataUntil,
             .data = writeDataTrackedUntil,
-            .slices = writeDataSlicesTrackedUntil,
         }) catch |err| {
             if (err == error.StreamReset) {
                 if (self.last_peer_reset) |reset| {
@@ -13388,17 +13382,12 @@ pub const Connection = struct {
         if (semantics.traditional_connect and options.status >= 200 and options.status < 300) {
             try stripSuccessfulConnectContentLength(&fields);
         }
-        const body_len = std.math.add(
-            usize,
-            options.body_prefix.len,
-            options.body.len,
-        ) catch return error.MessageTooLarge;
         const declared_response_length = try contentLength(fields.items);
-        try validateOutgoingResponseBodyForStatusWithBodyLength(options.status, declared_response_length, body_len, options.trailers);
-        try validateResponseBodyForRequestSemanticsWithBodyLength(options.status, semantics, declared_response_length, body_len, options.trailers);
-        try validateDeclaredResponseLengthValue(options.status, semantics, declared_response_length, body_len);
-        if (responseShouldDefaultContentLengthValue(options.status, semantics, declared_response_length, body_len)) {
-            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{body_len}) catch unreachable;
+        try validateOutgoingResponseBodyForStatusWithLength(options.status, declared_response_length, options.body, options.trailers);
+        try validateResponseBodyForRequestSemanticsWithLength(options.status, semantics, declared_response_length, options.body, options.trailers);
+        try validateDeclaredResponseLengthValue(options.status, semantics, declared_response_length, options.body.len);
+        if (responseShouldDefaultContentLengthValue(options.status, semantics, declared_response_length, options.body.len)) {
+            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{options.body.len}) catch unreachable;
             fields.appendAssumeCapacity(.{
                 .name = "content-length",
                 .value = content_length,
@@ -13409,37 +13398,8 @@ pub const Connection = struct {
         self.appendAutomaticDateHeader(&fields);
         var output_started = false;
         errdefer if (deadline != null and output_started) self.abortExtendedConnect(stream_id, response_cleanup.cleanupDeadline(self, deadline));
-        if (options.body_prefix.len != 0) {
-            // The prefix and body are distinct borrowed slices. They keep the
-            // caller's payload allocation instead of materializing one
-            // concatenated copy for large messages.
-            try self.writeHeadersUntil(
-                stream_id,
-                fields.items,
-                suppress_body or (body_len == 0 and options.trailers.len == 0),
-                deadline,
-            );
-            output_started = true;
-            if (progress) |value| value.head_committed = true;
-            if (!suppress_body) {
-                if (body_len != 0) {
-                    const slices = [_][]const u8{ options.body_prefix, options.body };
-                    var committed: usize = 0;
-                    try self.writeDataSlicesPreparedTrackedUntil(
-                        stream_id,
-                        &slices,
-                        options.trailers.len == 0,
-                        &committed,
-                        deadline,
-                    );
-                }
-                if (options.trailers.len != 0) try self.writeHeadersUntil(stream_id, options.trailers, true, deadline);
-            }
-            if (release_stream) self.releasePeerStream(stream_id);
-            return;
-        }
         if (deadline == null and !suppress_body and
-            body_len != 0 and
+            options.body.len != 0 and
             options.trailers.len == 0)
         {
             try self.writeHeadersThenData(
@@ -13454,14 +13414,14 @@ pub const Connection = struct {
                 stream_id,
                 fields.items,
                 suppress_body or
-                    (body_len == 0 and options.trailers.len == 0),
+                    (options.body.len == 0 and options.trailers.len == 0),
                 deadline,
             );
             output_started = true;
             if (progress) |value| value.head_committed = true;
         }
         if (!suppress_body) {
-            if (body_len != 0 and (deadline != null or options.trailers.len != 0)) {
+            if (options.body.len != 0 and (deadline != null or options.trailers.len != 0)) {
                 var committed: usize = 0;
                 try self.writeDataTrackedUntil(stream_id, options.body, options.trailers.len == 0, &committed, deadline);
             }
@@ -13537,10 +13497,6 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (stream_ids.len != responses.len) return error.InvalidResponse;
         if (stream_ids.len == 0) return;
-        for (responses) |options| {
-            // Batched responses are serialized from one contiguous body slice.
-            if (options.body_prefix.len != 0) return error.InvalidResponse;
-        }
         for (stream_ids, 0..) |stream_id, index| {
             if (!self.outboundStreamIsActive(stream_id)) {
                 return error.InvalidStreamId;
@@ -18601,24 +18557,6 @@ pub const Connection = struct {
         );
     }
 
-    fn writeDataSlicesTrackedUntil(
-        self: *Connection,
-        stream_id: u31,
-        slices: []const []const u8,
-        end_stream: bool,
-        written: *usize,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!void {
-        try self.prepareDataWrite(stream_id);
-        return self.writeDataSlicesPreparedTrackedUntil(
-            stream_id,
-            slices,
-            end_stream,
-            written,
-            deadline,
-        );
-    }
-
     fn prepareDataWrite(
         self: *Connection,
         stream_id: u31,
@@ -19703,10 +19641,6 @@ pub const RequestOptions = struct {
     priority: ?http2.ExtensiblePriority = null,
     headers: []const http2.Hpack.HeaderField = &.{},
     body: []const u8 = &.{},
-    /// Bytes written immediately before `body` without copying them into one
-    /// contiguous buffer. Length validation and automatic Content-Length use
-    /// `body_prefix.len + body.len`.
-    body_prefix: []const u8 = &.{},
     trailers: []const http2.Hpack.HeaderField = &.{},
 };
 
@@ -19726,12 +19660,6 @@ pub const ResponseOptions = struct {
     status: u16 = 200,
     headers: []const http2.Hpack.HeaderField = &.{},
     body: []const u8 = &.{},
-    /// Bytes written immediately before `body` without copying them into one
-    /// contiguous buffer. Length validation and automatic Content-Length use
-    /// `body_prefix.len + body.len`. The pair is emitted as ordered DATA
-    /// payload slices under the same flow-control and deadline rules as
-    /// `body`. `writeResponseBatch` does not support this field.
-    body_prefix: []const u8 = &.{},
     trailers: []const http2.Hpack.HeaderField = &.{},
     /// Optional request method for method-specific response semantics.  HEAD
     /// and successful traditional CONNECT responses do not carry HTTP response

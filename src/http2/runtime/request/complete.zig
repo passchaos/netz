@@ -35,12 +35,7 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
         .initBuffer(fields_buffer);
     const method_is_connect = headers.methodIsConnect(request_options.method);
     const extended_connect = request_options.protocol != null;
-    const body_len = std.math.add(
-        usize,
-        request_options.body_prefix.len,
-        request_options.body.len,
-    ) catch return error.MessageTooLarge;
-    if (method_is_connect and !extended_connect and (body_len != 0 or request_options.trailers.len != 0)) {
+    if (method_is_connect and !extended_connect and (request_options.body.len != 0 or request_options.trailers.len != 0)) {
         return error.InvalidContentLength;
     }
     fields.appendAssumeCapacity(.{
@@ -84,8 +79,8 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
         .request,
     );
     var content_length_buf: [32]u8 = undefined;
-    if (headers.requestShouldDefaultContentLength(request_options.method, fields.items, body_len)) {
-        const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{body_len}) catch unreachable;
+    if (headers.requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
+        const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
         fields.appendAssumeCapacity(.{
             .name = "content-length",
             .value = content_length,
@@ -93,7 +88,7 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
     }
     try headers.validateHeaderBlock(fields.items, .request);
     try headers.validateHeaderBlock(request_options.trailers, .request_trailers);
-    try headers.validateDeclaredRequestLength(fields.items, body_len);
+    try headers.validateDeclaredRequestLength(fields.items, request_options.body.len);
 
     if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
     const stream_id = try Context.reserve(self);
@@ -115,48 +110,7 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
         Context.release(self, stream_id);
         Context.forgetWindows(self, stream_id);
     }
-    if (request_options.body_prefix.len != 0) {
-        try Context.headers(
-            self,
-            stream_id,
-            fields.items,
-            body_len == 0 and request_options.trailers.len == 0,
-            deadline,
-        );
-        head_committed = true;
-        if (body_len != 0) {
-            const slices = [_][]const u8{
-                request_options.body_prefix,
-                request_options.body,
-            };
-            Context.slices(
-                self,
-                stream_id,
-                &slices,
-                request_options.trailers.len == 0,
-                &body_written,
-                deadline,
-            ) catch |err| {
-                if (err != error.ResponseAvailable) return @as(Context.ErrorType!Context.PendingType, err);
-                response_available = true;
-            };
-        }
-        if (!response_available and request_options.trailers.len != 0) {
-            try Context.headers(self, stream_id, request_options.trailers, true, deadline);
-        }
-        return .{
-            .stream_id = stream_id,
-            .request_method = request_options.method,
-            .extended_connect = extended_connect,
-            .upload = if (response_available) upload.Upload{
-                .prefix = request_options.body_prefix,
-                .body = request_options.body,
-                .written = body_written,
-                .trailers = request_options.trailers,
-            } else null,
-        };
-    }
-    if (body_len != 0 and
+    if (request_options.body.len != 0 and
         request_options.trailers.len == 0)
     {
         Context.burst(
@@ -177,12 +131,12 @@ pub fn send(self: anytype, options: anytype, deadline: ?std.Io.Clock.Timestamp, 
             self,
             stream_id,
             fields.items,
-            body_len == 0 and
+            request_options.body.len == 0 and
                 request_options.trailers.len == 0,
             deadline,
         );
         head_committed = true;
-        if (body_len != 0) {
+        if (request_options.body.len != 0) {
             Context.data(
                 self,
                 stream_id,
