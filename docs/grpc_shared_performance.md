@@ -710,3 +710,14 @@ candidate's median was 890,066 ns per roundtrip versus 858,614 ns for the
 baseline, and three of five pairs were slower. The candidate was reverted; the
 direct clock reads remain in those paths. A future attempt should reduce
 message copies or segmented ownership rather than clock-source overhead.
+
+## Steady-state config reclaim fast path (2026-11-02)
+
+`Publication.reclaim` now returns before the seq_cst reader-epoch load when
+`retired == null`, which is the steady state between config updates. `retired`
+is only mutated under the State mutex. On the same 256-KiB persistent workload,
+five alternating wall-time pairs were all faster: median 887,608 ns per
+roundtrip versus 907,171 ns for the baseline (2.2%). Three fixed-binary PMU
+pairs reduced instructions from a 244,301,950 median to 242,820,199 (0.61%,
+3/3 wins); cycles remained load-noisy. The full gRPC Debug gate passes 562/562
+with the change retained.

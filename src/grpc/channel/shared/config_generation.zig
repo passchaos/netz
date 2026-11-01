@@ -73,6 +73,9 @@ pub const Publication = struct {
         self.reclaim();
     }
     pub fn reclaim(self: *Publication) void {
+        // `retired` is only mutated under the State mutex, so the common
+        // steady-state path avoids an atomic reader-epoch load.
+        if (self.retired == null) return;
         if (self.readers.load(.seq_cst) != 0) return;
         while (self.retired) |old| {
             self.retired = old.retired_next;
