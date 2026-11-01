@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+Rust h2 client observed netz gRPC PING enforcement: transport=h2c acknowledged=3 violating_ack=false goaway=ENHANCE_YOUR_CALM client_io=h2-tokio server_io=zio-std-io
+netz grpc server ready: port=56215 scenario=ping_abuse transport=h2c client_io=rust-h2-tokio server_io=zio-std-io
+netz grpc server accepted: scenario=ping_abuse transport=h2c
+netz grpc server completed: scenario=ping_abuse transport=h2c pings=4 strikes=3 goaway=ENHANCE_YOUR_CALM debug=too_many_pings client_io=rust-h2-tokio server_io=zio-std-io
+netz gRPC SharedChannel throttled keepalive from Rust HTTP/2 GOAWAY: configured_ms=100 effective_ms=200 throttles=1 acknowledged=1 client_io=zio-std-io server_io=rust-tokio
+Rust HTTP/2 throttle server listening on 127.0.0.1:51997
+Rust HTTP/2 server observed netz gRPC keepalive throttle: configured_ms=100 effective_ms=200 observed_ms=200 exact_ack=true client_io=zio-std-io server_io=rust-tokio

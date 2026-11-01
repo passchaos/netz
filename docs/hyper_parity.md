@@ -2156,7 +2156,9 @@ Status requests default on for RFC 7633 Must-Staple compatibility; `.require`
 rejects missing, expired, malformed, unknown, revoked, or incorrectly signed
 staples. An OpenSSL TLS 1.3 process gate completes a real HTTP request only for
 a signed `good` response and proves missing/revoked responses fail before any
-HTTP bytes are sent.
+HTTP bytes are sent. A fresh 2026-11-01 `interop-http1-ocsp` run passed the
+OpenSSL TLS 1.2 and TLS 1.3 good/missing/revoked matrix; see
+`docs/evidence/http1_ocsp/2026-11-01.json`.
 
 RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
 non-incremental stream in one candidate scan rather than two. The priority-aware

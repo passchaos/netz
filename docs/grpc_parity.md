@@ -2506,7 +2506,12 @@ HTTP/2 server repeats the replacement-connection flow and measured exactly
 case remains in the same gate. The pinned grpc-cpp h2c/TLS matrix continues to
 verify exact ACK with `throttles=0`, proving ordinary peers do not spuriously
 back off. Evidence is recorded in
-`docs/evidence/grpc_shared_keepalive_throttle/2026-10-29.json`.
+`docs/evidence/grpc_shared_keepalive_throttle/2026-10-29.json`. A fresh
+2026-11-01 `interop-grpc-h2-ping-abuse` run repeated the Rust/Tokio raw h2
+replacement-connection flow: the configured 100 ms interval became exactly
+200 ms, one throttle was recorded, the probe was acknowledged, and the
+independent server observed the exact 200 ms interval and ACK; see
+`docs/evidence/grpc_h2_ping_abuse/2026-11-01.json`.
 
 ## SharedChannel scan-cached operation time
 
