@@ -46,9 +46,11 @@ test "gRPC SharedChannel weighted target WRR filters per-RPC ORCA workers" {
     var client_live = true;
     defer if (client_live) client.deinit();
     try client.connectWithTimeout(.fromSeconds(5));
-    var watches: [3]grpc.ChannelConnectivityWatch = undefined;
+    var watches: [2]grpc.ChannelConnectivityWatch = undefined;
     var watch_count: usize = 0;
     defer for (watches[0..watch_count]) |*watch| watch.deinit();
+    // Only the configured `wrr` endpoints are activated; the unconfigured
+    // `outside` endpoint stays IDLE until a config update selects it.
     for (&watches, 0..) |*watch, index| {
         watch.* = client.watchEndpointConnectivity(index).?;
         watch_count += 1;
@@ -135,7 +137,6 @@ test "gRPC SharedChannel weighted target WRR filters per-RPC ORCA workers" {
     client_live = false;
     try a_task.await(io);
     try b_task.await(io);
-    try outside_task.await(io);
 }
 
 test "gRPC SharedChannel weighted target WRR owns child OOB stream" {
@@ -204,7 +205,6 @@ test "gRPC SharedChannel weighted target WRR owns child OOB stream" {
     client_live = false;
     stop.set(io);
     try wrr_task.await(io);
-    try outside_task.await(io);
 }
 
 fn call(sender: shared.Sender) !grpc.UnaryResponse {

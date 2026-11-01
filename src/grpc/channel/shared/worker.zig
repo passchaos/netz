@@ -178,7 +178,7 @@ pub fn Worker(comptime State: type) type {
         }
 
         fn tick(self: *Self) !void {
-            const demand = self.parent.needsConnection(self);
+            const policy = self.parent.connectionPolicy(self);
             self.parent.lock();
             const updated = self.pending_settings;
             self.pending_settings = null;
@@ -215,10 +215,33 @@ pub fn Worker(comptime State: type) type {
                 self.dropOrca();
             }
             self.parent.expireQueued();
-            if (!demand and self.active.items.len == 0 and self.streams.items.len == 0) return self.sleepUntilWake(null);
+            if (!policy.active and self.connection == null and
+                self.active.items.len == 0 and self.streams.items.len == 0)
+            {
+                const until: ?std.Io.Clock.Timestamp = if (policy.wake_at) |nanoseconds|
+                    .{ .raw = .{ .nanoseconds = nanoseconds }, .clock = .awake }
+                else
+                    null;
+                return self.sleepUntilWake(until);
+            }
             if (self.connection == null) {
                 if (retiring) return;
-                if (self.connect_at != null and !self.expired(self.connect_at)) return self.sleepUntilWake(minimum(self.connect_at, self.parent.nextQueuedDeadline()));
+                if (self.connect_at != null) {
+                    if (!self.expired(self.connect_at)) {
+                        return self.sleepUntilWake(minimum(
+                            self.connect_at,
+                            self.parent.nextQueuedDeadline(),
+                        ));
+                    }
+                    // grpc-core reports IDLE once reconnect backoff elapses;
+                    // the following CONNECTING then restarts the priority
+                    // failover timer. Re-evaluate the policy here so the
+                    // runtime observes IDLE before this task publishes
+                    // CONNECTING in the same turn.
+                    self.local_state = .idle;
+                    self.publish();
+                    _ = self.parent.connectionPolicy(self);
+                }
                 self.local_state = .connecting;
                 self.publish();
                 self.owner.resetConnectionBackoff();

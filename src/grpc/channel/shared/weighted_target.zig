@@ -62,6 +62,9 @@ pub fn Runtime(comptime State: type) type {
         const PriorityChild = struct {
             ignore_reresolution_requests: bool,
             node: *Node,
+            /// Once grpc-core reaches a priority it keeps that child alive and
+            /// retrying even when a lower priority becomes current.
+            activated: bool = false,
         };
 
         const Priority = struct {
@@ -130,6 +133,126 @@ pub fn Runtime(comptime State: type) type {
 
         pub fn shufflesAddressList(self: *const Self, path: []const []const u8) bool {
             return @import("../tree_query.zig").shufflesAddressList(self.root, path);
+        }
+
+        /// Whether the endpoint path belongs to the priority slice that should
+        /// currently be connected. `wake_at` receives the failover deadline
+        /// when the path is waiting for a higher priority's timer.
+        pub fn pathActive(
+            self: *Self,
+            state: *State,
+            path: []const []const u8,
+            wake_at: *?i96,
+        ) bool {
+            return self.pathActiveNode(self.root, state, path, wake_at);
+        }
+
+        const PriorityState = struct {
+            active_index: ?usize,
+            wake_at: ?i96,
+            failover_open: bool,
+        };
+
+        fn evaluatePriority(
+            self: *Self,
+            priority: *Priority,
+            state: *State,
+        ) PriorityState {
+            if (priority.order.len == 0) {
+                return .{ .active_index = null, .wake_at = null, .failover_open = true };
+            }
+            const now = std.Io.Clock.awake.now(state.io).nanoseconds;
+            const first = priority.children[priority.order[0]];
+            const first_state = self.aggregateNode(first.node, state);
+            switch (first_state) {
+                .ready, .idle => {
+                    priority.failover_started_ns = null;
+                    priority.failover_can_start = true;
+                },
+                .connecting => {
+                    if (priority.failover_started_ns == null and
+                        priority.failover_can_start)
+                    {
+                        priority.failover_started_ns = now;
+                    }
+                    priority.failover_can_start = false;
+                },
+                .transient_failure, .shutdown => {
+                    priority.failover_started_ns = null;
+                    priority.failover_can_start = false;
+                },
+            }
+            if (first_state == .ready or first_state == .idle) {
+                activatePriority(priority, 0);
+                return .{ .active_index = 0, .wake_at = null, .failover_open = false };
+            }
+            if (first_state == .connecting) {
+                if (priority.failover_started_ns) |started| {
+                    const deadline = started +| self.priority_failover_timeout_ns;
+                    if (self.priority_failover_timeout_ns > 0 and now < deadline) {
+                        activatePriority(priority, 0);
+                        return .{
+                            .active_index = 0,
+                            .wake_at = deadline,
+                            .failover_open = false,
+                        };
+                    }
+                }
+            }
+            // The first priority failed or its timer expired. Select the next
+            // priority that is not in TRANSIENT_FAILURE; otherwise delegate to
+            // the last priority so it can retry.
+            var index = priority.order.len - 1;
+            for (priority.order[1..], 1..) |child_index, ordinal| {
+                const child = priority.children[child_index];
+                if (self.aggregateNode(child.node, state) != .transient_failure) {
+                    index = ordinal;
+                    break;
+                }
+            }
+            activatePriority(priority, index);
+            return .{ .active_index = index, .wake_at = null, .failover_open = true };
+        }
+
+        fn activatePriority(priority: *Priority, index: usize) void {
+            for (priority.order[0 .. index + 1]) |child_index| {
+                priority.children[child_index].activated = true;
+            }
+        }
+
+        fn pathActiveNode(
+            self: *Self,
+            node: *Node,
+            state: *State,
+            path: []const []const u8,
+            wake_at: *?i96,
+        ) bool {
+            if (!pathMatches(path, node.path)) return false;
+            return switch (node.kind) {
+                .leaf => true,
+                .outlier => |wrapper| self.pathActiveNode(wrapper.child, state, path, wake_at),
+                .weighted => |weighted| for (weighted.children) |child| {
+                    if (self.pathActiveNode(child.node, state, path, wake_at)) break true;
+                } else false,
+                .priority => |*priority| blk: {
+                    const info = self.evaluatePriority(priority, state);
+                    for (priority.order) |child_index| {
+                        const child = priority.children[child_index];
+                        if (!pathMatches(path, child.node.path)) continue;
+                        if (child.activated) {
+                            break :blk self.pathActiveNode(child.node, state, path, wake_at);
+                        }
+                        if (info.wake_at) |deadline| {
+                            wake_at.* = if (wake_at.*) |current|
+                                @min(current, deadline)
+                            else
+                                deadline;
+                        }
+                        break :blk false;
+                    }
+                    break :blk false;
+                },
+            };
         }
 
         pub fn aggregate(self: *Self, state: *State) connectivity.State {
@@ -598,40 +721,11 @@ pub fn Runtime(comptime State: type) type {
                     unreachable;
                 },
                 .priority => |*priority| blk: {
-                    if (priority.order.len == 0) break :blk null;
-                    const now = std.Io.Clock.awake.now(state.io).nanoseconds;
-                    const first = priority.children[priority.order[0]];
-                    const first_state = self.aggregateNode(first.node, state);
-                    switch (first_state) {
-                        .ready, .idle => {
-                            priority.failover_started_ns = null;
-                            priority.failover_can_start = true;
-                        },
-                        .connecting => {
-                            if (priority.failover_started_ns == null and
-                                priority.failover_can_start)
-                            {
-                                priority.failover_started_ns = now;
-                            }
-                            priority.failover_can_start = false;
-                        },
-                        .transient_failure, .shutdown => {
-                            priority.failover_started_ns = null;
-                            priority.failover_can_start = false;
-                        },
-                    }
-                    const failover_open = self.priority_failover_timeout_ns <= 0 or switch (first_state) {
-                        .ready, .idle => false,
-                        .transient_failure, .shutdown => true,
-                        .connecting => timer: {
-                            const started = priority.failover_started_ns orelse
-                                break :timer true;
-                            break :timer now >= started +|
-                                self.priority_failover_timeout_ns;
-                        },
-                    };
-                    if (!failover_open) {
-                        if (first_state == .ready) {
+                    const info = self.evaluatePriority(priority, state);
+                    const active_index = info.active_index orelse break :blk null;
+                    if (!info.failover_open) {
+                        const first = priority.children[priority.order[active_index]];
+                        if (self.aggregateNode(first.node, state) == .ready) {
                             break :blk try self.pickNode(
                                 first.node,
                                 state,

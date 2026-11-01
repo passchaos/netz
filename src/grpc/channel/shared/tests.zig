@@ -478,7 +478,6 @@ test "gRPC shared priority selects the highest ready child" {
     }
     stop.set(io);
     try high_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC shared priority falls back to the lower ready child" {
@@ -574,7 +573,6 @@ test "gRPC shared priority accepts least-request and WRR children" {
     }
     stop.set(io);
     try high_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC shared priority supports nested priority children" {
@@ -634,8 +632,6 @@ test "gRPC shared priority supports nested priority children" {
     }
     stop.set(io);
     try high1_peer.await(io);
-    try high2_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC shared priority honors the failover timeout" {
@@ -685,7 +681,6 @@ test "gRPC shared priority honors the failover timeout" {
         }),
     );
     stop.set(io);
-    try low_peer.await(io);
 }
 
 test "gRPC shared priority falls back immediately when the high child fails" {
@@ -799,7 +794,6 @@ test "gRPC shared priority restarts the failover timer after the high child was 
         }),
     );
     stop.set(io);
-    try low_peer.await(io);
 }
 
 test "gRPC shared nested pick_first shuffle keeps sibling subsets ordered" {

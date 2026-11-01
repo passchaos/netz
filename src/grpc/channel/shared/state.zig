@@ -502,12 +502,24 @@ pub const State = struct {
             }
         }
     }
-    pub fn needsConnection(self: *State, worker: *Worker) bool {
+    pub const ConnectionPolicy = struct {
+        active: bool,
+        wake_at: ?i96 = null,
+    };
+    pub fn connectionPolicy(self: *State, worker: *Worker) ConnectionPolicy {
         self.lock();
         defer self.unlock();
         self.evaluateOutliersLocked();
         worker.wake.reset();
-        return self.demand and !worker.retired;
+        if (!self.demand or worker.retired) return .{ .active = false };
+        const runtime = if (self.weighted_target) |*value| value else return .{ .active = true };
+        var wake_at: ?i96 = null;
+        const active = runtime.pathActive(
+            self,
+            worker.source.endpoint.hierarchicalPath(),
+            &wake_at,
+        );
+        return .{ .active = active, .wake_at = if (active) null else wake_at };
     }
     pub fn shouldStop(self: *State, worker: *Worker, drained: bool) bool {
         self.lock();
