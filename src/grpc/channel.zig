@@ -411,11 +411,15 @@ pub const Options = struct {
     /// pending. Null selects serial connection attempts. The default follows
     /// grpc-core pick_first's 250 ms Happy Eyeballs pass.
     connection_attempt_delay: ?std.Io.Duration = .fromMilliseconds(250),
+    /// grpc-core priority child failover timeout. Null uses 10 seconds; zero
+    /// makes lower priorities eligible immediately.
+    priority_failover_timeout: ?std.Io.Duration = null,
 
     pub fn validate(self: Options) error{InvalidChannelOptions}!void {
         try self.backoff.validate();
         if (self.resolver_min_refresh_interval.nanoseconds < 0) return error.InvalidChannelOptions;
         if (self.connection_attempt_delay) |delay| if (delay.nanoseconds <= 0) return error.InvalidChannelOptions;
+        if (self.priority_failover_timeout) |timeout| if (timeout.nanoseconds < 0) return error.InvalidChannelOptions;
     }
 };
 
@@ -804,9 +808,11 @@ pub const Channel = struct {
         var result = try init(allocator, io, target, resolved);
         errdefer result.deinit();
         if (owns_composite) {
-            result.weighted_target_runtime = try .init(
+            result.weighted_target_runtime = try .initWithPriorityFailoverTimeout(
                 allocator,
                 balancing.root orelse return error.InvalidChannelOptions,
+                (options.priority_failover_timeout orelse
+                    std.Io.Duration.fromSeconds(10)).nanoseconds,
             );
             result.selection_policy = if (balancing.policy == .priority)
                 .priority

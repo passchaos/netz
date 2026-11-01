@@ -41,6 +41,7 @@ pub fn Runtime(comptime Slot: type) type {
         allocator: std.mem.Allocator,
         root: *Node,
         outlier_count: usize = 0,
+        priority_failover_timeout_ns: i96 = 10 * std.time.ns_per_s,
 
         const Self = @This();
         const AggregateState = enum {
@@ -90,6 +91,7 @@ pub fn Runtime(comptime Slot: type) type {
         const Priority = struct {
             children: []PriorityChild,
             order: []usize,
+            failover_started_ns: ?i96 = null,
         };
 
         const Node = struct {
@@ -106,7 +108,23 @@ pub fn Runtime(comptime Slot: type) type {
             allocator: std.mem.Allocator,
             config: *const service_config.LoadBalancingNode,
         ) BuildError!Self {
-            var self = Self{ .allocator = allocator, .root = undefined };
+            return initWithPriorityFailoverTimeout(
+                allocator,
+                config,
+                10 * std.time.ns_per_s,
+            );
+        }
+
+        pub fn initWithPriorityFailoverTimeout(
+            allocator: std.mem.Allocator,
+            config: *const service_config.LoadBalancingNode,
+            priority_failover_timeout_ns: i96,
+        ) BuildError!Self {
+            var self = Self{
+                .allocator = allocator,
+                .root = undefined,
+                .priority_failover_timeout_ns = priority_failover_timeout_ns,
+            };
             self.root = try self.build(config, &.{});
             return self;
         }
@@ -469,7 +487,27 @@ pub fn Runtime(comptime Slot: type) type {
                     }
                     unreachable;
                 },
-                .priority => |priority| blk: {
+                .priority => |*priority| blk: {
+                    const now = std.Io.Clock.awake.now(io).nanoseconds;
+                    if (priority.failover_started_ns == null) {
+                        priority.failover_started_ns = now;
+                    }
+                    const failover_open = self.priority_failover_timeout_ns <= 0 or
+                        now >= priority.failover_started_ns.? +|
+                            self.priority_failover_timeout_ns;
+                    if (!failover_open) {
+                        if (priority.order.len == 0) break :blk null;
+                        const first = priority.children[priority.order[0]];
+                        if (self.aggregate(first.node, slots) == .ready) {
+                            break :blk try self.pickNode(
+                                first.node,
+                                slots,
+                                io,
+                                input,
+                            );
+                        }
+                        break :blk null;
+                    }
                     for (priority.order) |child_index| {
                         const child = priority.children[child_index];
                         if (self.aggregate(child.node, slots) == .ready) {

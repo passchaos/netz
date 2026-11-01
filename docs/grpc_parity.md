@@ -662,8 +662,21 @@ used when the higher one cannot become ready. SharedChannel initializes the
 same composite runtime and applies it to background worker selection and live
 updates. Focused parser, high-priority selection, lower-priority fallback,
 least-request/WRR child and nested-priority tests pass in the service-config,
-ordinary weighted-target and shared-channel suites. grpc-core failover timers
-and child-retention semantics remain explicit integration work.
+ordinary weighted-target and shared-channel suites.
+
+The grpc-core failover timer is now implemented in both owners. A lower
+priority becomes eligible only after the first priority has failed to produce a
+READY child for the configured `priority_failover_timeout`, which defaults to
+grpc-core's 10 seconds. `Channel.Options.priority_failover_timeout` and the
+matching SharedChannel option override that interval, and a zero duration makes
+immediate fallback explicit for tests and callers that want the pre-timer
+behavior. The deadline starts at the first priority pick and is retained across
+picks, so a child that briefly reaches READY does not restart the window.
+Default-interval regressions assert that a
+lower-priority READY child is still bypassed inside the window, while zero
+duration and elapsed-time regressions assert ordered fallback. The full gRPC
+Debug gate passes 553/553 with these changes. Child-retention semantics for
+removed priority children remain explicit integration work.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.

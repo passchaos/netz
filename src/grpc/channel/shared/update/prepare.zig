@@ -46,7 +46,12 @@ pub const Prepared = struct {
             if (self.policy == .priority and balancing.policy != .priority) {
                 return error.InvalidSharedOptions;
             }
-            self.weighted = try State.WeightedTarget.init(allocator, balancing.root orelse return error.InvalidSharedOptions);
+            self.weighted = try State.WeightedTarget.initWithPriorityFailoverTimeout(
+                allocator,
+                balancing.root orelse return error.InvalidSharedOptions,
+                (options.priority_failover_timeout orelse
+                    std.Io.Duration.fromSeconds(10)).nanoseconds,
+            );
         }
         const name: ?[]const u8 = if (options.disable_health_check) null else options.health_service orelse
             if (config) |generation| generation.config.healthCheckServiceName() else null;

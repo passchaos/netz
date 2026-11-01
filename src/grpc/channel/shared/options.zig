@@ -30,4 +30,7 @@ pub const Options = struct {
     /// silently evicting a child before its configured lifetime expires.
     removed_child_retention: std.Io.Duration = .fromSeconds(15 * 60),
     max_retained_children: usize = 256,
+    /// grpc-core priority child failover timeout. Null uses 10 seconds; zero
+    /// makes lower priorities eligible immediately.
+    priority_failover_timeout: ?std.Io.Duration = null,
 };
