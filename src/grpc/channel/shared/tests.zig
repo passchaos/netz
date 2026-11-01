@@ -801,3 +801,61 @@ test "gRPC shared priority restarts the failover timer after the high child was 
     stop.set(io);
     try low_peer.await(io);
 }
+
+test "gRPC shared nested pick_first shuffle keeps sibling subsets ordered" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    var high_addresses: [8]std.Io.net.IpAddress = undefined;
+    var low_addresses: [2]std.Io.net.IpAddress = undefined;
+    var endpoints: [10]grpc.ChannelEndpoint = undefined;
+    for (0..8) |index| {
+        high_addresses[index] = .{ .ip4 = .loopback(@intCast(1000 + index)) };
+        endpoints[index] = .{ .cleartext_ip = .{
+            .address = high_addresses[index],
+            .hierarchical_path = &high_path,
+        } };
+    }
+    for (0..2) |index| {
+        low_addresses[index] = .{ .ip4 = .loopback(@intCast(2000 + index)) };
+        endpoints[8 + index] = .{ .cleartext_ip = .{
+            .address = low_addresses[index],
+            .hierarchical_path = &low_path,
+        } };
+    }
+    var client = try shared.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .service_config_json =
+            \\{"loadBalancingConfig":[{"priority_experimental":{
+            \\ "children":{
+            \\  "high":{"config":[{"pick_first":{"shuffleAddressList":true}}]},
+            \\  "low":{"config":[{"round_robin":{}}]}},
+            \\ "priorities":["high","low"]}}]}
+            ,
+        },
+    );
+    defer client.deinit();
+    try std.testing.expectEqual(@as(usize, 10), client.state.sources.len);
+    for (client.state.sources[0..8]) |source| {
+        try std.testing.expect(std.mem.eql(
+            u8,
+            "high",
+            source.endpoint.hierarchicalPath()[0],
+        ));
+    }
+    for (client.state.sources[8..], 0..) |source, index| {
+        try std.testing.expect(std.mem.eql(
+            u8,
+            "low",
+            source.endpoint.hierarchicalPath()[0],
+        ));
+        try std.testing.expect(source.endpoint.cleartext_ip.address.eql(
+            &low_addresses[index],
+        ));
+    }
+}

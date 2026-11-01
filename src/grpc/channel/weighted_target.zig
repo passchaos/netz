@@ -59,6 +59,7 @@ pub fn Runtime(comptime Slot: type) type {
 
         const Leaf = struct {
             policy: enum { pick_first, round_robin, least_request, ring_hash, weighted_round_robin },
+            shuffle_address_list: bool = false,
             least_request_config: least_request.Config = .{},
             ring_hash_config: ring_hash.Config = .{},
             ring_hash_header: ?[]u8 = null,
@@ -185,6 +186,10 @@ pub fn Runtime(comptime Slot: type) type {
             return @import("tree_query.zig").ignoresReresolution(self.root, path);
         }
 
+        pub fn shufflesAddressList(self: *const Self, path: []const []const u8) bool {
+            return @import("tree_query.zig").shufflesAddressList(self.root, path);
+        }
+
         pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
             for (slots) |*slot| {
                 slot.least_request_enabled = self.pathUsesLeastRequest(
@@ -203,7 +208,12 @@ pub fn Runtime(comptime Slot: type) type {
             path: []const []const u8,
         ) BuildError!*Node {
             return switch (config.*) {
-                .pick_first => self.buildLeaf(path, .pick_first),
+                .pick_first => |config_value| blk: {
+                    const node = try self.buildLeaf(path, .pick_first);
+                    node.kind.leaf.shuffle_address_list =
+                        config_value.shuffle_address_list;
+                    break :blk node;
+                },
                 .round_robin => self.buildLeaf(path, .round_robin),
                 .least_request => |config_value| self.buildLeastRequest(
                     path,
@@ -1186,4 +1196,35 @@ test "ordinary priority honors ignoreReresolutionRequests" {
     defer inner_runtime.deinit();
     try std.testing.expect(inner_runtime.ignoresReresolution(&.{"a"}));
     try std.testing.expect(!inner_runtime.ignoresReresolution(&.{"b"}));
+}
+
+test "ordinary priority propagates nested pick_first shuffleAddressList" {
+    const FakeSlot = struct {};
+    const shuffled_leaf = service_config.LoadBalancingNode{ .pick_first = .{
+        .shuffle_address_list = true,
+    } };
+    const plain_leaf = service_config.LoadBalancingNode{ .pick_first = .{} };
+    const inner_children = [_]service_config.PriorityConfig.Child{
+        .{ .name = "a", .child = &shuffled_leaf },
+        .{ .name = "b", .child = &plain_leaf },
+    };
+    const inner_priorities = [_][]const u8{ "a", "b" };
+    const inner = service_config.LoadBalancingNode{ .priority = .{
+        .children = &inner_children,
+        .priorities = &inner_priorities,
+    } };
+    const outer_children = [_]service_config.PriorityConfig.Child{
+        .{ .name = "high", .child = &inner },
+        .{ .name = "low", .child = &plain_leaf },
+    };
+    const outer_priorities = [_][]const u8{ "high", "low" };
+    const outer = service_config.LoadBalancingNode{ .priority = .{
+        .children = &outer_children,
+        .priorities = &outer_priorities,
+    } };
+    var runtime = try Runtime(FakeSlot).init(std.testing.allocator, &outer);
+    defer runtime.deinit();
+    try std.testing.expect(runtime.shufflesAddressList(&.{ "high", "a" }));
+    try std.testing.expect(!runtime.shufflesAddressList(&.{ "high", "b" }));
+    try std.testing.expect(!runtime.shufflesAddressList(&.{"low"}));
 }

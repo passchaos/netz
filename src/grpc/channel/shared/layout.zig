@@ -133,7 +133,58 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             std.mem.swap(*State.Source, &sources[remaining], &sources[random % (remaining + 1)]);
         }
     }
+    if (weighted_target) |runtime| {
+        try shuffleLeafSubsets(allocator, io, sources, runtime);
+    }
     return sources;
+}
+
+/// Shuffle each pick_first child's own endpoint subset, matching grpc-core's
+/// per-policy `shuffleAddressList` instead of reordering unrelated children.
+fn shuffleLeafSubsets(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    sources: []*State.Source,
+    runtime: *State.WeightedTarget,
+) State.Failure!void {
+    if (sources.len < 2) return;
+    const query = @import("../tree_query.zig");
+    const processed = try allocator.alloc([]const []const u8, sources.len);
+    defer allocator.free(processed);
+    const indices = try allocator.alloc(usize, sources.len);
+    defer allocator.free(indices);
+    var processed_count: usize = 0;
+    for (sources) |source| {
+        const path = source.endpoint.hierarchicalPath();
+        if (!runtime.shufflesAddressList(path)) continue;
+        var seen = false;
+        for (processed[0..processed_count]) |prior| {
+            if (query.equal(prior, path)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        processed[processed_count] = path;
+        processed_count += 1;
+        var count: usize = 0;
+        for (sources, 0..) |candidate, index| {
+            if (!query.equal(candidate.endpoint.hierarchicalPath(), path)) continue;
+            indices[count] = index;
+            count += 1;
+        }
+        var remaining = count;
+        while (remaining > 1) {
+            remaining -= 1;
+            var random: usize = undefined;
+            io.random(std.mem.asBytes(&random));
+            std.mem.swap(
+                *State.Source,
+                &sources[indices[remaining]],
+                &sources[indices[random % (remaining + 1)]],
+            );
+        }
+    }
 }
 
 fn weightedTargetEndpointCount(

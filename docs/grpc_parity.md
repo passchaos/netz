@@ -1743,6 +1743,16 @@ background stream, while SharedChannel supplies that ownership.
 Machine-readable WRR evidence is recorded in
 `docs/evidence/grpc_weighted_round_robin/2026-10-31.json`.
 
+`pick_first.shuffleAddressList` now applies per child policy instead of only
+when it is the top-level policy. Both Channel owners shuffle exactly the
+endpoint subset owned by each flagged pick_first leaf; sibling
+weighted-target/priority children keep their relative order, and an existing
+selection follows its slot when that subset is reordered. Hostname resolution
+re-shuffles the affected subsets on each applied address update. The recursive
+leaf query is shared through `src/grpc/channel/tree_query.zig`, with focused
+flag-propagation tests for both runtimes and a SharedChannel regression that
+keeps a sibling round-robin subset ordered.
+
 Hostname Channel targets now resolve every unique system A/AAAA address through
 a background polling worker; callers may inject the same allocator-owned,
 deadline-aware `AddressResolver` contract used by other netz transports. The

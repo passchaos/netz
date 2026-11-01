@@ -818,6 +818,7 @@ pub const Channel = struct {
                 .priority
             else
                 .weighted_target;
+            try result.shuffleLeafSubsets(result.slots, &result.selected_index);
             try result.weighted_target_runtime.?.configureSlots(result.slots);
             result.weighted_target_runtime.?.startOutliers(io);
         }
@@ -1964,6 +1965,9 @@ pub const Channel = struct {
                 };
             }
         }
+        if (self.weighted_target_runtime != null) {
+            try self.shuffleLeafSubsets(replacement, &selected);
+        }
         for (old_slots) |*slot| {
             slot.closeConnection();
             slot.deinitPolicyState(self.allocator);
@@ -2127,6 +2131,60 @@ pub const Channel = struct {
             );
             remaining -= 1;
             std.mem.swap(Slot, &self.slots[index], &self.slots[remaining]);
+        }
+    }
+
+    /// Shuffle each pick_first child's own endpoint subset, matching
+    /// grpc-core's per-policy `shuffleAddressList`. Other children keep their
+    /// relative order.
+    fn shuffleLeafSubsets(
+        self: *Channel,
+        slots: []Slot,
+        selected: *?usize,
+    ) Error!void {
+        const runtime = if (self.weighted_target_runtime) |*value| value else return;
+        if (slots.len < 2) return;
+        const query = @import("channel/tree_query.zig");
+        const processed = try self.allocator.alloc([]const []const u8, slots.len);
+        defer self.allocator.free(processed);
+        const indices = try self.allocator.alloc(usize, slots.len);
+        defer self.allocator.free(indices);
+        var processed_count: usize = 0;
+        for (slots) |slot| {
+            const path = slot.endpoint.hierarchicalPath();
+            if (!runtime.shufflesAddressList(path)) continue;
+            var seen = false;
+            for (processed[0..processed_count]) |prior| {
+                if (query.equal(prior, path)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            processed[processed_count] = path;
+            processed_count += 1;
+            var count: usize = 0;
+            for (slots, 0..) |candidate, index| {
+                if (!query.equal(candidate.endpoint.hierarchicalPath(), path)) continue;
+                indices[count] = index;
+                count += 1;
+            }
+            var remaining = count;
+            while (remaining > 1) {
+                remaining -= 1;
+                var random: usize = undefined;
+                self.io.random(std.mem.asBytes(&random));
+                const current = indices[remaining];
+                const other = indices[random % (remaining + 1)];
+                std.mem.swap(Slot, &slots[current], &slots[other]);
+                if (selected.*) |value| {
+                    if (value == current) {
+                        selected.* = other;
+                    } else if (value == other) {
+                        selected.* = current;
+                    }
+                }
+            }
         }
     }
 

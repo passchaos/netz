@@ -56,6 +56,21 @@ pub fn ignoresReresolution(node: anytype, path: []const []const u8) bool {
     };
 }
 
+/// True when the pick_first leaf at `path` requests address-list shuffling.
+pub fn shufflesAddressList(node: anytype, path: []const []const u8) bool {
+    if (!matches(path, node.path)) return false;
+    return switch (node.kind) {
+        .leaf => |leaf| leaf.shuffle_address_list,
+        .outlier => |wrapper| shufflesAddressList(wrapper.child, path),
+        .weighted => |weighted| for (weightedChildren(weighted)) |child| {
+            if (shufflesAddressList(child.node, path)) break true;
+        } else false,
+        .priority => |priority| for (priority.children) |child| {
+            if (shufflesAddressList(child.node, path)) break true;
+        } else false,
+    };
+}
+
 /// True when the node at `path` is a composite policy that can own retained
 /// children: weighted_target or priority.
 pub fn compositeParent(node: anytype, path: []const []const u8) bool {
