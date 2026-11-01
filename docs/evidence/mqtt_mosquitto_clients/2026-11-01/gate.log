@@ -1,0 +1,5 @@
+cJSON.h: OK
+/home/passchaos/Work/mosquitto/libcommon/password_common.c:76:12: warning: ‘pw__memcmp_const’ defined but not used [-Wunused-function]
+   76 | static int pw__memcmp_const(const void *a, const void *b, size_t len)
+      |            ^~~~~~~~~~~~~~~~
+Mosquitto CLI client interop passed: source=checkout-5cd25465 version=mosquitto_pub-2.1.2+libmosquitto-2.1.0 protocols=mqtt31,mqtt311,mqtt5 qos=0,1,2 retained=true response-topic=true correlation-data=true client_io=libmosquitto server_io=zio-std-io

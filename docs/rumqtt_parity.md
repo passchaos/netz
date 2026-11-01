@@ -4606,7 +4606,10 @@ flag for QoS 0/1/2 fanout plus retained replay. A final MQTT 5 pair publishes
 Response Topic and binary Correlation Data through the CLI property API and requires
 libmosquitto's formatted decoder to reproduce both values exactly. This is
 client-process interoperability evidence, distinct from the source-derived raw
-packet fixtures below.
+packet fixtures below. A fresh 2026-11-01 run passed MQTT 3.1/3.1.1/5 with
+libmosquitto 2.1.0, QoS 0/1/2 fanout, retained replay, Response Topic and
+binary Correlation Data; see
+`docs/evidence/mqtt_mosquitto_clients/2026-11-01.json`.
 `zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast` adds a second
 independent client implementation. Its committed Cargo lock pins rumqttc
 0.25.1 and the runner builds with `--offline --locked`. Each protocol drives

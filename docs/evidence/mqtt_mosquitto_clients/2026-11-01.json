@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-mqtt-mosquitto-clients",
+  "command": "zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast",
+  "reference": {
+    "implementation": "Mosquitto CLI clients (mosquitto_pub/mosquitto_sub)",
+    "version": "mosquitto_pub 2.1.2 / libmosquitto 2.1.0",
+    "revision": "5cd25465"
+  },
+  "result": "Mosquitto CLI client interop passed: protocols=mqtt31,mqtt311,mqtt5 qos=0,1,2 retained=true response-topic=true correlation-data=true client_io=libmosquitto server_io=zio-std-io",
+  "coverage": [
+    "Real libmosquitto clients against the netz broker over MQTT 3.1, 3.1.1 and 5",
+    "Exact topic, payload, delivered QoS and retain flag for QoS 0/1/2 fanout",
+    "Retained replay",
+    "MQTT 5 Response Topic and binary Correlation Data through the CLI property API"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}
