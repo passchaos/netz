@@ -1,0 +1,8 @@
+{
+  "outdir": "./reports",
+  "options": {"failByDrop": false},
+  "servers": [{"agent": "netz", "url": "wss://localhost:19001"}],
+  "cases": ["*"],
+  "exclude-cases": [],
+  "exclude-agent-cases": {}
+}
