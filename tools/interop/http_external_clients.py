@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 
 from http_libcurl_peer import LibcurlPeer, REQUEST_BODY as LIBCURL_REQUEST_BODY
 
@@ -65,6 +66,54 @@ def wait_for_line(process: subprocess.Popen[str], expected: str) -> str:
         output.append(line)
         if expected in line:
             return "".join(output)
+
+
+def port_is_listening(port: int) -> bool | None:
+    """Return whether 127.0.0.1:port is in LISTEN state, or None if unknown."""
+    found_proc_table = False
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            lines = Path(path).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        found_proc_table = True
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            local_address, state = fields[1], fields[3]
+            _, _, port_hex = local_address.rpartition(":")
+            if state == "0A" and int(port_hex, 16) == port:
+                return True
+    if found_proc_table:
+        return False
+    return None
+
+
+def wait_for_listening_port(
+    process: subprocess.Popen[str], port: int, timeout: float = 10.0
+) -> None:
+    """Wait until the server listens on 127.0.0.1:port without connecting.
+
+    nghttpd 1.70 no longer prints the ``IPv4: listen`` line that older
+    releases emitted, and a TCP readiness probe would itself appear as a
+    connection in nghttpd's transcript. On Linux, inspect the kernel LISTEN
+    table instead; elsewhere fall back to a short startup delay.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"server exited {process.returncode} before readiness"
+            )
+        listening = port_is_listening(port)
+        if listening is None:
+            time.sleep(0.5)
+            return
+        if listening:
+            return
+        time.sleep(0.02)
+    raise RuntimeError(f"timed out waiting for server on 127.0.0.1:{port}")
 
 
 def stop_server(process: subprocess.Popen[str]) -> None:
@@ -373,7 +422,7 @@ def run_nghttpd_case(
     result: subprocess.CompletedProcess[str] | None = None
     client_error: BaseException | None = None
     try:
-        initial = wait_for_line(server, f"IPv4: listen 127.0.0.1:{port}")
+        wait_for_listening_port(server, port)
         client_command = [str(client), str(port)]
         if tls:
             client_command.append(str(directory / "localhost.pem"))

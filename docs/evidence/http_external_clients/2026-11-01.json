@@ -1,0 +1,23 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-http-external-clients",
+  "command": "zig build interop-http-external-clients -Doptimize=ReleaseFast",
+  "tools": {
+    "curl": "curl 8.5.0 (aarch64-unknown-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 nghttp2/1.59.0",
+    "libcurl": "libcurl/8.5.0",
+    "nghttp": "nghttp nghttp2/1.70.0",
+    "nghttpd": "nghttpd nghttp2/1.70.0",
+    "netz_io": "zio-std-io"
+  },
+  "harness_change": "nghttpd 1.70 no longer prints the `IPv4: listen 127.0.0.1:<port>` line that older releases emitted. The gate now waits through the Linux /proc/net/tcp{,6} LISTEN table instead of a TCP probe, because a probe would itself appear as an extra connection in nghttpd's one-connection transcript. Non-Linux hosts fall back to a short startup delay.",
+  "coverage": [
+    "curl HTTP/1.1 and HTTP/2 against netz over cleartext and certificate-verified TLS",
+    "libcurl shared-library request/response trailers over HTTP/1.1 cleartext and TLS, including one easy-handle reuse",
+    "nghttp2 1.70 clients against netz HTTP/2 over h2c and TLS, with two concurrent POST streams, round-robin DATA, request trailers, response trailers and a static-file GET",
+    "netz HTTP/2 client against nghttpd 1.70 over h2c and certificate-verified TLS, with streams 1/3/5, terminal request trailers, echo bodies, response trailers and h2 ALPN on TLS"
+  ],
+  "result": "External HTTP interop passed in both endpoint roles: curl HTTP/1.1+h2, libcurl HTTP/1.1 trailers, and nghttp2 h2 clients against netz, plus netz h2 against nghttpd; cleartext and certificate-verified TLS, persistent H1 chunked and H2 multiplexed body/trailer traffic verified.",
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}
