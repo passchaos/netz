@@ -1,0 +1,1 @@
+HTTP CookieJar curl live/import/export parity passed: ordinary='docs=two; root=one' deep='deep=three; docs=two; root=one' client_io=netz-cookie-jar reference_io=libcurl-cookie-engine

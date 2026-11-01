@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-http-cookie-curl",
+  "command": "zig build interop-http-cookie-curl -Doptimize=ReleaseFast",
+  "result": "HTTP CookieJar curl live/import/export parity passed: ordinary='docs=two; root=one' deep='deep=three; docs=two; root=one' client_io=netz-cookie-jar reference_io=libcurl-cookie-engine",
+  "reference": "curl 8.5 / libcurl cookie engine",
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

@@ -1425,7 +1425,10 @@ initiating URI. `zig build interop-http-cookie-curl -Doptimize=ReleaseFast`
 independently matches curl 8.5/libcurl's repeated Set-Cookie, default/explicit
 Path, and ordinary/deep request ordering. It now also imports curl's generated
 Netscape file into Netz and exports Netz state back through curl, requiring
-identical Cookie values in both directions.
+identical Cookie values in both directions. A fresh 2026-11-01 run repeated
+that live/import/export parity with ordinary `docs=two; root=one` and deep
+`deep=three; docs=two; root=one` ordering; see
+`docs/evidence/http_cookie_curl/2026-11-01.json`.
 The current `draft-ietf-httpbis-layered-cookies` storage algorithm is also
 implemented for `__Http-` and `__Host-Http-`: both require a secure origin plus
 Secure and HttpOnly, while the Host form additionally requires host-only state
