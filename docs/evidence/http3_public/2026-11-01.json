@@ -10,13 +10,14 @@
     "error": "HandshakeTimeout",
     "note": "OpenSSL QUICv1/TLS1.3 handshake succeeds from the same host, so this is a netz client interop issue rather than reachability. The netz client receives no server response across five retries."
   },
+  "handshake_ack_generation": "The handshake receive/open paths do not generate ACK frames; they only open packets and reassemble CRYPTO data.",
   "handshake_flight_observation": {
     "coalesced_tail": 0,
     "first_handshake_packet": {
       "packet_number": 13,
       "payload_bytes": 646
     },
-    "next_receive": "The following source.receiveTimeout with the passive deadline remained blocked past 70 seconds.",
+    "next_receive": "strace shows the client waiting in io_uring for a datagram after the first Handshake packet. The handshake client has no sendAck path and opens server packets without acknowledging them, so the next target is handshake ACK generation or server flight continuation.",
     "reassembled_tls_bytes": 642
   },
   "logs": {
