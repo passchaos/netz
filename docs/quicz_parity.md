@@ -66,6 +66,14 @@ keys before reserving the next packet number for its Finished flight. quic.tech
 now completes the handshake and returns HTTP/3 200 with a 462-byte body. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
+After both handshake fixes, the external client-role gates were re-run on
+2026-11-01: `interop-quic-quinn`, `interop-quic-s2n`, `interop-quic-quic-go`,
+`interop-http3-quic-go`, `interop-websocket-h3-quic-go`, `interop-http3-tquic`
+and `interop-webtransport-wtransport` all exited 0 with their full both-role
+matrices. The quic-go gates used the pinned Go 1.24.13 toolchain through
+`GO_BIN`. Logs and per-gate results are in
+`docs/evidence/quic_handshake_ack/2026-11-01.json`.
+
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
 headers, Version Negotiation, Retry parsing and integrity verification, typed
 and untyped transport parameters, owned and caller-storage frame parsing,

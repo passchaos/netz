@@ -1,0 +1,66 @@
+?   	netz-quic-go-interop	[no test files]
+ok  	netz-quic-go-interop/handshake	(cached)
+ok  	netz-quic-go-interop/http3_bench	(cached)
+ok  	netz-quic-go-interop/http3_digest	(cached)
+?   	netz-quic-go-interop/http3_informational	[no test files]
+ok  	netz-quic-go-interop/http3_peer	(cached)
+?   	netz-quic-go-interop/http3_socks5	[no test files]
+ok  	netz-quic-go-interop/internal/rawpeer	(cached)
+ok  	netz-quic-go-interop/internal/sockettraffic	(cached)
+ok  	netz-quic-go-interop/internal/testcert	(cached)
+?   	netz-quic-go-interop/lifecycle_client	[no test files]
+ok  	netz-quic-go-interop/raw	(cached)
+?   	netz-quic-go-interop/raw_echo_client	[no test files]
+?   	netz-quic-go-interop/raw_echo_server	[no test files]
+ok  	netz-quic-go-interop/websocket_h3	(cached)
+netz HTTP/3 client interoperated with quic-go: version=1 cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window=8192 read_before_cancel>=12288 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1
+quic-go HTTP/3 interop server listening=127.0.0.1:40002 ca_out=/tmp/tmp.wh9bgMafRg/quic-go-ca.pem
+quic-go HTTP/3 server interoperated with netz: version=1 cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1
+netz HTTP/3 client followed quic-go redirect: version=1 status=200 redirects=1 method=POST->GET credentials=same-origin connections=2
+netz HTTP/3 pool reused quic-go connection through redirect: version=1 requests=2 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=quic-go-netpoll
+netz HTTP/3 shared pool routed quic-go redirect transaction: version=1 requests=2 redirects=1 idle=1 total=1 routes=1 unrelated_events_preserved=true client_io=zio-std-io server_io=quic-go-netpoll
+quic-go HTTP/3 interop server listening=127.0.0.1:39195 ca_out=/tmp/tmp.wh9bgMafRg/quic-go-redirect-ca.pem
+quic-go HTTP/3 server verified netz redirects: version=1 requests=6 redirects=3 method=POST-to-GET credentials=same-origin connections=4 exclusive_pool_connections=1 shared_pool_connections=1
+2026/11/01 11:57:54 connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?. See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+quic-go HTTP/3 client interoperated with netz: version=1 cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 stop_sending_transmissions>=2 concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1
+netz HTTP/3 quic-go interop server listening on 127.0.0.1:38343
+netz HTTP/3 server interoperated with quic-go: version=1 origin=true cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1
+netz HTTP/3 client observed quic-go informational responses: version=1 statuses=103,102 final=200 body=5
+quic-go HTTP/3 informational server listening=127.0.0.1:35968 ca_out=/tmp/tmp.wh9bgMafRg/quic-go-informational-ca.pem
+quic-go HTTP/3 server sent informational responses to netz: version=1 statuses=103,102 final=200 body=5
+quic-go HTTP/3 client received netz informational responses: version=1 statuses=103,102 final=200 body=5
+netz HTTP/3 quic-go interop server listening on 127.0.0.1:43693
+netz HTTP/3 server sent informational responses to quic-go: version=1 origin=true statuses=103,102 final=200 body=5
+?   	netz-quic-go-interop	[no test files]
+ok  	netz-quic-go-interop/handshake	(cached)
+ok  	netz-quic-go-interop/http3_bench	(cached)
+ok  	netz-quic-go-interop/http3_digest	(cached)
+?   	netz-quic-go-interop/http3_informational	[no test files]
+ok  	netz-quic-go-interop/http3_peer	(cached)
+?   	netz-quic-go-interop/http3_socks5	[no test files]
+ok  	netz-quic-go-interop/internal/rawpeer	(cached)
+ok  	netz-quic-go-interop/internal/sockettraffic	(cached)
+ok  	netz-quic-go-interop/internal/testcert	(cached)
+?   	netz-quic-go-interop/lifecycle_client	[no test files]
+ok  	netz-quic-go-interop/raw	(cached)
+?   	netz-quic-go-interop/raw_echo_client	[no test files]
+?   	netz-quic-go-interop/raw_echo_server	[no test files]
+ok  	netz-quic-go-interop/websocket_h3	(cached)
+netz HTTP/3 client interoperated with quic-go: version=2 cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 concurrent_sibling=true stream_window=8192 read_before_cancel>=12288 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1
+quic-go HTTP/3 interop server listening=127.0.0.1:39531 ca_out=/tmp/tmp.yORC4jsVfc/quic-go-ca.pem
+quic-go HTTP/3 server interoperated with netz: version=2 cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=8192 large_response=131072 request_body=12 request_trailers=1 response_body=16 response_trailers=1
+netz HTTP/3 client followed quic-go redirect: version=2 status=200 redirects=1 method=POST->GET credentials=same-origin connections=2
+netz HTTP/3 pool reused quic-go connection through redirect: version=2 requests=2 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=quic-go-netpoll
+netz HTTP/3 shared pool routed quic-go redirect transaction: version=2 requests=2 redirects=1 idle=1 total=1 routes=1 unrelated_events_preserved=true client_io=zio-std-io server_io=quic-go-netpoll
+quic-go HTTP/3 interop server listening=127.0.0.1:34673 ca_out=/tmp/tmp.yORC4jsVfc/quic-go-redirect-ca.pem
+quic-go HTTP/3 server verified netz redirects: version=2 requests=6 redirects=3 method=POST-to-GET credentials=same-origin connections=4 exclusive_pool_connections=1 shared_pool_connections=1
+2026/11/01 11:57:57 connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?. See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+quic-go HTTP/3 client interoperated with netz: version=2 cancel=H3_REQUEST_CANCELLED dropped_stop_sending=1 stop_sending_transmissions>=2 concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1
+netz HTTP/3 quic-go interop server listening on 127.0.0.1:41697
+netz HTTP/3 server interoperated with quic-go: version=2 origin=true cancel=H3_REQUEST_CANCELLED concurrent_sibling=true connection_reused=true stream_window=8192 read_before_cancel=12288 large_response=131072 request_body=15 request_trailers=1 response_body=13 response_trailers=1
+netz HTTP/3 client observed quic-go informational responses: version=2 statuses=103,102 final=200 body=5
+quic-go HTTP/3 informational server listening=127.0.0.1:52032 ca_out=/tmp/tmp.yORC4jsVfc/quic-go-informational-ca.pem
+quic-go HTTP/3 server sent informational responses to netz: version=2 statuses=103,102 final=200 body=5
+quic-go HTTP/3 client received netz informational responses: version=2 statuses=103,102 final=200 body=5
+netz HTTP/3 quic-go interop server listening on 127.0.0.1:37341
+netz HTTP/3 server sent informational responses to quic-go: version=2 origin=true statuses=103,102 final=200 body=5

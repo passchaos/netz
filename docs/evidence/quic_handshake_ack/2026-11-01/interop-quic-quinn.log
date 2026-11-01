@@ -1,0 +1,32 @@
+Certificate request self-signature ok
+subject=CN=localhost
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=quinn-tokio-rustls
+netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop server listening=127.0.0.1:36210
+Quinn interop runtime: endpoint_role=server client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop runtime: endpoint_role=client client_io=quinn-tokio-rustls server_io=zio-std-io
+Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC interop server listening on 127.0.0.1:58206
+netz QUIC interop runtime: endpoint_role=server client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=quinn-tokio-rustls
+netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-client-outbound dropped_datagrams=1 unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop server listening=127.0.0.1:32978
+Quinn interop runtime: endpoint_role=server client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=loss fault_scope=netz-client-outbound netz_datagrams_received=2 first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop runtime: endpoint_role=client client_io=quinn-tokio-rustls server_io=zio-std-io
+Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound netz_datagrams_received=2 first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC interop server listening on 127.0.0.1:33053
+netz QUIC interop runtime: endpoint_role=server client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound dropped_datagrams=1 unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=quinn-tokio-rustls
+netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-client-outbound reordered_pairs=1 all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop server listening=127.0.0.1:49298
+Quinn interop runtime: endpoint_role=server client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=reorder fault_scope=netz-client-outbound netz_datagrams_received=3 reordered=true all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls
+Quinn interop runtime: endpoint_role=client client_io=quinn-tokio-rustls server_io=zio-std-io
+Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound netz_datagrams_received=3 reordered=true all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC interop server listening on 127.0.0.1:55826
+netz QUIC interop runtime: endpoint_role=server client_io=quinn-tokio-rustls server_io=zio-std-io
+netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound reordered_pairs=1 all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io

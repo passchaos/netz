@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "commit": "5b125a4c408364c62c01d96970559b15059f9e3e",
+  "fixes": [
+    "da91fe3a fix(quic): start initial flight at accepted packet number",
+    "d3f4ee73 fix(quic): acknowledge first handshake CRYPTO packet"
+  ],
+  "purpose": "Re-run external client-role interop gates after the two client handshake fixes.",
+  "environment": {
+    "go": "go1.24.13 linux/arm64",
+    "go_bin": "/nav_env/Temp/go1.24.13/bin/go",
+    "note": "An initial quic-go invocation without GO_BIN failed with exit 127 because go was not on PATH; every recorded gate below uses the pinned GO_BIN."
+  },
+  "command_template": "GO_BIN=/nav_env/Temp/go1.24.13/bin/go zig build <target> -Doptimize=ReleaseFast",
+  "gates": [
+    {
+      "target": "interop-quic-quinn",
+      "peer": "Quinn (tokio/rustls)",
+      "exit": 0,
+      "log": "2026-11-01/interop-quic-quinn.log",
+      "result": "Both roles passed certificate verification, hq-interop ALPN, DATAGRAM, deterministic loss and reorder on netz outbound, surviving stream sibling 4 and exact peer close."
+    },
+    {
+      "target": "interop-quic-s2n",
+      "peer": "s2n-quic (tokio)",
+      "exit": 0,
+      "log": "2026-11-01/interop-quic-s2n.log",
+      "result": "Both roles passed 32-stream mixed churn with 16 FIN and 16 reset terminals, exact bytes/checksum/reset mask, and deterministic loss and reorder on netz outbound."
+    },
+    {
+      "target": "interop-quic-quic-go",
+      "peer": "quic-go",
+      "exit": 0,
+      "log": "2026-11-01/interop-quic-quic-go.log",
+      "result": "Both roles passed, including migration, migration-loss and NAT-rebinding cases."
+    },
+    {
+      "target": "interop-http3-quic-go",
+      "peer": "quic-go v0.59.0",
+      "exit": 0,
+      "log": "2026-11-01/interop-http3-quic-go.log",
+      "result": "Both roles passed QUIC v1/v2 with H3_REQUEST_CANCELLED, dropped STOP_SENDING, concurrent sibling, connection reuse, 8-KiB stream window, 128-KiB response and request/response trailers."
+    },
+    {
+      "target": "interop-websocket-h3-quic-go",
+      "peer": "quic-go v0.59.0",
+      "exit": 0,
+      "log": "2026-11-01/interop-websocket-h3-quic-go.log",
+      "result": "Both roles passed RFC 9220 Extended CONNECT, Origin, subprotocol, masked fragmented text, permessage-deflate without context takeover, ping/pong, close 1000 and reciprocal KeyUpdate."
+    },
+    {
+      "target": "interop-http3-tquic",
+      "peer": "tquic",
+      "exit": 0,
+      "log": "2026-11-01/interop-http3-tquic.log",
+      "result": "Both roles passed GET, byte Range, POST, ORIGIN, connection reuse and two-phase GOAWAY(4) drain with Retry disabled and forced."
+    },
+    {
+      "target": "interop-webtransport-wtransport",
+      "peer": "wtransport (Quinn/tokio)",
+      "exit": 0,
+      "log": "2026-11-01/interop-webtransport-wtransport.log",
+      "result": "Both roles passed CONNECT admission headers, DATAGRAM with oversized rejection, bidi/uni streams, reset/stop, concurrent sibling, reuse, drain before connection close and peer close."
+    }
+  ]
+}

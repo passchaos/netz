@@ -1,0 +1,11 @@
+wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1381 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io
+netz WebTransport interop server listening on 127.0.0.1:53906
+netz WebTransport interop accepted CONNECT with admission metadata
+netz WebTransport interop received DATAGRAM
+netz WebTransport interop received bidi
+netz WebTransport interop received uni
+netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io
+netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio
+WTRANSPORT_PORT=45881
+wtransport server rejected CONNECT with 404
+wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1381 oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio

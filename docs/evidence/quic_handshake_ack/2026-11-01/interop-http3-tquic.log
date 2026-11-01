@@ -1,0 +1,35 @@
+    Finished `release` profile [optimized] target(s) in 0.24s
+netz HTTP/3 client interoperated with tquic: verified=true retry=false requests=3 connection_reused=true get=9 range=206/5 post_md5=32 client_io=zio-std-io server_io=tquic-mio
+netz HTTP/3 client interoperated with tquic: verified=true retry=true requests=3 connection_reused=true get=9 range=206/5 post_md5=32 client_io=zio-std-io server_io=tquic-mio
+netz HTTP/3 client gracefully drained tquic: retry=false goaway=0 active_stream=0 active_drained=true next_rejected=true client_io=zio-std-io server_io=tquic-mio
+netz HTTP/3 client gracefully drained tquic: retry=true goaway=0 active_stream=0 active_drained=true next_rejected=true client_io=zio-std-io server_io=tquic-mio
+
+finished in 2.782251ms, 1000.00 req/s
+conns: total 1, finish 1, success 1, failure 0
+requests: sent 2, finish 2, success 2
+time for request(µs):
+	min: 146.00, max: 186.00, mean: 166.00, sd: 28.28
+	median: 166.00, p80: 186.00, p90: 186.00, p99: 186.00
+recv pkts: 9, sent pkts: 9, lost pkts: 0
+recv bytes: 2197, sent bytes: 3298, lost bytes: 0
+
+netz HTTP/3 tquic interop server listening
+netz HTTP/3 server interoperated with tquic: retry=false origin=true requests=2 connection_reused=true bodies=14,14 client_io=tquic-mio server_io=zio-std-io
+
+finished in 2.94538ms, 1000.00 req/s
+conns: total 1, finish 1, success 1, failure 0
+requests: sent 2, finish 2, success 2
+time for request(µs):
+	min: 185.00, max: 266.00, mean: 225.50, sd: 57.28
+	median: 225.50, p80: 266.00, p90: 266.00, p99: 266.00
+recv pkts: 9, sent pkts: 10, lost pkts: 0
+recv bytes: 2205, sent bytes: 3658, lost bytes: 0
+
+netz HTTP/3 tquic interop server listening
+netz HTTP/3 server interoperated with tquic: retry=true origin=true requests=2 connection_reused=true bodies=14,14 client_io=tquic-mio server_io=zio-std-io
+tquic HTTP/3 client gracefully drained by netz: retry=false initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io
+netz HTTP/3 tquic interop server listening
+netz HTTP/3 server gracefully drained tquic: retry=false origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io
+tquic HTTP/3 client gracefully drained by netz: retry=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io
+netz HTTP/3 tquic interop server listening
+netz HTTP/3 server gracefully drained tquic: retry=true origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io

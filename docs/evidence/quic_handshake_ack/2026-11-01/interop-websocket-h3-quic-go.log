@@ -1,0 +1,14 @@
+ok  	netz-quic-go-interop/websocket_h3	(cached)
+netz RFC 9220 client interoperated with quic-go: version=1 extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=zio-std-io server_io=quic-go-netpoll
+quic-go RFC 9220 server listening=127.0.0.1:51483 ca_out=/tmp/tmp.pL54GsFCA0/quic-go-ca.pem
+quic-go RFC 9220 server interoperated with netz: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll
+quic-go RFC 9220 client interoperated with netz: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=quic-go-netpoll server_io=zio-std-io
+netz RFC 9220 quic-go interop server listening on 127.0.0.1:54465
+netz RFC 9220 server interoperated with quic-go: version=1 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=quic-go-netpoll server_io=zio-std-io
+ok  	netz-quic-go-interop/websocket_h3	(cached)
+netz RFC 9220 client interoperated with quic-go: version=2 extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=zio-std-io server_io=quic-go-netpoll
+quic-go RFC 9220 server listening=127.0.0.1:58188 ca_out=/tmp/tmp.keREWJD7PY/quic-go-ca.pem
+quic-go RFC 9220 server interoperated with netz: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll
+quic-go RFC 9220 client interoperated with netz: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=quic-go-netpoll server_io=zio-std-io
+netz RFC 9220 quic-go interop server listening on 127.0.0.1:59841
+netz RFC 9220 server interoperated with quic-go: version=2 extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates=1 peer_key_updates=1 client_io=quic-go-netpoll server_io=zio-std-io
