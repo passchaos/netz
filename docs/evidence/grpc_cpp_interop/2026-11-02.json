@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "full grpc-cpp forward interop matrix after shared-channel allocator and direct-ring decode changes",
+  "decision": "accepted",
+  "head": {
+    "commit": "da351750ad3145ae7cb348e77ae0623f787f746d",
+    "description": "allocator A/B evidence commit; includes direct call-ring decoding, Publication.reclaim early return, BlockCache and Backend.initCached"
+  },
+  "scope": {
+    "direction": "netz client to upstream grpc-cpp interop_server",
+    "transports": [
+      "h2c",
+      "certificate-verified TLS with h2 ALPN"
+    ],
+    "routes": [
+      "direct loopback",
+      "Hyper CONNECT proxy",
+      "SOCKS5 CONNECT proxy"
+    ],
+    "policies": [
+      "single endpoint",
+      "pick_first two-endpoint failover"
+    ],
+    "case_shape": "canonical 271828-byte request and 314159-byte response with full-byte validation"
+  },
+  "reference": {
+    "implementation": "grpc-core C++ interop_server built from the pinned checkout",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source_clean": true,
+    "tls_fixtures": [
+      "src/core/tsi/test_creds/ca.pem",
+      "src/core/tsi/test_creds/server1.pem",
+      "src/core/tsi/test_creds/server1.key"
+    ]
+  },
+  "toolchain": {
+    "zig": "0.16.0",
+    "bazel": "8.7.0",
+    "bazel_sha256": "bfe9558bd8a2ecfe4841ec46c0dbccb4b469fe22d81f2f859de0de222b3e7ce3",
+    "bazel_source": "https://github.com/bazelbuild/bazel/releases/download/8.7.0/bazel-8.7.0-linux-arm64",
+    "cc": "/usr/bin/gcc",
+    "cxx": "/usr/bin/g++",
+    "client_io": "zio-std-io",
+    "server_io": "grpc-cpp-posix-event-engine",
+    "host_bazel_note": "The host pixi Bazel reports 8.6.0- (@non-git), which the upstream 8.7.0 pin rejects; the official arm64 8.7.0 release binary was downloaded and passed via BAZEL."
+  },
+  "command": "BAZEL=/nav_env/Temp/bazel-8.7.0 GRPC_ROOT=/nav_env/Work/grpc TMPDIR=/nav_env/Temp/netz-grpc-tmp GRPC_BAZEL_OUTPUT_USER_ROOT=/nav_env/Temp/netz-grpc-bazel GRPC_CPP_BUILD_TIMEOUT=45m LD_LIBRARY_PATH=/home/passchaos/.pixi/envs/bazel/lib CC=/usr/bin/gcc CXX=/usr/bin/g++ zig build interop-grpc-cpp -Doptimize=ReleaseFast --summary all",
+  "results": {
+    "gate_exit": 0,
+    "bazel_build": "3492 total actions completed successfully in 368.111s",
+    "h2c": "netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large orca=per-rpc+oob shared_orca=oob-background+fanout rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine",
+    "tls": "netz gRPC client interoperated with grpc-cpp: transport=tls (same case matrix), certificate verified, ALPN h2",
+    "hyper_connect": "netz gRPC tunneled grpc-cpp TLS through Hyper CONNECT proxy: rpcs=2 tls_identity=foo.test.google.fr certificate_verified=true alpn=h2 proxy_authorization=isolated connection_reused=true",
+    "socks5": "netz gRPC tunneled grpc-cpp TLS through SOCKS5: rpcs=2 remote_dns=true rfc1929=true auth_downgrade=false certificate_verified=true alpn=h2 connection_reused=true",
+    "pick_first_h2c": "phase one endpoint=0 then failover endpoint_order=0->1, rpcs=2, request_bytes=271828, response_bytes=314159",
+    "pick_first_tls": "phase one endpoint=0 then failover endpoint_order=0->1, rpcs=2, certificate_verified=true, alpn=h2"
+  },
+  "source_sha256": {
+    "src/alloc.zig": "a6cac8cb88facbb291519bca48997b01f220b813ddc39e748ecc3749ea4a3e54",
+    "src/runtime.zig": "eca1ac3956afefcbc7093231171bde5c94e25f3ee52f9e86615a28eda872c70d",
+    "src/grpc/channel/shared/stream/read.zig": "9c343187b95d22254ed3b390be2d1f5418f2ff90b7c5b3af64b5e105b7f962bf",
+    "src/grpc/channel/shared/config_generation.zig": "236069ff960a8a7dc0ed9b1883c4bf2289ce2c30617a5dfe2d62a58c8e52b319",
+    "tools/interop/grpc_cpp.sh": "342ffdd10335afa6104792585e4f8b96342f3b94d28e1ce07eea839dacfa5d8c"
+  },
+  "conclusion": "The post-allocator shared-channel path preserves the complete grpc-cpp forward matrix: h2c and TLS direct transport, Hyper CONNECT and SOCKS5 tunnels, and two-endpoint pick_first failover over both transports. No wire, status, deadline, cancellation, metadata, compression, ORCA, or keepalive behavior regressed."
+}
