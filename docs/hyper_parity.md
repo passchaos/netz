@@ -2877,7 +2877,14 @@ opens one association per exclusive QUIC connection, keeps origin and Alt-Svc
 DNS at the proxy, preserves SNI/`:authority`, carries the request deadline over
 proxy setup plus QUIC/TLS, and falls back from optional 0-RTT through the same
 route rather than bypassing it. A Python/quic-go process gate proves HTTPS
-discovery followed by certificate-verified H3 over the proxy. Shared-H3
+discovery followed by certificate-verified H3 over the proxy. A fresh
+2026-11-01 SOCKS5 run passed the HTTP matrix with one redirect, cleartext
+HTTP/1, cleartext HTTP/2, direct h2, TLS 1.3 hostname verification, five tunnels
+and two pooled requests over one tunnel, and the UDP ASSOCIATE matrix with
+RFC 1929 authentication, wildcard relay normalization, fragment rejection,
+control lifetime and QUIC ECN/GSO/GRO fallback; see
+`docs/evidence/http_socks5/2026-11-01.json` and
+`docs/evidence/socks5_udp/2026-11-01.json`. Shared-H3
 mode now initializes that association lazily on the first H3 request, so Pool
 construction and TCP fallback remain free of proxy network side effects. Its
 bounded `max_socks5_shared_routes` registry assigns stable per-domain logical

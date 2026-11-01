@@ -1267,7 +1267,13 @@ end-to-end credentials and clears origin TLS tickets as before. A two-authority
 independent gate checks one WS redirect plus two WSS reconnect chains, exact
 six-tunnel ordering, Authorization isolation, TLS 1.3 hostname verification,
 and retained rejection metadata. That gate found and now guards a duplicate
-rejection-transport close in the initial adapter implementation.
+rejection-transport close in the initial adapter implementation. A fresh
+2026-11-01 run repeated one WS redirect and two WSS reconnect chains across
+exactly six fresh tunnels with remote DNS, Authorization isolation, TLS 1.3
+hostname verification and one deadline; the companion HTTP/WS/MQTT matrix also
+passed HTTP/HTTPS, WS/WSS, MQTT-over-WS and MQTT-over-WSS. See
+`docs/evidence/websocket_socks5_redirect/2026-11-01.json` and
+`docs/evidence/websocket_socks5/2026-11-01.json`.
 
 RFC 9220 URI clients now expose the same SOCKS5 route through HTTP/3 UDP
 ASSOCIATE. The URI host remains proxy-resolved while TLS SNI, certificate

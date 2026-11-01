@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-http-websocket-socks5",
+  "command": "zig build interop-http-websocket-socks5 -Doptimize=ReleaseFast",
+  "result": "HTTP WebSocket SOCKS5 interoperability passed: http=true https=true ws=true wss=true mqtt_ws=true mqtt_wss=true remote_dns=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket",
+  "coverage": [
+    "HTTP and certificate-verified HTTPS through a remote-DNS SOCKS5 tunnel",
+    "WS and WSS WebSocket composition",
+    "MQTT over WS and WSS through the same first-class SOCKS5 route",
+    "TLS 1.3 hostname verification and one absolute deadline"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

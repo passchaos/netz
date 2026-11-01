@@ -787,7 +787,12 @@ handshake-promotion window, completes PATH_CHALLENGE/PATH_RESPONSE, switches
 the server's local endpoint, and exchanges a post-migration PING. Ordinary
 pending sequence-0 CIDs retain strict original-peer isolation; only the
 already-advertised alternate CID admits a new tuple before promotion, and the
-established connection still authenticates it before changing path state. The
+established connection still authenticates it before changing path state. A
+fresh 2026-11-01 `interop-http3-socks5-pool` run passed three origins, HTTP/1
+discovery, four H3 requests, three TCP tunnels and one UDP association, with
+two active/four total QUIC connections, domain-route limit 2, route churn,
+remote DNS, a shared endpoint, TLS 1.3 and a complete close deadline; see
+`docs/evidence/http3_socks5_pool/2026-11-01.json`. The
 shared HTTP/3 client pool now owns an optional opposite-family endpoint and exposes
 preferred migration through its lease. Its single receive owner races both
 sockets with `std.Io.Select`, folds the dispatcher timer into the same absolute

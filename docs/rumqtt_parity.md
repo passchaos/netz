@@ -196,7 +196,9 @@ origin-authenticated TLS Upgrade, and `mqtt.websocket_runtime.Client` adopts
 the negotiated `mqtt` connection while preserving the remaining absolute
 budget. The cross-protocol peer gate proves remote proxy DNS, Host/SNI
 isolation, TLS 1.3 hostname verification, and MQTT CONNECT/PING/DISCONNECT over
-both WS and WSS.
+both WS and WSS. A fresh 2026-11-01 run passed HTTP/HTTPS, WS/WSS, MQTT-over-WS
+and MQTT-over-WSS through remote-DNS SOCKS5 with TLS 1.3 hostname verification
+and one absolute deadline; see `docs/evidence/websocket_socks5/2026-11-01.json`.
 
 MQTT-over-WebSocket HTTP redirects and reconnect connectors also accept the
 same first-class SOCKS5 route. Every reconnect restarts the complete redirect
@@ -204,7 +206,10 @@ chain and opens a new tunnel for every authority; one caller deadline spans the
 SOCKS, TLS, Upgrade, MQTT authentication, and CONNACK phases. The independent
 multi-authority gate runs the connector twice, requires four WSS tunnels after
 the two-tunnel WS redirect, and proves Authorization is present at each initial
-origin but absent after the cross-port redirect.
+origin but absent after the cross-port redirect. A fresh 2026-11-01 run
+repeated one WS redirect and two WSS reconnect chains across exactly six
+tunnels with isolated credentials; see
+`docs/evidence/websocket_socks5_redirect/2026-11-01.json`.
 
 ## One-way inbound broker bridge
 

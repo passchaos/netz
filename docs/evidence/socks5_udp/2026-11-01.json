@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-socks5-udp",
+  "command": "zig build interop-socks5-udp -Doptimize=ReleaseFast",
+  "result": "SOCKS5 UDP interoperability passed: command=udp-associate auth=rfc1929 remote_dns=true wildcard_reply=true fragments=rejected control_lifetime=true quic_endpoint=true ecn_gso_gro=fallback client_io=zio-std-io peer_io=python-socket",
+  "coverage": [
+    "RFC 1928 UDP ASSOCIATE with RFC 1929 authentication and proxy-side destination DNS",
+    "Wildcard relay reply normalization and explicit fragment rejection",
+    "Control-connection-owned association lifetime",
+    "QUIC endpoint adoption with destination-path ECN and GSO/GRO fallback"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

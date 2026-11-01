@@ -1,0 +1,1 @@
+HTTP SOCKS5 interoperability passed: redirects=1 http1=true http2=true http2_direct=true alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=5 remote_dns=true credentials_isolated=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket

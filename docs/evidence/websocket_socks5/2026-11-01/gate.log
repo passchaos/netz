@@ -1,0 +1,1 @@
+HTTP WebSocket SOCKS5 interoperability passed: http=true https=true ws=true wss=true mqtt_ws=true mqtt_wss=true remote_dns=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket

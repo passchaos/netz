@@ -1,0 +1,1 @@
+WebSocket SOCKS5 redirect interoperability passed: ws_redirects=1 mqtt_reconnect_chains=2 fresh_tunnels=6 remote_dns=true credentials_isolated=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket

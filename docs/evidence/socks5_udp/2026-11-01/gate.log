@@ -1,0 +1,1 @@
+SOCKS5 UDP interoperability passed: command=udp-associate auth=rfc1929 remote_dns=true wildcard_reply=true fragments=rejected control_lifetime=true quic_endpoint=true ecn_gso_gro=fallback client_io=zio-std-io peer_io=python-socket
