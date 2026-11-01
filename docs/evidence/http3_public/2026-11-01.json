@@ -20,7 +20,7 @@
   },
   "packet_number_fix": {
     "change": "InitialResponseFilter records the accepted packet number; openInitialCryptoFlightFrom starts at that number and is bounded by the initial-flight deadline.",
-    "remaining_failure": "The handshake still times out before the server Handshake flight completes; the next target is coalesced Initial/Handshake packet handling or X25519MLKEM768 interoperability.",
+    "remaining_failure": "The handshake still times out after the ServerHello. Forcing X25519-only also times out, so the key exchange group is not the cause; the next target is the server Handshake flight or coalesced Initial/Handshake packet processing.",
     "result": "The client now processes the server Initial packet 1 and parses the ServerHello (AES-128-GCM-SHA256, X25519MLKEM768)."
   },
   "passing": [
@@ -35,5 +35,6 @@
     "The handshake still times out after the ServerHello; the remaining boundary is the server Handshake flight or the X25519MLKEM768 shared-secret path.",
     "Accepting the ACK-only packet unconditionally was tested and reintroduced the documented split-ClientHello deadlock, so the filter still rejects ACK-only later fragments."
   ],
-  "status": "partial"
+  "status": "partial",
+  "x25519_only_test": "The fetch example was temporarily restricted to key_exchange_groups=&.{.x25519}; quic.tech still returned HandshakeTimeout after the ServerHello."
 }

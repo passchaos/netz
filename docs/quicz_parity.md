@@ -65,9 +65,10 @@ rejected packet 0, and `openInitialCryptoFlightFrom` then expected packet 0
 and discarded packet 1. The filter now records the accepted packet number, so
 packet 1 is processed, the initial-flight read is deadline-bounded, and the
 ServerHello parses as AES-128-GCM-SHA256 with X25519MLKEM768. The handshake
-still times out after the ServerHello; the next target is the server Handshake
-flight or X25519MLKEM768 shared-secret interoperability. Accepting the
-ACK-only packet unconditionally was tested and reintroduced the documented
+still times out after the ServerHello; forcing X25519-only also times out, so
+the key exchange group is not the cause. The next target is the server
+Handshake flight or coalesced Initial/Handshake packet processing. Accepting
+the ACK-only packet unconditionally was tested and reintroduced the documented
 split-ClientHello deadlock, so ACK-only later fragments remain rejected. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
