@@ -27,7 +27,7 @@ pub const Plan = struct {
         var entry = state.retention.head;
         while (entry) |cached| : (entry = cached.next) {
             if (next == null or state.options.removed_child_retention.nanoseconds == 0 or
-                !query.weightedParent(next.?.root, cached.node.path[0 .. cached.node.path.len - 1])) try self.use(cached);
+                !query.compositeParent(next.?.root, cached.node.path[0 .. cached.node.path.len - 1])) try self.use(cached);
         }
         var reused: usize = 0;
         for (self.used.items) |cached| if (cached.expires_ns > self.now) {
@@ -44,9 +44,23 @@ pub const Plan = struct {
         if (!query.equal(old.path, next.path)) return;
         if (old.kind == .outlier) return self.collect(old.kind.outlier.child, if (next.kind == .outlier) next.kind.outlier.child else next, generation, transfer);
         if (next.kind == .outlier) return self.collect(old, next.kind.outlier.child, generation, transfer);
-        if (old.kind != .weighted or next.kind != .weighted) return;
-        for (old.kind.weighted.children) |child| {
-            const present = for (next.kind.weighted.children) |candidate| {
+        if (std.meta.activeTag(old.kind) != std.meta.activeTag(next.kind)) return;
+        switch (next.kind) {
+            .leaf => {},
+            .outlier => unreachable,
+            .weighted => |weighted| {
+                try self.retainRemoved(old.kind.weighted.children, weighted.children, generation);
+                try self.reusePresent(old.kind.weighted.children, weighted.children, generation, transfer);
+            },
+            .priority => |priority| {
+                try self.retainRemoved(old.kind.priority.children, priority.children, generation);
+                try self.reusePresent(old.kind.priority.children, priority.children, generation, transfer);
+            },
+        }
+    }
+    fn retainRemoved(self: *Plan, old_children: anytype, next_children: anytype, generation: *Generation) State.Failure!void {
+        for (old_children) |child| {
+            const present = for (next_children) |candidate| {
                 if (query.equal(child.node.path, candidate.node.path)) break true;
             } else false;
             if (present or self.state.options.removed_child_retention.nanoseconds == 0) continue;
@@ -55,8 +69,10 @@ pub const Plan = struct {
             self.added = entry;
             self.added_count += 1;
         }
-        for (next.kind.weighted.children) |child| {
-            const prior = for (old.kind.weighted.children) |candidate| {
+    }
+    fn reusePresent(self: *Plan, old_children: anytype, next_children: anytype, generation: *Generation, transfer: *Transfer) State.Failure!void {
+        for (next_children) |child| {
+            const prior = for (old_children) |candidate| {
                 if (query.equal(child.node.path, candidate.node.path)) break candidate.node;
             } else null;
             if (prior) |node| {

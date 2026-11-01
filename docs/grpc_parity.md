@@ -674,9 +674,22 @@ behavior. The deadline starts at the first priority pick and is retained across
 picks, so a child that briefly reaches READY does not restart the window.
 Default-interval regressions assert that a
 lower-priority READY child is still bypassed inside the window, while zero
-duration and elapsed-time regressions assert ordered fallback. The full gRPC
-Debug gate passes 553/553 with these changes. Child-retention semantics for
-removed priority children remain explicit integration work.
+duration and elapsed-time regressions assert ordered fallback.
+
+SharedChannel now also applies grpc-core child retention to priority trees.
+When a config update removes a priority child, its subtree and matching
+endpoint transports are retained for `removed_child_retention` (15 minutes by
+default) instead of being retired immediately. The retained node keeps its
+leaf round-robin, ring-hash, WRR and outlier state, and a later update that
+re-adds the same child path reactivates the original transport rather than
+dialing a new one. Retention recurses through nested priority and weighted
+targets, uses the existing bounded `max_retained_children` admission, and is
+disabled by a zero retention duration. Leaf and outlier state is also
+transferred when a priority tree survives an update with the same child paths.
+The full gRPC Debug gate passes 556/556 with these changes. grpc-core's
+lower-priority deactivation timer and lazy child creation remain open: netz
+still starts every configured priority child eagerly and retains configured
+children until they are removed from the config.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.

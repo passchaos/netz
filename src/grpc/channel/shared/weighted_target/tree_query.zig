@@ -21,17 +21,23 @@ pub fn accepts(node: anytype, path: []const []const u8) bool {
         } else false,
     };
 }
-pub fn weightedParent(node: anytype, path: []const []const u8) bool {
+/// True when the node at `path` is a composite policy that can own retained
+/// children: weighted_target or priority.
+pub fn compositeParent(node: anytype, path: []const []const u8) bool {
     if (!matches(path, node.path)) return false;
-    if (equal(node.path, path) and node.kind == .weighted) return true;
+    if (equal(node.path, path)) return switch (node.kind) {
+        .weighted, .priority => true,
+        .outlier => |wrapper| compositeParent(wrapper.child, path),
+        .leaf => false,
+    };
     return switch (node.kind) {
         .leaf => false,
-        .outlier => |wrapper| weightedParent(wrapper.child, path),
+        .outlier => |wrapper| compositeParent(wrapper.child, path),
         .weighted => |weighted| for (weighted.children) |child| {
-            if (weightedParent(child.node, path)) break true;
+            if (compositeParent(child.node, path)) break true;
         } else false,
         .priority => |priority| for (priority.children) |child| {
-            if (weightedParent(child.node, path)) break true;
+            if (compositeParent(child.node, path)) break true;
         } else false,
     };
 }

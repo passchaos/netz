@@ -34,7 +34,15 @@ pub fn Plan(comptime Runtime: type) type {
                 .leaf => |leaf| {
                     if (old.kind.leaf.policy == leaf.policy) try self.pairs.append(self.allocator, .{ .old = old, .next = next });
                 },
-                .priority => {},
+                .priority => |priority| {
+                    for (priority.children) |child| {
+                        for (old.kind.priority.children) |prior| {
+                            if (!samePath(prior.node.path, child.node.path)) continue;
+                            try self.collect(prior.node, child.node);
+                            break;
+                        }
+                    }
+                },
                 .outlier => |wrapper| {
                     try self.pairs.append(self.allocator, .{ .old = old, .next = next });
                     try self.collect(old.kind.outlier.child, wrapper.child);
