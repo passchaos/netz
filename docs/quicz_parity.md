@@ -71,10 +71,14 @@ decrypts the first server Handshake packet (packet number 13, 642 bytes of
 TLS data), then the next `source.receiveTimeout` with the passive deadline
 remains blocked past a 70-second observation. `strace` shows the client
 waiting in `io_uring` for a datagram; the handshake client has no `sendAck`
-path and opens server packets without acknowledging them. The next target is
-handshake ACK generation or the server's remaining Handshake flight. Accepting
-the ACK-only packet unconditionally was tested and reintroduced the documented
-split-ClientHello deadlock, so ACK-only later fragments remain rejected. See
+path and opens server packets without acknowledging them. A temporary ACK for
+Handshake packet 13, sealed with client Handshake keys at packet number 0,
+produced `ConnectionClosed` rather than unlocking the server flight. Correct
+ACK generation must coordinate its packet number with the client Finished.
+The next target is integrated handshake ACK and client-Finished packet-number
+ownership. Accepting the ACK-only packet unconditionally was tested and
+reintroduced the documented split-ClientHello deadlock, so ACK-only later
+fragments remain rejected. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long

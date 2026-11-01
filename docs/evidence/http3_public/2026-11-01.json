@@ -11,13 +11,14 @@
     "note": "OpenSSL QUICv1/TLS1.3 handshake succeeds from the same host, so this is a netz client interop issue rather than reachability. The netz client receives no server response across five retries."
   },
   "handshake_ack_generation": "The handshake receive/open paths do not generate ACK frames; they only open packets and reassemble CRYPTO data.",
+  "handshake_ack_test": "Manual ACK packet 0 for the first Handshake packet caused ConnectionClosed; it did not advance the server flight. The next target is integrated handshake ACK and client-Finished packet-number ownership.",
   "handshake_flight_observation": {
     "coalesced_tail": 0,
     "first_handshake_packet": {
       "packet_number": 13,
       "payload_bytes": 646
     },
-    "next_receive": "strace shows the client waiting in io_uring for a datagram after the first Handshake packet. The handshake client has no sendAck path and opens server packets without acknowledging them, so the next target is handshake ACK generation or server flight continuation.",
+    "next_receive": "strace shows the client waiting in io_uring for a datagram after the first Handshake packet. A temporary ACK for Handshake packet 13, sealed with client Handshake keys at packet number 0, produced ConnectionClosed on the next attempt rather than unlocking the server flight. Correct ACK generation must coordinate its packet number with the client Finished.",
     "reassembled_tls_bytes": 642
   },
   "logs": {
