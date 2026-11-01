@@ -193,6 +193,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     selected.add_argument("--only-connect-property-linear", action="store_true")
+    selected.add_argument(
+        "--only-required-client-id-prefix",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -7571,6 +7575,15 @@ def main() -> None:
                 "MQTT CONNECT property linearity integration passed: "
                 "upstream=01-connect-575314 properties=5001 schedule=ABBA "
                 "cpu_ratio_lt_20=true "
+                f"mosquitto_process_sources={source_count} " + RUNTIME
+            )
+            return
+        if args.only_required_client_id_prefix:
+            run_required_client_id_prefix_case(args.broker, directory)
+            print(
+                "MQTT required Client ID prefix integration passed: "
+                "admission=true reload=true rollback=true "
+                "existing-connection-retained=true "
                 f"mosquitto_process_sources={source_count} " + RUNTIME
             )
             return

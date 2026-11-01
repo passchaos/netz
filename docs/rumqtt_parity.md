@@ -4908,7 +4908,11 @@ requiring a restart. The production config gate reloads `secure-` to `next-`,
 keeps the already accepted connection usable, rejects clients matching only the
 old prefix, accepts clients matching the new prefix, applies the reloaded
 `auto_id_prefix` to assigned identifiers, and preserves the committed policy
-when a restart-required global change aborts the reload.
+when a restart-required global change aborts the reload. The focused process
+gate is
+`zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- --only-required-client-id-prefix`,
+which reported `admission=true reload=true rollback=true
+existing-connection-retained=true` on 2026-11-02.
 Four source-locked malformed-Will cases directly port Mosquitto's
 `07-will-no-flag.py` and
 `07-will-null-topic.py` for MQTT 3.1.1 and MQTT 5. They remove the complete
