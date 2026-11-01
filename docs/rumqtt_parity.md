@@ -1663,6 +1663,16 @@ while leaving those historical captures separately scoped. Full per-sample
 records, build logs, environment hashes and the strict checker output are in
 `docs/evidence/mqtt_broker_matrix/2026-11-01-qos2.json`.
 
+A 100,000-message serial QoS 2 perf capture (2,048 cycles:Pu samples, zero
+lost) explains the remaining 0.917× as distributed runtime cost rather than a
+single protocol hotspot: zio clock/executor/scheduler work is about a quarter
+of sampled cycles (`__kernel_clock_gettime` 11.67%, `Executor.run` 3.84%,
+`AnyTask.yield` 3.31%, `processCleanup` 2.97%, `Loop.addInternal` 2.57%,
+`Loop.poll` 1.77%), while the largest protocol costs are delivery flush
+(4.63%), `handlePubRel` (3.41%), route matching (3.18%) and packet receive/parse
+(2.98%). Full flat and call-graph reports are in
+`docs/evidence/mqtt_broker_profile/2026-11-01.json`.
+
 The runner and both strict checkers now accept
 `MQTT_SESSION_EXPIRY_SECONDS=0..4294967295` and bind its canonical value into
 the driver result, run-order, environment, shape, allocator, and completion

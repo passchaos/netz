@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-01",
+  "status": "captured",
+  "purpose": "Profile the remaining serial QoS 2 throughput gap (netz 27,398-29,592 vs Mosquitto 29,880 publishes/s).",
+  "workload": {
+    "broker": "netz-mqtt-vector-broker ReleaseFast, 260,100,040-byte unstripped artifact",
+    "broker_sha256": "55614ee1adae4c689c08a7930710b4bb7fb2b129f21cf987930975f32727b4b1",
+    "driver_sha256": "6480a985c8eb562147c6cfcd96e7d5dfdea2cbda8f971ae76a53d2b3450a1700",
+    "address": "127.0.0.1:18832",
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "qos": 2,
+    "publisher_window": 1,
+    "warmup_messages": 512,
+    "measured_messages": 100000,
+    "result": {
+      "publishes_per_s": 29592,
+      "p50_ns": 24305,
+      "p99_ns": 46223,
+      "p999_ns": 118112,
+      "checksum": 24625440,
+      "complete": true
+    }
+  },
+  "capture": {
+    "command": "perf record -F 999 -g --call-graph dwarf -o /tmp/mqtt-serial-qos2-long.perf.data -- <broker> --bind=127.0.0.1:18832 --connections=16 --max-queued-deliveries=1024",
+    "event": "cycles:Pu",
+    "samples": 2048,
+    "lost_samples": 0,
+    "host_load_note": "The shared 12-CPU host also ran unrelated build/test jobs during this capture; ranking is from 2,048 samples with zero losses, but absolute cycle shares are approximate."
+  },
+  "top_self_symbols": [
+    { "symbol": "__kernel_clock_gettime", "self_percent": 11.67 },
+    { "symbol": "mqtt.broker.Broker.flushSlotLockedMode", "self_percent": 4.63 },
+    { "symbol": "runtime.Executor.run", "self_percent": 3.84 },
+    { "symbol": "mqtt.broker.Broker.handlePubRel", "self_percent": 3.41 },
+    { "symbol": "task.AnyTask.yield", "self_percent": 3.31 },
+    { "symbol": "mqtt.router.Router.matchTrie", "self_percent": 3.18 },
+    { "symbol": "mqtt.runtime.receive.events.Reader.read", "self_percent": 2.98 },
+    { "symbol": "runtime.Executor.processCleanup", "self_percent": 2.97 },
+    { "symbol": "ev.loop.Loop.addInternal", "self_percent": 2.57 },
+    { "symbol": "mqtt.broker.Broker.enqueuePublishLocked", "self_percent": 2.08 },
+    { "symbol": "mqtt.broker.Broker.routePublish", "self_percent": 2.06 },
+    { "symbol": "mqtt.runtime.Connection.readBrokerEventOptionsOut", "self_percent": 1.80 },
+    { "symbol": "ev.loop.Loop.poll", "self_percent": 1.77 },
+    { "symbol": "mqtt.runtime.packet_identifiers.State.contains", "self_percent": 1.51 },
+    { "symbol": "mqtt.mod.validateMqttUtf8String", "self_percent": 1.48 }
+  ],
+  "conclusions": [
+    "No single netz protocol function dominates the serial QoS 2 cost.",
+    "Zio event-loop, executor, scheduler and clock work account for roughly a quarter of sampled cycles: __kernel_clock_gettime 11.67%, Executor.run 3.84%, AnyTask.yield 3.31%, processCleanup 2.97%, Loop.addInternal 2.57% and Loop.poll 1.77%.",
+    "The largest protocol-side costs are the delivery flush path (4.63%), handlePubRel (3.41%), route matching (3.18%) and packet receive/parse (2.98%).",
+    "Closing the remaining serial QoS 2 gap requires reducing per-message event-loop wakeups/clock reads or protocol work; no isolated hotspot is available for a small local patch."
+  ],
+  "artifacts": "2026-11-01/"
+}
