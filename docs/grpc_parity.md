@@ -670,11 +670,14 @@ READY child for the configured `priority_failover_timeout`, which defaults to
 grpc-core's 10 seconds. `Channel.Options.priority_failover_timeout` and the
 matching SharedChannel option override that interval, and a zero duration makes
 immediate fallback explicit for tests and callers that want the pre-timer
-behavior. The deadline starts at the first priority pick and is retained across
-picks, so a child that briefly reaches READY does not restart the window.
-Default-interval regressions assert that a
-lower-priority READY child is still bypassed inside the window, while zero
-duration and elapsed-time regressions assert ordered fallback.
+behavior. The timer follows grpc-core's child state machine: it starts when the
+first priority is CONNECTING, is cancelled while that child is READY or IDLE,
+and restarts only after the child has been READY or IDLE again. A first child
+that reports TRANSIENT_FAILURE makes lower priorities eligible immediately,
+matching grpc-core, rather than waiting out the interval. Regressions cover a
+stalled high child that remains CONNECTING for the whole window, immediate
+fallback after a failed high child, ordered fallback with a zero duration, and
+a previously-READY child whose reconnect restarts the window.
 
 SharedChannel now also applies grpc-core child retention to priority trees.
 When a config update removes a priority child, its subtree and matching
@@ -686,7 +689,7 @@ dialing a new one. Retention recurses through nested priority and weighted
 targets, uses the existing bounded `max_retained_children` admission, and is
 disabled by a zero retention duration. Leaf and outlier state is also
 transferred when a priority tree survives an update with the same child paths.
-The full gRPC Debug gate passes 556/556 with these changes. grpc-core's
+The full gRPC Debug gate passes 558/558 with these changes. grpc-core's
 lower-priority deactivation timer and lazy child creation remain open: netz
 still starts every configured priority child eagerly and retains configured
 children until they are removed from the config.

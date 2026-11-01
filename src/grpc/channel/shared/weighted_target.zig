@@ -67,6 +67,9 @@ pub fn Runtime(comptime State: type) type {
             children: []PriorityChild,
             order: []usize,
             failover_started_ns: ?i96 = null,
+            /// grpc-core only restarts the failover timer after the first
+            /// priority has been READY or IDLE since the previous attempt.
+            failover_can_start: bool = true,
         };
 
         const Node = struct {
@@ -379,8 +382,7 @@ pub fn Runtime(comptime State: type) type {
                 @memcpy(child_path[0..path.len], path);
                 child_path[path.len] = child_config.name;
                 child.* = .{
-                    .ignore_reresolution_requests =
-                        child_config.ignore_reresolution_requests,
+                    .ignore_reresolution_requests = child_config.ignore_reresolution_requests,
                     .node = try self.build(child_config.child, child_path),
                 };
                 initialized += 1;
@@ -582,17 +584,40 @@ pub fn Runtime(comptime State: type) type {
                     unreachable;
                 },
                 .priority => |*priority| blk: {
+                    if (priority.order.len == 0) break :blk null;
                     const now = std.Io.Clock.awake.now(state.io).nanoseconds;
-                    if (priority.failover_started_ns == null) {
-                        priority.failover_started_ns = now;
+                    const first = priority.children[priority.order[0]];
+                    const first_state = self.aggregateNode(first.node, state);
+                    switch (first_state) {
+                        .ready, .idle => {
+                            priority.failover_started_ns = null;
+                            priority.failover_can_start = true;
+                        },
+                        .connecting => {
+                            if (priority.failover_started_ns == null and
+                                priority.failover_can_start)
+                            {
+                                priority.failover_started_ns = now;
+                            }
+                            priority.failover_can_start = false;
+                        },
+                        .transient_failure, .shutdown => {
+                            priority.failover_started_ns = null;
+                            priority.failover_can_start = false;
+                        },
                     }
-                    const failover_open = self.priority_failover_timeout_ns <= 0 or
-                        now >= priority.failover_started_ns.? +|
-                            self.priority_failover_timeout_ns;
+                    const failover_open = self.priority_failover_timeout_ns <= 0 or switch (first_state) {
+                        .ready, .idle => false,
+                        .transient_failure, .shutdown => true,
+                        .connecting => timer: {
+                            const started = priority.failover_started_ns orelse
+                                break :timer true;
+                            break :timer now >= started +|
+                                self.priority_failover_timeout_ns;
+                        },
+                    };
                     if (!failover_open) {
-                        if (priority.order.len == 0) break :blk null;
-                        const first = priority.children[priority.order[0]];
-                        if (self.aggregateNode(first.node, state) == .ready) {
+                        if (first_state == .ready) {
                             break :blk try self.pickNode(
                                 first.node,
                                 state,
