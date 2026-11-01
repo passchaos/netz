@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "scope": "supplemental full Autobahn fuzzingserver client-side run (not the digest-locked PyPy gate)",
+  "client": {
+    "binary": "netz-websocket-autobahn-client ReleaseFast",
+    "agent": "netz",
+    "client_io": "zio-std-io",
+    "transport": "cleartext ws://127.0.0.1:9001"
+  },
+  "toolchain": {
+    "python": "CPython 2.7.15 (pixi/conda-forge environment)",
+    "autobahn": "0.10.9",
+    "autobahn_testsuite": "25.10.1",
+    "twisted": "20.3.0",
+    "cryptography": "2.7",
+    "note": "This environment is not the gate's digest-locked PyPy 7.3.20 identity. Docker/Podman and the locked PyPy archive are unavailable on this host."
+  },
+  "testee_protocol": [
+    "GET-style WebSocket connection to /getCaseCount",
+    "One fresh connection per /runCase?case=<N>&agent=netz",
+    "Echo every complete text or binary message",
+    "Final /updateReports?agent=netz connection"
+  ],
+  "compression": {
+    "offer": "permessage-deflate with context takeover, client_max_window_bits=15 and server_max_window_bits=15",
+    "effect": "Without explicit window-bit offers the 72 cases 13.3.x-13.6.x were reported UNIMPLEMENTED; with the offers they all passed."
+  },
+  "results": {
+    "total": 517,
+    "ok": 514,
+    "informational": 3,
+    "non_strict": 0,
+    "failed": 0,
+    "unimplemented": 0,
+    "informational_cases": [
+      "7.1.6",
+      "7.13.1",
+      "7.13.2"
+    ]
+  },
+  "conclusions": [
+    "All 517 Autobahn Testsuite 25.10.1 client cases executed against the netz WebSocket client with zero failed, zero non-strict and zero unimplemented results.",
+    "The three INFORMATIONAL results are the suite's expected close-behavior cases 7.1.6, 7.13.1 and 7.13.2 with close codes 1000/1002.",
+    "Explicit client/server window-bit offers are required for the 13.3-13.6 compression cases; the adapter now offers both at 15.",
+    "This is supplemental evidence: the strict repository gate still requires the digest-locked PyPy identity or the container image."
+  ],
+  "artifacts": "2026-11-01/",
+  "log": "2026-11-01/client.log",
+  "server_log": "2026-11-01/fuzzingserver.log",
+  "report": "2026-11-01/index.json"
+}

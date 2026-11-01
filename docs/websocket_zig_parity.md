@@ -1833,7 +1833,15 @@ applying TCP-only socket options.
    Because that environment is not the digest-locked PyPy identity, these runs
    are recorded separately and do not replace the strict gate; see
    `docs/evidence/websocket_autobahn_full/2026-11-01.json` and
-   `docs/evidence/websocket_autobahn_full_tls/2026-11-01.json`. The separate
+   `docs/evidence/websocket_autobahn_full_tls/2026-11-01.json`. A companion
+   2026-11-01 fuzzingserver run drove the netz client through the same 517
+   cases using `/getCaseCount`, one fresh `/runCase` connection per case and a
+   final `/updateReports`; it reported 514 OK, 3 INFORMATIONAL (the same
+   close-behavior cases), 0 failed, 0 non-strict and 0 unimplemented. The
+   client testee offers permessage-deflate with context takeover and both
+   window-bit limits at 15; without those offers the 72 cases 13.3.x-13.6.x
+   were reported unimplemented, and with them all 72 passed. Evidence is in
+   `docs/evidence/websocket_autobahn_client/2026-11-01.json`. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
    without Docker: eight simultaneous peers verify masked text/binary echo,
    Ping/Pong and Close. A separate connection interleaves Ping/Pong inside a

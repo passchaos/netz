@@ -1906,6 +1906,27 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    const websocket_autobahn_client = b.addExecutable(.{
+        .name = "netz-websocket-autobahn-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_autobahn_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_autobahn_client_step = b.step(
+        "build-websocket-autobahn-client",
+        "Build the Autobahn fuzzing-server echo testee",
+    );
+    websocket_autobahn_client_step.dependOn(&websocket_autobahn_client.step);
+    const websocket_autobahn_client_install = b.addInstallArtifact(
+        websocket_autobahn_client,
+        .{},
+    );
+    websocket_autobahn_client_step.dependOn(&websocket_autobahn_client_install.step);
     const websocket_autobahn = b.addSystemCommand(
         &.{"tools/interop/websocket_autobahn.sh"},
     );
