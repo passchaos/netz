@@ -861,6 +861,47 @@ test "Initial CRYPTO opener accepts a packet slice from validated padded datagra
     );
 }
 
+test "Initial CRYPTO opener accepts a nonzero first packet number" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "nonzero1";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    const handshake_message = [_]u8{ 1, 0, 0, 0 };
+    const packet = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = "peer",
+        .packet_number = 1,
+        .crypto_data = &handshake_message,
+    });
+    defer allocator.free(packet);
+
+    var received = try target.open(
+        &endpoint,
+        endpoint.address(),
+        packet,
+        keys,
+        .{
+            .expected_packet_number = 1,
+            .max_crypto_buffer = 64,
+        },
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &handshake_message,
+        received.crypto_data,
+    );
+}
+
 test "Initial CRYPTO payload extraction skips ACK without allocation" {
     const allocator = std.testing.allocator;
     var payload: std.ArrayList(u8) = .empty;

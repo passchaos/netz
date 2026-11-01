@@ -14,7 +14,14 @@
     "gate": "2026-11-01/gate.log",
     "meta": "2026-11-01/meta.log",
     "quic_tech_netz": "2026-11-01/quic_tech.netz.log",
-    "quic_tech_openssl": "2026-11-01/quic_tech.openssl.log"
+    "quic_tech_openssl": "2026-11-01/quic_tech.openssl.log",
+    "quic_tech_packet_number_fix": "2026-11-01/quic_tech.packet_number_fix.log",
+    "quic_tech_packet_number_fix_rf": "2026-11-01/quic_tech.packet_number_fix.rf.log"
+  },
+  "packet_number_fix": {
+    "change": "InitialResponseFilter records the accepted packet number; openInitialCryptoFlightFrom starts at that number and is bounded by the initial-flight deadline.",
+    "remaining_failure": "The handshake still times out before the server Handshake flight completes; the next target is coalesced Initial/Handshake packet handling or X25519MLKEM768 interoperability.",
+    "result": "The client now processes the server Initial packet 1 and parses the ServerHello (AES-128-GCM-SHA256, X25519MLKEM768)."
   },
   "passing": [
     "robotics.bytedance.com verified HEAD",
@@ -23,9 +30,10 @@
   ],
   "root_cause_analysis": [
     "The quic.tech server responds with an ACK-only Initial packet number zero followed by an Initial packet number one carrying CRYPTO offset zero.",
-    "InitialResponseFilter currently rejects the ACK-only packet; openInitialCryptoFlightFrom then expects packet number zero and discards the CRYPTO packet number one, so the ServerHello is never processed.",
-    "Accepting the ACK-only packet unconditionally was tested and reintroduced the documented split-ClientHello deadlock: the client leaves the PTO loop and stops retransmitting the missing ClientHello fragments.",
-    "A correct fix must authenticate and accept the first ACK-only Initial, process coalesced or subsequent Initial CRYPTO packets, and retain ClientHello retransmission when the initial flight deadline expires."
+    "The filter originally rejected the ACK-only packet; openInitialCryptoFlightFrom then expected packet number zero and discarded packet one.",
+    "The filter now records the accepted packet number, so packet one is processed and the ServerHello is parsed.",
+    "The handshake still times out after the ServerHello; the remaining boundary is the server Handshake flight or the X25519MLKEM768 shared-secret path.",
+    "Accepting the ACK-only packet unconditionally was tested and reintroduced the documented split-ClientHello deadlock, so the filter still rejects ACK-only later fragments."
   ],
   "status": "partial"
 }

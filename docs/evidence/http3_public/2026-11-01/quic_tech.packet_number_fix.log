@@ -1,0 +1,5 @@
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+debug(zio): Spawning thread 0
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null

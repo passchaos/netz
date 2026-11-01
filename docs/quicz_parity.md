@@ -58,15 +58,17 @@ Fresh 2026-11-01 live fuzz gates passed `fuzz-http3-connection`,
 A 2026-11-01 public-endpoint run passed ByteDance, Cloudflare and Meta. The
 quic.tech:8443 case still times out with `HandshakeTimeout` even though an
 OpenSSL QUICv1/TLS1.3 handshake to the same endpoint succeeds from this host;
-the netz client receives no server response across five retries. This is an
-open netz client interop issue, not a reachability failure. Root-cause
+the netz client receives no server response across five retries. Root-cause
 instrumentation shows the server sends an ACK-only Initial packet 0 followed
-by an Initial packet 1 carrying CRYPTO offset zero. The current
-`InitialResponseFilter` rejects packet 0, and `openInitialCryptoFlightFrom`
-then expects packet 0 and discards packet 1, so the ServerHello is never
-processed. Accepting packet 0 unconditionally was tested and reintroduced the
-documented split-ClientHello deadlock; the fix must also preserve ClientHello
-retransmission when the initial-flight deadline expires. See
+by an Initial packet 1 carrying CRYPTO offset zero. The filter originally
+rejected packet 0, and `openInitialCryptoFlightFrom` then expected packet 0
+and discarded packet 1. The filter now records the accepted packet number, so
+packet 1 is processed, the initial-flight read is deadline-bounded, and the
+ServerHello parses as AES-128-GCM-SHA256 with X25519MLKEM768. The handshake
+still times out after the ServerHello; the next target is the server Handshake
+flight or X25519MLKEM768 shared-secret interoperability. Accepting the
+ACK-only packet unconditionally was tested and reintroduced the documented
+split-ClientHello deadlock, so ACK-only later fragments remain rejected. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long

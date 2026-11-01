@@ -1,0 +1,33 @@
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null
+HTTP/3 fetch attempt 1/5 failed: HandshakeTimeout
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null
+HTTP/3 fetch attempt 2/5 failed: HandshakeTimeout
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null
+HTTP/3 fetch attempt 3/5 failed: HandshakeTimeout
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null
+HTTP/3 fetch attempt 4/5 failed: HandshakeTimeout
+openFrom accepted=1 expected=1
+openFrom ok crypto_len=1178
+SERVERHELLO cipher=.aes_128_gcm_sha256 group=.x25519_mlkem768 psk=null
+HTTP/3 fetch attempt 5/5 failed: HandshakeTimeout
+error: HandshakeTimeout
+run-http3-fetch
++- run exe netz-http3-fetch failure
+error: process exited with error code 1
+failed command: ./.zig-cache/o/eea270153df1094c2d27abd18a2ce8a7/netz-http3-fetch "--alt-svc=h3=\":8443\"; ma=86400" --expect-status=200 --min-body-bytes=400 https://quic.tech/
+
+Build Summary: 6/8 steps succeeded (1 failed)
+run-http3-fetch transitive failure
++- run exe netz-http3-fetch failure
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/d74715ec3a78b2745342ff6dbbb99d75/build /nav_env/Temp/zig-aarch64-linux-0.16.0/zig /nav_env/Temp/zig-aarch64-linux-0.16.0/lib /nav_env/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x17ff8f1d -Zf47fdf6a812079c2 run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc=h3=":8443"; ma=86400 --expect-status=200 --min-body-bytes=400 https://quic.tech/

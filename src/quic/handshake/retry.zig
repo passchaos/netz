@@ -43,9 +43,13 @@ pub const InitialResponseFilter = struct {
     initial_keys: quic.protection.PacketProtectionKeys,
     retry_already_processed: bool,
     allow_zero_fixed_bit: bool = false,
+    /// Packet number of the Initial packet that satisfied the CRYPTO filter.
+    /// The initial-flight reader must start at that number when an ACK-only
+    /// packet zero preceded it.
+    accepted_packet_number: ?u64 = null,
 
     pub fn accept(context: *anyopaque, bytes: []const u8) bool {
-        const self: *const InitialResponseFilter =
+        const self: *InitialResponseFilter =
             @ptrCast(@alignCast(context));
         if (isVersionNegotiationDatagram(bytes)) return true;
         if (quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
@@ -60,7 +64,11 @@ pub const InitialResponseFilter = struct {
                     self.initial_source_connection_id,
                 ))
             {
-                return self.initialContainsCryptoOffsetZero(bytes[0..info.len]);
+                const packet_number = self.initialContainsCryptoOffsetZero(
+                    bytes[0..info.len],
+                ) orelse return false;
+                self.accepted_packet_number = packet_number;
+                return true;
             }
         } else |_| {}
         if (self.retry_already_processed) return false;
@@ -83,14 +91,14 @@ pub const InitialResponseFilter = struct {
     fn initialContainsCryptoOffsetZero(
         self: *const InitialResponseFilter,
         bytes: []const u8,
-    ) bool {
+    ) ?u64 {
         var packet = quic.protection.openInitialPacketWithFixedBitPolicy(
             self.allocator,
             self.initial_keys,
             bytes,
             0,
             self.allow_zero_fixed_bit,
-        ) catch return false;
+        ) catch return null;
         defer packet.deinit(self.allocator);
 
         var offset: usize = 0;
@@ -98,21 +106,21 @@ pub const InitialResponseFilter = struct {
             var parsed = quic.parseFrameOwned(
                 self.allocator,
                 packet.payload[offset..],
-            ) catch return false;
+            ) catch return null;
             defer parsed.deinitOwned(self.allocator);
             // A valid Initial close terminates the attempt even though it
             // carries no CRYPTO offset zero. Authentication failures still
             // remain inside the PTO loop above.
-            if (parsed.frame == .connection_close) return true;
+            if (parsed.frame == .connection_close) return packet.packet_number;
             if (parsed.frame == .crypto and
                 parsed.frame.crypto.offset == 0 and
                 parsed.frame.crypto.data.len != 0)
             {
-                return true;
+                return packet.packet_number;
             }
             offset += parsed.consumed;
         }
-        return false;
+        return null;
     }
 };
 
@@ -343,6 +351,7 @@ test "client Initial response filter requires CRYPTO offset zero in v1 and v2" {
             &filter,
             ack_packet,
         ));
+        try std.testing.expectEqual(@as(?u64, null), filter.accepted_packet_number);
 
         var crypto_payload: std.ArrayList(u8) = .empty;
         defer crypto_payload.deinit(allocator);
@@ -369,6 +378,7 @@ test "client Initial response filter requires CRYPTO offset zero in v1 and v2" {
             &filter,
             suffix_packet,
         ));
+        try std.testing.expectEqual(@as(?u64, null), filter.accepted_packet_number);
 
         crypto_payload.clearRetainingCapacity();
         try quic.crypto_stream.writeCryptoFrames(
@@ -394,5 +404,6 @@ test "client Initial response filter requires CRYPTO offset zero in v1 and v2" {
             &filter,
             prefix_packet,
         ));
+        try std.testing.expectEqual(@as(?u64, 2), filter.accepted_packet_number);
     }
 }

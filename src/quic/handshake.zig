@@ -1704,6 +1704,7 @@ fn connectAttempt(
     var sent_early_data_packet_count: usize = 0;
     var sent_early_data_packet_len: usize = 0;
     var server_datagram: quic.runtime.OwnedBytes = undefined;
+    var accepted_initial_packet_number: ?u64 = null;
 
     while (true) {
         var response_filter = retry.InitialResponseFilter{
@@ -1822,6 +1823,8 @@ fn connectAttempt(
             next_initial_packet_number = send_context.next_packet_number;
         }
 
+        accepted_initial_packet_number =
+            response_filter.accepted_packet_number;
         _ = quic.retry_flow.validateClientPacket(
             endpoint.allocator,
             .{
@@ -1936,6 +1939,11 @@ fn connectAttempt(
             continue;
         };
 
+        const initial_flight_deadline: ?std.Io.Clock.Timestamp = switch (server_initial_deadline) {
+            .none => null,
+            .deadline => |deadline| deadline,
+            .duration => |duration| .fromNow(endpoint.io, duration),
+        };
         break quic.initial_exchange.openInitialCryptoFlightFrom(
             endpoint,
             source,
@@ -1943,10 +1951,11 @@ fn connectAttempt(
             server_datagram.bytes[0..server_initial_info.len],
             active_initial_secrets.server,
             .{
-                .expected_packet_number = 0,
+                .expected_packet_number = accepted_initial_packet_number orelse 0,
                 .max_crypto_buffer = options.max_crypto_buffer,
                 .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
                 .discard_invalid_first = true,
+                .deadline = initial_flight_deadline,
             },
         ) catch |err| switch (err) {
             error.DiscardedInitialPacket => {
