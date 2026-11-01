@@ -1626,6 +1626,15 @@ durable session-packet priority, queue order, inflight limits and push-back
 rollback. Evidence is in
 `docs/evidence/mqtt_broker_profile/2026-11-01-balanced-qos1.json`.
 
+A narrower attempt to skip that Session drain when
+`slot.state.session_persistent` is false was rejected: the focused
+`broker enforces unsubscribe and outgoing delivery access control` test failed
+consistently on three runs with the client observing `ConnectionClosed` while
+waiting for a retained PUBLISH. Transient Sessions can still carry Session
+packets, so the unconditional drain remains; reverting the change restored
+144/144 tests. See
+`docs/evidence/mqtt_transient_session_drain_rejected/2026-11-01.json`.
+
 The remaining gap has moved to tail latency and memory. Balanced-32x32 p99 is
 10.64 ms versus 4.22 ms, and serial p999 is 287.9 us versus 69.4 us. Broker RSS
 is 1.16–1.65× Mosquitto in four shapes and 0.66× in balanced-32x32. The host

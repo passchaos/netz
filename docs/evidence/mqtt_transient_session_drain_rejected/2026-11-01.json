@@ -1,0 +1,11 @@
+{
+  "date": "2026-11-01",
+  "status": "rejected",
+  "experiment": "Skip takeSessionPacketAssumeLocked in flushSlotLockedMode when slot.state.session_persistent is false.",
+  "motivation": "The balanced QoS 1 profile attributed 20.36% self to flushSlotLockedMode; the session drain runs once per queued delivery.",
+  "verification": {
+    "focused_test": "broker enforces unsubscribe and outgoing delivery access control",
+    "result": "failed consistently on 3 consecutive runs with the client observing ConnectionClosed while waiting for a retained PUBLISH; reverting the change restored 144/144 tests"
+  },
+  "conclusion": "Transient Sessions can still carry Session packets, so the unconditional drain is required. The code change was reverted; no source change remains."
+}
