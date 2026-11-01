@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-01",
+  "status": "captured",
+  "purpose": "Profile the balanced 32x32 QoS 1 shape to explain its higher p50/p99 than Mosquitto.",
+  "workload": {
+    "broker": "netz-mqtt-vector-broker ReleaseFast (unstripped artifact)",
+    "publishers": 32,
+    "subscribers": 32,
+    "payload_bytes": 64,
+    "publisher_window": 4,
+    "server_queue_capacity": 3200,
+    "max_outgoing_inflight": 64,
+    "warmup_messages": 256,
+    "measured_messages": 3200,
+    "result": {
+      "publishes_per_s": 5731,
+      "deliveries_per_s": 183408,
+      "p50_ns": 5308563,
+      "p99_ns": 14572758,
+      "p999_ns": 17205049,
+      "checksum": 5861376,
+      "complete": true
+    }
+  },
+  "capture": {
+    "command": "perf record -F 999 -g --call-graph dwarf -o /tmp/mqtt-balanced-qos1.perf.data -- <broker> --bind=127.0.0.1:18840 --connections=64 --max-queued-deliveries=3200 --max-outgoing-inflight=64",
+    "event": "cycles:Pu",
+    "samples": 425,
+    "lost_samples": 0,
+    "host_load_note": "The shared host also ran unrelated jobs; absolute latency is not a clean benchmark, but the 425-sample symbol ranking is zero-loss and consistent with the serial QoS 2 profile."
+  },
+  "top_self_symbols": [
+    { "symbol": "mqtt.broker.Broker.flushSlotLockedMode", "self_percent": 20.36, "children_percent": 44.48 },
+    { "symbol": "task.AnyTask.yield", "self_percent": 6.54 },
+    { "symbol": "mqtt.runtime.Connection.writePublish", "self_percent": 5.64, "children_percent": 18.52 },
+    { "symbol": "mqtt.broker.ClientTask.run", "self_percent": 3.42 },
+    { "symbol": "mqtt.runtime.receive.events.Reader.read", "self_percent": 3.45, "children_percent": 9.51 },
+    { "symbol": "mqtt.runtime.Connection.readBrokerEventOptionsOut", "self_percent": 1.43, "children_percent": 11.35 },
+    { "symbol": "mqtt.broker.Broker.flushMatches", "self_percent": 1.81, "children_percent": 13.07 },
+    { "symbol": "mqtt.mod.writePublishPrefix", "self_percent": 1.29, "children_percent": 8.03 },
+    { "symbol": "mqtt.broker.Broker.routePublish", "self_percent": 0.21, "children_percent": 18.68 },
+    { "symbol": "sync.Futex.wait", "self_percent": 7.60 }
+  ],
+  "conclusions": [
+    "The delivery flush path is the dominant protocol cost: flushSlotLockedMode is 20.36% self and 44.48% children.",
+    "Lock contention is visible: sync.Futex.wait is 7.60% self, and flushSlotLockedMode takes the global state lock once per queued delivery.",
+    "Network encoding/writing is the next layer: writePublish is 5.64% self and 18.52% children, with writeAllSlices at 12.78% children.",
+    "The next candidate is batching transient queue pops under one state-lock critical section (for example up to eight deliveries), then writing outside the lock. It must preserve durable session-packet priority, queue order, inflight-limit checks and push-back rollback.",
+    "AnyTask.yield at 6.54% and the runtime loop remain a separate scheduling cost."
+  ],
+  "artifacts": "2026-11-01-balanced-qos1/",
+  "log": "2026-11-01-balanced-qos1/flat.txt"
+}

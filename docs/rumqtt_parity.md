@@ -1616,6 +1616,16 @@ the pre-QoS-1-writer throughput deficit for current code while leaving that
 historical capture separately scoped. QoS 2 and durable-Session captures remain
 separate measurements.
 
+A balanced-32x32 QoS 1 profile (425 zero-loss `cycles:Pu` samples) places the
+delivery flush path first: `flushSlotLockedMode` is 20.36% self and 44.48%
+children, `writePublish` is 5.64% self and 18.52% children, `sync.Futex.wait`
+is 7.60%, and `AnyTask.yield` is 6.54%. The flush loop takes the global state
+lock once per queued delivery. The next candidate is batching transient queue
+pops under one critical section and writing outside the lock while preserving
+durable session-packet priority, queue order, inflight limits and push-back
+rollback. Evidence is in
+`docs/evidence/mqtt_broker_profile/2026-11-01-balanced-qos1.json`.
+
 The remaining gap has moved to tail latency and memory. Balanced-32x32 p99 is
 10.64 ms versus 4.22 ms, and serial p999 is 287.9 us versus 69.4 us. Broker RSS
 is 1.16–1.65× Mosquitto in four shapes and 0.66× in balanced-32x32. The host

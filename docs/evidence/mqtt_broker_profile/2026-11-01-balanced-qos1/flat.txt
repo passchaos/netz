@@ -1,0 +1,365 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 425  of event 'cycles:Pu'
+# Event count (approx.): 333424081
+#
+# Children      Self  Command          Shared Object            Symbol                                                                                                                       
+# ........  ........  ...............  .......................  .............................................................................................................................
+#
+    79.88%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] coro.coroutines.Coroutine.setup.CoroutineData.entrypointFn
+    79.88%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.startFn
+    79.57%     3.42%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientTask.run
+    79.44%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientTask.runLoopMode__anon_70848 (inlined)
+    79.15%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ListenerAcceptTask.run (inlined)
+    78.68%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Group.async__anon_35807.TypeErased.start
+    44.48%    20.36%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.flushSlotLockedMode
+    36.68%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientTask.flushAcknowledgedSessionWhileLocked (inlined)
+    36.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.flushSlotLocked (inlined)
+    18.68%     0.21%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.routePublish
+    18.68%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.routeReleasedPublish (inlined)
+    18.68%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.routeReleasedPublishMode__anon_75933 (inlined)
+    18.52%     5.64%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writePublish
+    16.49%     0.71%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.waitForIo
+    15.93%     6.54%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.yield__anon_48130
+    15.92%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.wait__anon_43608
+    15.92%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.waitTask__anon_48061 (inlined)
+    15.52%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.yieldFrom__anon_48141 (inlined)
+    13.82%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writePublishUntil (inlined)
+    13.39%     0.33%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.dispatchNetworkPlan
+    13.07%     1.81%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.flushMatches
+    12.91%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.Transport.writePacketParts
+    12.87%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.fanout.flush.run__anon_75514 (inlined)
+    12.78%     0.50%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] internal.stream_io.writeAllSlices
+    12.78%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] internal.stream_io.writeAllParts (inlined)
+    12.68%     0.33%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] io.netWriteImpl
+    12.67%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientTask.readNextBrokerEvent__anon_71064 (inlined)
+    12.67%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.readBrokerEventWithManagedKeepAliveIntoPrefixedOut (inlined)
+    11.35%     1.43%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.readBrokerEventOptionsOut
+     9.51%     3.45%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.receive.events.Reader(mqtt.runtime.Connection.EventReceive__struct_74936).read
+     8.06%     0.82%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeValidatedPublishUntil
+     8.03%     1.29%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.writePublishPrefix
+     7.68%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.receive.events.Reader(mqtt.runtime.Connection.EventReceive__struct_74936).readTransport (inlined)
+     7.60%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] sync.Futex.wait
+     7.59%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.loopAdd (inlined)
+     7.46%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.Loop.add (inlined)
+     7.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.flushSlotLocked (inlined)
+     7.13%     7.13%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.Loop.addInternal
+     6.75%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.publishWirePlan (inlined)
+     6.69%     0.34%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.run
+     6.64%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt_broker.main
+     6.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Group.await (inlined)
+     6.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] group.Group.wait (inlined)
+     6.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] io.groupAwaitImpl
+     6.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.serveListeners
+     6.55%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt_broker.serveBroker
+     6.42%     4.60%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validatePropertiesFor
+     6.35%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.acknowledgement.apply.Controller(mqtt.runtime.Connection.AckApplication__struct_71003).puback (inlined)
+     6.25%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.Transport.readPacketWithInactivityObserverIntoWithPrefix (inlined)
+     6.06%     1.30%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.readTcpPacketWithPolicy__anon_75179
+     5.87%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.park (inlined)
+     5.87%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.parkAndSearch (inlined)
+     5.42%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.switchOut (inlined)
+     5.37%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(ev.completion.Completion.State).cmpxchgWeak (inlined)
+     5.37%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.casState (inlined)
+     5.37%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.enterRunning (inlined)
+     5.28%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.getNextTask (inlined)
+     5.28%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.takeSessionPacketAssumeLocked (inlined)
+     5.10%     1.32%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.AckPacket.validateFields
+     5.10%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.AckPacket.validate (inlined)
+     4.98%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] utils.local_run_queue.LocalRunQueue(utils.wait_queue.WaitNode,true).pop (inlined)
+     4.78%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] utils.local_run_queue.LocalRunQueue(utils.wait_queue.WaitNode,true).casHead (inlined)
+     4.76%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] io.netReadImpl
+     4.76%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.readTcpSome__anon_63020
+     4.69%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.lockUncancelable (inlined)
+     4.67%     1.53%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.enqueuePublishLocked__anon_75599
+     4.04%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.unlock (inlined)
+     3.98%     3.98%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.propertiesEncodedLen
+     3.87%     2.66%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] io.futexWaitUncancelableImpl
+     3.87%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.futexWaitUncancelable__anon_15703 (inlined)
+     3.86%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validatePropertyNotDuplicate (inlined)
+     3.78%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validateAckProperties (inlined)
+     3.78%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validateAuthenticationPropertiesForContext (inlined)
+     3.68%     3.68%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.prepareAutomaticTopicAliasAssumeCapacity
+     3.54%     2.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.drainDispatched
+     3.04%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.signal (inlined)
+     3.00%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.prepareAutomaticTopicAliasInternal__anon_65140 (inlined)
+     2.81%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.Loop.poll
+     2.80%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.topic_alias.Table.findTopic (inlined)
+     2.64%     2.64%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.processCleanup
+     2.64%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.drainIntoInternal__anon_65909 (inlined)
+     2.64%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.drainOneForDetachTrackingSnapshotChange (inlined)
+     2.39%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.reserveOutgoingPublish (inlined)
+     2.39%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.reservation.Controller(mqtt.runtime.Connection.OutgoingIdentifiers__struct_64693).reserve (inlined)
+     2.33%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(u32).cmpxchgWeak (inlined)
+     2.32%     2.19%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.State.containsOutgoing
+     2.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).value (inlined)
+     2.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).get (inlined)
+     2.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getAdapted__anon_64124 (inlined)
+     2.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getContext (inlined)
+     2.31%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.beginShield (inlined)
+     2.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getIndex__anon_64071 (inlined)
+     2.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.queuedCount (inlined)
+     2.15%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.routeId (inlined)
+     2.15%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.getSession (inlined)
+     2.14%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.beginShield (inlined)
+     2.07%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.recordPublishSent (inlined)
+     2.07%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publish_counters.Counters.recordSent (inlined)
+     1.99%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(task.AnyTask.State).cmpxchgWeak (inlined)
+     1.95%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.hasOutgoingPacketIdentifier (inlined)
+     1.94%     1.94%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.scheduleTask
+     1.86%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publish_counters.saturatingAdd (inlined)
+     1.82%     1.82%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validateProperty
+     1.82%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.propertyHasExpectedWireType (inlined)
+     1.75%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.lockUncancelable (inlined)
+     1.75%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(Io.Mutex.State).cmpxchgStrong (inlined)
+     1.74%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(usize).cmpxchgWeak (inlined)
+     1.65%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.Backend(.auto).poll (inlined)
+     1.65%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.io_uring.poll (inlined)
+     1.64%     1.27%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.validateOutgoingPublish
+     1.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.lockUncancelable (inlined)
+     1.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(Io.Mutex.State).cmpxchgStrong (inlined)
+     1.54%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.wake (inlined)
+     1.33%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.finishBrokerEventInto (inlined)
+     1.31%     1.31%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.compactDeliveryQueue
+     1.31%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mem.copyForwards__anon_65307 (inlined)
+     1.31%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.ensureDeliveryReservationCapacity
+     1.28%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(task.AnyTask.State).cmpxchgWeak (inlined)
+     1.26%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Delivery.deinit (inlined)
+     1.21%     1.21%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).add
+     1.21%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.State.add
+     1.18%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validatePacketFlags (inlined)
+     1.16%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.writePublishPrefixAssumeCapacity (inlined)
+     1.14%     1.14%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.renewManagedKeepAlive
+     1.13%     0.22%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeValidatedPublishUntil
+     1.07%     1.07%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.State.remove
+     1.07%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.releaseOutgoingPublish (inlined)
+     0.99%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e2e1574
+     0.94%     0.94%  netz-mqtt-vecto  [vdso]                   [.] __kernel_clock_gettime
+     0.94%     0.00%  netz-mqtt-vecto  libc.so.6                [.] __GI___clock_gettime (inlined)
+     0.94%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.LoopState.updateNow (inlined)
+     0.94%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.time.now (inlined)
+     0.94%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).remove (inlined)
+     0.85%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).Iterator.next (inlined)
+     0.81%     0.81%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.LoopState.markCompletedFromBackend
+     0.81%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.LoopState.markCompleted (inlined)
+     0.81%     0.81%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_delivery.Plan.initWithScratch
+     0.79%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.popDelivery (inlined)
+     0.77%     0.77%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.Publication.release
+     0.75%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).contains (inlined)
+     0.75%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).value (inlined)
+     0.73%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.concurrent__anon_75686.TypeErased.start
+     0.73%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.flushSlotLocked (inlined)
+     0.73%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.DeliveryWriterTask.run (inlined)
+     0.72%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.io_uring_enter2 (inlined)
+     0.72%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.errno (inlined)
+     0.72%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.system.linux.errno (inlined)
+     0.72%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b7f84
+     0.66%     0.26%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] sync.Futex.wake
+     0.63%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.validateOutgoingTopicAlias (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_delivery.findRouteIndex (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).get (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getAdapted__anon_64124 (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getContext (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getIndex__anon_64071 (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u3).value (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(ev.completion.Completion.State).cmpxchgWeak (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.casState (inlined)
+     0.62%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.enterCompleted (inlined)
+     0.61%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(Io.Mutex.State).cmpxchgStrong (inlined)
+     0.59%     0.59%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.lockUncancelable
+     0.59%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.unlock (inlined)
+     0.58%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Mutex.unlock (inlined)
+     0.58%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] array_list.Aligned(mqtt.broker.Delivery,null).appendAssumeCapacity (inlined)
+     0.58%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.appendDeliveryAssumeCapacity (inlined)
+     0.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getIndex__anon_64071 (inlined)
+     0.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).get (inlined)
+     0.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getAdapted__anon_64124 (inlined)
+     0.57%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).getContext (inlined)
+     0.56%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.checkCancel (inlined)
+     0.51%     0.51%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] utils.writer.fillBuf
+     0.50%     0.50%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash.wyhash.Wyhash.hash
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.getAutoHashFn__struct_36350.hash (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).get (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).getAdapted__anon_65113 (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).getContext (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.outgoingTopicAlias (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.topic_alias.Table.get (inlined)
+     0.50%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).getIndex__anon_64601 (inlined)
+     0.47%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Group.async__anon_35807.TypeErased.start
+     0.45%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.checkLocalWork
+     0.43%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.Transport.ioHandle (inlined)
+     0.42%     0.42%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.router.Router.matchTrie
+     0.42%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.matchRoutesForPublisherLocked
+     0.42%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.router.Router.emitNormalEntries (inlined)
+     0.42%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.router.Router.matchValidatedIntoForPublisher
+     0.41%     0.21%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.decodeIncomingPublish
+     0.41%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.commitValidatedIncomingPublish (inlined)
+     0.41%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.recordIncomingPublish (inlined)
+     0.41%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.receive.publish.decode__anon_75358 (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(i64).cmpxchgWeak (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.broker_keep_alive.State.renew (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeAckPacketNoProperties (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeGeneratedPacket
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writePubAck
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeTransportPacket (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.Transport.writePacket (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_transport.writeAll (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] array_list.Aligned(mqtt.broker.Delivery,null).addOneAssumeCapacity (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.signal (inlined)
+     0.40%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.wake (inlined)
+     0.39%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_route.connectionIndex (inlined)
+     0.39%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_route.sessionRouteId (inlined)
+     0.38%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] math.add__anon_10627 (inlined)
+     0.38%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.Publication.appendDeliveryPropertiesMany (inlined)
+     0.38%     0.38%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433f5b7b24
+     0.37%     0.37%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.getCurrentExecutorOrNull
+     0.35%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.getCurrentExecutor (inlined)
+     0.34%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e2f6f88
+     0.34%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e2f7114
+     0.34%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e2f7150
+     0.34%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b7b2c
+     0.34%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(task.AnyTask.State).load (inlined)
+     0.33%     0.20%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.Backend(.auto).submit__anon_10964334
+     0.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.validatePropertyNotDuplicateForContext (inlined)
+     0.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.isUsable (inlined)
+     0.32%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.termination.usable__anon_52837 (inlined)
+     0.31%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.sessionIsPersistentLocked (inlined)
+     0.30%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).putAssumeCapacityNoClobberContext (inlined)
+     0.30%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).putNoClobber (inlined)
+     0.30%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).putNoClobberContext (inlined)
+     0.27%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b7f18
+     0.26%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.thread.MutexFutex.unlock (inlined)
+     0.25%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mem.eql__anon_6273 (inlined)
+     0.25%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.Direct.init (inlined)
+     0.25%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] common.Waiter.init (inlined)
+     0.25%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.getWaitableTaskOrNull (inlined)
+     0.24%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.propertyId (inlined)
+     0.24%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.writeTransportPacketParts (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] array_list.Aligned(u8,null).appendSliceAssumeCapacity (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.appendLengthPrefixedAssumeCapacity (inlined)
+     0.22%     0.22%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433e8f3dec
+     0.22%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e8f6528
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(Io.Mutex.State).cmpxchgStrong (inlined)
+     0.22%     0.22%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memmove.memmoveFast
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memmove.copyForwards (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.createRoutePublicationLocked
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.createRoutePublication (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.Publication.create (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.Publication.createFromPublish (inlined)
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.Publication.initialize
+     0.22%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(u32).load (inlined)
+     0.21%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.appendIntAssumeCapacity__anon_53009 (inlined)
+     0.21%     0.21%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.Backend(.auto).syncWallTimer
+     0.21%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.Loop.checkTimers
+     0.21%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.getResult__anon_43475 (inlined)
+     0.21%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.NetSend.getResult (inlined)
+     0.20%     0.20%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.State.contains
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u2).contains (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.packet_identifiers.storage.Storage(u2).value (inlined)
+     0.20%     0.20%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.OwnedPublish.deinit
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mem.Allocator.free__anon_52878 (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.Publish.deinit (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u64,usize,hash_map.AutoContext(u64),80).get (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u64,usize,hash_map.AutoContext(u64),80).getAdapted__anon_65433 (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u64,usize,hash_map.AutoContext(u64),80).getContext (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u64,usize,hash_map.AutoContext(u64),80).getIndex__anon_65452 (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.handleForRouteId (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.scheduleTaskLocal (inlined)
+     0.20%     0.20%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_delivery.Plan.nextOutputSubscriberId
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.session_delivery.Plan.routeForId (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).remove (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).removeAdapted__anon_64059 (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).removeContext (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.endShield (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.endShield (inlined)
+     0.20%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.repeatablePropertyInContext (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.completion.Completion.enterDead (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.LoopState.dispatchCompletion (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.loop.LoopState.finishCompletion (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(u64).store (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.recordPacketSent (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.TrafficCounters.recordSentExclusive (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).values (inlined)
+     0.19%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.publication.remainingExpiry (inlined)
+     0.19%     0.19%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] array_list.Aligned(mqtt.session.mod.Inflight,null).ensureUnusedCapacity
+     0.18%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.futexWake__anon_15668 (inlined)
+     0.18%     0.18%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433f5b74bc
+     0.18%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,[]u8,hash_map.AutoContext(u16),80).values (inlined)
+     0.18%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.subscriptionIdentifier (inlined)
+     0.18%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.validatePublishPropertyDirection (inlined)
+     0.17%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.getCurrentTaskOrNull (inlined)
+     0.14%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] coro.coroutines.Coroutine.yieldTo (inlined)
+     0.14%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] coro.coroutines.switchContext (inlined)
+     0.14%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] coro.coroutines.Coroutine.step (inlined)
+     0.14%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] coro.coroutines.switchContext (inlined)
+     0.13%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] Io.Event.set (inlined)
+     0.13%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.Broker.scheduleMatches (inlined)
+     0.13%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash.wyhash.Wyhash.smallKey (inlined)
+     0.13%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.stats (inlined)
+     0.13%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash.wyhash.Wyhash.final2 (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(u32).load (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] task.AnyTask.checkCancel (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.io_uring.getSqe
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.io_uring.getSqeOrDefer (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.io_uring.submitInner__anon_49958 (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] ev.backends.linux.io_uring.submit__anon_10965402 (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.inflightPayloadLimitReached (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mem.sliceAsBytes__anon_93575 (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] math.add__anon_10627 (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.mod.propertyEncodedLen (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] array_list.Aligned(u8,null).ensureUnusedCapacity
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.IoUring.flush_sq (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.Connection.isUsable (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.termination.usable__anon_52837 (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433e601ff0
+     0.12%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e8f6498
+     0.12%     0.12%  netz-mqtt-vecto  libc.so.6                [.] _int_free_create_chunk
+     0.12%     0.00%  netz-mqtt-vecto  libc.so.6                [.] __GI___libc_free (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  libc.so.6                [.] _int_free_merge_chunk
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash_map.HashMapUnmanaged(u16,u3,hash_map.AutoContext(u16),80).values (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] atomic.Value(usize).load (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] hash.wyhash.Wyhash.init (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.broker.ClientSlot.pushFront
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mem.copyBackwards__anon_65255 (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.runtime.BrokerEvent.deinit
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.fromCoroutine (inlined)
+     0.12%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.loadParentContext (inlined)
+     0.12%     0.12%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] mqtt.session.mod.Store.pruneExpiredPublishes
+     0.09%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b74c4
+     0.09%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e3037e8
+     0.09%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5c9cec
+     0.09%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5ca1bc
+     0.09%     0.09%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433e387514
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memcpy.copyBlocks (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memcpy.copyBlocksAlignedSource (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memcpy.copyForwards (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] compiler_rt.memcpy.memcpyFast
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] dns.resolver.resolver.Resolver.init (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Backend.init (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Backend.initZio (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Runtime.init (inlined)
+     0.09%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Runtime.initStatic (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] _start
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] _dl_start
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] brk
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] __brk (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] _dl_start_final (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] _dl_sysdep_start
+     0.00%     0.00%  netz-mqtt-vecto  ld-linux-aarch64.so.1    [.] elf_get_dynamic_info (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433e3037e4
+     0.00%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] runtime.Executor.spendQuantum
+     0.00%     0.00%  netz-mqtt-vecto  [unknown]                [k] 0xffffdd433f59b368
+     0.00%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.IoUring.copy_cqes (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.IoUring.copy_cqes_ready (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  netz-mqtt-vector-broker  [.] os.linux.IoUring.cq_ready (inlined)
+     0.00%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433e5558a4
+     0.00%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b79c0
+     0.00%     0.00%  netz-mqtt-vecto  [unknown]                [.] 0xffffdd433f5b7f30
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
