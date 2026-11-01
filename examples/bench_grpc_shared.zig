@@ -32,12 +32,14 @@ pub fn main(init: std.process.Init) !void {
     var peer: Peer = .{ .server = &server, .options = options, .request = request, .response = response };
     var server_task = io.async(Peer.run, .{&peer});
     defer _ = server_task.cancel(io) catch {};
-    var client = try netz.grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address(), .limits = limits } }, .{});
+    var client = try netz.grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address(), .limits = limits } }, .{
+        .max_write_bytes_per_turn = options.write_turn_bytes,
+    });
     var live = true;
     defer if (live) client.deinit();
     var sender = client.sender();
     defer sender.deinit();
-    var persistent: ?Session = if (options.mode == .persistent) try Session.open(sender, allocator, response) else null;
+    var persistent: ?Session = if (options.mode == .persistent) try Session.open(sender, allocator, response, options.validate) else null;
     defer if (persistent) |*session| session.deinit();
     for (0..options.warmup) |_| try exchange(sender, allocator, request, response, &persistent);
     const before = counting.snapshot();
@@ -60,21 +62,21 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "record=result schema=2 implementation=netz protocol=grpc transport=h2c " ++
             "mode={s} client_api=shared client_io=zio-std-io server_io=zio-std-io " ++
-            "connection_scope=persistent connections=1 validation=full-bytes " ++
+            "connection_scope=persistent connections=1 validation={s} " ++
             "protobuf_scope=preencoded allocation_scope=client+server+protocol stats_enabled={} warmup={d} iterations={d} " ++
             "payload_bytes={d} protobuf_bytes={d} logical_bytes={d} elapsed_ns={d} " ++
             "stream_window={d} connection_window={d} adaptive_window={} adaptive_window_max={d} max_frame_size={d} " ++
             "final_client_stream_window={d} final_server_stream_window={d} " ++
             "ns_per_roundtrip={d} roundtrips_per_second={d} p50_ns={d} p95_ns={d} p99_ns={d} " ++
             "alloc_count={d} allocated_bytes={d} freed_bytes={d} live_bytes={d}\n",
-        .{ @tagName(options.mode), options.stats, options.warmup, options.iterations, options.payload_bytes, request.len, logical_bytes, elapsed, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window, elapsed / options.iterations, roundtrips, percentile(latencies, 50), percentile(latencies, 95), percentile(latencies, 99), after.alloc_count - before.alloc_count, after.total_allocated - before.total_allocated, after.total_freed - before.total_freed, after.current_bytes },
+        .{ @tagName(options.mode), if (options.validate) "full-bytes" else "length-only", options.stats, options.warmup, options.iterations, options.payload_bytes, request.len, logical_bytes, elapsed, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window, elapsed / options.iterations, roundtrips, percentile(latencies, 50), percentile(latencies, 95), percentile(latencies, 99), after.alloc_count - before.alloc_count, after.total_allocated - before.total_allocated, after.total_freed - before.total_freed, after.current_bytes },
     );
     std.debug.print("record=peer-completion schema=2 implementation=netz protocol=grpc mode={s} request_messages={d} response_messages={d} terminal_calls={d} protobuf_bytes={d} stream_window={d} connection_window={d} adaptive_window={} adaptive_window_max={d} max_frame_size={d} final_client_stream_window={d} final_server_stream_window={d}\n", .{ @tagName(options.mode), peer.messages, peer.messages, peer.finished_calls, request.len, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window });
 }
 
 fn exchange(sender: netz.grpc.SharedChannelSender, allocator: std.mem.Allocator, request: []const u8, response: []const u8, persistent: *?Session) !void {
     if (persistent.*) |*session| return session.exchange(request);
-    var session = try Session.open(sender, allocator, response);
+    var session = try Session.open(sender, allocator, response, true);
     defer session.deinit();
     try session.exchange(request);
     try session.finish();

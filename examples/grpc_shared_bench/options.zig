@@ -7,11 +7,13 @@ pub const Options = struct {
     warmup: usize = 100,
     iterations: usize = 2000,
     stats: bool = false,
+    validate: bool = true,
     stream_window: u32 = 65535,
     connection_window: u32 = 65535,
     adaptive_window: bool = false,
     adaptive_window_max: u32 = 16 * 1024 * 1024,
     max_frame_size: u32 = 16 * 1024,
+    write_turn_bytes: usize = 64 * 1024,
 
     pub fn total(self: Options) usize {
         return self.warmup + self.iterations;
@@ -29,6 +31,8 @@ pub fn parse(init: std.process.Init) !Options {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--stats")) {
             options.stats = true;
+        } else if (std.mem.eql(u8, arg, "--no-validate")) {
+            options.validate = false;
         } else if (std.mem.eql(u8, arg, "--adaptive-window")) {
             options.adaptive_window = true;
         } else if (std.mem.startsWith(u8, arg, "--stream-window=")) {
@@ -39,6 +43,8 @@ pub fn parse(init: std.process.Init) !Options {
             options.adaptive_window_max = try std.fmt.parseInt(u32, arg["--adaptive-window-max=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--max-frame-size=")) {
             options.max_frame_size = try std.fmt.parseInt(u32, arg["--max-frame-size=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--write-turn-bytes=")) {
+            options.write_turn_bytes = try std.fmt.parseInt(usize, arg["--write-turn-bytes=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
             options.mode = std.meta.stringToEnum(Mode, arg["--mode=".len..]) orelse return error.InvalidArgument;
         } else if (std.mem.startsWith(u8, arg, "--payload=")) {
@@ -49,7 +55,8 @@ pub fn parse(init: std.process.Init) !Options {
             options.iterations = try std.fmt.parseInt(usize, arg["--iterations=".len..], 10);
         } else return error.InvalidArgument;
     }
-    if (options.iterations == 0 or options.payload_bytes > 16 * 1024 * 1024 - 8) return error.InvalidArgument;
+    if (options.iterations == 0 or options.payload_bytes > 16 * 1024 * 1024 - 8 or
+        options.write_turn_bytes == 0) return error.InvalidArgument;
     const maximum_window = 16 * 1024 * 1024;
     if (options.stream_window == 0 or options.stream_window > maximum_window or options.connection_window < 65535 or options.connection_window > maximum_window) return error.InvalidArgument;
     if (options.adaptive_window_max > maximum_window or (options.adaptive_window and options.adaptive_window_max < @max(options.stream_window, options.connection_window))) return error.InvalidArgument;

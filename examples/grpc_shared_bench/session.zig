@@ -7,14 +7,15 @@ pub const Session = struct {
     reader: grpc.SharedStreamReader,
     allocator: std.mem.Allocator,
     expected: []const u8,
+    validate: bool,
 
-    pub fn open(sender: grpc.SharedChannelSender, allocator: std.mem.Allocator, expected: []const u8) !Session {
+    pub fn open(sender: grpc.SharedChannelSender, allocator: std.mem.Allocator, expected: []const u8, validate: bool) !Session {
         const rpc = try sender.startDuplex(.{
             .path = "/grpc.testing.EchoTestService/BidiStream",
             .wait_for_ready = true,
             .timeout = .{ .value = 300, .unit = .second },
         });
-        return .{ .rpc = rpc, .writer = rpc.writer(), .reader = rpc.reader(), .allocator = allocator, .expected = expected };
+        return .{ .rpc = rpc, .writer = rpc.writer(), .reader = rpc.reader(), .allocator = allocator, .expected = expected, .validate = validate };
     }
     pub fn deinit(self: *Session) void {
         self.reader.deinit();
@@ -29,7 +30,9 @@ pub const Session = struct {
             defer event.deinit(self.allocator);
             switch (event) {
                 .message => |value| {
-                    if (value.was_compressed or !std.mem.eql(u8, value.payload, self.expected)) return error.InvalidBenchmarkResponse;
+                    if (value.was_compressed) return error.InvalidBenchmarkResponse;
+                    if (self.validate and !std.mem.eql(u8, value.payload, self.expected)) return error.InvalidBenchmarkResponse;
+                    if (!self.validate and value.payload.len != self.expected.len) return error.InvalidBenchmarkResponse;
                     return;
                 },
                 .terminal => return error.EarlyTerminal,

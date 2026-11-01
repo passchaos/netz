@@ -16,8 +16,11 @@ pub const Peer = struct {
         expected: []const u8,
         count: usize = 0,
         limit: usize,
+        validate: bool,
         fn consume(self: *@This(), message: grpc.StreamingMessage) !void {
-            if (self.count == self.limit or message.was_compressed or !std.mem.eql(u8, self.expected, message.payload)) return error.InvalidBenchmarkRequest;
+            if (self.count == self.limit or message.was_compressed) return error.InvalidBenchmarkRequest;
+            if (self.validate and !std.mem.eql(u8, self.expected, message.payload)) return error.InvalidBenchmarkRequest;
+            if (!self.validate and message.payload.len != self.expected.len) return error.InvalidBenchmarkRequest;
             self.count += 1;
         }
     };
@@ -33,7 +36,11 @@ pub const Peer = struct {
             var rpc = try connection.acceptDuplexWithTimeout(.fromSeconds(10));
             defer rpc.deinit();
             try rpc.startResponse(.{});
-            var collector: Collector = .{ .expected = self.request, .limit = if (self.options.mode == .persistent) self.options.total() else 1 };
+            var collector: Collector = .{
+                .expected = self.request,
+                .limit = if (self.options.mode == .persistent) self.options.total() else 1,
+                .validate = self.options.validate,
+            };
             var finished = false;
             var replies: usize = 0;
             while (replies < collector.limit) {

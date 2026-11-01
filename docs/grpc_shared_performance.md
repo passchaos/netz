@@ -711,6 +711,15 @@ baseline, and three of five pairs were slower. The candidate was reverted; the
 direct clock reads remain in those paths. A future attempt should reduce
 message copies or segmented ownership rather than clock-source overhead.
 
+Two further controls were measured on the same 256-KiB workload. Client write
+turn budgets of 64 KiB, 256 KiB, and 1 MiB produced 846, 844, and 850 µs, so the
+64-KiB `max_write_bytes_per_turn` default is not the bottleneck. Disabling the
+benchmark's full-byte payload validation (`--no-validate`, which now reports
+`validation=length-only`) reduced the median from 859,022 to 801,915 ns per
+roundtrip in two of three alternating pairs, about 7%. The
+transport gap against grpc-cpp is therefore roughly 2.0x after accounting for
+benchmark validation, and the remaining cost is still copy/throughput-bound.
+
 ## Steady-state config reclaim fast path (2026-11-02)
 
 `Publication.reclaim` now returns before the seq_cst reader-epoch load when
