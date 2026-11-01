@@ -1,0 +1,16 @@
+Alt-Svc override: h3 authority=:443 -> www.facebook.com:443 ma=86400
+debug(zio): Spawning thread 0
+HTTP/3 https://www.facebook.com/ -> 302
+:status: 302
+location: https://www.facebook.com/unsupportedbrowser
+strict-transport-security: max-age=15552000; preload
+content-type: text/html; charset="utf-8"
+x-fb-debug: Ywno/AO2WHDbTXGiXme4SckC7rDdEPeHEiqPCeSQKStwIc22/IAd0iBhnfzV4c+5QvlB2ToACKcx1ve7d6jbMA==
+content-length: 0
+date: Sun, 01 Nov 2026 01:04:26 GMT
+x-fb-connection-quality: GOOD; q=0.7, rtt=132, rtx=0, c=23, mss=1232, tbw=6549, tp=10, tpl=0, uplat=170, ullat=0
+alt-svc: h3=":443"; ma=86400
+server-timing: slb_crtt;dur=132,slb_srtt;dur=-1,slb_req_start;dur=1793495066833203,slb_srv_hdr_rcvd;dur=170141,slb_cli_body_rcvd_first;dur=-1,slb_cli_body_rcvd_last;dur=-1,slb_conn_lat;dur=0,slb_ssl;dur=328,slb_rule_lat;dur=0
+priority: u=3,i
+body-bytes: 0
+debug(zio): Removing thread 0

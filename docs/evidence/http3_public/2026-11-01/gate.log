@@ -1,0 +1,60 @@
+HTTP/3 public interop: ByteDance/Tengine verified HEAD
+Alt-Svc override: h3 authority=:443 -> robotics.bytedance.com:443 ma=2592000
+debug(zio): Spawning thread 0
+HTTP/3 https://robotics.bytedance.com/ -> 200
+:status: 200
+server: Tengine
+content-type: text/html; charset=utf-8
+date: Sun, 01 Nov 2026 00:37:21 GMT
+vary: Accept-Encoding
+cache-control: no-cache
+x-ggw-config-version: 15800907
+x-tt-logid: 20261101083721E28FAF8B3059833C3B7D
+server-timing: inner; dur=14
+x-tt-trace-host: 0119693562e14495188a950be8b82150c768d639625dcb2de6af4e811a43ee7f044ba48db511d6c127a0c9d97922f7300f17512cee7178dc382e7fd4b58aa384ba2c1be9fb4d0253f5f8e1bbd241085ee1680e026b36f19cd4f84c2b624a707cb90959c3a249a7eede1dfd35aab92d6322
+x-tt-trace-tag: id=03;cdn-cache=miss;type=dyn
+x-tt-trace-id: 00-261101083721E28FAF8B3059833C3B7D-353881631692F428-00
+x-tt-timestamp: 1793493441.762
+via: cache8.l2cm9-7[30,0], cache16.cn790[42,0]
+alt-svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+timing-allow-origin: *
+eagleid: 77f9302417934934417343691e
+body-bytes: 0
+debug(zio): Removing thread 0
+HTTP/3 public interop: Cloudflare verified GET and cross-signed anchor
+Alt-Svc override: h3 authority=:443 -> cloudflare-quic.com:443 ma=86400
+debug(zio): Spawning thread 0
+HTTP/3 https://cloudflare-quic.com/ -> 200
+:status: 200
+date: Sun, 01 Nov 2026 00:37:33 GMT
+priority: u=3,i=?0
+content-type: text/html
+server: cloudflare
+cf-ray: a536d4e13b3d470f-LAX
+alt-svc: h3=":443"; ma=86400
+server-timing: cfExtPri
+body-bytes: 125959
+body-preview:
+<!DOCTYPE html>
+<html lang="en" itemscope="" itemtype="http://schema.org/Article"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>QUIC | Cloudflare</title>
+    <meta name="viewport" content="width=device-width, initial-
+debug(zio): Removing thread 0
+HTTP/3 public interop: quiche verified GET on UDP/8443
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+debug(zio): Spawning thread 0
+HTTP/3 fetch attempt 1/5 failed: HandshakeTimeout
+HTTP/3 fetch attempt 2/5 failed: HandshakeTimeout
+HTTP/3 fetch attempt 3/5 failed: HandshakeTimeout
+interop-http3-public
++- run sh failure
+error: process exited with error code 124
+failed command: sh tools/interop/http3_public.sh ./.zig-cache/o/0d735966f7ea698ed32da8163859a578/netz-http3-public-fetch
+
+Build Summary: 6/8 steps succeeded (1 failed)
+interop-http3-public transitive failure
++- run sh failure
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/d74715ec3a78b2745342ff6dbbb99d75/build /nav_env/Temp/zig-aarch64-linux-0.16.0/zig /nav_env/Temp/zig-aarch64-linux-0.16.0/lib /nav_env/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x93a9e581 -Ze44ef96f553d8997 interop-http3-public
+exit=1

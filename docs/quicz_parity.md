@@ -55,6 +55,13 @@ Fresh 2026-11-01 live fuzz gates passed `fuzz-http3-connection`,
 `fuzz-webtransport-endpoint` and `fuzz-quic-connection` at 3/3 tests each; see
 `docs/evidence/live_fuzz/2026-11-01.json`.
 
+A 2026-11-01 public-endpoint run passed ByteDance, Cloudflare and Meta. The
+quic.tech:8443 case still times out with `HandshakeTimeout` even though an
+OpenSSL QUICv1/TLS1.3 handshake to the same endpoint succeeds from this host;
+the netz client receives no server response across five retries. This is an
+open netz client interop issue, not a reachability failure. See
+`docs/evidence/http3_public/2026-11-01.json`.
+
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
 headers, Version Negotiation, Retry parsing and integrity verification, typed
 and untyped transport parameters, owned and caller-storage frame parsing,

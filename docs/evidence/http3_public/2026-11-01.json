@@ -1,0 +1,25 @@
+{
+  "commands": [
+    "zig build interop-http3-public",
+    "NETZ_HTTP3_PUBLIC_TIMEOUT_SECONDS=120 zig build interop-http3-public",
+    "openssl s_client -quic -connect quic.tech:8443 -servername quic.tech -alpn h3"
+  ],
+  "date": "2026-11-01",
+  "failing": {
+    "endpoint": "quic.tech:8443",
+    "error": "HandshakeTimeout",
+    "note": "OpenSSL QUICv1/TLS1.3 handshake succeeds from the same host, so this is a netz client interop issue rather than reachability. The netz client receives no server response across five retries."
+  },
+  "logs": {
+    "gate": "2026-11-01/gate.log",
+    "meta": "2026-11-01/meta.log",
+    "quic_tech_netz": "2026-11-01/quic_tech.netz.log",
+    "quic_tech_openssl": "2026-11-01/quic_tech.openssl.log"
+  },
+  "passing": [
+    "robotics.bytedance.com verified HEAD",
+    "cloudflare-quic.com verified GET",
+    "www.facebook.com verified 302"
+  ],
+  "status": "partial"
+}

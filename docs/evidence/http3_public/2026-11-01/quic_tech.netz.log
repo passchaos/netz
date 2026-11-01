@@ -1,0 +1,5 @@
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+debug(zio): Spawning thread 0
+HTTP/3 fetch attempt 1/5 failed: HandshakeTimeout
+HTTP/3 fetch attempt 2/5 failed: HandshakeTimeout
+HTTP/3 fetch attempt 3/5 failed: HandshakeTimeout
