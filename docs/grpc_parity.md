@@ -677,7 +677,10 @@ that reports TRANSIENT_FAILURE makes lower priorities eligible immediately,
 matching grpc-core, rather than waiting out the interval. Regressions cover a
 stalled high child that remains CONNECTING for the whole window, immediate
 fallback after a failed high child, ordered fallback with a zero duration, and
-a previously-READY child whose reconnect restarts the window.
+a previously-READY child whose reconnect restarts the window. The ordinary
+Channel still classifies a slot waiting for retry backoff as CONNECTING rather
+than TRANSIENT_FAILURE, so its immediate-failure fallback does not yet match
+grpc-core or SharedChannel until that aggregate state is aligned.
 
 SharedChannel now also applies grpc-core child retention to priority trees.
 When a config update removes a priority child, its subtree and matching
