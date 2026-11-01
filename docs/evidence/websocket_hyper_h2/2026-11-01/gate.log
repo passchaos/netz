@@ -1,0 +1,19 @@
+   Compiling netz-hyper-http2-flow v0.0.0 (/nav_env/project-z/netz/tools/hyper_http2_flow)
+    Finished `release` profile [optimized] target(s) in 2.03s
+netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport=h2c
+netz RFC 8441 client interoperated with Hyper: transport=h2c fragmented-text ping pong bounded-close tls_metadata=n/a key_update=n/a client_io=zio-std-io server_io=hyper-tokio
+Hyper RFC 8441 server listening on 127.0.0.1:34407
+Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data
+Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio
+netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport=tls
+netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio
+Hyper RFC 8441 server listening on 127.0.0.1:60901
+rustls RFC 8441 server sent TLS KeyUpdate request
+Hyper RFC 8441 Ping fixture sent unsolicited Pong and interleaved application data
+Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio
+netz RFC 8441 Ping tolerated unsolicited Pong and preserved interleaved data: transport=tls
+netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio
+netz RFC 8441 client tunneled Hyper TLS through Hyper CONNECT proxy: origin=localhost:32773 scheme=https authority=exact proxy_authorization=isolated client_io=zio-std-io proxy_io=hyper-tokio server_io=hyper-tokio
+Hyper CONNECT proxy listening on 127.0.0.1:33947
+Hyper CONNECT proxy tunneled netz TLS HTTP/2: authority=localhost:32773 proxy_authorization=true client_io=zio-std-io proxy_io=hyper-tokio
+netz RFC 8441 -> Hyper CONNECT proxy -> Hyper TLS/h2 server interop passed

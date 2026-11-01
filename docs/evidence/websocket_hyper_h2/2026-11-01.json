@@ -1,0 +1,21 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-websocket-hyper-h2",
+  "command": "zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast",
+  "peer": "audited Hyper fixture (/nav_env/Work/hyper, Tokio/rustls)",
+  "coverage": [
+    "Direct RFC 8441 Extended CONNECT against a Hyper HTTP/2 server",
+    "Hyper server validates CONNECT method, :protocol=websocket, path and WebSocket version",
+    "Masked fragmented text from netz, unmasked Hyper response, Ping/Pong and bounded Close 1000/done",
+    "Hyper TLS KeyUpdate request and verified TLS/exporter metadata",
+    "Three-process route: netz -> Hyper HTTP/1.1 CONNECT proxy -> Hyper TLS/h2 RFC 8441 origin, with exact authority and isolated Proxy-Authorization"
+  ],
+  "transcripts": [
+    "netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio",
+    "Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio",
+    "netz RFC 8441 -> Hyper CONNECT proxy -> Hyper TLS/h2 server interop passed"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

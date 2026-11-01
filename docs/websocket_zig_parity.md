@@ -60,7 +60,11 @@ KeyUpdate, exporter metadata, fragmented frames, interleaved application data
 during Ping, and bounded Close all traverse the tunnel. This proves the
 HTTP/2 proxy composition at the WebSocket protocol boundary instead of relying
 only on an ordinary HTTP request. Evidence is recorded in
-`docs/evidence/websocket_h2_hyper_proxy/2026-10-31.json`.
+`docs/evidence/websocket_h2_hyper_proxy/2026-10-31.json`. A fresh 2026-11-01
+run of the direct and proxy Hyper matrices passed fragmented text, Ping/Pong
+with unsolicited Pong tolerance, bounded Close 1000/`done`, verified TLS
+KeyUpdate metadata, exact origin authority and isolated
+`Proxy-Authorization`; see `docs/evidence/websocket_hyper_h2/2026-11-01.json`.
 
 RFC 9220 now has an owning authenticated HTTP/3 client/server runtime in
 `websocket.runtime.h3`. It enables `SETTINGS_ENABLE_CONNECT_PROTOCOL`, waits
