@@ -172,6 +172,19 @@ the unchanged inode and exact PID contents owned by that process. Replacing the
 path externally cannot make the exiting broker delete the replacement. The
 path is restart-required on SIGHUP.
 
+The complete restart-required SIGHUP set is
+`global_max_clients`, `global_max_connections`, `max_packet_size`,
+`max_inflight_messages`, `max_inflight_bytes`, `max_queued_messages`,
+`max_queued_bytes`, `pid_file`, `websocket_headers_size`, and
+`set_tcp_nodelay`. A reload that changes any of them is rejected transactionally
+with `GlobalConfigurationRequiresRestart`, and the running broker keeps its
+previous capacity and policy. These fields bound preallocated slot tables,
+per-connection buffers, or process-level identity, so applying them live would
+require unbounded reallocation or listener recreation. Every `Config` field is
+exhaustively classified at compile time in
+`examples/support/mqtt_reload_compatibility.zig`, so a newly added field cannot
+be silently ignored by the reload path.
+
 Native MQTT clients now also expose SOCKS5 transport composition through the
 public, protocol-independent `proxy.socks5` module and
 `mqtt.socks5_runtime`. The RFC 1928 layer sends DNS names to the proxy instead
