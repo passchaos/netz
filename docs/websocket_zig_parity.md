@@ -1825,7 +1825,13 @@ applying TCP-only socket options.
    the published digest-locked image is amd64-only and no Docker/Podman runtime
    is installed. The real-socket smoke remains green over cleartext and TLS
    with eight concurrent peers plus protocol-error isolation and worker reuse,
-   while the strict report-checker unit suite passes 14/14. The separate
+   while the strict report-checker unit suite passes 14/14. A supplemental
+   2026-11-01 fuzzingclient run in a CPython 2.7.15 environment with the same
+   Autobahn 0.10.9 / Testsuite 25.10.1 versions executed all 517 manifest
+   cases: 514 OK, 3 INFORMATIONAL (7.1.6, 7.13.1 and 7.13.2), 0 failed and 0
+   non-strict. Because that environment is not the digest-locked PyPy identity,
+   it is recorded separately and does not replace the strict gate; see
+   `docs/evidence/websocket_autobahn_full/2026-11-01.json`. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
    without Docker: eight simultaneous peers verify masked text/binary echo,
    Ping/Pong and Close. A separate connection interleaves Ping/Pong inside a

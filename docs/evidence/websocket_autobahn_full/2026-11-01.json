@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "scope": "supplemental full Autobahn fuzzingclient run (not the digest-locked PyPy gate)",
+  "server": {
+    "binary": "netz-websocket-autobahn-server ReleaseFast",
+    "workers": 64,
+    "server_io": "zio-std-io",
+    "transport": "cleartext ws://127.0.0.1:19000"
+  },
+  "toolchain": {
+    "python": "CPython 2.7.15 (pixi/conda-forge environment)",
+    "autobahn": "0.10.9",
+    "autobahn_testsuite": "25.10.1",
+    "twisted": "20.3.0",
+    "cryptography": "2.7",
+    "note": "This environment is not the gate's digest-locked PyPy 7.3.20 identity and therefore does not replace `interop-websocket-autobahn`. It was built to execute the same suite version because Docker/Podman and the locked PyPy archive are unavailable on this host."
+  },
+  "config": {
+    "mode": "fuzzingclient",
+    "cases": ["*"],
+    "exclude_cases": [],
+    "exclude_agent_cases": {}
+  },
+  "results": {
+    "total": 517,
+    "ok": 514,
+    "informational": 3,
+    "non_strict": 0,
+    "failed": 0,
+    "informational_cases": [
+      "7.1.6",
+      "7.13.1",
+      "7.13.2"
+    ]
+  },
+  "conclusions": [
+    "All 517 Autobahn Testsuite 25.10.1 fuzzingclient cases executed against the netz echo endpoint with zero failed and zero non-strict results.",
+    "The three INFORMATIONAL results are the suite's expected close-behavior cases 7.1.6, 7.13.1 and 7.13.2; their behaviorClose is INFORMATIONAL with close codes 1000/1002.",
+    "This is supplemental evidence only: the strict repository gate still requires the digest-locked PyPy identity or the container image."
+  ],
+  "artifacts": "2026-11-01/",
+  "log": "2026-11-01/fuzzingclient.log",
+  "report": "2026-11-01/index.json"
+}

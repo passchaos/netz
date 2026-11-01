@@ -1,0 +1,7 @@
+{
+  "outdir": "./reports",
+  "servers": [{"agent": "netz", "url": "ws://127.0.0.1:19000"}],
+  "cases": ["*"],
+  "exclude-cases": [],
+  "exclude-agent-cases": {}
+}
