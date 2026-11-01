@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "borrowed prefix-slice server duplex response",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "aa918d63",
+    "src/grpc/stream/duplex.zig": "e0fa1d4108720241d9dcaebd774385aa50a8b48565b0f8d989d21402aac37b69",
+    "binary_sha256": "c7e4e7bf65fb89fff8bfd36b753276a052458dae337510b493925f71a6eff7eb"
+  },
+  "candidate": {
+    "src/grpc/stream/duplex.zig": "1216d3be088088bbb38463de0e6254be04e78b9e70a4e0671d46d17eae1bf8c6",
+    "binary_sha256": "6fde05dc2b97b0610c0e54468ff4f852b99111bc39cb54313bc2804186ddc669",
+    "design": "ServerDuplex.writeMessage tried transport.writeResponseParts with a stack five-byte gRPC prefix and the caller payload, then copied only an unsent suffix into PendingMessage when an early peer response interrupted the write."
+  },
+  "scope": {
+    "workload": "SharedChannel persistent duplex, 262144-byte payload",
+    "allocator": "cached",
+    "iterations": 200,
+    "warmup": 20,
+    "windows": "stream 65535 / connection 65535",
+    "frame_size": 16384,
+    "validation": "full bytes plus peer completion"
+  },
+  "benchmark_method": {
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_median_ns": 457074,
+    "candidate_median_ns": 470244.5,
+    "candidate_over_baseline": 1.0288,
+    "candidate_wins": "0/10; every candidate sample exceeded every baseline sample",
+    "baseline_cache": "hits=1337 misses=95",
+    "candidate_cache": "hits=897 misses=95",
+    "allocations_removed_per_run": 440,
+    "conclusion": "The borrowed write removed the payload-sized staging allocation and copy, but the extra five-byte DATA frame and the two separate response-data write calls cost more than the removed memory traffic on this workload."
+  },
+  "correctness": {
+    "focused_test": "a 100,000-byte server duplex response passed and a counting allocator observed zero allocations at or above the payload size",
+    "note": "the correctness test was removed together with the rejected implementation"
+  },
+  "resolution": "The source change and its test were reverted. The accepted ordinary unary prefix-slice path from commit 0e1cef27 is unaffected because it writes prefix and body as one ordered slice burst rather than two separate response-data calls."
+}
