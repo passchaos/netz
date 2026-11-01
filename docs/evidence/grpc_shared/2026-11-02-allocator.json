@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-02",
+  "status": "captured",
+  "purpose": "Attribute the gRPC 256-KiB persistent gap to the benchmark allocator and verify netz.alloc.BlockCache as an allocator-independent fix.",
+  "context": {
+    "arch": "aarch64",
+    "cpu": "shared host; alternating pairs",
+    "netz_revision": "433bb0e3",
+    "build_mode": "ReleaseFast",
+    "benchmark": "examples/bench_grpc_shared.zig",
+    "mode": "persistent",
+    "warmup": 20,
+    "iterations": 200,
+    "payload_sizes": [0, 512, 4096, 65536, 262144],
+    "allocators": {
+      "smp": "std.heap.smp_allocator",
+      "cached": "netz.alloc.BlockCache default 16-MiB cap wrapping std.heap.smp_allocator",
+      "c": "std.heap.c_allocator (glibc malloc)"
+    },
+    "grpc_cpp_reference_ns_262144": 392766.5394405986,
+    "source_sha256": {
+      "examples/bench_grpc_shared.zig": "acee42cc972c18705f7500e08ef3203cc241adb4410134b1ff4013644f0a9be5",
+      "examples/grpc_shared_bench/options.zig": "5809562d2d6eb8a373d16401c649361570664cc1ef92932e1f12289ddd33a904",
+      "examples/grpc_shared_bench/session.zig": "46593a6040485d8ad6edcfaa84e4707723e535f282c4dad87f585fd3d08d3817",
+      "examples/grpc_shared_bench/peer.zig": "9a011822e217745f5c4d3b573e366476938fc7075b1ee10be2e4e68b73ce99e0",
+      "src/alloc.zig": "a6cac8cb88facbb291519bca48997b01f220b813ddc39e748ecc3749ea4a3e54"
+    }
+  },
+  "commands": [
+    "zig build bench-grpc-shared -Doptimize=ReleaseFast -- --payload=262144 --warmup=20 --iterations=200",
+    "zig build bench-grpc-shared -Doptimize=ReleaseFast -- --payload=262144 --warmup=20 --iterations=200 --cached-allocator",
+    "zig build bench-grpc-shared -Doptimize=ReleaseFast -- --payload=262144 --warmup=20 --iterations=200 --c-allocator",
+    "zig build bench-grpc-shared -Doptimize=ReleaseFast -- --payload=65536 --warmup=20 --iterations=200 --cached-allocator"
+  ],
+  "results": [
+    {
+      "payload_bytes": 262144,
+      "smp_ns": [843094, 850778, 853666],
+      "smp_median_ns": 850778,
+      "cached_ns": [460127, 481470, 480253],
+      "cached_median_ns": 480253,
+      "c_ns": [486917, 489273, 492100],
+      "c_median_ns": 489273,
+      "cached_over_smp": 0.5645,
+      "cached_over_grpc_cpp": 1.2227,
+      "c_over_grpc_cpp": 1.2457,
+      "smp_over_grpc_cpp": 2.1661
+    },
+    {
+      "payload_bytes": 65536,
+      "smp_ns": [224352],
+      "cached_ns": [118373],
+      "cached_over_smp": 0.5276
+    },
+    {
+      "payload_bytes": 4096,
+      "smp_ns": [23102],
+      "cached_ns": [23426],
+      "cached_over_smp": 1.0140
+    },
+    {
+      "payload_bytes": 512,
+      "smp_ns": [19082],
+      "cached_ns": [19226],
+      "cached_over_smp": 1.0075
+    },
+    {
+      "payload_bytes": 0,
+      "smp_ns": [18340],
+      "cached_ns": [18456],
+      "cached_over_smp": 1.0063
+    }
+  ],
+  "cache_stats": {
+    "hits": 1337,
+    "misses": 95,
+    "cached_bytes": 1478656
+  },
+  "pmu": {
+    "note": "Three fixed-binary pairs showed nearly identical instructions for smp and c (521.7M versus 522.0M, +0.1%) and about 3% fewer cycles for c; the wall difference is allocator syscall/lock behavior, not extra work."
+  },
+  "conclusion": "The previously recorded 2.4x 256-KiB gap used std.heap.smp_allocator. With the system allocator or netz.alloc.BlockCache, netz is about 1.22-1.25x the grpc-cpp reference. BlockCache removes the large-block allocator cost without changing protocol behavior and stays within a bounded 16-MiB retention cap."
+}

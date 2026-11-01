@@ -785,4 +785,6 @@ The benchmark exposes `--cached-allocator` and reports `allocator=cached`.
 The cache is opt-in; `Backend.init` continues to use exactly the allocator the
 caller supplies. `netz.runtime.Backend.initCached` heap-owns the cache behind
 the runtime facade, so applications can enable it without managing a separate
-allocator lifetime.
+allocator lifetime. Alternating-pair rows, source hashes and the PMU note are
+recorded in
+[the allocator evidence](evidence/grpc_shared/2026-11-02-allocator.json).
