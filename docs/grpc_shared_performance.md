@@ -721,3 +721,9 @@ roundtrip versus 907,171 ns for the baseline (2.2%). Three fixed-binary PMU
 pairs reduced instructions from a 244,301,950 median to 242,820,199 (0.61%,
 3/3 wins); cycles remained load-noisy. The full gRPC Debug gate passes 562/562
 with the change retained.
+
+An additional monotonic fast-path load before the abandoned-pending swap
+reduced instructions another 0.15% (3/3 fixed-binary PMU pairs) but was
+wall-neutral to slightly slower across five alternating pairs (median 843,608
+versus 841,579 ns/roundtrip, 2/5 wins). It was not retained; the single swap
+remains in the source tree.
