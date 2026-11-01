@@ -57,12 +57,23 @@ pub fn Runtime(comptime State: type) type {
             child: *Node,
         };
 
+        const PriorityChild = struct {
+            ignore_reresolution_requests: bool,
+            node: *Node,
+        };
+
+        const Priority = struct {
+            children: []PriorityChild,
+            order: []usize,
+        };
+
         const Node = struct {
             refs: std.atomic.Value(usize) = .init(1),
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
                 weighted: Weighted,
+                priority: Priority,
                 outlier: Outlier,
             },
         };
@@ -227,7 +238,10 @@ pub fn Runtime(comptime State: type) type {
                     weighted,
                     path,
                 ),
-                .priority => error.InvalidSharedOptions,
+                .priority => |priority| self.buildPriority(
+                    priority,
+                    path,
+                ),
                 .outlier_detection => |wrapper| self.buildOutlier(
                     wrapper,
                     path,
@@ -325,6 +339,67 @@ pub fn Runtime(comptime State: type) type {
             return node;
         }
 
+        fn buildPriority(
+            self: *Self,
+            config: service_config.PriorityConfig,
+            path: []const []const u8,
+        ) BuildError!*Node {
+            const owned_path = try self.allocator.dupe([]const u8, path);
+            errdefer self.allocator.free(owned_path);
+            const children = try self.allocator.alloc(
+                PriorityChild,
+                config.children.len,
+            );
+            var initialized: usize = 0;
+            errdefer {
+                for (children[0..initialized]) |child| self.destroy(child.node);
+                self.allocator.free(children);
+            }
+            for (config.children, children) |child_config, *child| {
+                const leaf = child_config.child.leafPolicy();
+                if (leaf != .pick_first and leaf != .round_robin) {
+                    return error.InvalidSharedOptions;
+                }
+                const child_path = try self.allocator.alloc(
+                    []const u8,
+                    path.len + 1,
+                );
+                defer self.allocator.free(child_path);
+                @memcpy(child_path[0..path.len], path);
+                child_path[path.len] = child_config.name;
+                child.* = .{
+                    .ignore_reresolution_requests =
+                        child_config.ignore_reresolution_requests,
+                    .node = try self.build(child_config.child, child_path),
+                };
+                initialized += 1;
+            }
+            const order = try self.allocator.alloc(
+                usize,
+                config.priorities.len,
+            );
+            errdefer self.allocator.free(order);
+            for (config.priorities, order) |name, *slot| {
+                var found: ?usize = null;
+                for (config.children, 0..) |child_config, index| {
+                    if (std.mem.eql(u8, child_config.name, name)) {
+                        found = index;
+                        break;
+                    }
+                }
+                slot.* = found orelse return error.InvalidSharedOptions;
+            }
+            const node = try self.allocator.create(Node);
+            node.* = .{
+                .path = owned_path,
+                .kind = .{ .priority = .{
+                    .children = children,
+                    .order = order,
+                } },
+            };
+            return node;
+        }
+
         fn buildOutlier(
             self: *Self,
             wrapper: @FieldType(service_config.LoadBalancingNode, "outlier_detection"),
@@ -360,6 +435,11 @@ pub fn Runtime(comptime State: type) type {
                     for (weighted.children) |child| self.destroy(child.node);
                     self.allocator.free(weighted.children);
                 },
+                .priority => |priority| {
+                    for (priority.children) |child| self.destroy(child.node);
+                    self.allocator.free(priority.children);
+                    self.allocator.free(priority.order);
+                },
                 .outlier => |wrapper| self.destroy(wrapper.child),
             }
             self.allocator.free(node.path);
@@ -377,6 +457,24 @@ pub fn Runtime(comptime State: type) type {
                     var connecting = false;
                     var idle = false;
                     for (weighted.children) |child| {
+                        switch (self.aggregateNode(child.node, state)) {
+                            .ready => break :blk .ready,
+                            .connecting => connecting = true,
+                            .idle => idle = true,
+                            .transient_failure, .shutdown => {},
+                        }
+                    }
+                    break :blk if (connecting)
+                        .connecting
+                    else if (idle)
+                        .idle
+                    else
+                        .transient_failure;
+                },
+                .priority => |priority| blk: {
+                    var connecting = false;
+                    var idle = false;
+                    for (priority.children) |child| {
                         switch (self.aggregateNode(child.node, state)) {
                             .ready => break :blk .ready,
                             .connecting => connecting = true,
@@ -472,6 +570,19 @@ pub fn Runtime(comptime State: type) type {
                     }
                     unreachable;
                 },
+                .priority => |priority| blk: {
+                    for (priority.order) |child_index| {
+                        const child = priority.children[child_index];
+                        if (self.aggregateNode(child.node, state) == .ready) {
+                            break :blk try self.pickNode(
+                                child.node,
+                                state,
+                                job,
+                            );
+                        }
+                    }
+                    break :blk null;
+                },
                 .outlier => |wrapper| try self.pickNode(
                     wrapper.child,
                     state,
@@ -563,6 +674,17 @@ pub fn Runtime(comptime State: type) type {
                         return;
                     }
                 },
+                .priority => |priority| {
+                    for (priority.children) |child| {
+                        if (!pathMatches(
+                            worker.source
+                                .endpoint.hierarchicalPath(),
+                            child.node.path,
+                        )) continue;
+                        self.commitNode(child.node, state, worker);
+                        return;
+                    }
+                },
                 .outlier => |wrapper| self.commitNode(
                     wrapper.child,
                     state,
@@ -614,6 +736,11 @@ pub fn Runtime(comptime State: type) type {
                 },
                 .weighted => |weighted| {
                     for (weighted.children) |child| {
+                        self.removeNode(child.node, worker);
+                    }
+                },
+                .priority => |priority| {
+                    for (priority.children) |child| {
                         self.removeNode(child.node, worker);
                     }
                 },
@@ -704,6 +831,9 @@ pub fn Runtime(comptime State: type) type {
                 .weighted => |weighted| for (weighted.children) |child| {
                     self.invalidateNodePickers(child.node);
                 },
+                .priority => |priority| for (priority.children) |child| {
+                    self.invalidateNodePickers(child.node);
+                },
                 .outlier => |wrapper| self.invalidateNodePickers(wrapper.child),
             }
         }
@@ -721,6 +851,7 @@ pub fn Runtime(comptime State: type) type {
                         return self.pathUsesRing(child.node, path);
                     }
                 } else false,
+                .priority => false,
                 .outlier => |wrapper| self.pathUsesRing(wrapper.child, path),
             };
         }

@@ -9,6 +9,30 @@ const Call = struct {
     }
 };
 
+const PriorityPeer = struct {
+    fn run(
+        server: *grpc.runtime.Server,
+        stop: *std.Io.Event,
+        label: []const u8,
+    ) !void {
+        var connection = try server.acceptWithTimeout(.fromSeconds(5));
+        defer connection.deinit();
+        while (!stop.isSet()) {
+            var request = connection.readUnaryWithTimeout(.fromMilliseconds(100)) catch |err| switch (err) {
+                error.Timeout => continue,
+                error.ConnectionClosed,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                error.UnexpectedEof,
+                => return,
+                else => return err,
+            };
+            defer request.deinit();
+            try connection.writeUnary(request.request.stream_id, .{ .message = label });
+        }
+    }
+};
+
 test "gRPC shared background channel multiplexes concurrent unary calls on one connection" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -407,23 +431,97 @@ test "gRPC shared channel UNIMPLEMENTED disables health checking for its connect
     try peer.await(io);
 }
 
-test "gRPC shared channel rejects parsed priority policy" {
+test "gRPC shared priority selects the highest ready child" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    try std.testing.expectError(
-        error.InvalidSharedOptions,
-        shared.SharedChannel.init(
-            allocator,
-            io,
-            .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
-            .{
-                .service_config_json =
-                    \\{"loadBalancingConfig":[{"priority_experimental":{
-                    \\ "children":{"high":{"config":[{"round_robin":{}}]}},
-                    \\ "priorities":["high"]}}]}
-                ,
-            },
-        ),
+    var high_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer high_server.deinit();
+    var low_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer low_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var high_peer = io.async(PriorityPeer.run, .{ &high_server, &stop, "high" });
+    defer _ = high_peer.cancel(io) catch {};
+    var low_peer = io.async(PriorityPeer.run, .{ &low_server, &stop, "low" });
+    defer _ = low_peer.cancel(io) catch {};
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = high_server.address(), .hierarchical_path = &high_path } },
+        .{ .cleartext_ip = .{ .address = low_server.address(), .hierarchical_path = &low_path } },
+    };
+    var client = try shared.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .service_config_json =
+                \\{"loadBalancingConfig":[{"priority_experimental":{
+                \\ "children":{
+                \\  "high":{"config":[{"round_robin":{}}]},
+                \\  "low":{"config":[{"round_robin":{}}]}},
+                \\ "priorities":["high","low"]}}]}
+            ,
+        },
     );
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    client.connect();
+    var high_watch = client.watchEndpointConnectivity(0).?;
+    defer high_watch.deinit();
+    while ((try high_watch.nextWithTimeout(.fromSeconds(3))).state != .ready) {}
+    for (0..10) |_| {
+        var response = try Call.run(sender, "request");
+        defer response.deinit();
+        try std.testing.expectEqualStrings("high", response.message.?.payload);
+    }
+    stop.set(io);
+    try high_peer.await(io);
+    try low_peer.await(io);
+}
+
+test "gRPC shared priority falls back to the lower ready child" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var low_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer low_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var low_peer = io.async(PriorityPeer.run, .{ &low_server, &stop, "low" });
+    defer _ = low_peer.cancel(io) catch {};
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &high_path } },
+        .{ .cleartext_ip = .{ .address = low_server.address(), .hierarchical_path = &low_path } },
+    };
+    var client = try shared.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .service_config_json =
+                \\{"loadBalancingConfig":[{"priority_experimental":{
+                \\ "children":{
+                \\  "high":{"config":[{"round_robin":{}}]},
+                \\  "low":{"config":[{"round_robin":{}}]}},
+                \\ "priorities":["high","low"]}}]}
+            ,
+        },
+    );
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    client.connect();
+    var low_watch = client.watchEndpointConnectivity(1).?;
+    defer low_watch.deinit();
+    while ((try low_watch.nextWithTimeout(.fromSeconds(3))).state != .ready) {}
+    for (0..5) |_| {
+        var response = try Call.run(sender, "request");
+        defer response.deinit();
+        try std.testing.expectEqualStrings("low", response.message.?.payload);
+    }
+    stop.set(io);
+    try low_peer.await(io);
 }

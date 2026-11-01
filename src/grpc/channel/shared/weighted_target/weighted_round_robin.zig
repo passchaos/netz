@@ -53,6 +53,9 @@ pub fn config(
         .weighted => |weighted| for (weighted.children) |child| {
             if (config(child.node, state, worker)) |value| return value;
         } else null,
+        .priority => |priority| for (priority.children) |child| {
+            if (config(child.node, state, worker)) |value| return value;
+        } else null,
         .outlier => |wrapper| config(wrapper.child, state, worker),
     };
 }
@@ -64,6 +67,9 @@ pub fn disconnect(node: anytype, state: anytype, worker: anytype) void {
             leaf.wrr_scheduler.remove(worker);
         },
         .weighted => |weighted| for (weighted.children) |child| {
+            disconnect(child.node, state, worker);
+        },
+        .priority => |priority| for (priority.children) |child| {
             disconnect(child.node, state, worker);
         },
         .outlier => |wrapper| disconnect(wrapper.child, state, worker),
@@ -85,6 +91,9 @@ pub fn orcaForPath(node: anytype, path: []const []const u8) ?*orca_config.Config
         .weighted => |weighted| for (weighted.children) |child| {
             if (orcaForPath(child.node, path)) |value| return value;
         } else null,
+        .priority => |priority| for (priority.children) |child| {
+            if (orcaForPath(child.node, path)) |value| return value;
+        } else null,
         .outlier => |wrapper| orcaForPath(wrapper.child, path),
     };
 }
@@ -93,6 +102,9 @@ pub fn hasOob(node: anytype) bool {
     return switch (node.kind) {
         .leaf => |leaf| leaf.wrr_oob != null,
         .weighted => |weighted| for (weighted.children) |child| {
+            if (hasOob(child.node)) break true;
+        } else false,
+        .priority => |priority| for (priority.children) |child| {
             if (hasOob(child.node)) break true;
         } else false,
         .outlier => |wrapper| hasOob(wrapper.child),

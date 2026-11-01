@@ -34,6 +34,7 @@ pub fn Plan(comptime Runtime: type) type {
                 .leaf => |leaf| {
                     if (old.kind.leaf.policy == leaf.policy) try self.pairs.append(self.allocator, .{ .old = old, .next = next });
                 },
+                .priority => {},
                 .outlier => |wrapper| {
                     try self.pairs.append(self.allocator, .{ .old = old, .next = next });
                     try self.collect(old.kind.outlier.child, wrapper.child);
@@ -103,6 +104,7 @@ pub fn Plan(comptime Runtime: type) type {
                         wrapper.next_evaluation_ns = pair.old.kind.outlier.next_evaluation_ns;
                     }
                 },
+                .priority => unreachable,
                 .weighted => unreachable,
             };
         }

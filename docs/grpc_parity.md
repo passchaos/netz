@@ -653,15 +653,14 @@ returned before cleanup ownership was installed. Parser evidence is recorded in
 The recursive parser now also retains grpc-core's `priority_experimental`
 policy. Named children each own a recursively parsed child policy and an
 optional `ignoreReresolutionRequests` flag, while the ordered `priorities`
-list is validated against the child names. The single-owner Channel now
-executes the first priority slice: children are limited to
-`pick_first`/`round_robin` leaves, picks follow the configured priority order,
-only a READY child is selected, and a lower-priority child is used when the
-higher one cannot become ready. SharedChannel still rejects a parsed priority
-policy at initialization (`InvalidSharedOptions`) instead of silently
-flattening it to round-robin; runtime execution there remains explicit
-integration work. Focused parser, high-priority selection and lower-priority
-fallback tests pass in the service-config and weighted-target suites.
+list is validated against the child names. Both Channel owners execute the
+first priority slice: children are limited to `pick_first`/`round_robin`
+leaves, picks follow the configured priority order, only a READY child is
+selected, and a lower-priority child is used when the higher one cannot
+become ready. SharedChannel initializes the same composite runtime and applies
+it to background worker selection and live updates. Focused parser,
+high-priority selection and lower-priority fallback tests pass in the
+service-config, ordinary weighted-target and shared-channel suites.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.

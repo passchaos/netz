@@ -593,15 +593,19 @@ pub const State = struct {
     fn pickLocked(self: *State, claimant: *Worker) Error!?*Worker {
         self.evaluateOutliersLocked();
         if (self.weighted_target) |*runtime| {
-            if (self.weighted_target_selected) |selected| {
-                if (runtime.available(self, selected)) return selected;
-                self.weighted_target_selected = null;
+            if (self.policy != .priority) {
+                if (self.weighted_target_selected) |selected| {
+                    if (runtime.available(self, selected)) return selected;
+                    self.weighted_target_selected = null;
+                }
             }
             const selected = try runtime.pick(
                 self,
                 self.head orelse return null,
             ) orelse return null;
-            self.weighted_target_selected = selected;
+            if (self.policy != .priority) {
+                self.weighted_target_selected = selected;
+            }
             return selected;
         }
         if (self.policy == .pick_first) {

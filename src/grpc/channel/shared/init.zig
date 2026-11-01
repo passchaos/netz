@@ -34,10 +34,14 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
     const balancing = @import("balancing.zig").resolve(if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{}, options.channel.selection_policy);
-    if (balancing.policy == .priority) return error.InvalidSharedOptions;
     const policy = @import("balancing.zig").select(balancing, options.channel.selection_policy, if (target == .resolved) target.resolved.policy else .pick_first);
-    if (policy == .weighted_target and balancing.policy != .weighted_target) return error.InvalidSharedOptions;
-    var weighted_target = if (policy == .weighted_target)
+    if (policy == .weighted_target and balancing.policy != .weighted_target) {
+        return error.InvalidSharedOptions;
+    }
+    if (policy == .priority and balancing.policy != .priority) {
+        return error.InvalidSharedOptions;
+    }
+    var weighted_target = if (policy == .weighted_target or policy == .priority)
         State.WeightedTarget.init(
             allocator,
             balancing.root orelse return error.InvalidSharedOptions,
@@ -121,11 +125,13 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .weighted_target = weighted_target,
         .least_request_config = balancing.least_request,
         .ring_hash_config = balancing.ring_hash,
-        .outlier_config = if (balancing.policy == .weighted_target)
+        .outlier_config = if (balancing.policy == .weighted_target or
+            balancing.policy == .priority)
             null
         else
             balancing.outlier_detection,
-        .outlier_next_evaluation_ns = if (balancing.policy == .weighted_target)
+        .outlier_next_evaluation_ns = if (balancing.policy == .weighted_target or
+            balancing.policy == .priority)
             null
         else if (balancing.outlier_detection) |outlier|
             if (outlier.countingEnabled()) std.Io.Clock.awake.now(io)

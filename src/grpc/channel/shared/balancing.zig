@@ -24,6 +24,6 @@ pub fn select(config: service_config.LoadBalancingConfig, override: ?channel.Sel
         .ring_hash => .ring_hash,
         .weighted_round_robin => .weighted_round_robin,
         .weighted_target => .weighted_target,
-        .priority => .round_robin,
+        .priority => .priority,
     };
 }

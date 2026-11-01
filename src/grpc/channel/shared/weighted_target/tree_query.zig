@@ -16,6 +16,9 @@ pub fn accepts(node: anytype, path: []const []const u8) bool {
         .weighted => |weighted| for (weighted.children) |child| {
             if (accepts(child.node, path)) break true;
         } else false,
+        .priority => |priority| for (priority.children) |child| {
+            if (accepts(child.node, path)) break true;
+        } else false,
     };
 }
 pub fn weightedParent(node: anytype, path: []const []const u8) bool {
@@ -25,6 +28,9 @@ pub fn weightedParent(node: anytype, path: []const []const u8) bool {
         .leaf => false,
         .outlier => |wrapper| weightedParent(wrapper.child, path),
         .weighted => |weighted| for (weighted.children) |child| {
+            if (weightedParent(child.node, path)) break true;
+        } else false,
+        .priority => |priority| for (priority.children) |child| {
             if (weightedParent(child.node, path)) break true;
         } else false,
     };

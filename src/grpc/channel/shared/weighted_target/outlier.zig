@@ -12,6 +12,13 @@ pub fn evaluate(runtime: anytype, node: anytype, state: anytype, now_ns: i96) bo
             }
             break :blk changed;
         },
+        .priority => |priority| blk: {
+            var changed = false;
+            for (priority.children) |child| {
+                changed = evaluate(runtime, child.node, state, now_ns) or changed;
+            }
+            break :blk changed;
+        },
         .outlier => |*wrapper| blk: {
             var changed = false;
             if (wrapper.config.countingEnabled() and
@@ -51,6 +58,15 @@ pub fn nextDeadline(node: anytype) ?i96 {
             }
             break :blk result;
         },
+        .priority => |priority| blk: {
+            var result: ?i96 = null;
+            for (priority.children) |child| {
+                if (nextDeadline(child.node)) |value| {
+                    result = if (result) |prior| @min(prior, value) else value;
+                }
+            }
+            break :blk result;
+        },
         .outlier => |wrapper| blk: {
             var result: ?i96 = if (wrapper.config.countingEnabled())
                 wrapper.next_evaluation_ns
@@ -71,6 +87,9 @@ pub fn record(node: anytype, state: anytype, worker: anytype, success: bool) voi
         .weighted => |weighted| for (weighted.children) |child| {
             record(child.node, state, worker, success);
         },
+        .priority => |priority| for (priority.children) |child| {
+            record(child.node, state, worker, success);
+        },
         .outlier => |wrapper| {
             if (wrapper.config.countingEnabled()) worker.weighted_outliers[wrapper.index].record(success);
             record(wrapper.child, state, worker, success);
@@ -83,6 +102,9 @@ pub fn ejected(node: anytype, state: anytype, worker: anytype) bool {
     return switch (node.kind) {
         .leaf => false,
         .weighted => |weighted| for (weighted.children) |child| {
+            if (ejected(child.node, state, worker)) break true;
+        } else false,
+        .priority => |priority| for (priority.children) |child| {
             if (ejected(child.node, state, worker)) break true;
         } else false,
         .outlier => |wrapper| worker.weighted_outliers[wrapper.index]

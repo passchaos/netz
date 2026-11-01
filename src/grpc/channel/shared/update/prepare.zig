@@ -39,8 +39,13 @@ pub const Prepared = struct {
         const balancing = self.balancing;
         self.policy = @import("../balancing.zig").select(balancing, options.channel.selection_policy, resolver_policy);
         self.shuffle = options.channel.shuffle_address_list orelse (balancing.configured and balancing.shuffle_address_list);
-        if (self.policy == .weighted_target) {
-            if (balancing.policy != .weighted_target) return error.InvalidSharedOptions;
+        if (self.policy == .weighted_target or self.policy == .priority) {
+            if (self.policy == .weighted_target and balancing.policy != .weighted_target) {
+                return error.InvalidSharedOptions;
+            }
+            if (self.policy == .priority and balancing.policy != .priority) {
+                return error.InvalidSharedOptions;
+            }
             self.weighted = try State.WeightedTarget.init(allocator, balancing.root orelse return error.InvalidSharedOptions);
         }
         const name: ?[]const u8 = if (options.disable_health_check) null else options.health_service orelse
