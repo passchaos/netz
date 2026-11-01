@@ -2962,3 +2962,20 @@ ordinary-unary benchmark remains at `examples/bench_grpc_unary.zig`. Rows,
 binary identities and commands are recorded in
 `docs/evidence/grpc_unary_prefix_rejected/2026-11-02.json` and
 `docs/evidence/grpc_duplex_borrowed_response_rejected/2026-11-02.json`.
+
+## Shared abandoned-job prune fast path
+
+`pruneAbandonedLocked` runs on every SharedChannel lock/unlock. It now
+performs an acquire load of `abandoned_pending` and returns before the
+`acq_rel` swap when no abandonment is pending. `abandon()` stores that flag
+before waking the owner and re-entering `unlock`, so a concurrent abandonment
+is still observed by the next prune.
+
+The new ordinary-unary benchmark (`examples/bench_grpc_unary.zig`) separates
+the two client APIs: with 256-KiB cached payloads and length-only validation,
+ordinary unary measured about 273 us per roundtrip while SharedChannel unary
+measured about 462 us. The fast path moved a 500-iteration SharedChannel A/B
+from a 463,199 ns baseline median to 451,370.5 ns (2.55% faster, 5/5 ABBA
+rounds). The gRPC filter passes 562/562, and a full-payload shared-unary run
+passes. Evidence is recorded in
+`docs/evidence/grpc_shared_abandoned_fast_path/2026-11-02.json`.

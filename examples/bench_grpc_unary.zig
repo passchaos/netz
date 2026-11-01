@@ -6,6 +6,8 @@ const Options = struct {
     warmup: usize = 20,
     iterations: usize = 200,
     cached_allocator: bool = false,
+    shared: bool = false,
+    validate: bool = true,
 };
 
 fn parse(init: std.process.Init) !Options {
@@ -19,6 +21,10 @@ fn parse(init: std.process.Init) !Options {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--cached-allocator")) {
             options.cached_allocator = true;
+        } else if (std.mem.eql(u8, arg, "--shared")) {
+            options.shared = true;
+        } else if (std.mem.eql(u8, arg, "--no-validate")) {
+            options.validate = false;
         } else if (std.mem.startsWith(u8, arg, "--payload=")) {
             options.payload_bytes = try std.fmt.parseInt(
                 usize,
@@ -90,22 +96,45 @@ pub fn main(init: std.process.Init) !void {
     var peer_task = io.async(Peer.run, .{ &peer, &peer_result });
     defer peer_task.cancel(io);
 
-    var client = try netz.http2.runtime.Client.connect(
-        backing,
-        io,
-        server.address(),
-        limits,
-    );
-    defer client.close();
-
-    for (0..options.warmup) |_| {
-        try exchange(&client, backing, request, response);
+    var elapsed: u64 = undefined;
+    if (options.shared) {
+        var channel = try netz.grpc.SharedChannel.init(
+            backing,
+            io,
+            .{ .cleartext_ip = .{
+                .address = server.address(),
+                .limits = limits,
+            } },
+            .{},
+        );
+        defer channel.deinit();
+        var sender = channel.sender();
+        defer sender.deinit();
+        for (0..options.warmup) |_| {
+            try sharedExchange(sender, request, response, options.validate);
+        }
+        const started = now(io);
+        for (0..options.iterations) |_| {
+            try sharedExchange(sender, request, response, options.validate);
+        }
+        elapsed = now(io) -| started;
+    } else {
+        var client = try netz.http2.runtime.Client.connect(
+            backing,
+            io,
+            server.address(),
+            limits,
+        );
+        defer client.close();
+        for (0..options.warmup) |_| {
+            try exchange(&client, backing, request, response, options.validate);
+        }
+        const started = now(io);
+        for (0..options.iterations) |_| {
+            try exchange(&client, backing, request, response, options.validate);
+        }
+        elapsed = now(io) -| started;
     }
-    const started = now(io);
-    for (0..options.iterations) |_| {
-        try exchange(&client, backing, request, response);
-    }
-    const elapsed = now(io) -| started;
 
     peer_task.await(io);
     try peer_result;
@@ -120,14 +149,16 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "record=result schema=2 implementation=netz protocol=grpc transport=h2c " ++
-            "client_api=ordinary-unary allocator={s} warmup={d} iterations={d} " ++
-            "payload_bytes={d} elapsed_ns={d} ns_per_roundtrip={d} " ++
+            "client_api={s} allocator={s} warmup={d} iterations={d} " ++
+            "payload_bytes={d} validation={s} elapsed_ns={d} ns_per_roundtrip={d} " ++
             "roundtrips_per_second={d} complete=true\n",
         .{
+            if (options.shared) "shared-unary" else "ordinary-unary",
             if (options.cached_allocator) "cached" else "smp",
             options.warmup,
             options.iterations,
             options.payload_bytes,
+            if (options.validate) "full-bytes" else "length-only",
             elapsed,
             elapsed / options.iterations,
             if (elapsed == 0) 0 else @as(u128, options.iterations) * std.time.ns_per_s / elapsed,
@@ -140,6 +171,7 @@ fn exchange(
     allocator: std.mem.Allocator,
     request: []const u8,
     response: []const u8,
+    validate: bool,
 ) !void {
     var result = try netz.grpc.unaryCall(connection, allocator, .{
         .path = "/bench.Echo/Unary",
@@ -147,9 +179,32 @@ fn exchange(
         .message = request,
     });
     defer result.deinit();
+    try validateUnary(result, response, validate);
+}
+
+fn sharedExchange(
+    sender: netz.grpc.SharedChannelSender,
+    request: []const u8,
+    response: []const u8,
+    validate: bool,
+) !void {
+    var result = try sender.unary(.{
+        .path = "/bench.Echo/Unary",
+        .authority = "localhost",
+        .message = request,
+    });
+    defer result.deinit();
+    try validateUnary(result, response, validate);
+}
+
+fn validateUnary(result: netz.grpc.UnaryResponse, response: []const u8, validate: bool) !void {
     if (result.status != .ok) return error.UnexpectedStatus;
     const payload = result.message orelse return error.MissingResponse;
-    if (!std.mem.eql(u8, payload.payload, response)) {
+    if (validate) {
+        if (!std.mem.eql(u8, payload.payload, response)) {
+            return error.InvalidResponse;
+        }
+    } else if (payload.payload.len != response.len) {
         return error.InvalidResponse;
     }
 }

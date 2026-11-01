@@ -168,6 +168,9 @@ pub const State = struct {
     }
     fn pruneAbandonedLocked(self: *State) void {
         self.config.reclaim();
+        // `unlock` already checks the flag before reacquiring, so avoid a
+        // locked read-modify-write on every ordinary critical section.
+        if (!self.abandoned_pending.load(.acquire)) return;
         if (!self.abandoned_pending.swap(false, .acq_rel)) return;
         var current = self.head;
         while (current) |job| {

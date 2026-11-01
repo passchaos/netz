@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "SharedChannel abandoned-job prune load fast path",
+  "decision": "accepted",
+  "baseline": {
+    "commit": "9d66c87cd0f8009cbb30d7e03be5dd307edc0687",
+    "src/grpc/channel/shared/state.zig": "e57a6d513941f51f5a87b252a135bd384c45560cf0f342e638dafeb19067a6f7",
+    "binary_sha256": "e6e4e840eee96c28e3ec992fd2d06fce73c9eb59c9a47bbd19ed9246528c84ce"
+  },
+  "candidate": {
+    "src/grpc/channel/shared/state.zig": "4e24ba74787ea02ea75687edd26dde4bbfce8b1eeb8efaa1aeaf9d73a2ee8a4d",
+    "binary_sha256": "2e4c15a718c4149a56a261f5f522361e0ca04ad176408b0d853944256d6501db",
+    "design": "pruneAbandonedLocked now performs an acquire load of abandoned_pending and returns before the acq_rel swap when the flag is clear. abandon() stores the flag and re-enters unlock, so a concurrent abandonment is still observed by the next prune."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 500,
+    "warmup": 50,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [452999, 455613, 456259, 460802, 461792, 464606, 464731, 467097, 476771, 479536],
+    "candidate_samples_ns": [444607, 446023, 446869, 448347, 448673, 450083, 452658, 455240, 458228, 465417],
+    "baseline_median_ns": 463199,
+    "candidate_median_ns": 451370.5,
+    "candidate_over_baseline": 0.9745,
+    "round_wins": "5/5 ABBA rounds",
+    "paired_ratios": [0.9905, 0.9592, 0.9636, 0.9785, 0.9745]
+  },
+  "correctness": {
+    "grpc_filter": "562/562 passed",
+    "full_validation_run": "shared-unary with full payload equality passed"
+  },
+  "context": {
+    "ordinary_unary_no_validate_ns": 273338,
+    "shared_unary_no_validate_ns": 462535,
+    "note": "The shared unary path remains about 1.69x the ordinary unary path; the accepted change reduces the worker lock/unlock overhead but does not close that architectural gap."
+  }
+}
