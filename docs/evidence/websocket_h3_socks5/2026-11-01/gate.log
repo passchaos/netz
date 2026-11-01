@@ -1,0 +1,1 @@
+RFC 9220 SOCKS5 interoperability passed: extended_connect=true remote_dns=true tls_verified=true fragmented_text=true permessage_deflate=true ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll

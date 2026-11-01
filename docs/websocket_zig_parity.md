@@ -1286,7 +1286,10 @@ adopted. `zig build interop-websocket-h3-socks5 -Doptimize=ReleaseFast`
 then runs the complete independent quic-go exchange through that route:
 fragmented masked text, two no-context-takeover compressed messages,
 Ping/Pong, and Close 1000/`done`, with certificate verification and proxy-side
-`localhost` DNS asserted by the relay.
+`localhost` DNS asserted by the relay. A fresh 2026-11-01 run passed the same
+RFC 9220 matrix with remote DNS, TLS verification, fragmented text,
+permessage-deflate, Ping/Pong and Close 1000/`done`; see
+`docs/evidence/websocket_h3_socks5/2026-11-01.json`.
 
 ## Remaining evidence before a broad completion claim
 

@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-websocket-h3-socks5",
+  "command": "zig build interop-websocket-h3-socks5 -Doptimize=ReleaseFast",
+  "result": "RFC 9220 SOCKS5 interoperability passed: extended_connect=true remote_dns=true tls_verified=true fragmented_text=true permessage_deflate=true ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll",
+  "coverage": [
+    "RFC 9220 Extended CONNECT through an HTTP/3 SOCKS5 UDP ASSOCIATE route",
+    "Proxy-side localhost DNS, certificate verification and exact authority",
+    "Fragmented masked text, two no-context-takeover compressed messages",
+    "Ping/Pong and Close 1000/done against the independent quic-go peer"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}
