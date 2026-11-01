@@ -734,6 +734,12 @@ timer. `Channel.Options.priority_deactivation_timeout` overrides the default
 being attempted and a deterministic runtime state test for activation,
 recovery and deactivation.
 
+The ordinary Channel still does not apply `healthCheckConfig`. A
+connection-time Health/Check gate was evaluated and rejected: grpc-core-compatible
+health servers and the existing fixtures implement Watch rather than Check, and
+the same gate would also double-check SharedChannel's endpoint owners. A
+Watch-based concurrent subchannel manager remains the correct integration.
+
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.
 Every background endpoint owner leaves IDLE concurrently. Parent state follows
