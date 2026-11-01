@@ -1,0 +1,110 @@
+1793507154: Info: running mosquitto as user: passchaos.
+1793507154: mosquitto version 2.1.2 starting
+1793507154: Config loaded from /tmp/netz-mqtt-matrix-qos2-2026-11-01/publishers-32/sample-01/artifacts/mosquitto.conf.
+1793507154: Bridge support available.
+1793507154: Persistence support available.
+1793507154: TLS support NOT available.
+1793507154: TLS-PSK support NOT available.
+1793507154: Websockets support NOT available.
+1793507154: Opening ipv4 listen socket on port 48765.
+1793507154: mosquitto version 2.1.2 running
+1793507154: New connection from 127.0.0.1:52248 on port 48765.
+1793507154: New client connected from 127.0.0.1:52248 as netz-load-subscriber-0 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52260 on port 48765.
+1793507154: New client connected from 127.0.0.1:52260 as netz-load-publisher-0 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52262 on port 48765.
+1793507154: New client connected from 127.0.0.1:52262 as netz-load-publisher-1 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52268 on port 48765.
+1793507154: New client connected from 127.0.0.1:52268 as netz-load-publisher-2 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52274 on port 48765.
+1793507154: New client connected from 127.0.0.1:52274 as netz-load-publisher-3 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52282 on port 48765.
+1793507154: New client connected from 127.0.0.1:52282 as netz-load-publisher-4 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52298 on port 48765.
+1793507154: New client connected from 127.0.0.1:52298 as netz-load-publisher-5 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52306 on port 48765.
+1793507154: New client connected from 127.0.0.1:52306 as netz-load-publisher-6 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52308 on port 48765.
+1793507154: New client connected from 127.0.0.1:52308 as netz-load-publisher-7 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52314 on port 48765.
+1793507154: New client connected from 127.0.0.1:52314 as netz-load-publisher-8 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52318 on port 48765.
+1793507154: New client connected from 127.0.0.1:52318 as netz-load-publisher-9 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52328 on port 48765.
+1793507154: New client connected from 127.0.0.1:52328 as netz-load-publisher-10 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52340 on port 48765.
+1793507154: New client connected from 127.0.0.1:52340 as netz-load-publisher-11 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52354 on port 48765.
+1793507154: New client connected from 127.0.0.1:52354 as netz-load-publisher-12 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52362 on port 48765.
+1793507154: New client connected from 127.0.0.1:52362 as netz-load-publisher-13 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52368 on port 48765.
+1793507154: New client connected from 127.0.0.1:52368 as netz-load-publisher-14 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52370 on port 48765.
+1793507154: New client connected from 127.0.0.1:52370 as netz-load-publisher-15 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52384 on port 48765.
+1793507154: New client connected from 127.0.0.1:52384 as netz-load-publisher-16 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52394 on port 48765.
+1793507154: New client connected from 127.0.0.1:52394 as netz-load-publisher-17 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52404 on port 48765.
+1793507154: New client connected from 127.0.0.1:52404 as netz-load-publisher-18 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52414 on port 48765.
+1793507154: New client connected from 127.0.0.1:52414 as netz-load-publisher-19 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52428 on port 48765.
+1793507154: New client connected from 127.0.0.1:52428 as netz-load-publisher-20 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52434 on port 48765.
+1793507154: New client connected from 127.0.0.1:52434 as netz-load-publisher-21 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52444 on port 48765.
+1793507154: New client connected from 127.0.0.1:52444 as netz-load-publisher-22 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52456 on port 48765.
+1793507154: New client connected from 127.0.0.1:52456 as netz-load-publisher-23 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52472 on port 48765.
+1793507154: New client connected from 127.0.0.1:52472 as netz-load-publisher-24 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52482 on port 48765.
+1793507154: New client connected from 127.0.0.1:52482 as netz-load-publisher-25 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52494 on port 48765.
+1793507154: New client connected from 127.0.0.1:52494 as netz-load-publisher-26 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52500 on port 48765.
+1793507154: New client connected from 127.0.0.1:52500 as netz-load-publisher-27 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52516 on port 48765.
+1793507154: New client connected from 127.0.0.1:52516 as netz-load-publisher-28 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52520 on port 48765.
+1793507154: New client connected from 127.0.0.1:52520 as netz-load-publisher-29 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52534 on port 48765.
+1793507154: New client connected from 127.0.0.1:52534 as netz-load-publisher-30 (p5, c1, k30).
+1793507154: New connection from 127.0.0.1:52542 on port 48765.
+1793507154: New client connected from 127.0.0.1:52542 as netz-load-publisher-31 (p5, c1, k30).
+1793507154: Client netz-load-subscriber-0 [127.0.0.1:52248] disconnected.
+1793507154: Client netz-load-publisher-0 [127.0.0.1:52260] disconnected.
+1793507154: Client netz-load-publisher-1 [127.0.0.1:52262] disconnected.
+1793507154: Client netz-load-publisher-2 [127.0.0.1:52268] disconnected.
+1793507154: Client netz-load-publisher-3 [127.0.0.1:52274] disconnected.
+1793507154: Client netz-load-publisher-4 [127.0.0.1:52282] disconnected.
+1793507154: Client netz-load-publisher-5 [127.0.0.1:52298] disconnected.
+1793507154: Client netz-load-publisher-6 [127.0.0.1:52306] disconnected.
+1793507154: Client netz-load-publisher-7 [127.0.0.1:52308] disconnected.
+1793507154: Client netz-load-publisher-8 [127.0.0.1:52314] disconnected.
+1793507154: Client netz-load-publisher-9 [127.0.0.1:52318] disconnected.
+1793507154: Client netz-load-publisher-10 [127.0.0.1:52328] disconnected.
+1793507154: Client netz-load-publisher-11 [127.0.0.1:52340] disconnected.
+1793507154: Client netz-load-publisher-12 [127.0.0.1:52354] disconnected.
+1793507154: Client netz-load-publisher-13 [127.0.0.1:52362] disconnected.
+1793507154: Client netz-load-publisher-14 [127.0.0.1:52368] disconnected.
+1793507154: Client netz-load-publisher-15 [127.0.0.1:52370] disconnected.
+1793507154: Client netz-load-publisher-16 [127.0.0.1:52384] disconnected.
+1793507154: Client netz-load-publisher-17 [127.0.0.1:52394] disconnected.
+1793507154: Client netz-load-publisher-18 [127.0.0.1:52404] disconnected.
+1793507154: Client netz-load-publisher-19 [127.0.0.1:52414] disconnected.
+1793507154: Client netz-load-publisher-20 [127.0.0.1:52428] disconnected.
+1793507154: Client netz-load-publisher-21 [127.0.0.1:52434] disconnected.
+1793507154: Client netz-load-publisher-22 [127.0.0.1:52444] disconnected.
+1793507154: Client netz-load-publisher-23 [127.0.0.1:52456] disconnected.
+1793507154: Client netz-load-publisher-24 [127.0.0.1:52472] disconnected.
+1793507154: Client netz-load-publisher-25 [127.0.0.1:52482] disconnected.
+1793507154: Client netz-load-publisher-26 [127.0.0.1:52494] disconnected.
+1793507154: Client netz-load-publisher-27 [127.0.0.1:52500] disconnected.
+1793507154: Client netz-load-publisher-28 [127.0.0.1:52516] disconnected.
+1793507154: Client netz-load-publisher-29 [127.0.0.1:52520] disconnected.
+1793507154: Client netz-load-publisher-30 [127.0.0.1:52534] disconnected.
+1793507154: Client netz-load-publisher-31 [127.0.0.1:52542] disconnected.
+1793507154: mosquitto version 2.1.2 terminating

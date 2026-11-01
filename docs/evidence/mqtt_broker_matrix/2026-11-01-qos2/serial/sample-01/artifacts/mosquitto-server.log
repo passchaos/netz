@@ -1,0 +1,17 @@
+1793507153: Info: running mosquitto as user: passchaos.
+1793507153: mosquitto version 2.1.2 starting
+1793507153: Config loaded from /tmp/netz-mqtt-matrix-qos2-2026-11-01/serial/sample-01/artifacts/mosquitto.conf.
+1793507153: Bridge support available.
+1793507153: Persistence support available.
+1793507153: TLS support NOT available.
+1793507153: TLS-PSK support NOT available.
+1793507153: Websockets support NOT available.
+1793507153: Opening ipv4 listen socket on port 59565.
+1793507153: mosquitto version 2.1.2 running
+1793507153: New connection from 127.0.0.1:45298 on port 59565.
+1793507153: New client connected from 127.0.0.1:45298 as netz-load-subscriber-0 (p5, c1, k30).
+1793507153: New connection from 127.0.0.1:45310 on port 59565.
+1793507153: New client connected from 127.0.0.1:45310 as netz-load-publisher-0 (p5, c1, k30).
+1793507153: Client netz-load-subscriber-0 [127.0.0.1:45298] disconnected.
+1793507153: Client netz-load-publisher-0 [127.0.0.1:45310] disconnected.
+1793507153: mosquitto version 2.1.2 terminating

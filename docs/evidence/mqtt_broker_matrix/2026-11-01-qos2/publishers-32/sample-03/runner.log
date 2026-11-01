@@ -1,0 +1,57 @@
+record=run-order protocol=mqtt5 transport=tcp mode=qos2-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true session_expiry_seconds=0 broker_order=mosquitto-first client_cpu=0 server_cpu=1 sampler_cpu=2 complete=true
+record=memory implementation=netz endpoint_role=server role_pair=netz-client+netz-server client_io=zio-std-io server_io=zio-std-io protocol=mqtt5 transport=tcp mode=qos2-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true publishers=32 subscribers=1 warmup=256 publishes=4096 deliveries=4096 overlapping_subscriptions=1 session_expiry_seconds=0 publisher_window=4 payload_bytes=64 server_queue_capacity=4096 connection_scope=persistent rss_scope=broker-process rss_source=proc-vmrss-sampled-2ms process_peak_rss_kib=4732 complete=true
+record=memory implementation=mosquitto endpoint_role=server role_pair=netz-client+mosquitto-server client_io=zio-std-io server_io=mosquitto-event-loop protocol=mqtt5 transport=tcp mode=qos2-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true publishers=32 subscribers=1 warmup=256 publishes=4096 deliveries=4096 overlapping_subscriptions=1 session_expiry_seconds=0 publisher_window=4 payload_bytes=64 server_queue_capacity=4096 connection_scope=persistent rss_scope=broker-process rss_source=proc-vmrss-sampled-2ms process_peak_rss_kib=3392 complete=true
+record=verified protocol=mqtt5 transport=tcp mode=qos2-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true publishers=32 subscribers=1 warmup=256 publishes=4096 deliveries=4096 payload_bytes=64 publisher_window=4 server_queue_capacity=4096 session_expiry_seconds=0 checksum=230656 client_io=zio-std-io server_io=zio-std-io+mosquitto-event-loop complete=true
+--- netz ---
+MQTT 5 TCP broker fanout workload
+  client io backend: zio-std-io
+  endpoint: 127.0.0.1:37287
+  publishers: 32
+  subscribers: 1
+  overlapping subscriptions/client: 1
+  publisher window: 4
+  delivery QoS: 2
+  server queue capacity: 4096
+  session expiry seconds: 0
+  warmup publishes: 256
+  measured publishes: 4096
+  measured deliveries: 4096
+  payload bytes: 64
+  elapsed ns: 107817611
+  publishes/s: 37990
+  deliveries/s: 37990
+  publish completion p50 ns: 1761184
+  publish completion p99 ns: 3109791
+  publish completion p99.9 ns: 3232737
+  client allocation calls: 30653
+  client cumulative allocated bytes: 1367952
+  client peak live bytes: 73334
+  checksum: 230656
+record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos2-fanout role_pair=netz-client+netz-server client_io=zio-std-io server_io=zio-std-io benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true connection_scope=persistent publishers=32 subscribers=1 overlapping_subscriptions=1 publisher_window=4 server_queue_capacity=4096 session_expiry_seconds=0 warmup=256 publishes=4096 deliveries=4096 payload_bytes=64 elapsed_ns=107817611 publishes_per_s=37990 deliveries_per_s=37990 p50_ns=1761184 p99_ns=3109791 p999_ns=3232737 client_alloc_count=30653 client_total_allocated_bytes=1367952 client_peak_live_bytes=73334 checksum=230656 complete=true
+--- Mosquitto ---
+MQTT 5 TCP broker fanout workload
+  client io backend: zio-std-io
+  endpoint: 127.0.0.1:39425
+  publishers: 32
+  subscribers: 1
+  overlapping subscriptions/client: 1
+  publisher window: 4
+  delivery QoS: 2
+  server queue capacity: 4096
+  session expiry seconds: 0
+  warmup publishes: 256
+  measured publishes: 4096
+  measured deliveries: 4096
+  payload bytes: 64
+  elapsed ns: 106896845
+  publishes/s: 38317
+  deliveries/s: 38317
+  publish completion p50 ns: 1648063
+  publish completion p99 ns: 2852963
+  publish completion p99.9 ns: 2977086
+  client allocation calls: 30653
+  client cumulative allocated bytes: 1367952
+  client peak live bytes: 73334
+  checksum: 230656
+record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos2-fanout role_pair=netz-client+mosquitto-server client_io=zio-std-io server_io=mosquitto-event-loop benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true connection_scope=persistent publishers=32 subscribers=1 overlapping_subscriptions=1 publisher_window=4 server_queue_capacity=4096 session_expiry_seconds=0 warmup=256 publishes=4096 deliveries=4096 payload_bytes=64 elapsed_ns=106896845 publishes_per_s=38317 deliveries_per_s=38317 p50_ns=1648063 p99_ns=2852963 p999_ns=2977086 client_alloc_count=30653 client_total_allocated_bytes=1367952 client_peak_live_bytes=73334 checksum=230656 complete=true
+same-client MQTT comparison passed (Mosquitto 5cd25465) client_io=zio-std-io server_io=zio-std-io+mosquitto-event-loop

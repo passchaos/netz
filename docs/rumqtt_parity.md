@@ -1648,6 +1648,21 @@ within 5% and 4% of Mosquitto respectively. The same fixed binaries, source
 lock, completion checks, CPU assignment, queue bounds, and retained artifacts
 continue to make that gap directly measurable.
 
+## Current QoS 2 broker matrix
+
+A fresh 2026-11-01 QoS 2 capture on the current broker and driver now measures
+netz at parity or above Mosquitto in four of five shapes: serial 27,398 vs
+29,880 (0.917×), publishers-32 38,309 vs 38,341 (0.999×), fanout-32 3,100 vs
+2,789 (1.112×), balanced-32x32 3,212 vs 2,989 (1.075×), and large-payload
+18,039 vs 17,390 (1.037×). Latency is equal in serial and better in fanout,
+balanced and large-payload; publishers-32 remains slightly worse at 3.069 ms
+versus 2.855 ms p99. Broker RSS is still higher in every shape, at 1.29–1.70×
+Mosquitto, so memory is the clearest remaining QoS 2 gap. This capture
+supersedes the earlier QoS 2 tables for current-code throughput and latency
+while leaving those historical captures separately scoped. Full per-sample
+records, build logs, environment hashes and the strict checker output are in
+`docs/evidence/mqtt_broker_matrix/2026-11-01-qos2.json`.
+
 The runner and both strict checkers now accept
 `MQTT_SESSION_EXPIRY_SECONDS=0..4294967295` and bind its canonical value into
 the driver result, run-order, environment, shape, allocator, and completion

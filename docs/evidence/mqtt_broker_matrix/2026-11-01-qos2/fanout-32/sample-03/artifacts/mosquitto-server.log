@@ -1,0 +1,110 @@
+1793507159: Info: running mosquitto as user: passchaos.
+1793507159: mosquitto version 2.1.2 starting
+1793507159: Config loaded from /tmp/netz-mqtt-matrix-qos2-2026-11-01/fanout-32/sample-03/artifacts/mosquitto.conf.
+1793507159: Bridge support available.
+1793507159: Persistence support available.
+1793507159: TLS support NOT available.
+1793507159: TLS-PSK support NOT available.
+1793507159: Websockets support NOT available.
+1793507159: Opening ipv4 listen socket on port 50789.
+1793507159: mosquitto version 2.1.2 running
+1793507159: New connection from 127.0.0.1:54826 on port 50789.
+1793507159: New client connected from 127.0.0.1:54826 as netz-load-subscriber-0 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54836 on port 50789.
+1793507159: New client connected from 127.0.0.1:54836 as netz-load-subscriber-1 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54846 on port 50789.
+1793507159: New client connected from 127.0.0.1:54846 as netz-load-subscriber-2 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54860 on port 50789.
+1793507159: New client connected from 127.0.0.1:54860 as netz-load-subscriber-3 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54868 on port 50789.
+1793507159: New client connected from 127.0.0.1:54868 as netz-load-subscriber-4 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54876 on port 50789.
+1793507159: New client connected from 127.0.0.1:54876 as netz-load-subscriber-5 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54878 on port 50789.
+1793507159: New client connected from 127.0.0.1:54878 as netz-load-subscriber-6 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54882 on port 50789.
+1793507159: New client connected from 127.0.0.1:54882 as netz-load-subscriber-7 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54892 on port 50789.
+1793507159: New client connected from 127.0.0.1:54892 as netz-load-subscriber-8 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54896 on port 50789.
+1793507159: New client connected from 127.0.0.1:54896 as netz-load-subscriber-9 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54902 on port 50789.
+1793507159: New client connected from 127.0.0.1:54902 as netz-load-subscriber-10 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54904 on port 50789.
+1793507159: New client connected from 127.0.0.1:54904 as netz-load-subscriber-11 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54908 on port 50789.
+1793507159: New client connected from 127.0.0.1:54908 as netz-load-subscriber-12 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54912 on port 50789.
+1793507159: New client connected from 127.0.0.1:54912 as netz-load-subscriber-13 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54920 on port 50789.
+1793507159: New client connected from 127.0.0.1:54920 as netz-load-subscriber-14 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54932 on port 50789.
+1793507159: New client connected from 127.0.0.1:54932 as netz-load-subscriber-15 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54934 on port 50789.
+1793507159: New client connected from 127.0.0.1:54934 as netz-load-subscriber-16 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54936 on port 50789.
+1793507159: New client connected from 127.0.0.1:54936 as netz-load-subscriber-17 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54952 on port 50789.
+1793507159: New client connected from 127.0.0.1:54952 as netz-load-subscriber-18 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54954 on port 50789.
+1793507159: New client connected from 127.0.0.1:54954 as netz-load-subscriber-19 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54960 on port 50789.
+1793507159: New client connected from 127.0.0.1:54960 as netz-load-subscriber-20 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54972 on port 50789.
+1793507159: New client connected from 127.0.0.1:54972 as netz-load-subscriber-21 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54986 on port 50789.
+1793507159: New client connected from 127.0.0.1:54986 as netz-load-subscriber-22 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54988 on port 50789.
+1793507159: New client connected from 127.0.0.1:54988 as netz-load-subscriber-23 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:54996 on port 50789.
+1793507159: New client connected from 127.0.0.1:54996 as netz-load-subscriber-24 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55002 on port 50789.
+1793507159: New client connected from 127.0.0.1:55002 as netz-load-subscriber-25 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55016 on port 50789.
+1793507159: New client connected from 127.0.0.1:55016 as netz-load-subscriber-26 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55022 on port 50789.
+1793507159: New client connected from 127.0.0.1:55022 as netz-load-subscriber-27 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55024 on port 50789.
+1793507159: New client connected from 127.0.0.1:55024 as netz-load-subscriber-28 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55032 on port 50789.
+1793507159: New client connected from 127.0.0.1:55032 as netz-load-subscriber-29 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55048 on port 50789.
+1793507159: New client connected from 127.0.0.1:55048 as netz-load-subscriber-30 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55060 on port 50789.
+1793507159: New client connected from 127.0.0.1:55060 as netz-load-subscriber-31 (p5, c1, k30).
+1793507159: New connection from 127.0.0.1:55068 on port 50789.
+1793507159: New client connected from 127.0.0.1:55068 as netz-load-publisher-0 (p5, c1, k30).
+1793507159: Client netz-load-subscriber-0 [127.0.0.1:54826] disconnected.
+1793507159: Client netz-load-subscriber-1 [127.0.0.1:54836] disconnected.
+1793507159: Client netz-load-subscriber-2 [127.0.0.1:54846] disconnected.
+1793507159: Client netz-load-subscriber-3 [127.0.0.1:54860] disconnected.
+1793507159: Client netz-load-subscriber-4 [127.0.0.1:54868] disconnected.
+1793507159: Client netz-load-subscriber-5 [127.0.0.1:54876] disconnected.
+1793507159: Client netz-load-subscriber-6 [127.0.0.1:54878] disconnected.
+1793507159: Client netz-load-subscriber-7 [127.0.0.1:54882] disconnected.
+1793507159: Client netz-load-subscriber-8 [127.0.0.1:54892] disconnected.
+1793507159: Client netz-load-subscriber-9 [127.0.0.1:54896] disconnected.
+1793507159: Client netz-load-subscriber-10 [127.0.0.1:54902] disconnected.
+1793507159: Client netz-load-subscriber-11 [127.0.0.1:54904] disconnected.
+1793507159: Client netz-load-subscriber-12 [127.0.0.1:54908] disconnected.
+1793507159: Client netz-load-subscriber-13 [127.0.0.1:54912] disconnected.
+1793507159: Client netz-load-subscriber-14 [127.0.0.1:54920] disconnected.
+1793507159: Client netz-load-subscriber-15 [127.0.0.1:54932] disconnected.
+1793507159: Client netz-load-subscriber-16 [127.0.0.1:54934] disconnected.
+1793507159: Client netz-load-subscriber-17 [127.0.0.1:54936] disconnected.
+1793507159: Client netz-load-subscriber-18 [127.0.0.1:54952] disconnected.
+1793507159: Client netz-load-subscriber-19 [127.0.0.1:54954] disconnected.
+1793507159: Client netz-load-subscriber-20 [127.0.0.1:54960] disconnected.
+1793507159: Client netz-load-subscriber-21 [127.0.0.1:54972] disconnected.
+1793507159: Client netz-load-subscriber-22 [127.0.0.1:54986] disconnected.
+1793507159: Client netz-load-subscriber-23 [127.0.0.1:54988] disconnected.
+1793507159: Client netz-load-subscriber-24 [127.0.0.1:54996] disconnected.
+1793507159: Client netz-load-subscriber-25 [127.0.0.1:55002] disconnected.
+1793507159: Client netz-load-subscriber-26 [127.0.0.1:55016] disconnected.
+1793507159: Client netz-load-subscriber-27 [127.0.0.1:55022] disconnected.
+1793507159: Client netz-load-subscriber-28 [127.0.0.1:55024] disconnected.
+1793507159: Client netz-load-subscriber-29 [127.0.0.1:55032] disconnected.
+1793507159: Client netz-load-subscriber-30 [127.0.0.1:55048] disconnected.
+1793507159: Client netz-load-subscriber-31 [127.0.0.1:55060] disconnected.
+1793507159: Client netz-load-publisher-0 [127.0.0.1:55068] disconnected.
+1793507159: mosquitto version 2.1.2 terminating

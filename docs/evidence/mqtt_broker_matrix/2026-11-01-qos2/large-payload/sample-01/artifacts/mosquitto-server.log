@@ -1,0 +1,35 @@
+1793507172: Info: running mosquitto as user: passchaos.
+1793507172: mosquitto version 2.1.2 starting
+1793507172: Config loaded from /tmp/netz-mqtt-matrix-qos2-2026-11-01/large-payload/sample-01/artifacts/mosquitto.conf.
+1793507172: Bridge support available.
+1793507172: Persistence support available.
+1793507172: TLS support NOT available.
+1793507172: TLS-PSK support NOT available.
+1793507172: Websockets support NOT available.
+1793507172: Opening ipv4 listen socket on port 37341.
+1793507172: mosquitto version 2.1.2 running
+1793507172: New connection from 127.0.0.1:54486 on port 37341.
+1793507172: New client connected from 127.0.0.1:54486 as netz-load-subscriber-0 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54498 on port 37341.
+1793507172: New client connected from 127.0.0.1:54498 as netz-load-subscriber-1 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54506 on port 37341.
+1793507172: New client connected from 127.0.0.1:54506 as netz-load-subscriber-2 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54522 on port 37341.
+1793507172: New client connected from 127.0.0.1:54522 as netz-load-subscriber-3 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54536 on port 37341.
+1793507172: New client connected from 127.0.0.1:54536 as netz-load-publisher-0 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54538 on port 37341.
+1793507172: New client connected from 127.0.0.1:54538 as netz-load-publisher-1 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54544 on port 37341.
+1793507172: New client connected from 127.0.0.1:54544 as netz-load-publisher-2 (p5, c1, k30).
+1793507172: New connection from 127.0.0.1:54560 on port 37341.
+1793507172: New client connected from 127.0.0.1:54560 as netz-load-publisher-3 (p5, c1, k30).
+1793507172: Client netz-load-subscriber-0 [127.0.0.1:54486] disconnected.
+1793507172: Client netz-load-subscriber-1 [127.0.0.1:54498] disconnected.
+1793507172: Client netz-load-subscriber-2 [127.0.0.1:54506] disconnected.
+1793507172: Client netz-load-subscriber-3 [127.0.0.1:54522] disconnected.
+1793507172: Client netz-load-publisher-0 [127.0.0.1:54536] disconnected.
+1793507172: Client netz-load-publisher-1 [127.0.0.1:54538] disconnected.
+1793507172: Client netz-load-publisher-2 [127.0.0.1:54544] disconnected.
+1793507172: Client netz-load-publisher-3 [127.0.0.1:54560] disconnected.
+1793507172: mosquitto version 2.1.2 terminating
