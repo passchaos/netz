@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-webtransport-socks5",
+  "command": "zig build interop-webtransport-socks5 -Doptimize=ReleaseFast",
+  "result": "WebTransport SOCKS5 interoperability passed: associations=2 remote_dns=true rejection=404 connect=true datagram=true bidi=true uni=true reset=73 stop=74 recovery=true reuse=true peer_close=true client_io=zio-std-io server_io=wtransport-quinn-tokio",
+  "coverage": [
+    "Two authenticated WebTransport associations through independent SOCKS5 UDP relays",
+    "Remote DNS inside the proxy, rejected CONNECT with 404, accepted CONNECT",
+    "DATAGRAM exchange, bidirectional and unidirectional streams",
+    "RESET_STREAM 73 / STOP_SENDING 74 recovery, connection reuse and peer close"
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

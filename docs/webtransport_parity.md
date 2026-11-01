@@ -193,6 +193,11 @@ reporting only the peer's DATAGRAM frame allowance. The gate compares this
 with wtransport's corresponding API
 and requires both implementations to reject an allocation-backed payload one
 byte above their independently reported limit before continuing normally.
+A fresh 2026-11-01 `interop-webtransport-socks5` run passed two authenticated
+associations through independent SOCKS5 UDP relays with remote DNS, a 404
+rejection, CONNECT, DATAGRAM, bidirectional and unidirectional streams,
+RESET_STREAM 73 / STOP_SENDING 74 recovery, connection reuse and peer close;
+see `docs/evidence/webtransport_socks5/2026-11-01.json`.
 Handshake-backed WebTransport client/server sessions also expose the negotiated
 TLS cipher suite and transcript hash together with QUIC key-update initiation,
 local/peer generation counts and the outstanding ACK gate. The same APIs are

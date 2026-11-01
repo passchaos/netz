@@ -1,0 +1,1 @@
+WebTransport SOCKS5 interoperability passed: associations=2 remote_dns=true rejection=404 connect=true datagram=true bidi=true uni=true reset=73 stop=74 recovery=true reuse=true peer_close=true client_io=zio-std-io server_io=wtransport-quinn-tokio
