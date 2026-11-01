@@ -11,6 +11,7 @@ pub const Options = struct {
     connection_window: u32 = 65535,
     adaptive_window: bool = false,
     adaptive_window_max: u32 = 16 * 1024 * 1024,
+    max_frame_size: u32 = 16 * 1024,
 
     pub fn total(self: Options) usize {
         return self.warmup + self.iterations;
@@ -36,6 +37,8 @@ pub fn parse(init: std.process.Init) !Options {
             options.connection_window = try std.fmt.parseInt(u32, arg["--connection-window=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--adaptive-window-max=")) {
             options.adaptive_window_max = try std.fmt.parseInt(u32, arg["--adaptive-window-max=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--max-frame-size=")) {
+            options.max_frame_size = try std.fmt.parseInt(u32, arg["--max-frame-size=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
             options.mode = std.meta.stringToEnum(Mode, arg["--mode=".len..]) orelse return error.InvalidArgument;
         } else if (std.mem.startsWith(u8, arg, "--payload=")) {
@@ -50,6 +53,7 @@ pub fn parse(init: std.process.Init) !Options {
     const maximum_window = 16 * 1024 * 1024;
     if (options.stream_window == 0 or options.stream_window > maximum_window or options.connection_window < 65535 or options.connection_window > maximum_window) return error.InvalidArgument;
     if (options.adaptive_window_max > maximum_window or (options.adaptive_window and options.adaptive_window_max < @max(options.stream_window, options.connection_window))) return error.InvalidArgument;
+    if (options.max_frame_size < 16 * 1024 or options.max_frame_size > 16 * 1024 * 1024 - 1) return error.InvalidArgument;
     _ = std.math.add(usize, options.warmup, options.iterations) catch return error.InvalidArgument;
     return options;
 }

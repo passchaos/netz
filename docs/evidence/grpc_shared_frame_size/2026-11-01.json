@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "scope": "netz-to-netz SharedChannel persistent 256-KiB gRPC ping-pong",
+  "command_template": "taskset -c 0 zig build bench-grpc-shared -Doptimize=ReleaseFast -- --mode=persistent --payload=262144 --warmup=100 --iterations=1000 --stream-window=1048576 --connection-window=1048576 [--max-frame-size=65536]",
+  "change": "The gRPC shared benchmark now accepts --max-frame-size and applies it to both endpoints through http2.runtime.Limits. Result and peer-completion records include max_frame_size.",
+  "pairs": [
+    {
+      "pair": 1,
+      "window_only_ns_per_roundtrip": 742708,
+      "window_only_p50_ns": 728526,
+      "window_only_p99_ns": 1127271,
+      "large_frame_ns_per_roundtrip": 707929,
+      "large_frame_p50_ns": 701258,
+      "large_frame_p99_ns": 1039196
+    },
+    {
+      "pair": 2,
+      "window_only_ns_per_roundtrip": 741059,
+      "window_only_p50_ns": 728952,
+      "window_only_p99_ns": 1094308,
+      "large_frame_ns_per_roundtrip": 704608,
+      "large_frame_p50_ns": 699202,
+      "large_frame_p99_ns": 1020159
+    },
+    {
+      "pair": 3,
+      "window_only_ns_per_roundtrip": 741091,
+      "window_only_p50_ns": 728638,
+      "window_only_p99_ns": 1056437,
+      "large_frame_ns_per_roundtrip": 706498,
+      "large_frame_p50_ns": 698517,
+      "large_frame_p99_ns": 1086696
+    }
+  ],
+  "summary": {
+    "window_only_median_ns_per_roundtrip": 741091,
+    "large_frame_median_ns_per_roundtrip": 706498,
+    "median_improvement_percent": 4.67,
+    "window_only_median_p50_ns": 728638,
+    "large_frame_median_p50_ns": 699202,
+    "p50_improvement_percent": 4.04,
+    "wins": "3/3 pairs"
+  },
+  "conclusions": [
+    "Raising both HTTP/2 windows to 1 MiB and SETTINGS_MAX_FRAME_SIZE to 64 KiB improves netz-to-netz 256-KiB persistent gRPC by about 4.7% mean and 4.0% p50, with 3/3 paired wins.",
+    "The earlier window-only capture measured a single default-window run at about 836 us; the current 1-MiB/16-KiB run is about 741 us, so window tuning now matters more than the earlier 0-4% observation.",
+    "This tuning cannot close the grpc-cpp comparison by itself: grpc-cpp advertises its own 16-KiB maximum frame size and window policy, and the cross-stack fixture must keep its peer settings.",
+    "The benchmark option is a reproducible tuning path for deployments where both endpoints are netz and can adopt the larger frame size."
+  ],
+  "log": "2026-11-01/pairs.log",
+  "artifacts": "2026-11-01/"
+}

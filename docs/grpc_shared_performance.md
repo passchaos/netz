@@ -172,6 +172,22 @@ observed changes stayed near 0-4%, while every shape still took about 1 ms.
 Increasing default buffering is therefore not supported as the main remedy by
 this experiment.
 
+### Current 256-KiB window and frame-size tuning
+
+The benchmark now accepts `--max-frame-size` and records it in both result and
+peer-completion lines. Three CPU-0 pairs of 1,000 persistent 256-KiB
+roundtrips compared 1-MiB stream/connection windows with 16-KiB frames against
+the same windows with 64-KiB frames. Median roundtrip time fell from 741.1 to
+706.5 us (4.67%) and p50 from 728.6 to 699.2 us (4.04%), with 3/3 paired wins;
+p99 improved in two pairs. A single default-window reference run measured about
+836 us, so the combined 1-MiB/64-KiB shape is about 15.5% faster than the
+default shape for netz-to-netz traffic. This does not close the grpc-cpp
+comparison: grpc-cpp advertises its own 16-KiB frame limit and window policy,
+and the cross-stack fixture must keep those peer settings. The option is a
+reproducible tuning path for deployments where both endpoints are netz. Full
+records are in
+[the frame-size evidence](evidence/grpc_shared_frame_size/2026-11-01.json).
+
 The production shared owner now uses low-watermark connection refills and
 batches consumer-acknowledged stream credit. Stream updates cover only dequeued
 encoded bytes; an exhausted window flushes available acknowledged bytes even
