@@ -853,3 +853,54 @@ test "gRPC shared nested pick_first shuffle keeps sibling subsets ordered" {
         ));
     }
 }
+
+test "gRPC shared priority deactivates a lower child after the higher child recovers" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var high_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer high_server.deinit();
+    var low_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer low_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var low_peer = io.async(PriorityPeer.run, .{ &low_server, &stop, "low" });
+    defer _ = low_peer.cancel(io) catch {};
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = high_server.address(), .hierarchical_path = &high_path } },
+        .{ .cleartext_ip = .{ .address = low_server.address(), .hierarchical_path = &low_path } },
+    };
+    var client = try shared.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .priority_failover_timeout = .fromNanoseconds(0),
+            .removed_child_retention = .fromMilliseconds(200),
+            .service_config_json =
+            \\{"loadBalancingConfig":[{"priority_experimental":{
+            \\ "children":{
+            \\  "high":{"config":[{"round_robin":{}}]},
+            \\  "low":{"config":[{"round_robin":{}}]}},
+            \\ "priorities":["high","low"]}}]}
+            ,
+        },
+    );
+    defer client.deinit();
+    client.connect();
+    var low_watch = client.watchEndpointConnectivity(1).?;
+    defer low_watch.deinit();
+    while ((try low_watch.nextWithTimeout(.fromSeconds(3))).state != .ready) {}
+    // The high listener did not accept before this point, so the high worker
+    // stayed CONNECTING and the zero failover timeout activated the low child.
+    var high_peer = io.async(PriorityPeer.run, .{ &high_server, &stop, "high" });
+    defer _ = high_peer.cancel(io) catch {};
+    var high_watch = client.watchEndpointConnectivity(0).?;
+    defer high_watch.deinit();
+    while ((try high_watch.nextWithTimeout(.fromSeconds(3))).state != .ready) {}
+    // The higher child is now READY, so the low transport must close after the
+    // configured retention interval.
+    while ((try low_watch.nextWithTimeout(.fromSeconds(3))).state != .idle) {}
+    stop.set(io);
+}

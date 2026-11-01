@@ -20,6 +20,9 @@ pub fn Runtime(comptime State: type) type {
         root: *Node,
         outlier_count: usize = 0,
         priority_failover_timeout_ns: i96 = 10 * std.time.ns_per_s,
+        /// grpc-core's kChildRetentionInterval: how long a lower priority
+        /// stays connected after a higher priority becomes READY/IDLE.
+        priority_deactivation_timeout_ns: i96 = 15 * 60 * std.time.ns_per_s,
 
         const Self = @This();
         const Worker = State.Worker;
@@ -65,6 +68,12 @@ pub fn Runtime(comptime State: type) type {
             /// Once grpc-core reaches a priority it keeps that child alive and
             /// retrying even when a lower priority becomes current.
             activated: bool = false,
+            /// Set while a higher priority is READY/IDLE and this child is
+            /// scheduled for deactivation.
+            deactivate_at: ?i96 = null,
+            /// The deactivation deadline elapsed and this child's transports
+            /// must close until a higher priority fails again.
+            deactivated: bool = false,
         };
 
         const Priority = struct {
@@ -103,10 +112,25 @@ pub fn Runtime(comptime State: type) type {
             root_config: *const service_config.LoadBalancingNode,
             priority_failover_timeout_ns: i96,
         ) BuildError!Self {
+            return initWithPriorityTimeouts(
+                allocator,
+                root_config,
+                priority_failover_timeout_ns,
+                15 * 60 * std.time.ns_per_s,
+            );
+        }
+
+        pub fn initWithPriorityTimeouts(
+            allocator: std.mem.Allocator,
+            root_config: *const service_config.LoadBalancingNode,
+            priority_failover_timeout_ns: i96,
+            priority_deactivation_timeout_ns: i96,
+        ) BuildError!Self {
             var self = Self{
                 .allocator = allocator,
                 .root = undefined,
                 .priority_failover_timeout_ns = priority_failover_timeout_ns,
+                .priority_deactivation_timeout_ns = priority_deactivation_timeout_ns,
             };
             self.root = try self.build(root_config, &.{});
             return self;
@@ -135,16 +159,27 @@ pub fn Runtime(comptime State: type) type {
             return @import("../tree_query.zig").shufflesAddressList(self.root, path);
         }
 
-        /// Whether the endpoint path belongs to the priority slice that should
-        /// currently be connected. `wake_at` receives the failover deadline
-        /// when the path is waiting for a higher priority's timer.
-        pub fn pathActive(
+        pub const PathState = struct {
+            active: bool = false,
+            /// The path waits for a higher priority's failover deadline.
+            wake_at: ?i96 = null,
+            /// A higher priority is READY/IDLE and this lower child will be
+            /// deactivated at this deadline.
+            deactivate_at: ?i96 = null,
+            /// The deactivation deadline elapsed; close the transport now.
+            deactivate_now: bool = false,
+        };
+
+        /// Describe whether the endpoint path belongs to the priority slice
+        /// that should currently be connected.
+        pub fn pathState(
             self: *Self,
             state: *State,
             path: []const []const u8,
-            wake_at: *?i96,
-        ) bool {
-            return self.pathActiveNode(self.root, state, path, wake_at);
+        ) PathState {
+            var result = PathState{};
+            self.pathStateNode(self.root, state, path, &result);
+            return result;
         }
 
         const PriorityState = struct {
@@ -182,23 +217,43 @@ pub fn Runtime(comptime State: type) type {
                     priority.failover_can_start = false;
                 },
             }
+            var result: PriorityState = undefined;
             if (first_state == .ready or first_state == .idle) {
                 activatePriority(priority, 0);
-                return .{ .active_index = 0, .wake_at = null, .failover_open = false };
-            }
-            if (first_state == .connecting) {
-                if (priority.failover_started_ns) |started| {
+                result = .{ .active_index = 0, .wake_at = null, .failover_open = false };
+            } else if (first_state == .connecting) {
+                const pending = if (priority.failover_started_ns) |started| blk: {
                     const deadline = started +| self.priority_failover_timeout_ns;
                     if (self.priority_failover_timeout_ns > 0 and now < deadline) {
-                        activatePriority(priority, 0);
-                        return .{
-                            .active_index = 0,
-                            .wake_at = deadline,
-                            .failover_open = false,
-                        };
+                        break :blk deadline;
                     }
+                    break :blk null;
+                } else null;
+                if (pending) |deadline| {
+                    activatePriority(priority, 0);
+                    result = .{
+                        .active_index = 0,
+                        .wake_at = deadline,
+                        .failover_open = false,
+                    };
+                } else {
+                    result = self.chooseNextPriority(priority, state);
                 }
+            } else {
+                result = self.chooseNextPriority(priority, state);
             }
+            const active_index = result.active_index.?;
+            const active_child = priority.children[priority.order[active_index]];
+            const active_state = self.aggregateNode(active_child.node, state);
+            self.updateDeactivation(priority, active_index, active_state, now);
+            return result;
+        }
+
+        fn chooseNextPriority(
+            self: *Self,
+            priority: *Priority,
+            state: *State,
+        ) PriorityState {
             // The first priority failed or its timer expired. Select the next
             // priority that is not in TRANSIENT_FAILURE; otherwise delegate to
             // the last priority so it can retry.
@@ -216,43 +271,96 @@ pub fn Runtime(comptime State: type) type {
 
         fn activatePriority(priority: *Priority, index: usize) void {
             for (priority.order[0 .. index + 1]) |child_index| {
-                priority.children[child_index].activated = true;
+                const child = &priority.children[child_index];
+                child.activated = true;
+                child.deactivated = false;
+                child.deactivate_at = null;
             }
         }
 
-        fn pathActiveNode(
+        fn updateDeactivation(
+            self: *Self,
+            priority: *Priority,
+            active_index: usize,
+            active_state: connectivity.State,
+            now: i96,
+        ) void {
+            const deactivate_lower = active_state == .ready or active_state == .idle;
+            for (priority.order, 0..) |child_index, ordinal| {
+                const child = &priority.children[child_index];
+                if (ordinal <= active_index) {
+                    child.deactivate_at = null;
+                    child.deactivated = false;
+                    continue;
+                }
+                if (!child.activated) continue;
+                if (!deactivate_lower) {
+                    child.deactivate_at = null;
+                    continue;
+                }
+                if (self.priority_deactivation_timeout_ns <= 0) {
+                    child.activated = false;
+                    child.deactivated = true;
+                    child.deactivate_at = null;
+                    continue;
+                }
+                const deadline = child.deactivate_at orelse blk: {
+                    const value = now +| self.priority_deactivation_timeout_ns;
+                    child.deactivate_at = value;
+                    break :blk value;
+                };
+                if (now >= deadline) {
+                    child.activated = false;
+                    child.deactivated = true;
+                    child.deactivate_at = null;
+                }
+            }
+        }
+
+        fn pathStateNode(
             self: *Self,
             node: *Node,
             state: *State,
             path: []const []const u8,
-            wake_at: *?i96,
-        ) bool {
-            if (!pathMatches(path, node.path)) return false;
-            return switch (node.kind) {
-                .leaf => true,
-                .outlier => |wrapper| self.pathActiveNode(wrapper.child, state, path, wake_at),
+            result: *PathState,
+        ) void {
+            if (!pathMatches(path, node.path)) return;
+            switch (node.kind) {
+                .leaf => result.active = true,
+                .outlier => |wrapper| self.pathStateNode(wrapper.child, state, path, result),
                 .weighted => |weighted| for (weighted.children) |child| {
-                    if (self.pathActiveNode(child.node, state, path, wake_at)) break true;
-                } else false,
-                .priority => |*priority| blk: {
+                    self.pathStateNode(child.node, state, path, result);
+                },
+                .priority => |*priority| {
                     const info = self.evaluatePriority(priority, state);
-                    for (priority.order) |child_index| {
+                    for (priority.order, 0..) |child_index, ordinal| {
                         const child = priority.children[child_index];
                         if (!pathMatches(path, child.node.path)) continue;
                         if (child.activated) {
-                            break :blk self.pathActiveNode(child.node, state, path, wake_at);
-                        }
-                        if (info.wake_at) |deadline| {
-                            wake_at.* = if (wake_at.*) |current|
+                            if (info.active_index) |active| {
+                                if (ordinal > active) {
+                                    if (child.deactivate_at) |deadline| {
+                                        result.deactivate_at =
+                                            if (result.deactivate_at) |current|
+                                                @min(current, deadline)
+                                            else
+                                                deadline;
+                                    }
+                                }
+                            }
+                            self.pathStateNode(child.node, state, path, result);
+                        } else if (child.deactivated) {
+                            result.deactivate_now = true;
+                        } else if (info.wake_at) |deadline| {
+                            result.wake_at = if (result.wake_at) |current|
                                 @min(current, deadline)
                             else
                                 deadline;
                         }
-                        break :blk false;
+                        break;
                     }
-                    break :blk false;
                 },
-            };
+            }
         }
 
         pub fn aggregate(self: *Self, state: *State) connectivity.State {

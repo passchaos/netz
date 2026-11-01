@@ -42,11 +42,12 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         return error.InvalidSharedOptions;
     }
     var weighted_target = if (policy == .weighted_target or policy == .priority)
-        State.WeightedTarget.initWithPriorityFailoverTimeout(
+        State.WeightedTarget.initWithPriorityTimeouts(
             allocator,
             balancing.root orelse return error.InvalidSharedOptions,
             (options.priority_failover_timeout orelse
                 std.Io.Duration.fromSeconds(10)).nanoseconds,
+            options.removed_child_retention.nanoseconds,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidSharedOptions,

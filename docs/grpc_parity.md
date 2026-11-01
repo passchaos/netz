@@ -702,7 +702,7 @@ dialing a new one. Retention recurses through nested priority and weighted
 targets, uses the existing bounded `max_retained_children` admission, and is
 disabled by a zero retention duration. Leaf and outlier state is also
 transferred when a priority tree survives an update with the same child paths.
-The full gRPC Debug gate passes 560/560 with these changes.
+The full gRPC Debug gate passes 561/561 with these changes.
 
 SharedChannel now activates priority children lazily, matching grpc-core's
 `ChoosePriorityLocked` order. Only the current priority slice connects; lower
@@ -714,11 +714,18 @@ priority's timer sleeps until that exact deadline instead of polling. Endpoints
 that the configured policy does not accept now stay IDLE and no longer open
 speculative connections. Reconnect backoff publishes IDLE before CONNECTING so
 a previously-READY child restarts the failover timer exactly as grpc-core does.
-The deactivation timer that deletes a lower child after a higher priority has
-been READY for 15 minutes remains open; netz keeps already-connected lower
-children until their config child is removed. Lazy activation currently applies
-to SharedChannel's background owners; the ordinary Channel still warms every
-endpoint during each call.
+The grpc-core lower-priority deactivation timer is now implemented too. When
+the selected child is READY or IDLE, every activated lower child starts a
+`removed_child_retention` countdown (15 minutes by default). A lower transport
+stays usable and keeps its health/ORCA control work during that window; when
+the countdown expires its worker closes the connection cleanly without
+reporting a failure or requesting re-resolution. A later higher-priority
+failure cancels the countdown and reactivates the lower child, which reconnects
+on demand. Focused regressions cover both the countdown closing a live lower
+transport and reactivation through the existing failover tests. The full gRPC
+Debug gate passes 561/561 with these changes. Lazy activation and the
+deactivation timer currently apply to SharedChannel's background owners; the
+ordinary Channel still warms every endpoint during each call.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.

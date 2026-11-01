@@ -52,6 +52,8 @@ pub fn Worker(comptime State: type) type {
         health_failures: usize = 0,
         connect_failures: usize = 0,
         connect_at: ?std.Io.Clock.Timestamp = null,
+        /// Deadline at which an inactive lower-priority transport closes.
+        deactivation_deadline: ?std.Io.Clock.Timestamp = null,
         backoff_reset_requested: std.atomic.Value(bool) = .init(false),
         health_at: ?std.Io.Clock.Timestamp = null,
         keep_alive: keepalive.Driver = .{},
@@ -115,7 +117,8 @@ pub fn Worker(comptime State: type) type {
             return if (std.Io.Clock.Timestamp.compare(a.?, .lt, b.?)) a else b;
         }
         fn sleepUntilWake(self: *Self, until: ?std.Io.Clock.Timestamp) !void {
-            if (until) |time| self.wake.waitTimeout(self.parent.io, .{ .deadline = time }) catch |err| {
+            const combined = minimum(until, self.deactivation_deadline);
+            if (combined) |time| self.wake.waitTimeout(self.parent.io, .{ .deadline = time }) catch |err| {
                 if (err != error.Timeout) return err;
             } else try self.wake.wait(self.parent.io);
         }
@@ -159,6 +162,30 @@ pub fn Worker(comptime State: type) type {
             self.local_state = .transient_failure;
             self.parent.publish(self, .transient_failure, 0);
             self.parent.connectionFailed(self);
+        }
+        /// Close the transport for a deactivated lower-priority child without
+        /// reporting a connection failure or requesting re-resolution.
+        fn deactivate(self: *Self) void {
+            self.dropWatch();
+            self.dropOrca();
+            if (self.parent.orcaConfigFor(self) != null) {
+                self.orca_tracker.setStatus(.unavailable);
+            }
+            self.owner.disconnect() catch {};
+            self.connection = null;
+            self.keep_alive.disconnected();
+            self.goaway_keepalive_applied = false;
+            self.connection_keepalive_interval = null;
+            self.parent.disconnectWrr(self);
+            self.health_disabled = false;
+            self.health_at = null;
+            self.health_seen = false;
+            self.orca_disabled = false;
+            self.orca_at = null;
+            self.orca_seen = false;
+            self.deactivation_deadline = null;
+            self.local_state = .idle;
+            self.parent.publish(self, .idle, 0);
         }
         fn failActive(self: *Self, index: usize, err: anyerror) void {
             const job = self.active.items[index].job;
@@ -215,6 +242,20 @@ pub fn Worker(comptime State: type) type {
                 self.dropOrca();
             }
             self.parent.expireQueued();
+            if (policy.deactivate_now and self.connection != null and
+                self.active.items.len == 0 and self.streams.items.len == 0)
+            {
+                self.deactivate();
+                return self.sleepUntilWake(null);
+            }
+            self.deactivation_deadline = if (self.connection != null and
+                policy.deactivate_at != null)
+                std.Io.Clock.Timestamp{
+                    .raw = .{ .nanoseconds = policy.deactivate_at.? },
+                    .clock = .awake,
+                }
+            else
+                null;
             if (!policy.active and self.connection == null and
                 self.active.items.len == 0 and self.streams.items.len == 0)
             {
@@ -444,10 +485,13 @@ pub fn Worker(comptime State: type) type {
             }
             if (progress) return;
             var until = minimum(
-                self.parent.nextQueuedDeadline(),
+                self.deactivation_deadline,
                 minimum(
-                    self.parent.nextOutlierDeadline(),
-                    minimum(self.health_at, self.orca_at),
+                    self.parent.nextQueuedDeadline(),
+                    minimum(
+                        self.parent.nextOutlierDeadline(),
+                        minimum(self.health_at, self.orca_at),
+                    ),
                 ),
             );
             for (self.active.items) |item| until = minimum(until, item.job.deadline);

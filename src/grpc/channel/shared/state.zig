@@ -505,6 +505,8 @@ pub const State = struct {
     pub const ConnectionPolicy = struct {
         active: bool,
         wake_at: ?i96 = null,
+        deactivate_at: ?i96 = null,
+        deactivate_now: bool = false,
     };
     pub fn connectionPolicy(self: *State, worker: *Worker) ConnectionPolicy {
         self.lock();
@@ -513,13 +515,16 @@ pub const State = struct {
         worker.wake.reset();
         if (!self.demand or worker.retired) return .{ .active = false };
         const runtime = if (self.weighted_target) |*value| value else return .{ .active = true };
-        var wake_at: ?i96 = null;
-        const active = runtime.pathActive(
+        const path_state = runtime.pathState(
             self,
             worker.source.endpoint.hierarchicalPath(),
-            &wake_at,
         );
-        return .{ .active = active, .wake_at = if (active) null else wake_at };
+        return .{
+            .active = path_state.active,
+            .wake_at = path_state.wake_at,
+            .deactivate_at = path_state.deactivate_at,
+            .deactivate_now = path_state.deactivate_now,
+        };
     }
     pub fn shouldStop(self: *State, worker: *Worker, drained: bool) bool {
         self.lock();
