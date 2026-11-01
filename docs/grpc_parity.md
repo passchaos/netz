@@ -2995,3 +2995,25 @@ payload-sized staging allocation disappeared. The gRPC filter passes 563/563,
 the HTTP/2 filter passes 951/951, and a 100,000-byte duplex regression proves
 the response path makes no allocation at or above the payload size. Evidence
 is recorded in `docs/evidence/grpc_shared_duplex_burst/2026-11-02.json`.
+
+## Shared unary request prefix-reserved ownership
+
+A SharedChannel unary job previously cloned the caller payload once in
+`Job.create` and then copied it again into the framed `PendingMessage`. The
+job now allocates one five-byte-prefix-reserved buffer, points
+`options.message` at its payload suffix, and hands the exact storage to
+`ClientDuplex.stageOwnedMessageStorage`. Identity and compression fallback
+transfer that allocation without another copy; actual compression keeps its
+separate framed output and frees the original input.
+
+Five ABBA rounds on the 256-KiB shared-unary workload with the cached
+allocator and length-only validation moved the median from 450,380.5 ns to
+422,390.5 ns (6.2% faster, 5/5 rounds), and cache hits fell from 10,930 to
+10,270. The gRPC filter passes 564/564, a focused Job test binds the five-byte
+reservation and payload pointer, a full-payload shared-unary run passes, and
+the grpc-cpp forward matrix passes. Evidence is recorded in
+`docs/evidence/grpc_shared_owned_request/2026-11-02.json`.
+
+The earlier inline `OwnedMessage` variant changed `Job` size and collided with
+a test allocator keyed on `@sizeOf(StreamCall)`, causing a deadlock. Keeping
+`owned_message` as `?[]u8` preserves the original layout.

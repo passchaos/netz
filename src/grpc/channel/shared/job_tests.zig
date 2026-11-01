@@ -131,3 +131,35 @@ test "gRPC queued abandoned Job is reclaimed by the next shared owner" {
     try std.testing.expectEqual(@as(usize, 0), state.queued);
     try std.testing.expectEqual(refs, state.refs.load(.acquire));
 }
+
+test "gRPC Job reserves the frame prefix in its owned request allocation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try Shared.SharedChannel.init(
+        std.testing.allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+        .{},
+    );
+    var sender = channel.sender();
+    defer sender.deinit();
+    channel.deinit();
+    const state = sender.state;
+    state.closed = false;
+    defer state.closed = true;
+
+    var body: [7]u8 = "payload".*;
+    var path: [7]u8 = "/svc/Op".*;
+    const job = try Job.create(state, .{
+        .path = &path,
+        .message = &body,
+        .authority = "host.test",
+    }, null, null, null);
+    defer job.release();
+
+    const storage = job.owned_message.?;
+    try std.testing.expectEqual(@as(usize, 5 + body.len), storage.len);
+    try std.testing.expectEqual(storage.ptr + 5, job.options.message.ptr);
+    try std.testing.expectEqualStrings("payload", job.options.message);
+}

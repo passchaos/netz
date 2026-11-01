@@ -474,12 +474,26 @@ pub fn Worker(comptime State: type) type {
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;
                 };
-                stream.stageFinalMessage(job.options.message, .{}) catch |err| {
+                const storage = job.owned_message orelse {
+                    stream.deinit();
+                    self.parent.finishAttempt(self, job, null, error.InvalidStreamState);
+                    continue;
+                };
+                const transferred = stream.stageOwnedMessageStorage(
+                    storage,
+                    .{},
+                    true,
+                ) catch |err| {
                     stream.deinit();
                     self.parent.finishAttempt(self, job, null, err);
                     continue;
                 };
-                job.releaseMessage();
+                if (transferred) {
+                    job.owned_message = null;
+                    job.options.message = &.{};
+                } else {
+                    job.releaseMessage();
+                }
                 self.active.appendAssumeCapacity(.{ .job = job, .stream = stream });
                 self.publish();
             }

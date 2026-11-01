@@ -12,6 +12,8 @@ pub const Job = struct {
     completion: std.atomic.Value(Completion) = .init(.waiting),
     owner_wake: std.atomic.Value(?*Wake) = .init(null),
     owned_inputs: ?inputs.Inputs = null,
+    /// Prefix-reserved storage: bytes 0..5 are the gRPC frame header and the
+    /// remaining bytes own the caller payload.
     owned_message: ?[]u8 = null,
     options: call.UnaryCallOptions,
     deadline: ?std.Io.Clock.Timestamp,
@@ -31,15 +33,25 @@ pub const Job = struct {
         deadline: ?std.Io.Clock.Timestamp,
         rpc_deadline: ?std.Io.Clock.Timestamp,
         previous: ?u8,
-    ) (std.mem.Allocator.Error || error{MissingRequestHash})!*Job {
+    ) (std.mem.Allocator.Error || error{ MissingRequestHash, GrpcMessageTooLarge })!*Job {
         const allocator = parent.allocator;
         const routing_hash: ?ring_hash.RequestHash = null;
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
         var request = try inputs.clone(allocator, options);
         errdefer request.inputs.deinit();
-        const message = try allocator.dupe(u8, options.message);
-        request.options.message = message;
+        if (options.message.len > std.math.maxInt(u32)) {
+            return error.GrpcMessageTooLarge;
+        }
+        const encoded_len = std.math.add(
+            usize,
+            5,
+            options.message.len,
+        ) catch return error.GrpcMessageTooLarge;
+        const message = try allocator.alloc(u8, encoded_len);
+        errdefer allocator.free(message);
+        @memcpy(message[5..], options.message);
+        request.options.message = message[5..];
         parent.retain();
         job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .rpc_deadline = rpc_deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .routing_hash = routing_hash, .owned_inputs = request.inputs, .owned_message = message };
         return job;

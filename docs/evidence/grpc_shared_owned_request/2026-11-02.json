@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "SharedChannel unary request prefix-reserved ownership",
+  "decision": "accepted",
+  "baseline": {
+    "commit": "d467615d",
+    "src/grpc/channel/shared/job.zig": "14276f35f5fcd91e26867b14c7330ed5f880c7ec3130df774cf3707e36d2aeae",
+    "src/grpc/channel/shared/worker.zig": "6de03c83b6b25471707bdf7cc923118288d44a12a5381f5b4b59d1617b73052f",
+    "binary_sha256": "57981da7c1e62efc8522d017050802b1d15cd428abb54615d4f04a941c2c4133"
+  },
+  "candidate": {
+    "src/grpc/channel/shared/job.zig": "865fec387112ff8412f9536dae6a952052eb10e08f2442eaee2b986e26b00c23",
+    "src/grpc/channel/shared/worker.zig": "cd1826579117cdae001951f5963e96c6aac79ec0fcd20c8b20d48a1bccc75d6c",
+    "binary_sha256": "0899a0114c8828d471f283a110ea6d036b7e22335a11ec30eb0714faff008004",
+    "design": "Job.create allocates one 5 + payload buffer and points options.message at the payload suffix. The worker passes that storage to ClientDuplex.stageOwnedMessageStorage. Identity and compression fallback transfer the exact allocation to PendingMessage; actual compression keeps the compressed output and frees the original."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [441262, 469010, 449108, 449493, 445472, 449817, 450944, 455291, 451732, 453363],
+    "candidate_samples_ns": [424372, 425985, 414722, 416322, 421436, 423345, 420107, 431665, 419484, 425600],
+    "baseline_median_ns": 450380.5,
+    "candidate_median_ns": 422390.5,
+    "candidate_over_baseline": 0.9379,
+    "round_wins": "5/5 ABBA rounds",
+    "paired_ratios": [0.9342, 0.9248, 0.9436, 0.9399, 0.9337],
+    "baseline_cache": "hits=10930 misses=109",
+    "candidate_cache": "hits=10270 misses=109",
+    "cache_hits_removed_per_run": 660
+  },
+  "correctness": {
+    "grpc_filter": "564/564 passed",
+    "job_test": "a Job reserves exactly 5 + payload bytes and points options.message at storage[5..]",
+    "full_validation_run": "shared-unary with full payload equality passed",
+    "forward_interop": "interop-grpc-cpp EXIT=0"
+  },
+  "layout_note": "An earlier candidate stored outbound_ownership.OwnedMessage inline and grew Job to the same size as StreamCall. A test allocator keyed on @sizeOf(StreamCall) then locked on a Job allocation and deadlocked. Keeping owned_message as ?[]u8 preserves the original Job layout and avoids that collision."
+}
