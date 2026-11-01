@@ -9,6 +9,7 @@ pub const Options = struct {
     stats: bool = false,
     validate: bool = true,
     c_allocator: bool = false,
+    cached_allocator: bool = false,
     stream_window: u32 = 65535,
     connection_window: u32 = 65535,
     adaptive_window: bool = false,
@@ -36,6 +37,8 @@ pub fn parse(init: std.process.Init) !Options {
             options.validate = false;
         } else if (std.mem.eql(u8, arg, "--c-allocator")) {
             options.c_allocator = true;
+        } else if (std.mem.eql(u8, arg, "--cached-allocator")) {
+            options.cached_allocator = true;
         } else if (std.mem.eql(u8, arg, "--adaptive-window")) {
             options.adaptive_window = true;
         } else if (std.mem.startsWith(u8, arg, "--stream-window=")) {

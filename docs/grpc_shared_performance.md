@@ -767,5 +767,20 @@ not the transport. The benchmark now exposes `--c-allocator` and reports
 With the system allocator, the netz 256-KiB roundtrip is about 469-490 µs
 against the recorded grpc-cpp reference of about 393 µs, roughly 1.2-1.25x
 rather than 2.4x. The earlier comparison conflated allocator behavior with
-transport cost. Large-message callers should use a caching or system allocator;
-a netz-owned pooled allocator remains a candidate feature.
+transport cost. Large-message callers should use a caching or system allocator.
+
+`netz.alloc.BlockCache` now provides that caching layer. It retains freed
+power-of-two blocks from 4 KiB through 16 MiB, up to a configurable byte cap
+(16 MiB by default), behind a short spin-locked free list; blocks with larger
+alignment or beyond the cap delegate to the backing allocator. Wrapping
+`std.heap.smp_allocator` with the default cap on the same 256-KiB workload:
+
+- 843-854 µs (raw `smp_allocator`) versus **460-481 µs** (cached), about 1.78x
+  and 3/3 alternating pairs; this matches the system allocator's 462-492 µs.
+- 64 KiB: 224 µs to 118 µs. 0/512/4-KiB payloads stayed within about 1%.
+- After 200 roundtrips the cache reported 1,337 hits, 95 misses, and 1.48 MiB
+  retained.
+
+The benchmark exposes `--cached-allocator` and reports `allocator=cached`.
+The cache is opt-in; `Backend.init` continues to use exactly the allocator the
+caller supplies.

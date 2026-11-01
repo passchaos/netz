@@ -5,6 +5,7 @@
 //! byte-level protocol code so the same parsers can be fuzzed, embedded, or used
 //! with different runtimes.
 
+pub const alloc = @import("alloc.zig");
 pub const runtime = @import("runtime.zig");
 pub const stream = @import("stream.zig");
 pub const tls = @import("tls/mod.zig");
@@ -20,6 +21,7 @@ pub const mqtt = @import("mqtt/mod.zig");
 pub const webtransport = @import("webtransport/mod.zig");
 
 comptime {
+    _ = alloc;
     _ = runtime;
     _ = stream;
     _ = tls;
