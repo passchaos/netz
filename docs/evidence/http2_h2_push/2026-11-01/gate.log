@@ -1,0 +1,36 @@
+   Compiling netz-hyper-http2-flow v0.0.0 (/nav_env/project-z/netz/tools/hyper_http2_flow)
+    Finished `release` profile [optimized] target(s) in 1.69s
+netz HTTP/2 client accepted h2 server push: transport=h2c parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 push interop server listening on 127.0.0.1:49465
+h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+netz HTTP/2 client accepted h2 server push: transport=tls parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 push interop server listening on 127.0.0.1:46227
+h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+netz client verified order=push-before-parent shared_dictionary=true
+netz HTTP/2 client accepted h2 server push: transport=h2c parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 push interop server listening on 127.0.0.1:58251
+h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 server verified order=push-before-parent shared_dictionary=true
+netz client verified order=push-before-parent shared_dictionary=true
+netz HTTP/2 client accepted h2 server push: transport=tls parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 push interop server listening on 127.0.0.1:49177
+h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio
+h2 server verified order=push-before-parent shared_dictionary=true
+h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io
+netz HTTP/2 push interop server listening transport=h2c
+netz HTTP/2 server honored h2 push opt-out: transport=h2c request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io
+h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io
+netz HTTP/2 push interop server listening transport=tls
+netz HTTP/2 server honored h2 push opt-out: transport=tls request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io
+netz HTTP/2 client observed h2 informational responses: transport=h2c statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio
+h2 informational interop server listening on 127.0.0.1:54549
+h2 server sent informational responses to netz: statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio
+netz HTTP/2 client observed h2 informational responses: transport=tls statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio
+h2 informational interop server listening on 127.0.0.1:40983
+h2 server sent informational responses to netz: statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio
+h2 client received netz informational responses: statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io
+netz HTTP/2 informational interop server listening transport=h2c
+netz HTTP/2 server sent informational responses to h2: transport=h2c statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io
+h2 client received netz informational responses: statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io
+netz HTTP/2 informational interop server listening transport=tls
+netz HTTP/2 server sent informational responses to h2: transport=tls statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io

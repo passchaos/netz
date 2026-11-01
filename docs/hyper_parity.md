@@ -3366,7 +3366,11 @@ state and returns transport `MAX_STREAMS` credit.
    evidence rather than inference from local GOAWAY tests. A fresh 2026-11-01
    run passed all nine endpoint, proxy, pool, redirect, keep-alive,
    cancellation, KeyUpdate and GOAWAY transcripts in both directions; see
-   `docs/evidence/http2_hyper/2026-11-01.json`.
+   `docs/evidence/http2_hyper/2026-11-01.json`. A separate fresh 2026-11-01
+   `interop-http2-h2-push` run passed server push and ordered 103/102
+   informational responses with final 200 in both endpoint roles over h2c and
+   certificate-verified TLS against the audited rust-h2 fixture; see
+   `docs/evidence/http2_h2_push/2026-11-01.json`.
    The connection API also exposes Hyper/h2-style two-phase graceful shutdown:
    `gracefulShutdown`, `gracefulShutdownWithTimeout`, and
    `gracefulShutdownWithDeadline` first send `GOAWAY(2^31-1, NO_ERROR)`, wait
