@@ -3207,7 +3207,9 @@ state and returns transport `MAX_STREAMS` credit.
    count.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
    in h2spec v2.6.0 strict server mode (`H2SPEC=/absolute/path/to/h2spec zig
-   build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-10-16).
+   build interop-http2-h2spec -Doptimize=ReleaseFast`); a fresh 2026-11-01 run
+   passed 147/147 over h2c, TLS 1.3 and TLS 1.2, recorded in
+   `docs/evidence/http2_h2spec/2026-11-01.json`.
    The gate now supplies `--strict` itself and parses h2spec's summary so an
    empty selection, skipped case, or failed case cannot be mistaken for a
    successful conformance run. It rejects any binary that does not report
@@ -3284,7 +3286,10 @@ state and returns transport `MAX_STREAMS` credit.
    obsolete external ClientHello rather than the HTTP/2 or TLS server path.
    After the zio migration, h2c, TLS 1.3, and forced TLS 1.2 strict suites were
    rerun against that locked source/toolchain identity; each completed 147/147
-   with zero skipped and zero failed cases. Passing `--tls12` runs the same
+   with zero skipped and zero failed cases. A fresh 2026-11-01 build of the
+   same locked commit with Go 1.24.13 repeated 147/147 for h2c, TLS 1.3 and
+   forced TLS 1.2; the logs and binary/source identity are in
+   `docs/evidence/http2_h2spec/2026-11-01.json`. Passing `--tls12` runs the same
    strict HTTP/2 cases
    through the RFC 7540 TLS 1.2 profile with mandatory `h2` ALPN instead of
    relying on the peer's highest-version choice.

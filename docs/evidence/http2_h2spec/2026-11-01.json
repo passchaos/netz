@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-http2-h2spec",
+  "h2spec": {
+    "version": "2.6.0",
+    "source_commit": "70ac2294010887f48b18e2d64f5cccd48421fad1",
+    "source": "https://github.com/summerwind/h2spec",
+    "binary_sha256": "065e9b19b6f2dd56fdef8d89ad4ad95af0274b87016d376ef4c67dcdc3c949ca",
+    "build": "go build -ldflags '-X main.VERSION=2.6.0 -X main.COMMIT=70ac2294010887f48b18e2d64f5cccd48421fad1' ./cmd/h2spec",
+    "go": "go1.24.13 linux/arm64",
+    "note": "Built locally from the locked source commit because the v2 module path rejects `go install ...@v2.6.0`. The version string and source commit match the gate's locked expectation; the binary hash differs from the published release build because the Go toolchain differs."
+  },
+  "commands": [
+    "H2SPEC=/tmp/h2spec-bin/h2spec zig build interop-http2-h2spec -Doptimize=ReleaseFast",
+    "H2SPEC=/tmp/h2spec-bin/h2spec zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls",
+    "H2SPEC=/tmp/h2spec-bin/h2spec zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls12"
+  ],
+  "server": "netz-h2spec-server, ReleaseFast, server_io=zio-std-io",
+  "results": [
+    {
+      "transport": "h2c",
+      "exit": 0,
+      "tests": 147,
+      "passed": 147,
+      "skipped": 0,
+      "failed": 0,
+      "log": "2026-11-01/h2c.log"
+    },
+    {
+      "transport": "tls13",
+      "exit": 0,
+      "tests": 147,
+      "passed": 147,
+      "skipped": 0,
+      "failed": 0,
+      "log": "2026-11-01/tls13.log"
+    },
+    {
+      "transport": "tls12",
+      "exit": 0,
+      "tests": 147,
+      "passed": 147,
+      "skipped": 0,
+      "failed": 0,
+      "log": "2026-11-01/tls12.log"
+    }
+  ],
+  "conclusions": [
+    "The strict h2spec 2.6.0 server suite passes all 147 cases over h2c, TLS 1.3 with negotiated h2 and TLS 1.2 with negotiated h2.",
+    "Each run is invoked with the gate's mandatory --strict flag and is rejected unless the summary reports total == passed, zero skipped and zero failed."
+  ],
+  "artifacts": "2026-11-01/"
+}
