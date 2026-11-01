@@ -59,7 +59,14 @@ A 2026-11-01 public-endpoint run passed ByteDance, Cloudflare and Meta. The
 quic.tech:8443 case still times out with `HandshakeTimeout` even though an
 OpenSSL QUICv1/TLS1.3 handshake to the same endpoint succeeds from this host;
 the netz client receives no server response across five retries. This is an
-open netz client interop issue, not a reachability failure. See
+open netz client interop issue, not a reachability failure. Root-cause
+instrumentation shows the server sends an ACK-only Initial packet 0 followed
+by an Initial packet 1 carrying CRYPTO offset zero. The current
+`InitialResponseFilter` rejects packet 0, and `openInitialCryptoFlightFrom`
+then expects packet 0 and discards packet 1, so the ServerHello is never
+processed. Accepting packet 0 unconditionally was tested and reintroduced the
+documented split-ClientHello deadlock; the fix must also preserve ClientHello
+retransmission when the initial-flight deadline expires. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long

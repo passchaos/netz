@@ -21,5 +21,11 @@
     "cloudflare-quic.com verified GET",
     "www.facebook.com verified 302"
   ],
+  "root_cause_analysis": [
+    "The quic.tech server responds with an ACK-only Initial packet number zero followed by an Initial packet number one carrying CRYPTO offset zero.",
+    "InitialResponseFilter currently rejects the ACK-only packet; openInitialCryptoFlightFrom then expects packet number zero and discards the CRYPTO packet number one, so the ServerHello is never processed.",
+    "Accepting the ACK-only packet unconditionally was tested and reintroduced the documented split-ClientHello deadlock: the client leaves the PTO loop and stops retransmitting the missing ClientHello fragments.",
+    "A correct fix must authenticate and accept the first ACK-only Initial, process coalesced or subsequent Initial CRYPTO packets, and retain ClientHello retransmission when the initial flight deadline expires."
+  ],
   "status": "partial"
 }
