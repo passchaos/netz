@@ -1,0 +1,110 @@
+1793506875: Info: running mosquitto as user: passchaos.
+1793506875: mosquitto version 2.1.2 starting
+1793506875: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/fanout-32/sample-03/artifacts/mosquitto.conf.
+1793506875: Bridge support available.
+1793506875: Persistence support available.
+1793506875: TLS support NOT available.
+1793506875: TLS-PSK support NOT available.
+1793506875: Websockets support NOT available.
+1793506875: Opening ipv4 listen socket on port 48063.
+1793506875: mosquitto version 2.1.2 running
+1793506875: New connection from 127.0.0.1:44642 on port 48063.
+1793506875: New client connected from 127.0.0.1:44642 as netz-load-subscriber-0 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44654 on port 48063.
+1793506875: New client connected from 127.0.0.1:44654 as netz-load-subscriber-1 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44668 on port 48063.
+1793506875: New client connected from 127.0.0.1:44668 as netz-load-subscriber-2 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44684 on port 48063.
+1793506875: New client connected from 127.0.0.1:44684 as netz-load-subscriber-3 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44692 on port 48063.
+1793506875: New client connected from 127.0.0.1:44692 as netz-load-subscriber-4 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44696 on port 48063.
+1793506875: New client connected from 127.0.0.1:44696 as netz-load-subscriber-5 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44698 on port 48063.
+1793506875: New client connected from 127.0.0.1:44698 as netz-load-subscriber-6 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44704 on port 48063.
+1793506875: New client connected from 127.0.0.1:44704 as netz-load-subscriber-7 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44716 on port 48063.
+1793506875: New client connected from 127.0.0.1:44716 as netz-load-subscriber-8 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44728 on port 48063.
+1793506875: New client connected from 127.0.0.1:44728 as netz-load-subscriber-9 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44738 on port 48063.
+1793506875: New client connected from 127.0.0.1:44738 as netz-load-subscriber-10 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44748 on port 48063.
+1793506875: New client connected from 127.0.0.1:44748 as netz-load-subscriber-11 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44762 on port 48063.
+1793506875: New client connected from 127.0.0.1:44762 as netz-load-subscriber-12 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44776 on port 48063.
+1793506875: New client connected from 127.0.0.1:44776 as netz-load-subscriber-13 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44788 on port 48063.
+1793506875: New client connected from 127.0.0.1:44788 as netz-load-subscriber-14 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44800 on port 48063.
+1793506875: New client connected from 127.0.0.1:44800 as netz-load-subscriber-15 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44812 on port 48063.
+1793506875: New client connected from 127.0.0.1:44812 as netz-load-subscriber-16 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44824 on port 48063.
+1793506875: New client connected from 127.0.0.1:44824 as netz-load-subscriber-17 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44828 on port 48063.
+1793506875: New client connected from 127.0.0.1:44828 as netz-load-subscriber-18 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44844 on port 48063.
+1793506875: New client connected from 127.0.0.1:44844 as netz-load-subscriber-19 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44848 on port 48063.
+1793506875: New client connected from 127.0.0.1:44848 as netz-load-subscriber-20 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44862 on port 48063.
+1793506875: New client connected from 127.0.0.1:44862 as netz-load-subscriber-21 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44878 on port 48063.
+1793506875: New client connected from 127.0.0.1:44878 as netz-load-subscriber-22 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44882 on port 48063.
+1793506875: New client connected from 127.0.0.1:44882 as netz-load-subscriber-23 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44884 on port 48063.
+1793506875: New client connected from 127.0.0.1:44884 as netz-load-subscriber-24 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44894 on port 48063.
+1793506875: New client connected from 127.0.0.1:44894 as netz-load-subscriber-25 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44906 on port 48063.
+1793506875: New client connected from 127.0.0.1:44906 as netz-load-subscriber-26 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44918 on port 48063.
+1793506875: New client connected from 127.0.0.1:44918 as netz-load-subscriber-27 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44928 on port 48063.
+1793506875: New client connected from 127.0.0.1:44928 as netz-load-subscriber-28 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44942 on port 48063.
+1793506875: New client connected from 127.0.0.1:44942 as netz-load-subscriber-29 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44946 on port 48063.
+1793506875: New client connected from 127.0.0.1:44946 as netz-load-subscriber-30 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44956 on port 48063.
+1793506875: New client connected from 127.0.0.1:44956 as netz-load-subscriber-31 (p5, c1, k30).
+1793506875: New connection from 127.0.0.1:44960 on port 48063.
+1793506875: New client connected from 127.0.0.1:44960 as netz-load-publisher-0 (p5, c1, k30).
+1793506876: Client netz-load-subscriber-0 [127.0.0.1:44642] disconnected.
+1793506876: Client netz-load-subscriber-1 [127.0.0.1:44654] disconnected.
+1793506876: Client netz-load-subscriber-2 [127.0.0.1:44668] disconnected.
+1793506876: Client netz-load-subscriber-3 [127.0.0.1:44684] disconnected.
+1793506876: Client netz-load-subscriber-4 [127.0.0.1:44692] disconnected.
+1793506876: Client netz-load-subscriber-5 [127.0.0.1:44696] disconnected.
+1793506876: Client netz-load-subscriber-6 [127.0.0.1:44698] disconnected.
+1793506876: Client netz-load-subscriber-7 [127.0.0.1:44704] disconnected.
+1793506876: Client netz-load-subscriber-8 [127.0.0.1:44716] disconnected.
+1793506876: Client netz-load-subscriber-9 [127.0.0.1:44728] disconnected.
+1793506876: Client netz-load-subscriber-10 [127.0.0.1:44738] disconnected.
+1793506876: Client netz-load-subscriber-11 [127.0.0.1:44748] disconnected.
+1793506876: Client netz-load-subscriber-12 [127.0.0.1:44762] disconnected.
+1793506876: Client netz-load-subscriber-13 [127.0.0.1:44776] disconnected.
+1793506876: Client netz-load-subscriber-14 [127.0.0.1:44788] disconnected.
+1793506876: Client netz-load-subscriber-15 [127.0.0.1:44800] disconnected.
+1793506876: Client netz-load-subscriber-16 [127.0.0.1:44812] disconnected.
+1793506876: Client netz-load-subscriber-17 [127.0.0.1:44824] disconnected.
+1793506876: Client netz-load-subscriber-18 [127.0.0.1:44828] disconnected.
+1793506876: Client netz-load-subscriber-19 [127.0.0.1:44844] disconnected.
+1793506876: Client netz-load-subscriber-20 [127.0.0.1:44848] disconnected.
+1793506876: Client netz-load-subscriber-21 [127.0.0.1:44862] disconnected.
+1793506876: Client netz-load-subscriber-22 [127.0.0.1:44878] disconnected.
+1793506876: Client netz-load-subscriber-23 [127.0.0.1:44882] disconnected.
+1793506876: Client netz-load-subscriber-24 [127.0.0.1:44884] disconnected.
+1793506876: Client netz-load-subscriber-25 [127.0.0.1:44894] disconnected.
+1793506876: Client netz-load-subscriber-26 [127.0.0.1:44906] disconnected.
+1793506876: Client netz-load-subscriber-27 [127.0.0.1:44918] disconnected.
+1793506876: Client netz-load-subscriber-28 [127.0.0.1:44928] disconnected.
+1793506876: Client netz-load-subscriber-29 [127.0.0.1:44942] disconnected.
+1793506876: Client netz-load-subscriber-30 [127.0.0.1:44946] disconnected.
+1793506876: Client netz-load-subscriber-31 [127.0.0.1:44956] disconnected.
+1793506876: Client netz-load-publisher-0 [127.0.0.1:44960] disconnected.
+1793506876: mosquitto version 2.1.2 terminating

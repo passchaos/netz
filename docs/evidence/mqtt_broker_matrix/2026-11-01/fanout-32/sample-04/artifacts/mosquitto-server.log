@@ -1,0 +1,110 @@
+1793506877: Info: running mosquitto as user: passchaos.
+1793506877: mosquitto version 2.1.2 starting
+1793506877: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/fanout-32/sample-04/artifacts/mosquitto.conf.
+1793506877: Bridge support available.
+1793506877: Persistence support available.
+1793506877: TLS support NOT available.
+1793506877: TLS-PSK support NOT available.
+1793506877: Websockets support NOT available.
+1793506877: Opening ipv4 listen socket on port 55693.
+1793506877: mosquitto version 2.1.2 running
+1793506877: New connection from 127.0.0.1:42222 on port 55693.
+1793506877: New client connected from 127.0.0.1:42222 as netz-load-subscriber-0 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42228 on port 55693.
+1793506877: New client connected from 127.0.0.1:42228 as netz-load-subscriber-1 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42232 on port 55693.
+1793506877: New client connected from 127.0.0.1:42232 as netz-load-subscriber-2 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42246 on port 55693.
+1793506877: New client connected from 127.0.0.1:42246 as netz-load-subscriber-3 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42260 on port 55693.
+1793506877: New client connected from 127.0.0.1:42260 as netz-load-subscriber-4 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42270 on port 55693.
+1793506877: New client connected from 127.0.0.1:42270 as netz-load-subscriber-5 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42284 on port 55693.
+1793506877: New client connected from 127.0.0.1:42284 as netz-load-subscriber-6 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42288 on port 55693.
+1793506877: New client connected from 127.0.0.1:42288 as netz-load-subscriber-7 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42292 on port 55693.
+1793506877: New client connected from 127.0.0.1:42292 as netz-load-subscriber-8 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42308 on port 55693.
+1793506877: New client connected from 127.0.0.1:42308 as netz-load-subscriber-9 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42312 on port 55693.
+1793506877: New client connected from 127.0.0.1:42312 as netz-load-subscriber-10 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42328 on port 55693.
+1793506877: New client connected from 127.0.0.1:42328 as netz-load-subscriber-11 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42332 on port 55693.
+1793506877: New client connected from 127.0.0.1:42332 as netz-load-subscriber-12 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42340 on port 55693.
+1793506877: New client connected from 127.0.0.1:42340 as netz-load-subscriber-13 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42342 on port 55693.
+1793506877: New client connected from 127.0.0.1:42342 as netz-load-subscriber-14 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42352 on port 55693.
+1793506877: New client connected from 127.0.0.1:42352 as netz-load-subscriber-15 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42366 on port 55693.
+1793506877: New client connected from 127.0.0.1:42366 as netz-load-subscriber-16 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42380 on port 55693.
+1793506877: New client connected from 127.0.0.1:42380 as netz-load-subscriber-17 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42384 on port 55693.
+1793506877: New client connected from 127.0.0.1:42384 as netz-load-subscriber-18 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42388 on port 55693.
+1793506877: New client connected from 127.0.0.1:42388 as netz-load-subscriber-19 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42404 on port 55693.
+1793506877: New client connected from 127.0.0.1:42404 as netz-load-subscriber-20 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42410 on port 55693.
+1793506877: New client connected from 127.0.0.1:42410 as netz-load-subscriber-21 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42424 on port 55693.
+1793506877: New client connected from 127.0.0.1:42424 as netz-load-subscriber-22 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42440 on port 55693.
+1793506877: New client connected from 127.0.0.1:42440 as netz-load-subscriber-23 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42444 on port 55693.
+1793506877: New client connected from 127.0.0.1:42444 as netz-load-subscriber-24 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42456 on port 55693.
+1793506877: New client connected from 127.0.0.1:42456 as netz-load-subscriber-25 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42460 on port 55693.
+1793506877: New client connected from 127.0.0.1:42460 as netz-load-subscriber-26 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42476 on port 55693.
+1793506877: New client connected from 127.0.0.1:42476 as netz-load-subscriber-27 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42484 on port 55693.
+1793506877: New client connected from 127.0.0.1:42484 as netz-load-subscriber-28 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42488 on port 55693.
+1793506877: New client connected from 127.0.0.1:42488 as netz-load-subscriber-29 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42502 on port 55693.
+1793506877: New client connected from 127.0.0.1:42502 as netz-load-subscriber-30 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42504 on port 55693.
+1793506877: New client connected from 127.0.0.1:42504 as netz-load-subscriber-31 (p5, c1, k30).
+1793506877: New connection from 127.0.0.1:42514 on port 55693.
+1793506877: New client connected from 127.0.0.1:42514 as netz-load-publisher-0 (p5, c1, k30).
+1793506877: Client netz-load-subscriber-0 [127.0.0.1:42222] disconnected.
+1793506877: Client netz-load-subscriber-1 [127.0.0.1:42228] disconnected.
+1793506877: Client netz-load-subscriber-2 [127.0.0.1:42232] disconnected.
+1793506877: Client netz-load-subscriber-3 [127.0.0.1:42246] disconnected.
+1793506877: Client netz-load-subscriber-4 [127.0.0.1:42260] disconnected.
+1793506877: Client netz-load-subscriber-5 [127.0.0.1:42270] disconnected.
+1793506877: Client netz-load-subscriber-6 [127.0.0.1:42284] disconnected.
+1793506877: Client netz-load-subscriber-7 [127.0.0.1:42288] disconnected.
+1793506877: Client netz-load-subscriber-8 [127.0.0.1:42292] disconnected.
+1793506877: Client netz-load-subscriber-9 [127.0.0.1:42308] disconnected.
+1793506877: Client netz-load-subscriber-10 [127.0.0.1:42312] disconnected.
+1793506877: Client netz-load-subscriber-11 [127.0.0.1:42328] disconnected.
+1793506877: Client netz-load-subscriber-12 [127.0.0.1:42332] disconnected.
+1793506877: Client netz-load-subscriber-13 [127.0.0.1:42340] disconnected.
+1793506877: Client netz-load-subscriber-14 [127.0.0.1:42342] disconnected.
+1793506877: Client netz-load-subscriber-15 [127.0.0.1:42352] disconnected.
+1793506877: Client netz-load-subscriber-16 [127.0.0.1:42366] disconnected.
+1793506877: Client netz-load-subscriber-17 [127.0.0.1:42380] disconnected.
+1793506877: Client netz-load-subscriber-18 [127.0.0.1:42384] disconnected.
+1793506877: Client netz-load-subscriber-19 [127.0.0.1:42388] disconnected.
+1793506877: Client netz-load-subscriber-20 [127.0.0.1:42404] disconnected.
+1793506877: Client netz-load-subscriber-21 [127.0.0.1:42410] disconnected.
+1793506877: Client netz-load-subscriber-22 [127.0.0.1:42424] disconnected.
+1793506877: Client netz-load-subscriber-23 [127.0.0.1:42440] disconnected.
+1793506877: Client netz-load-subscriber-24 [127.0.0.1:42444] disconnected.
+1793506877: Client netz-load-subscriber-25 [127.0.0.1:42456] disconnected.
+1793506877: Client netz-load-subscriber-26 [127.0.0.1:42460] disconnected.
+1793506877: Client netz-load-subscriber-27 [127.0.0.1:42476] disconnected.
+1793506877: Client netz-load-subscriber-28 [127.0.0.1:42484] disconnected.
+1793506877: Client netz-load-subscriber-29 [127.0.0.1:42488] disconnected.
+1793506877: Client netz-load-subscriber-30 [127.0.0.1:42502] disconnected.
+1793506877: Client netz-load-subscriber-31 [127.0.0.1:42504] disconnected.
+1793506877: Client netz-load-publisher-0 [127.0.0.1:42514] disconnected.
+1793506877: mosquitto version 2.1.2 terminating

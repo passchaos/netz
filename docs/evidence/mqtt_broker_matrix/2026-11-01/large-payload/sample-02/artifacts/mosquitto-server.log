@@ -1,0 +1,35 @@
+1793506884: Info: running mosquitto as user: passchaos.
+1793506884: mosquitto version 2.1.2 starting
+1793506884: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/large-payload/sample-02/artifacts/mosquitto.conf.
+1793506884: Bridge support available.
+1793506884: Persistence support available.
+1793506884: TLS support NOT available.
+1793506884: TLS-PSK support NOT available.
+1793506884: Websockets support NOT available.
+1793506884: Opening ipv4 listen socket on port 49829.
+1793506884: mosquitto version 2.1.2 running
+1793506884: New connection from 127.0.0.1:45180 on port 49829.
+1793506884: New client connected from 127.0.0.1:45180 as netz-load-subscriber-0 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45188 on port 49829.
+1793506884: New client connected from 127.0.0.1:45188 as netz-load-subscriber-1 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45192 on port 49829.
+1793506884: New client connected from 127.0.0.1:45192 as netz-load-subscriber-2 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45204 on port 49829.
+1793506884: New client connected from 127.0.0.1:45204 as netz-load-subscriber-3 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45218 on port 49829.
+1793506884: New client connected from 127.0.0.1:45218 as netz-load-publisher-0 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45234 on port 49829.
+1793506884: New client connected from 127.0.0.1:45234 as netz-load-publisher-1 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45246 on port 49829.
+1793506884: New client connected from 127.0.0.1:45246 as netz-load-publisher-2 (p5, c1, k30).
+1793506884: New connection from 127.0.0.1:45248 on port 49829.
+1793506884: New client connected from 127.0.0.1:45248 as netz-load-publisher-3 (p5, c1, k30).
+1793506884: Client netz-load-subscriber-0 [127.0.0.1:45180] disconnected.
+1793506884: Client netz-load-subscriber-1 [127.0.0.1:45188] disconnected.
+1793506884: Client netz-load-subscriber-2 [127.0.0.1:45192] disconnected.
+1793506884: Client netz-load-subscriber-3 [127.0.0.1:45204] disconnected.
+1793506884: Client netz-load-publisher-0 [127.0.0.1:45218] disconnected.
+1793506884: Client netz-load-publisher-1 [127.0.0.1:45234] disconnected.
+1793506884: Client netz-load-publisher-2 [127.0.0.1:45246] disconnected.
+1793506884: Client netz-load-publisher-3 [127.0.0.1:45248] disconnected.
+1793506884: mosquitto version 2.1.2 terminating

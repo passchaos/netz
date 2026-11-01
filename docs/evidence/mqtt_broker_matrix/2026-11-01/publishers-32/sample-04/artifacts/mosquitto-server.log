@@ -1,0 +1,110 @@
+1793506873: Info: running mosquitto as user: passchaos.
+1793506873: mosquitto version 2.1.2 starting
+1793506873: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/publishers-32/sample-04/artifacts/mosquitto.conf.
+1793506873: Bridge support available.
+1793506873: Persistence support available.
+1793506873: TLS support NOT available.
+1793506873: TLS-PSK support NOT available.
+1793506873: Websockets support NOT available.
+1793506873: Opening ipv4 listen socket on port 60627.
+1793506873: mosquitto version 2.1.2 running
+1793506873: New connection from 127.0.0.1:55376 on port 60627.
+1793506873: New client connected from 127.0.0.1:55376 as netz-load-subscriber-0 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55384 on port 60627.
+1793506873: New client connected from 127.0.0.1:55384 as netz-load-publisher-0 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55386 on port 60627.
+1793506873: New client connected from 127.0.0.1:55386 as netz-load-publisher-1 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55396 on port 60627.
+1793506873: New client connected from 127.0.0.1:55396 as netz-load-publisher-2 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55410 on port 60627.
+1793506873: New client connected from 127.0.0.1:55410 as netz-load-publisher-3 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55424 on port 60627.
+1793506873: New client connected from 127.0.0.1:55424 as netz-load-publisher-4 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55440 on port 60627.
+1793506873: New client connected from 127.0.0.1:55440 as netz-load-publisher-5 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55446 on port 60627.
+1793506873: New client connected from 127.0.0.1:55446 as netz-load-publisher-6 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55458 on port 60627.
+1793506873: New client connected from 127.0.0.1:55458 as netz-load-publisher-7 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55462 on port 60627.
+1793506873: New client connected from 127.0.0.1:55462 as netz-load-publisher-8 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55466 on port 60627.
+1793506873: New client connected from 127.0.0.1:55466 as netz-load-publisher-9 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55468 on port 60627.
+1793506873: New client connected from 127.0.0.1:55468 as netz-load-publisher-10 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55476 on port 60627.
+1793506873: New client connected from 127.0.0.1:55476 as netz-load-publisher-11 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55484 on port 60627.
+1793506873: New client connected from 127.0.0.1:55484 as netz-load-publisher-12 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55492 on port 60627.
+1793506873: New client connected from 127.0.0.1:55492 as netz-load-publisher-13 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55498 on port 60627.
+1793506873: New client connected from 127.0.0.1:55498 as netz-load-publisher-14 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55500 on port 60627.
+1793506873: New client connected from 127.0.0.1:55500 as netz-load-publisher-15 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55510 on port 60627.
+1793506873: New client connected from 127.0.0.1:55510 as netz-load-publisher-16 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55512 on port 60627.
+1793506873: New client connected from 127.0.0.1:55512 as netz-load-publisher-17 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55520 on port 60627.
+1793506873: New client connected from 127.0.0.1:55520 as netz-load-publisher-18 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55522 on port 60627.
+1793506873: New client connected from 127.0.0.1:55522 as netz-load-publisher-19 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55538 on port 60627.
+1793506873: New client connected from 127.0.0.1:55538 as netz-load-publisher-20 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55546 on port 60627.
+1793506873: New client connected from 127.0.0.1:55546 as netz-load-publisher-21 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55560 on port 60627.
+1793506873: New client connected from 127.0.0.1:55560 as netz-load-publisher-22 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55568 on port 60627.
+1793506873: New client connected from 127.0.0.1:55568 as netz-load-publisher-23 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55574 on port 60627.
+1793506873: New client connected from 127.0.0.1:55574 as netz-load-publisher-24 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55588 on port 60627.
+1793506873: New client connected from 127.0.0.1:55588 as netz-load-publisher-25 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55592 on port 60627.
+1793506873: New client connected from 127.0.0.1:55592 as netz-load-publisher-26 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55594 on port 60627.
+1793506873: New client connected from 127.0.0.1:55594 as netz-load-publisher-27 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55606 on port 60627.
+1793506873: New client connected from 127.0.0.1:55606 as netz-load-publisher-28 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55618 on port 60627.
+1793506873: New client connected from 127.0.0.1:55618 as netz-load-publisher-29 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55634 on port 60627.
+1793506873: New client connected from 127.0.0.1:55634 as netz-load-publisher-30 (p5, c1, k30).
+1793506873: New connection from 127.0.0.1:55646 on port 60627.
+1793506873: New client connected from 127.0.0.1:55646 as netz-load-publisher-31 (p5, c1, k30).
+1793506873: Client netz-load-subscriber-0 [127.0.0.1:55376] disconnected.
+1793506873: Client netz-load-publisher-0 [127.0.0.1:55384] disconnected.
+1793506873: Client netz-load-publisher-1 [127.0.0.1:55386] disconnected.
+1793506873: Client netz-load-publisher-2 [127.0.0.1:55396] disconnected.
+1793506873: Client netz-load-publisher-3 [127.0.0.1:55410] disconnected.
+1793506873: Client netz-load-publisher-4 [127.0.0.1:55424] disconnected.
+1793506873: Client netz-load-publisher-5 [127.0.0.1:55440] disconnected.
+1793506873: Client netz-load-publisher-6 [127.0.0.1:55446] disconnected.
+1793506873: Client netz-load-publisher-7 [127.0.0.1:55458] disconnected.
+1793506873: Client netz-load-publisher-8 [127.0.0.1:55462] disconnected.
+1793506873: Client netz-load-publisher-9 [127.0.0.1:55466] disconnected.
+1793506873: Client netz-load-publisher-10 [127.0.0.1:55468] disconnected.
+1793506873: Client netz-load-publisher-11 [127.0.0.1:55476] disconnected.
+1793506873: Client netz-load-publisher-12 [127.0.0.1:55484] disconnected.
+1793506873: Client netz-load-publisher-13 [127.0.0.1:55492] disconnected.
+1793506873: Client netz-load-publisher-14 [127.0.0.1:55498] disconnected.
+1793506873: Client netz-load-publisher-15 [127.0.0.1:55500] disconnected.
+1793506873: Client netz-load-publisher-16 [127.0.0.1:55510] disconnected.
+1793506873: Client netz-load-publisher-17 [127.0.0.1:55512] disconnected.
+1793506873: Client netz-load-publisher-18 [127.0.0.1:55520] disconnected.
+1793506873: Client netz-load-publisher-19 [127.0.0.1:55522] disconnected.
+1793506873: Client netz-load-publisher-20 [127.0.0.1:55538] disconnected.
+1793506873: Client netz-load-publisher-21 [127.0.0.1:55546] disconnected.
+1793506873: Client netz-load-publisher-22 [127.0.0.1:55560] disconnected.
+1793506873: Client netz-load-publisher-23 [127.0.0.1:55568] disconnected.
+1793506873: Client netz-load-publisher-24 [127.0.0.1:55574] disconnected.
+1793506873: Client netz-load-publisher-25 [127.0.0.1:55588] disconnected.
+1793506873: Client netz-load-publisher-26 [127.0.0.1:55592] disconnected.
+1793506873: Client netz-load-publisher-27 [127.0.0.1:55594] disconnected.
+1793506873: Client netz-load-publisher-28 [127.0.0.1:55606] disconnected.
+1793506873: Client netz-load-publisher-29 [127.0.0.1:55618] disconnected.
+1793506873: Client netz-load-publisher-30 [127.0.0.1:55634] disconnected.
+1793506873: Client netz-load-publisher-31 [127.0.0.1:55646] disconnected.
+1793506873: mosquitto version 2.1.2 terminating

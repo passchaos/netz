@@ -1,0 +1,25 @@
+MQTT 5 TCP broker fanout workload
+  client io backend: zio-std-io
+  endpoint: 127.0.0.1:44027
+  publishers: 1
+  subscribers: 1
+  overlapping subscriptions/client: 1
+  publisher window: 1
+  delivery QoS: 1
+  server queue capacity: 1024
+  session expiry seconds: 0
+  warmup publishes: 128
+  measured publishes: 512
+  measured deliveries: 512
+  payload bytes: 256
+  elapsed ns: 8483027
+  publishes/s: 60355
+  deliveries/s: 60355
+  publish completion p50 ns: 8186
+  publish completion p99 ns: 25361
+  publish completion p99.9 ns: 64055
+  client allocation calls: 3232
+  client cumulative allocated bytes: 315758
+  client peak live bytes: 8039
+  checksum: 156800
+record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos1-fanout role_pair=netz-client+netz-server client_io=zio-std-io server_io=zio-std-io benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true connection_scope=persistent publishers=1 subscribers=1 overlapping_subscriptions=1 publisher_window=1 server_queue_capacity=1024 session_expiry_seconds=0 warmup=128 publishes=512 deliveries=512 payload_bytes=256 elapsed_ns=8483027 publishes_per_s=60355 deliveries_per_s=60355 p50_ns=8186 p99_ns=25361 p999_ns=64055 client_alloc_count=3232 client_total_allocated_bytes=315758 client_peak_live_bytes=8039 checksum=156800 complete=true

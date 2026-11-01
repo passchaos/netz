@@ -1,0 +1,203 @@
+1793506879: Info: running mosquitto as user: passchaos.
+1793506879: mosquitto version 2.1.2 starting
+1793506879: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/balanced-32x32/sample-02/artifacts/mosquitto.conf.
+1793506879: Bridge support available.
+1793506879: Persistence support available.
+1793506879: TLS support NOT available.
+1793506879: TLS-PSK support NOT available.
+1793506879: Websockets support NOT available.
+1793506879: Opening ipv4 listen socket on port 40305.
+1793506879: mosquitto version 2.1.2 running
+1793506879: New connection from 127.0.0.1:38022 on port 40305.
+1793506879: New client connected from 127.0.0.1:38022 as netz-load-subscriber-0 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38030 on port 40305.
+1793506879: New client connected from 127.0.0.1:38030 as netz-load-subscriber-1 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38040 on port 40305.
+1793506879: New client connected from 127.0.0.1:38040 as netz-load-subscriber-2 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38046 on port 40305.
+1793506879: New client connected from 127.0.0.1:38046 as netz-load-subscriber-3 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38056 on port 40305.
+1793506879: New client connected from 127.0.0.1:38056 as netz-load-subscriber-4 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38068 on port 40305.
+1793506879: New client connected from 127.0.0.1:38068 as netz-load-subscriber-5 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38078 on port 40305.
+1793506879: New client connected from 127.0.0.1:38078 as netz-load-subscriber-6 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38086 on port 40305.
+1793506879: New client connected from 127.0.0.1:38086 as netz-load-subscriber-7 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38094 on port 40305.
+1793506879: New client connected from 127.0.0.1:38094 as netz-load-subscriber-8 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38100 on port 40305.
+1793506879: New client connected from 127.0.0.1:38100 as netz-load-subscriber-9 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38116 on port 40305.
+1793506879: New client connected from 127.0.0.1:38116 as netz-load-subscriber-10 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38120 on port 40305.
+1793506879: New client connected from 127.0.0.1:38120 as netz-load-subscriber-11 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38122 on port 40305.
+1793506879: New client connected from 127.0.0.1:38122 as netz-load-subscriber-12 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38138 on port 40305.
+1793506879: New client connected from 127.0.0.1:38138 as netz-load-subscriber-13 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38150 on port 40305.
+1793506879: New client connected from 127.0.0.1:38150 as netz-load-subscriber-14 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38160 on port 40305.
+1793506879: New client connected from 127.0.0.1:38160 as netz-load-subscriber-15 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38176 on port 40305.
+1793506879: New client connected from 127.0.0.1:38176 as netz-load-subscriber-16 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38182 on port 40305.
+1793506879: New client connected from 127.0.0.1:38182 as netz-load-subscriber-17 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38192 on port 40305.
+1793506879: New client connected from 127.0.0.1:38192 as netz-load-subscriber-18 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38202 on port 40305.
+1793506879: New client connected from 127.0.0.1:38202 as netz-load-subscriber-19 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38210 on port 40305.
+1793506879: New client connected from 127.0.0.1:38210 as netz-load-subscriber-20 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38212 on port 40305.
+1793506879: New client connected from 127.0.0.1:38212 as netz-load-subscriber-21 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38214 on port 40305.
+1793506879: New client connected from 127.0.0.1:38214 as netz-load-subscriber-22 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38222 on port 40305.
+1793506879: New client connected from 127.0.0.1:38222 as netz-load-subscriber-23 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38236 on port 40305.
+1793506879: New client connected from 127.0.0.1:38236 as netz-load-subscriber-24 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38246 on port 40305.
+1793506879: New client connected from 127.0.0.1:38246 as netz-load-subscriber-25 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38254 on port 40305.
+1793506879: New client connected from 127.0.0.1:38254 as netz-load-subscriber-26 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38268 on port 40305.
+1793506879: New client connected from 127.0.0.1:38268 as netz-load-subscriber-27 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38270 on port 40305.
+1793506879: New client connected from 127.0.0.1:38270 as netz-load-subscriber-28 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38278 on port 40305.
+1793506879: New client connected from 127.0.0.1:38278 as netz-load-subscriber-29 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38280 on port 40305.
+1793506879: New client connected from 127.0.0.1:38280 as netz-load-subscriber-30 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38286 on port 40305.
+1793506879: New client connected from 127.0.0.1:38286 as netz-load-subscriber-31 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38300 on port 40305.
+1793506879: New client connected from 127.0.0.1:38300 as netz-load-publisher-0 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38304 on port 40305.
+1793506879: New client connected from 127.0.0.1:38304 as netz-load-publisher-1 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38316 on port 40305.
+1793506879: New client connected from 127.0.0.1:38316 as netz-load-publisher-2 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38330 on port 40305.
+1793506879: New client connected from 127.0.0.1:38330 as netz-load-publisher-3 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38344 on port 40305.
+1793506879: New client connected from 127.0.0.1:38344 as netz-load-publisher-4 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38358 on port 40305.
+1793506879: New client connected from 127.0.0.1:38358 as netz-load-publisher-5 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38360 on port 40305.
+1793506879: New client connected from 127.0.0.1:38360 as netz-load-publisher-6 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38372 on port 40305.
+1793506879: New client connected from 127.0.0.1:38372 as netz-load-publisher-7 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38386 on port 40305.
+1793506879: New client connected from 127.0.0.1:38386 as netz-load-publisher-8 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38402 on port 40305.
+1793506879: New client connected from 127.0.0.1:38402 as netz-load-publisher-9 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38416 on port 40305.
+1793506879: New client connected from 127.0.0.1:38416 as netz-load-publisher-10 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38422 on port 40305.
+1793506879: New client connected from 127.0.0.1:38422 as netz-load-publisher-11 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38432 on port 40305.
+1793506879: New client connected from 127.0.0.1:38432 as netz-load-publisher-12 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38438 on port 40305.
+1793506879: New client connected from 127.0.0.1:38438 as netz-load-publisher-13 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38450 on port 40305.
+1793506879: New client connected from 127.0.0.1:38450 as netz-load-publisher-14 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38462 on port 40305.
+1793506879: New client connected from 127.0.0.1:38462 as netz-load-publisher-15 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38472 on port 40305.
+1793506879: New client connected from 127.0.0.1:38472 as netz-load-publisher-16 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38476 on port 40305.
+1793506879: New client connected from 127.0.0.1:38476 as netz-load-publisher-17 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38484 on port 40305.
+1793506879: New client connected from 127.0.0.1:38484 as netz-load-publisher-18 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38492 on port 40305.
+1793506879: New client connected from 127.0.0.1:38492 as netz-load-publisher-19 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38494 on port 40305.
+1793506879: New client connected from 127.0.0.1:38494 as netz-load-publisher-20 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38500 on port 40305.
+1793506879: New client connected from 127.0.0.1:38500 as netz-load-publisher-21 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38512 on port 40305.
+1793506879: New client connected from 127.0.0.1:38512 as netz-load-publisher-22 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38526 on port 40305.
+1793506879: New client connected from 127.0.0.1:38526 as netz-load-publisher-23 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38538 on port 40305.
+1793506879: New client connected from 127.0.0.1:38538 as netz-load-publisher-24 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38548 on port 40305.
+1793506879: New client connected from 127.0.0.1:38548 as netz-load-publisher-25 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38558 on port 40305.
+1793506879: New client connected from 127.0.0.1:38558 as netz-load-publisher-26 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38574 on port 40305.
+1793506879: New client connected from 127.0.0.1:38574 as netz-load-publisher-27 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38582 on port 40305.
+1793506879: New client connected from 127.0.0.1:38582 as netz-load-publisher-28 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38594 on port 40305.
+1793506879: New client connected from 127.0.0.1:38594 as netz-load-publisher-29 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38602 on port 40305.
+1793506879: New client connected from 127.0.0.1:38602 as netz-load-publisher-30 (p5, c1, k30).
+1793506879: New connection from 127.0.0.1:38606 on port 40305.
+1793506879: New client connected from 127.0.0.1:38606 as netz-load-publisher-31 (p5, c1, k30).
+1793506879: Client netz-load-subscriber-0 [127.0.0.1:38022] disconnected.
+1793506879: Client netz-load-subscriber-1 [127.0.0.1:38030] disconnected.
+1793506879: Client netz-load-subscriber-2 [127.0.0.1:38040] disconnected.
+1793506879: Client netz-load-subscriber-3 [127.0.0.1:38046] disconnected.
+1793506879: Client netz-load-subscriber-4 [127.0.0.1:38056] disconnected.
+1793506879: Client netz-load-subscriber-5 [127.0.0.1:38068] disconnected.
+1793506879: Client netz-load-subscriber-6 [127.0.0.1:38078] disconnected.
+1793506879: Client netz-load-subscriber-7 [127.0.0.1:38086] disconnected.
+1793506879: Client netz-load-subscriber-8 [127.0.0.1:38094] disconnected.
+1793506879: Client netz-load-subscriber-9 [127.0.0.1:38100] disconnected.
+1793506879: Client netz-load-subscriber-10 [127.0.0.1:38116] disconnected.
+1793506879: Client netz-load-subscriber-11 [127.0.0.1:38120] disconnected.
+1793506879: Client netz-load-subscriber-12 [127.0.0.1:38122] disconnected.
+1793506879: Client netz-load-subscriber-13 [127.0.0.1:38138] disconnected.
+1793506879: Client netz-load-subscriber-14 [127.0.0.1:38150] disconnected.
+1793506879: Client netz-load-subscriber-15 [127.0.0.1:38160] disconnected.
+1793506879: Client netz-load-subscriber-16 [127.0.0.1:38176] disconnected.
+1793506879: Client netz-load-subscriber-17 [127.0.0.1:38182] disconnected.
+1793506879: Client netz-load-subscriber-18 [127.0.0.1:38192] disconnected.
+1793506879: Client netz-load-subscriber-19 [127.0.0.1:38202] disconnected.
+1793506879: Client netz-load-subscriber-20 [127.0.0.1:38210] disconnected.
+1793506879: Client netz-load-subscriber-21 [127.0.0.1:38212] disconnected.
+1793506879: Client netz-load-subscriber-22 [127.0.0.1:38214] disconnected.
+1793506879: Client netz-load-subscriber-23 [127.0.0.1:38222] disconnected.
+1793506879: Client netz-load-subscriber-24 [127.0.0.1:38236] disconnected.
+1793506879: Client netz-load-subscriber-25 [127.0.0.1:38246] disconnected.
+1793506879: Client netz-load-subscriber-26 [127.0.0.1:38254] disconnected.
+1793506879: Client netz-load-subscriber-28 [127.0.0.1:38270] disconnected.
+1793506879: Client netz-load-subscriber-27 [127.0.0.1:38268] disconnected.
+1793506879: Client netz-load-subscriber-29 [127.0.0.1:38278] disconnected.
+1793506879: Client netz-load-subscriber-30 [127.0.0.1:38280] disconnected.
+1793506879: Client netz-load-subscriber-31 [127.0.0.1:38286] disconnected.
+1793506879: Client netz-load-publisher-0 [127.0.0.1:38300] disconnected.
+1793506879: Client netz-load-publisher-1 [127.0.0.1:38304] disconnected.
+1793506879: Client netz-load-publisher-2 [127.0.0.1:38316] disconnected.
+1793506879: Client netz-load-publisher-3 [127.0.0.1:38330] disconnected.
+1793506879: Client netz-load-publisher-4 [127.0.0.1:38344] disconnected.
+1793506879: Client netz-load-publisher-5 [127.0.0.1:38358] disconnected.
+1793506879: Client netz-load-publisher-6 [127.0.0.1:38360] disconnected.
+1793506879: Client netz-load-publisher-7 [127.0.0.1:38372] disconnected.
+1793506879: Client netz-load-publisher-8 [127.0.0.1:38386] disconnected.
+1793506879: Client netz-load-publisher-9 [127.0.0.1:38402] disconnected.
+1793506879: Client netz-load-publisher-10 [127.0.0.1:38416] disconnected.
+1793506879: Client netz-load-publisher-11 [127.0.0.1:38422] disconnected.
+1793506879: Client netz-load-publisher-12 [127.0.0.1:38432] disconnected.
+1793506879: Client netz-load-publisher-13 [127.0.0.1:38438] disconnected.
+1793506879: Client netz-load-publisher-14 [127.0.0.1:38450] disconnected.
+1793506879: Client netz-load-publisher-15 [127.0.0.1:38462] disconnected.
+1793506879: Client netz-load-publisher-16 [127.0.0.1:38472] disconnected.
+1793506879: Client netz-load-publisher-17 [127.0.0.1:38476] disconnected.
+1793506879: Client netz-load-publisher-18 [127.0.0.1:38484] disconnected.
+1793506879: Client netz-load-publisher-19 [127.0.0.1:38492] disconnected.
+1793506879: Client netz-load-publisher-20 [127.0.0.1:38494] disconnected.
+1793506879: Client netz-load-publisher-21 [127.0.0.1:38500] disconnected.
+1793506879: Client netz-load-publisher-22 [127.0.0.1:38512] disconnected.
+1793506879: Client netz-load-publisher-23 [127.0.0.1:38526] disconnected.
+1793506879: Client netz-load-publisher-24 [127.0.0.1:38538] disconnected.
+1793506879: Client netz-load-publisher-25 [127.0.0.1:38548] disconnected.
+1793506879: Client netz-load-publisher-26 [127.0.0.1:38558] disconnected.
+1793506879: Client netz-load-publisher-27 [127.0.0.1:38574] disconnected.
+1793506879: Client netz-load-publisher-28 [127.0.0.1:38582] disconnected.
+1793506879: Client netz-load-publisher-29 [127.0.0.1:38594] disconnected.
+1793506879: Client netz-load-publisher-30 [127.0.0.1:38602] disconnected.
+1793506879: Client netz-load-publisher-31 [127.0.0.1:38606] disconnected.
+1793506879: mosquitto version 2.1.2 terminating

@@ -1,0 +1,110 @@
+1793506874: Info: running mosquitto as user: passchaos.
+1793506874: mosquitto version 2.1.2 starting
+1793506874: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/fanout-32/sample-02/artifacts/mosquitto.conf.
+1793506874: Bridge support available.
+1793506874: Persistence support available.
+1793506874: TLS support NOT available.
+1793506874: TLS-PSK support NOT available.
+1793506874: Websockets support NOT available.
+1793506874: Opening ipv4 listen socket on port 59779.
+1793506874: mosquitto version 2.1.2 running
+1793506874: New connection from 127.0.0.1:55032 on port 59779.
+1793506874: New client connected from 127.0.0.1:55032 as netz-load-subscriber-0 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55046 on port 59779.
+1793506874: New client connected from 127.0.0.1:55046 as netz-load-subscriber-1 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55060 on port 59779.
+1793506874: New client connected from 127.0.0.1:55060 as netz-load-subscriber-2 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55068 on port 59779.
+1793506874: New client connected from 127.0.0.1:55068 as netz-load-subscriber-3 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55074 on port 59779.
+1793506874: New client connected from 127.0.0.1:55074 as netz-load-subscriber-4 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55088 on port 59779.
+1793506874: New client connected from 127.0.0.1:55088 as netz-load-subscriber-5 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55090 on port 59779.
+1793506874: New client connected from 127.0.0.1:55090 as netz-load-subscriber-6 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55092 on port 59779.
+1793506874: New client connected from 127.0.0.1:55092 as netz-load-subscriber-7 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55106 on port 59779.
+1793506874: New client connected from 127.0.0.1:55106 as netz-load-subscriber-8 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55110 on port 59779.
+1793506874: New client connected from 127.0.0.1:55110 as netz-load-subscriber-9 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55114 on port 59779.
+1793506874: New client connected from 127.0.0.1:55114 as netz-load-subscriber-10 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55118 on port 59779.
+1793506874: New client connected from 127.0.0.1:55118 as netz-load-subscriber-11 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55130 on port 59779.
+1793506874: New client connected from 127.0.0.1:55130 as netz-load-subscriber-12 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55136 on port 59779.
+1793506874: New client connected from 127.0.0.1:55136 as netz-load-subscriber-13 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55144 on port 59779.
+1793506874: New client connected from 127.0.0.1:55144 as netz-load-subscriber-14 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55152 on port 59779.
+1793506874: New client connected from 127.0.0.1:55152 as netz-load-subscriber-15 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55160 on port 59779.
+1793506874: New client connected from 127.0.0.1:55160 as netz-load-subscriber-16 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55176 on port 59779.
+1793506874: New client connected from 127.0.0.1:55176 as netz-load-subscriber-17 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55182 on port 59779.
+1793506874: New client connected from 127.0.0.1:55182 as netz-load-subscriber-18 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55188 on port 59779.
+1793506874: New client connected from 127.0.0.1:55188 as netz-load-subscriber-19 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55202 on port 59779.
+1793506874: New client connected from 127.0.0.1:55202 as netz-load-subscriber-20 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55208 on port 59779.
+1793506874: New client connected from 127.0.0.1:55208 as netz-load-subscriber-21 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55212 on port 59779.
+1793506874: New client connected from 127.0.0.1:55212 as netz-load-subscriber-22 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55228 on port 59779.
+1793506874: New client connected from 127.0.0.1:55228 as netz-load-subscriber-23 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55236 on port 59779.
+1793506874: New client connected from 127.0.0.1:55236 as netz-load-subscriber-24 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55248 on port 59779.
+1793506874: New client connected from 127.0.0.1:55248 as netz-load-subscriber-25 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55260 on port 59779.
+1793506874: New client connected from 127.0.0.1:55260 as netz-load-subscriber-26 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55272 on port 59779.
+1793506874: New client connected from 127.0.0.1:55272 as netz-load-subscriber-27 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55282 on port 59779.
+1793506874: New client connected from 127.0.0.1:55282 as netz-load-subscriber-28 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55290 on port 59779.
+1793506874: New client connected from 127.0.0.1:55290 as netz-load-subscriber-29 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55300 on port 59779.
+1793506874: New client connected from 127.0.0.1:55300 as netz-load-subscriber-30 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55304 on port 59779.
+1793506874: New client connected from 127.0.0.1:55304 as netz-load-subscriber-31 (p5, c1, k30).
+1793506874: New connection from 127.0.0.1:55308 on port 59779.
+1793506874: New client connected from 127.0.0.1:55308 as netz-load-publisher-0 (p5, c1, k30).
+1793506875: Client netz-load-subscriber-0 [127.0.0.1:55032] disconnected.
+1793506875: Client netz-load-subscriber-1 [127.0.0.1:55046] disconnected.
+1793506875: Client netz-load-subscriber-2 [127.0.0.1:55060] disconnected.
+1793506875: Client netz-load-subscriber-3 [127.0.0.1:55068] disconnected.
+1793506875: Client netz-load-subscriber-4 [127.0.0.1:55074] disconnected.
+1793506875: Client netz-load-subscriber-5 [127.0.0.1:55088] disconnected.
+1793506875: Client netz-load-subscriber-6 [127.0.0.1:55090] disconnected.
+1793506875: Client netz-load-subscriber-7 [127.0.0.1:55092] disconnected.
+1793506875: Client netz-load-subscriber-8 [127.0.0.1:55106] disconnected.
+1793506875: Client netz-load-subscriber-9 [127.0.0.1:55110] disconnected.
+1793506875: Client netz-load-subscriber-10 [127.0.0.1:55114] disconnected.
+1793506875: Client netz-load-subscriber-11 [127.0.0.1:55118] disconnected.
+1793506875: Client netz-load-subscriber-12 [127.0.0.1:55130] disconnected.
+1793506875: Client netz-load-subscriber-13 [127.0.0.1:55136] disconnected.
+1793506875: Client netz-load-subscriber-14 [127.0.0.1:55144] disconnected.
+1793506875: Client netz-load-subscriber-15 [127.0.0.1:55152] disconnected.
+1793506875: Client netz-load-subscriber-16 [127.0.0.1:55160] disconnected.
+1793506875: Client netz-load-subscriber-17 [127.0.0.1:55176] disconnected.
+1793506875: Client netz-load-subscriber-18 [127.0.0.1:55182] disconnected.
+1793506875: Client netz-load-subscriber-19 [127.0.0.1:55188] disconnected.
+1793506875: Client netz-load-subscriber-20 [127.0.0.1:55202] disconnected.
+1793506875: Client netz-load-subscriber-21 [127.0.0.1:55208] disconnected.
+1793506875: Client netz-load-subscriber-22 [127.0.0.1:55212] disconnected.
+1793506875: Client netz-load-subscriber-23 [127.0.0.1:55228] disconnected.
+1793506875: Client netz-load-subscriber-24 [127.0.0.1:55236] disconnected.
+1793506875: Client netz-load-subscriber-25 [127.0.0.1:55248] disconnected.
+1793506875: Client netz-load-subscriber-26 [127.0.0.1:55260] disconnected.
+1793506875: Client netz-load-subscriber-27 [127.0.0.1:55272] disconnected.
+1793506875: Client netz-load-subscriber-28 [127.0.0.1:55282] disconnected.
+1793506875: Client netz-load-subscriber-29 [127.0.0.1:55290] disconnected.
+1793506875: Client netz-load-subscriber-30 [127.0.0.1:55300] disconnected.
+1793506875: Client netz-load-subscriber-31 [127.0.0.1:55304] disconnected.
+1793506875: Client netz-load-publisher-0 [127.0.0.1:55308] disconnected.
+1793506875: mosquitto version 2.1.2 terminating

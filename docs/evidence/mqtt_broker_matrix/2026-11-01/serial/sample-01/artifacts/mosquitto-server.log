@@ -1,0 +1,17 @@
+1793506871: Info: running mosquitto as user: passchaos.
+1793506871: mosquitto version 2.1.2 starting
+1793506871: Config loaded from /tmp/netz-mqtt-matrix-2026-11-01/serial/sample-01/artifacts/mosquitto.conf.
+1793506871: Bridge support available.
+1793506871: Persistence support available.
+1793506871: TLS support NOT available.
+1793506871: TLS-PSK support NOT available.
+1793506871: Websockets support NOT available.
+1793506871: Opening ipv4 listen socket on port 36847.
+1793506871: mosquitto version 2.1.2 running
+1793506871: New connection from 127.0.0.1:46598 on port 36847.
+1793506871: New client connected from 127.0.0.1:46598 as netz-load-subscriber-0 (p5, c1, k30).
+1793506871: New connection from 127.0.0.1:46610 on port 36847.
+1793506871: New client connected from 127.0.0.1:46610 as netz-load-publisher-0 (p5, c1, k30).
+1793506871: Client netz-load-subscriber-0 [127.0.0.1:46598] disconnected.
+1793506871: Client netz-load-publisher-0 [127.0.0.1:46610] disconnected.
+1793506871: mosquitto version 2.1.2 terminating

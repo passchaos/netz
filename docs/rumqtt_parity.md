@@ -1600,6 +1600,27 @@ accepted matrix explicitly aligns `TCP_NODELAY=true` on both brokers and omits
 verbose packet logging. These results identify broker scheduling, serial
 latency, and per-connection memory as the next optimization targets.
 
+## Current QoS 1 broker matrix
+
+A fresh 2026-11-01 QoS 1 capture on the current broker and driver, using the
+same ABBA schedule and pinned CPUs 0/1/2, now measures netz above Mosquitto in
+all five shapes: serial 57,246 vs 49,747 (1.151×), publishers-32 80,792 vs
+73,221 (1.103×), fanout-32 6,146 vs 5,525 (1.112×), balanced-32x32 5,937 vs
+5,132 (1.157×), and large-payload 30,338 vs 29,927 (1.014×). This supersedes
+the pre-QoS-1-writer throughput deficit for current code while leaving that
+historical capture separately scoped. QoS 2 and durable-Session captures remain
+separate measurements.
+
+The remaining gap has moved to tail latency and memory. Balanced-32x32 p99 is
+10.64 ms versus 4.22 ms, and serial p999 is 287.9 us versus 69.4 us. Broker RSS
+is 1.16–1.65× Mosquitto in four shapes and 0.66× in balanced-32x32. The host
+also ran unrelated build/test jobs during this capture, so the throughput
+direction is ABBA-paired and consistent across 20 pairs while p99 and RSS
+values are noisier. Full per-sample records, build logs, environment hashes and
+the strict checker output are in
+`docs/evidence/mqtt_broker_matrix/2026-11-01.json`.
+
+
 The same driver and strict artifact pipeline now cover QoS 2. Subscriber tasks
 consume interleaved PUBLISH and PUBREL events through one socket reader, track
 the bounded set of pending Packet Identifiers, and send PUBREC/PUBCOMP without
@@ -5784,7 +5805,7 @@ proxy evidence for the entire suite.
    QoS 2 pairs reduced broker instructions 5.54% and cycles 10.49% by paired
    medians with 8/8 wins for each. Timing remained noisy and the final direct
    Mosquitto comparison still measured 22,091 versus 31,651 publishes/s, so
-   the broader serial/RSS gap remains active. Focused Keep Alive/broker tests
+   the durable QoS 2 serial/RSS gap remains active. Focused Keep Alive/broker tests
    pass 221/221, TLS/WSS composition passes 131/131, live-broker fuzz passes
    3/3, package tests pass 22/22, and Mosquitto gates pass 294 selected vectors
    plus all 1,825 source-locked sequences. Full PMU, profile and lifecycle
