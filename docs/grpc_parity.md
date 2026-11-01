@@ -2718,7 +2718,10 @@ The recorded matrix completes 216 exact RPCs through 108 reused native
 connections and rejects all 80 DNS-only-certificate attempts. Debug and
 ReleaseFast gRPC/address filters pass 414/414, and package checks pass 22/22.
 Detailed rows and source hashes are in
-`docs/evidence/grpc_ip_literals/2026-10-30.json`.
+`docs/evidence/grpc_ip_literals/2026-10-30.json`. A fresh 2026-11-01 run
+reproduced the same result: all 10 matrix rows passed with 216 native RPCs
+and the pinned reference rejected 2 TLS sessions; see
+`docs/evidence/grpc_ip_literals/2026-11-01.json`.
 
 ## Staggered ordinary-Channel connection attempts
 

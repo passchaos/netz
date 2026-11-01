@@ -1,0 +1,147 @@
+{
+  "command": "zig build interop-grpc-ip-literals",
+  "date": "2026-11-01",
+  "log": "2026-11-01/matrix.log",
+  "matrix": [
+    {
+      "host": "127.0.0.1",
+      "mode": "cleartext",
+      "nativeConnections": 7,
+      "nativeRpcs": 14,
+      "nodeTlsIdentityVerified": false,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": false
+      },
+      "referenceSni": [
+        null
+      ],
+      "reject": false
+    },
+    {
+      "host": "127.0.0.1",
+      "mode": "tls12",
+      "nativeConnections": 10,
+      "nativeRpcs": 20,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": false
+    },
+    {
+      "host": "127.0.0.1",
+      "mode": "tls13",
+      "nativeConnections": 10,
+      "nativeRpcs": 20,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": false
+    },
+    {
+      "host": "127.0.0.1",
+      "mode": "tls12",
+      "nativeConnections": 10,
+      "nativeRpcs": 0,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 1,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": true
+    },
+    {
+      "host": "127.0.0.1",
+      "mode": "tls13",
+      "nativeConnections": 10,
+      "nativeRpcs": 0,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": true
+    },
+    {
+      "host": "::1",
+      "mode": "cleartext",
+      "nativeConnections": 21,
+      "nativeRpcs": 42,
+      "nodeTlsIdentityVerified": false,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": false
+      },
+      "referenceSni": [
+        null
+      ],
+      "reject": false
+    },
+    {
+      "host": "::1",
+      "mode": "tls12",
+      "nativeConnections": 30,
+      "nativeRpcs": 60,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": false
+    },
+    {
+      "host": "::1",
+      "mode": "tls13",
+      "nativeConnections": 30,
+      "nativeRpcs": 60,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": false
+    },
+    {
+      "host": "::1",
+      "mode": "tls12",
+      "nativeConnections": 30,
+      "nativeRpcs": 0,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 1,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": true
+    },
+    {
+      "host": "::1",
+      "mode": "tls13",
+      "nativeConnections": 30,
+      "nativeRpcs": 0,
+      "nodeTlsIdentityVerified": true,
+      "referenceRejectedTlsSessions": 0,
+      "referenceResult": {
+        "numericSniUnavailable": true
+      },
+      "referenceSni": [],
+      "reject": true
+    }
+  ],
+  "native_rpcs": 216,
+  "node": "v26.10.0",
+  "reference": "grpc-js-1.14.0",
+  "reference_rejected_tls_sessions": 2,
+  "rows": 10,
+  "status": "passed"
+}

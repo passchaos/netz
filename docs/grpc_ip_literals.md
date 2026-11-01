@@ -83,3 +83,8 @@ Node v26.10.0 rejects the SDK's numeric SNI in all TLS scenarios. The independen
 Node TLS control rejects the same DNS-only leaves with the exact identity
 error; its TLS 1.2 peer session allocation is recorded separately before native
 attempts, which create no additional HTTP/2 sessions or requests.
+
+A fresh 2026-11-01 run reproduced the matrix: all 10 rows passed with 108
+accepted native connections (each reused twice), 216 native RPCs, 80 rejected
+native TLS attempts and 2 reference-rejected TLS sessions, recorded in the
+[2026-11-01 matrix](evidence/grpc_ip_literals/2026-11-01.json).
