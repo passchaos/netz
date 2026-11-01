@@ -66,10 +66,14 @@ and discarded packet 1. The filter now records the accepted packet number, so
 packet 1 is processed, the initial-flight read is deadline-bounded, and the
 ServerHello parses as AES-128-GCM-SHA256 with X25519MLKEM768. The handshake
 still times out after the ServerHello; forcing X25519-only also times out, so
-the key exchange group is not the cause. The next target is the server
-Handshake flight or coalesced Initial/Handshake packet processing. Accepting
-the ACK-only packet unconditionally was tested and reintroduced the documented
-split-ClientHello deadlock, so ACK-only later fragments remain rejected. See
+the key exchange group is not the cause. Instrumentation shows the client
+decrypts the first server Handshake packet (packet number 13, 642 bytes of
+TLS data), then the next `source.receiveTimeout` with the passive deadline
+remains blocked past a 70-second observation. The next target is the handshake
+reader's second receive/deadline handling or the server's remaining Handshake
+flight. Accepting the ACK-only packet unconditionally was tested and
+reintroduced the documented split-ClientHello deadlock, so ACK-only later
+fragments remain rejected. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long

@@ -10,6 +10,15 @@
     "error": "HandshakeTimeout",
     "note": "OpenSSL QUICv1/TLS1.3 handshake succeeds from the same host, so this is a netz client interop issue rather than reachability. The netz client receives no server response across five retries."
   },
+  "handshake_flight_observation": {
+    "coalesced_tail": 0,
+    "first_handshake_packet": {
+      "packet_number": 13,
+      "payload_bytes": 646
+    },
+    "next_receive": "The following source.receiveTimeout with the passive deadline remained blocked past 70 seconds.",
+    "reassembled_tls_bytes": 642
+  },
   "logs": {
     "gate": "2026-11-01/gate.log",
     "meta": "2026-11-01/meta.log",
@@ -20,7 +29,7 @@
   },
   "packet_number_fix": {
     "change": "InitialResponseFilter records the accepted packet number; openInitialCryptoFlightFrom starts at that number and is bounded by the initial-flight deadline.",
-    "remaining_failure": "The handshake still times out after the ServerHello. Forcing X25519-only also times out, so the key exchange group is not the cause; the next target is the server Handshake flight or coalesced Initial/Handshake packet processing.",
+    "remaining_failure": "The client decrypts the first server Handshake packet (packet number 13, 642 bytes of TLS data) and then waits for the rest of the flight. The second source.receiveTimeout with the passive deadline did not return within a 70-second observation. The next target is the handshake reader's second receive/deadline handling or the server's remaining Handshake flight, not the key exchange group.",
     "result": "The client now processes the server Initial packet 1 and parses the ServerHello (AES-128-GCM-SHA256, X25519MLKEM768)."
   },
   "passing": [
