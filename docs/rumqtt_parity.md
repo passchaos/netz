@@ -1635,6 +1635,17 @@ packets, so the unconditional drain remains; reverting the change restored
 144/144 tests. See
 `docs/evidence/mqtt_transient_session_drain_rejected/2026-11-01.json`.
 
+A four-delivery transient queue batching candidate was also rejected. It
+improved the targeted QoS 1 balanced shape (p50 3.623 → 3.275 ms, p99
+10.639 → 7.833 ms) and serial throughput (57,246 → 61,667/s), but QoS 2
+regressed in four of five shapes even after restricting QoS 2 to one delivery
+per lock and inlining the helper: serial 27,398 → 27,048/s with p99 0.042 →
+0.083 ms, publishers-32 38,309 → 34,993/s, fanout-32 3,100 → 2,808/s and
+balanced 3,212 → 2,901/s. The shared flush refactor and reservation bookkeeping
+cost more than the saved locks for QoS 2, so the change was reverted. A future
+attempt must leave the QoS 2 flush path structurally unchanged. See
+`docs/evidence/mqtt_queue_batch_rejected/2026-11-01.json`.
+
 The remaining gap has moved to tail latency and memory. Balanced-32x32 p99 is
 10.64 ms versus 4.22 ms, and serial p999 is 287.9 us versus 69.4 us. Broker RSS
 is 1.16–1.65× Mosquitto in four shapes and 0.66× in balanced-32x32. The host

@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-01",
+  "status": "rejected",
+  "experiment": "Batch up to four transient live-queue deliveries under one state-lock critical section in flushSlotLockedMode, then write them outside the lock.",
+  "motivation": "The balanced QoS 1 profile showed flushSlotLockedMode at 20.36% self and 44.48% children, with sync.Futex.wait at 7.60%; the loop took the global state lock once per delivery.",
+  "implementation": [
+    "Popped up to four QoS 0/1 deliveries per lock section; QoS 2 and durable Sessions stayed one-at-a-time.",
+    "Added a 4-KiB payload budget so 4-KiB messages kept one-at-a-time behavior.",
+    "Reserved route slots for the batch so concurrent publishers could not refill the queue and prevent push-back.",
+    "Deferred reservation release to the next loop iteration and marked the per-delivery helper inline."
+  ],
+  "verification": {
+    "mqtt_tests": "1329/1329 passed after the final iteration",
+    "qos1_matrix": "batch3 vs 2026-11-01 baseline",
+    "qos2_matrix": "batch6 vs 2026-11-01 QoS 2 baseline"
+  },
+  "qos1_results": [
+    { "shape": "serial", "baseline_publishes_per_s": 57246, "candidate_publishes_per_s": 61667, "baseline_p99_ms": 0.028, "candidate_p99_ms": 0.015 },
+    { "shape": "publishers-32", "baseline_publishes_per_s": 80792, "candidate_publishes_per_s": 79466, "baseline_p99_ms": 0.692, "candidate_p99_ms": 0.637 },
+    { "shape": "fanout-32", "baseline_publishes_per_s": 6146, "candidate_publishes_per_s": 6141, "baseline_p99_ms": 0.399, "candidate_p99_ms": 0.370 },
+    { "shape": "balanced-32x32", "baseline_publishes_per_s": 5937, "candidate_publishes_per_s": 5957, "baseline_p50_ms": 3.623, "candidate_p50_ms": 3.275, "baseline_p99_ms": 10.639, "candidate_p99_ms": 7.833 },
+    { "shape": "large-payload", "baseline_publishes_per_s": 30338, "candidate_publishes_per_s": 30573, "baseline_p99_ms": 1.174, "candidate_p99_ms": 1.343 }
+  ],
+  "qos2_results": [
+    { "shape": "serial", "baseline_publishes_per_s": 27398, "candidate_publishes_per_s": 27048, "baseline_p99_ms": 0.042, "candidate_p99_ms": 0.083 },
+    { "shape": "publishers-32", "baseline_publishes_per_s": 38309, "candidate_publishes_per_s": 34993, "baseline_p99_ms": 3.069, "candidate_p99_ms": 3.408 },
+    { "shape": "fanout-32", "baseline_publishes_per_s": 3100, "candidate_publishes_per_s": 2808, "baseline_p99_ms": 1.054, "candidate_p99_ms": 1.245 },
+    { "shape": "balanced-32x32", "baseline_publishes_per_s": 3212, "candidate_publishes_per_s": 2901, "baseline_p99_ms": 35.886, "candidate_p99_ms": 39.827 },
+    { "shape": "large-payload", "baseline_publishes_per_s": 18039, "candidate_publishes_per_s": 18103, "baseline_p99_ms": 3.219, "candidate_p99_ms": 3.157 }
+  ],
+  "conclusions": [
+    "QoS 1 improved the targeted balanced shape (p50 3.623 -> 3.275 ms, p99 10.639 -> 7.833 ms) and serial throughput (57,246 -> 61,667/s), with other QoS 1 shapes roughly neutral.",
+    "QoS 2 regressed in four of five shapes even after restricting QoS 2 to one-at-a-time and inlining the helper: serial 27,398 -> 27,048/s with p99 0.042 -> 0.083 ms, publishers-32 38,309 -> 34,993/s, fanout-32 3,100 -> 2,808/s, balanced 3,212 -> 2,901/s.",
+    "The shared flush-path refactor and reservation accounting therefore cost more than the lock savings for QoS 2. The code change was reverted; no source change remains.",
+    "A future attempt must leave the QoS 2 flush path structurally unchanged, for example by batching only in a separate QoS 0/1-only writer or by removing the extra reservation/lock bookkeeping."
+  ],
+  "artifacts": {
+    "qos1_summary": "/tmp/netz-mqtt-matrix-batch3-2026-11-01/summary.log",
+    "qos2_summary": "/tmp/netz-mqtt-matrix-batch6-qos2-2026-11-01/summary.log",
+    "baseline_qos1": "/tmp/netz-mqtt-matrix-2026-11-01/summary.log",
+    "baseline_qos2": "/tmp/netz-mqtt-matrix-qos2-2026-11-01/summary.log"
+  }
+}
