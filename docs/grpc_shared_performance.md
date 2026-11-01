@@ -694,3 +694,19 @@ generation, likely by adding segmented ownership below `ClientDuplex` in the
 HTTP/2 transport or selecting a separate large-message implementation. Full
 raw paired rows and binary identities are in
 [the rejected retained-DATA evidence](evidence/grpc_shared_retained_data_rejected/2026-10-30.json).
+
+## Large-message bottleneck and rejected clock cache (2026-11-02)
+
+A 256-KiB persistent roundtrip measured 839 µs with the default 16-KiB frame
+size and 837 µs with a 64-KiB negotiated frame size, so frame count and per-frame
+wakeups are not the dominant cost. The same workload scaled linearly with
+payload: 1 MiB took 3.47 ms and 4 MiB took 14.93 ms, about 600 MB/s of aggregate
+payload throughput. The gap is therefore copy/throughput-bound.
+
+Replacing the direct `Clock.awake.now` reads in the priority/WRR/pick paths
+with `netz_runtime.cachedAwakeTimestamp` was then measured with five alternating
+256-KiB persistent pairs against an otherwise identical baseline binary. The
+candidate's median was 890,066 ns per roundtrip versus 858,614 ns for the
+baseline, and three of five pairs were slower. The candidate was reverted; the
+direct clock reads remain in those paths. A future attempt should reduce
+message copies or segmented ownership rather than clock-source overhead.
