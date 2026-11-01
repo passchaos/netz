@@ -749,3 +749,23 @@ faster: median 808,907 ns per roundtrip versus 865,963 ns for the baseline
 (6.6%). Three fixed-binary PMU pairs reduced instructions from 242,819,212 to
 236,558,883 (2.58%, 3/3 wins). The full gRPC Debug gate passes 562/562 with the
 change retained.
+
+## Allocator dominates the large-message gap (2026-11-02)
+
+The remaining 256-KiB gap is dominated by the benchmark's allocator choice,
+not the transport. The benchmark now exposes `--c-allocator` and reports
+`allocator=smp|c`. With the same binary:
+
+- 0/512/4-KiB payloads measured about 18.3/19.4/23.4 µs per roundtrip under
+  both allocators.
+- 256 KiB measured about 830-915 µs with `std.heap.smp_allocator` and
+  **469-492 µs with `std.heap.c_allocator`** (glibc malloc), roughly 1.8x.
+- Three PMU pairs showed nearly identical instructions (521.7M versus 522.0M,
+  +0.1%) and only about 3% fewer cycles for the system allocator, so the wall
+  difference is allocator syscall/lock behavior rather than extra work.
+
+With the system allocator, the netz 256-KiB roundtrip is about 469-490 µs
+against the recorded grpc-cpp reference of about 393 µs, roughly 1.2-1.25x
+rather than 2.4x. The earlier comparison conflated allocator behavior with
+transport cost. Large-message callers should use a caching or system allocator;
+a netz-owned pooled allocator remains a candidate feature.
