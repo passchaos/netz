@@ -55,30 +55,15 @@ Fresh 2026-11-01 live fuzz gates passed `fuzz-http3-connection`,
 `fuzz-webtransport-endpoint` and `fuzz-quic-connection` at 3/3 tests each; see
 `docs/evidence/live_fuzz/2026-11-01.json`.
 
-A 2026-11-01 public-endpoint run passed ByteDance, Cloudflare and Meta. The
-quic.tech:8443 case still times out with `HandshakeTimeout` even though an
-OpenSSL QUICv1/TLS1.3 handshake to the same endpoint succeeds from this host;
-the netz client receives no server response across five retries. Root-cause
-instrumentation shows the server sends an ACK-only Initial packet 0 followed
-by an Initial packet 1 carrying CRYPTO offset zero. The filter originally
-rejected packet 0, and `openInitialCryptoFlightFrom` then expected packet 0
-and discarded packet 1. The filter now records the accepted packet number, so
-packet 1 is processed, the initial-flight read is deadline-bounded, and the
-ServerHello parses as AES-128-GCM-SHA256 with X25519MLKEM768. The handshake
-still times out after the ServerHello; forcing X25519-only also times out, so
-the key exchange group is not the cause. Instrumentation shows the client
-decrypts the first server Handshake packet (packet number 13, 642 bytes of
-TLS data), then the next `source.receiveTimeout` with the passive deadline
-remains blocked past a 70-second observation. `strace` shows the client
-waiting in `io_uring` for a datagram; the handshake client has no `sendAck`
-path and opens server packets without acknowledging them. A temporary ACK for
-Handshake packet 13, sealed with client Handshake keys at packet number 0,
-produced `ConnectionClosed` rather than unlocking the server flight. Correct
-ACK generation must coordinate its packet number with the client Finished.
-The next target is integrated handshake ACK and client-Finished packet-number
-ownership. Accepting the ACK-only packet unconditionally was tested and
-reintroduced the documented split-ClientHello deadlock, so ACK-only later
-fragments remain rejected. See
+A fresh 2026-11-01 `interop-http3-public` run passed ByteDance, Cloudflare,
+quic.tech:8443 and Meta. The quic.tech case exposed two client handshake
+issues: the server sends an ACK-only Initial packet 0 followed by a
+CRYPTO-offset-0 packet 1, and it gates the rest of the Handshake flight on an
+ACK for the first CRYPTO packet. The filter now records the accepted packet
+number so `openInitialCryptoFlightFrom` starts at packet 1, and the handshake
+client acknowledges the first Handshake CRYPTO packet with client Handshake
+keys before reserving the next packet number for its Finished flight. quic.tech
+now completes the handshake and returns HTTP/3 200 with a 462-byte body. See
 `docs/evidence/http3_public/2026-11-01.json`.
 
 `fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long

@@ -1,0 +1,74 @@
+HTTP/3 public interop: ByteDance/Tengine verified HEAD
+Alt-Svc override: h3 authority=:443 -> robotics.bytedance.com:443 ma=2592000
+HTTP/3 https://robotics.bytedance.com/ -> 200
+:status: 200
+server: Tengine
+content-type: text/html; charset=utf-8
+date: Sun, 01 Nov 2026 03:16:39 GMT
+vary: Accept-Encoding
+cache-control: no-cache
+x-ggw-config-version: 15801520
+x-tt-logid: 2026110111163954CFBA2A34D0CC5AF76A
+server-timing: inner; dur=9
+x-tt-trace-host: 01d9b8283fb5797bd66e9b33a4772c3286ceb87867d47b223541d88edfaaa6ae94350a32ed6b57cb974a984ad4a8792ddc03b134a3b6f78204f4560778046446b644766671f27f359aef778bcdadea1089b6552222806248940a3c803c305af7b09d80e336f7df44e110cdf25f0cfc1937
+x-tt-trace-tag: id=03;cdn-cache=miss;type=dyn
+x-tt-trace-id: 00-26110111163954CFBA2A34D0CC5AF76A-434FC035746CCFF6-00
+x-tt-timestamp: 1793502999.594
+via: cache24.l2cm9-7[24,0], ens-cache10.cn9509[40,0]
+alt-svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+timing-allow-origin: *
+eagleid: 01479a1e17935029995578491e
+body-bytes: 0
+HTTP/3 public interop: Cloudflare verified GET and cross-signed anchor
+Alt-Svc override: h3 authority=:443 -> cloudflare-quic.com:443 ma=86400
+HTTP/3 https://cloudflare-quic.com/ -> 200
+:status: 200
+date: Sun, 01 Nov 2026 03:16:41 GMT
+priority: u=3,i=?0
+content-type: text/html
+server: cloudflare
+cf-ray: a537bdfc682d7085-LAX
+alt-svc: h3=":443"; ma=86400
+server-timing: cfExtPri
+body-bytes: 125959
+body-preview:
+<!DOCTYPE html>
+<html lang="en" itemscope="" itemtype="http://schema.org/Article"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>QUIC | Cloudflare</title>
+    <meta name="viewport" content="width=device-width, initial-
+HTTP/3 public interop: quiche verified GET on UDP/8443
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+HTTP/3 https://quic.tech/ -> 200
+:status: 200
+server: quiche
+content-length: 462
+body-bytes: 462
+body-preview:
+<!DOCTYPE html>
+
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+
+    <link rel="shortcut icon" href="/quic.ico" type="image/x-icon">
+
+    <style>
+    img {
+        position: absolute;
+        margin: auto;
+        top
+HTTP/3 public interop: Meta verified redirect
+Alt-Svc override: h3 authority=:443 -> www.facebook.com:443 ma=86400
+HTTP/3 https://www.facebook.com/ -> 302
+:status: 302
+location: https://www.facebook.com/unsupportedbrowser
+strict-transport-security: max-age=15552000; preload
+content-type: text/html; charset="utf-8"
+x-fb-debug: 7ONver3uUffzL4LMBNwxFBsubkwTBomwnSbP11GfJHpVZMUzo7nfXkMc6bvtz70EW49sS/7+6ROkyr+gpvSOmQ==
+content-length: 0
+date: Sun, 01 Nov 2026 03:16:55 GMT
+x-fb-connection-quality: GOOD; q=0.7, rtt=92, rtx=1, c=4, mss=1232, tbw=6530, tp=9, tpl=1, uplat=181, ullat=0
+alt-svc: h3=":443"; ma=86400
+server-timing: slb_crtt;dur=92,slb_srtt;dur=-1,slb_req_start;dur=1793503015305103,slb_srv_hdr_rcvd;dur=181984,slb_cli_body_rcvd_first;dur=-1,slb_cli_body_rcvd_last;dur=-1,slb_conn_lat;dur=0,slb_ssl;dur=351,slb_rule_lat;dur=0
+priority: u=3,i
+body-bytes: 0

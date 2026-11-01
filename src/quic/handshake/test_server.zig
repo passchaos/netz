@@ -87,8 +87,6 @@ pub const Server = struct {
                 .crypto_data = flight.items,
             });
         }
-        var bytes = try self.endpoint.receiveBytesWithTimeout(.fromSeconds(2));
-        defer bytes.deinit(allocator);
         const expected_code: u64 = switch (self.mode) {
             .alpn => 0x178,
             .finished => 0x133,
@@ -97,15 +95,34 @@ pub const Server = struct {
             .close => unreachable,
         };
         if (self.mode == .cipher) {
+            var bytes = try self.endpoint.receiveBytesWithTimeout(.fromSeconds(2));
+            defer bytes.deinit(allocator);
             try std.testing.expect(bytes.bytes.len >= 1200);
             var packet = try quic.protection.openInitialPacket(allocator, keys.client, bytes.bytes, received.next_expected_packet_number);
             defer packet.deinit(allocator);
             try std.testing.expectEqual(received.next_expected_packet_number, packet.packet_number);
             try std.testing.expectEqual(expected_code, (try quic.parseFrame(packet.payload)).frame.connection_close.error_code);
         } else {
-            var packet = try quic.protection.openHandshakePacket(allocator, handshake.client_quic, bytes.bytes, 0);
-            defer packet.deinit(allocator);
-            try std.testing.expectEqual(expected_code, (try quic.parseFrame(packet.payload)).frame.connection_close.error_code);
+            var next_expected: u64 = 0;
+            while (true) {
+                var bytes = try self.endpoint.receiveBytesWithTimeout(.fromSeconds(2));
+                defer bytes.deinit(allocator);
+                var packet = try quic.protection.openHandshakePacket(
+                    allocator,
+                    handshake.client_quic,
+                    bytes.bytes,
+                    next_expected,
+                );
+                defer packet.deinit(allocator);
+                next_expected = packet.packet_number + 1;
+                const frame = (try quic.parseFrame(packet.payload)).frame;
+                if (frame == .ack) continue;
+                try std.testing.expectEqual(
+                    expected_code,
+                    frame.connection_close.error_code,
+                );
+                break;
+            }
         }
     }
 };

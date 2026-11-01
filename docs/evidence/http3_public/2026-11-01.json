@@ -5,10 +5,9 @@
     "openssl s_client -quic -connect quic.tech:8443 -servername quic.tech -alpn h3"
   ],
   "date": "2026-11-01",
-  "failing": {
-    "endpoint": "quic.tech:8443",
-    "error": "HandshakeTimeout",
-    "note": "OpenSSL QUICv1/TLS1.3 handshake succeeds from the same host, so this is a netz client interop issue rather than reachability. The netz client receives no server response across five retries."
+  "handshake_ack_fix": {
+    "change": "Acknowledge the first server Handshake CRYPTO packet with client Handshake keys and reserve the next client packet number for the Finished flight.",
+    "result": "quic.tech:8443 now completes the handshake and returns HTTP/3 200 with a 462-byte body."
   },
   "handshake_ack_generation": "The handshake receive/open paths do not generate ACK frames; they only open packets and reassemble CRYPTO data.",
   "handshake_ack_test": "Manual ACK packet 0 for the first Handshake packet caused ConnectionClosed; it did not advance the server flight. The next target is integrated handshake ACK and client-Finished packet-number ownership.",
@@ -23,7 +22,9 @@
   },
   "logs": {
     "gate": "2026-11-01/gate.log",
+    "gate_after_handshake_ack": "2026-11-01/gate.after_handshake_ack.log",
     "meta": "2026-11-01/meta.log",
+    "quic_tech_after_handshake_ack": "2026-11-01/quic_tech.ack_coord.log",
     "quic_tech_netz": "2026-11-01/quic_tech.netz.log",
     "quic_tech_openssl": "2026-11-01/quic_tech.openssl.log",
     "quic_tech_packet_number_fix": "2026-11-01/quic_tech.packet_number_fix.log",
@@ -37,15 +38,39 @@
   "passing": [
     "robotics.bytedance.com verified HEAD",
     "cloudflare-quic.com verified GET",
+    "quic.tech:8443 verified GET",
     "www.facebook.com verified 302"
   ],
   "root_cause_analysis": [
-    "The quic.tech server responds with an ACK-only Initial packet number zero followed by an Initial packet number one carrying CRYPTO offset zero.",
-    "The filter originally rejected the ACK-only packet; openInitialCryptoFlightFrom then expected packet number zero and discarded packet one.",
+    "The quic.tech server responds with an ACK-only Initial packet zero followed by an Initial packet one carrying CRYPTO offset zero.",
+    "The filter originally rejected the ACK-only packet; openInitialCryptoFlightFrom then expected packet zero and discarded packet one.",
     "The filter now records the accepted packet number, so packet one is processed and the ServerHello is parsed.",
-    "The handshake still times out after the ServerHello; the remaining boundary is the server Handshake flight or the X25519MLKEM768 shared-secret path.",
-    "Accepting the ACK-only packet unconditionally was tested and reintroduced the documented split-ClientHello deadlock, so the filter still rejects ACK-only later fragments."
+    "The server then gates the remaining Handshake flight on an ACK for the first CRYPTO packet. The handshake client had no sendAck path.",
+    "The client now acknowledges the first Handshake CRYPTO packet with client Handshake keys and uses the following packet number for the Finished flight.",
+    "quic.tech:8443 completes the handshake and returns HTTP/3 200."
   ],
-  "status": "partial",
+  "status": "passed",
+  "verification": {
+    "full_debug_tests": {
+      "log": "2026-11-01/tests.full.Debug.log",
+      "passed": 6146,
+      "total": 6146
+    },
+    "handshake_debug_tests": {
+      "log": "2026-11-01/tests.handshake.Debug.log",
+      "passed": 162,
+      "total": 162
+    },
+    "quic_debug_tests": {
+      "log": "2026-11-01/tests.quic.Debug.log",
+      "passed": 1142,
+      "total": 1142
+    },
+    "quic_releasefast_tests": {
+      "log": "2026-11-01/tests.quic.ReleaseFast.log",
+      "passed": 1142,
+      "total": 1142
+    }
+  },
   "x25519_only_test": "The fetch example was temporarily restricted to key_exchange_groups=&.{.x25519}; quic.tech still returned HandshakeTimeout after the ServerHello."
 }

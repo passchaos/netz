@@ -2052,6 +2052,7 @@ fn connectAttempt(
         server_datagram_owned = false;
         server_handshake_tail = &.{};
     }
+    var client_handshake_packet_number = options.client_handshake_packet_number;
     var server_handshake = receiveServerHandshakeCrypto(
         endpoint,
         source,
@@ -2059,6 +2060,8 @@ fn connectAttempt(
         server_handshake_tail,
         server_handshake_ecn,
         handshake.server_quic,
+        handshake.client_quic,
+        &client_handshake_packet_number,
         0,
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
@@ -2085,6 +2088,7 @@ fn connectAttempt(
         server_datagram.deinit(endpoint.allocator);
         server_datagram_owned = false;
     }
+    peer_failure.next_packet_number = client_handshake_packet_number;
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try peer_failure.guardTls(splitServerFlight(
         server_handshake.crypto_data,
@@ -2298,7 +2302,7 @@ fn connectAttempt(
             .version = options.version.wireValue(),
             .destination_connection_id = server_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
-            .packet_number = options.client_handshake_packet_number,
+            .packet_number = client_handshake_packet_number,
             .fixed_bit = try fixed_bit.randomValue(
                 endpoint.io,
                 peer_transport_parameters.grease_quic_bit,
@@ -4020,6 +4024,8 @@ fn receiveServerHandshakeCrypto(
     coalesced_tail: []const u8,
     coalesced_ecn: quic.packet_space.EcnCodepoint,
     handshake_keys: quic.protection.PacketProtectionKeys,
+    client_handshake_keys: quic.protection.PacketProtectionKeys,
+    next_client_packet_number: *u64,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
     allow_zero_fixed_bit: bool,
@@ -4111,6 +4117,35 @@ fn receiveServerHandshakeCrypto(
         };
         if (first_packet == null) {
             first_packet = packet;
+            // Some servers gate the rest of the Handshake flight on an ACK
+            // for the first CRYPTO packet. Acknowledge it before waiting for
+            // the continuation, and reserve the next packet number for the
+            // client Finished flight.
+            var ack_storage: [64]u8 = undefined;
+            var ack_list: std.ArrayList(u8) = .{
+                .items = ack_storage[0..0],
+                .capacity = ack_storage.len,
+            };
+            var fixed = std.heap.FixedBufferAllocator.init(&.{});
+            try (quic.Frame{ .ack = .{
+                .largest_acknowledged = packet.packet_number,
+                .ack_delay = 0,
+                .first_ack_range = 0,
+            } }).write(&ack_list, fixed.allocator());
+            var ack_packet_storage: [1280]u8 = undefined;
+            const ack_packet = try quic.protection.sealHandshakePacketInto(
+                &ack_packet_storage,
+                client_handshake_keys,
+                .{
+                    .version = packet.version,
+                    .destination_connection_id = packet.source_connection_id,
+                    .source_connection_id = packet.destination_connection_id,
+                    .packet_number = next_client_packet_number.*,
+                    .payload = ack_list.items,
+                },
+            );
+            next_client_packet_number.* += 1;
+            try endpoint.sendBytes(from, ack_packet);
         } else {
             packet.deinit(endpoint.allocator);
         }
@@ -4306,6 +4341,10 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
     defer allocator.free(application_packet);
     try coalesced.appendSlice(allocator, application_packet);
 
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x55} ** quic.protection.secret_len,
+    );
+    var next_client_packet_number: u64 = 0;
     var received = try receiveServerHandshakeCrypto(
         &endpoint,
         quic.runtime.DatagramSource.fromEndpoint(&endpoint),
@@ -4313,6 +4352,8 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
         coalesced.items,
         .ce,
         keys,
+        client_keys,
+        &next_client_packet_number,
         0,
         1024,
         false,
@@ -4320,6 +4361,7 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
         .{},
     );
     defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), next_client_packet_number);
     try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
     try std.testing.expectEqualSlices(
         u8,

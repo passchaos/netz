@@ -1,0 +1,20 @@
+Alt-Svc override: h3 authority=:8443 -> quic.tech:8443 ma=86400
+HTTP/3 https://quic.tech/ -> 200
+:status: 200
+server: quiche
+content-length: 462
+body-bytes: 462
+body-preview:
+<!DOCTYPE html>
+
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+
+    <link rel="shortcut icon" href="/quic.ico" type="image/x-icon">
+
+    <style>
+    img {
+        position: absolute;
+        margin: auto;
+        top
