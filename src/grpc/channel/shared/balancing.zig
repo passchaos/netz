@@ -11,6 +11,7 @@ pub fn resolve(parsed: service_config.LoadBalancingConfig, override: ?channel.Se
         .ring_hash => parsed.policy == .ring_hash,
         .weighted_round_robin => parsed.policy == .weighted_round_robin,
         .weighted_target => parsed.policy == .weighted_target,
+        .priority => parsed.policy == .priority,
     };
     return if (matches) parsed else .{};
 }

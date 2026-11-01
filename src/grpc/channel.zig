@@ -74,6 +74,7 @@ pub const SelectionPolicy = enum {
     ring_hash,
     weighted_round_robin,
     weighted_target,
+    priority,
 };
 
 pub const ConnectivityState = connectivity.State;
@@ -640,7 +641,9 @@ pub const Channel = struct {
         }
         const selection_policy = options.selection_policy orelse
             target.policy();
-        if (selection_policy == .weighted_target) {
+        if (selection_policy == .weighted_target or
+            selection_policy == .priority)
+        {
             return error.InvalidChannelOptions;
         }
         const slot_count = if (host_resolution != null)
@@ -777,12 +780,13 @@ pub const Channel = struct {
         composite_owned: bool,
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
-        if (balancing.policy == .priority) return error.InvalidChannelOptions;
         var resolved = options;
-        const owns_weighted_target = !composite_owned and
-            balancing.policy == .weighted_target;
+        const owns_composite = !composite_owned and
+            (balancing.policy == .weighted_target or
+                balancing.policy == .priority);
         if (resolved.selection_policy == null and balancing.configured and
-            !(composite_owned and balancing.policy == .weighted_target))
+            !(composite_owned and (balancing.policy == .weighted_target or
+                balancing.policy == .priority)))
         {
             resolved.selection_policy = switch (balancing.policy) {
                 .pick_first => .pick_first,
@@ -799,12 +803,15 @@ pub const Channel = struct {
         }
         var result = try init(allocator, io, target, resolved);
         errdefer result.deinit();
-        if (owns_weighted_target) {
+        if (owns_composite) {
             result.weighted_target_runtime = try .init(
                 allocator,
                 balancing.root orelse return error.InvalidChannelOptions,
             );
-            result.selection_policy = .weighted_target;
+            result.selection_policy = if (balancing.policy == .priority)
+                .priority
+            else
+                .weighted_target;
             try result.weighted_target_runtime.?.configureSlots(result.slots);
             result.weighted_target_runtime.?.startOutliers(io);
         }
@@ -1316,7 +1323,9 @@ pub const Channel = struct {
         weighted_input: weighted_target.RequestInput,
     ) Error!ReadyConnection {
         if (self.canceled.isSet()) return error.Canceled;
-        if (self.selection_policy == .weighted_target) {
+        if (self.selection_policy == .weighted_target or
+            self.selection_policy == .priority)
+        {
             return self.readyWeightedTarget(
                 wait_for_ready,
                 deadline,
@@ -1582,6 +1591,7 @@ pub const Channel = struct {
             .pick_first => self.selected_index orelse 0,
             .round_robin, .least_request, .weighted_round_robin => self.next_pick_index,
             .weighted_target => unreachable,
+            .priority => unreachable,
             .ring_hash => 0,
         };
     }

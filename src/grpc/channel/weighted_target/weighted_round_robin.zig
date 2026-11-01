@@ -49,6 +49,9 @@ pub fn config(
         .weighted => |children| for (children) |child| {
             if (config(child.node, slot)) |value| return value;
         } else null,
+        .priority => |priority| for (priority.children) |child| {
+            if (config(child.node, slot)) |value| return value;
+        } else null,
         .outlier => |wrapper| config(wrapper.child, slot),
     };
 }

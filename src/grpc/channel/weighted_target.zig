@@ -82,11 +82,22 @@ pub fn Runtime(comptime Slot: type) type {
             child: *Node,
         };
 
+        const PriorityChild = struct {
+            ignore_reresolution_requests: bool,
+            node: *Node,
+        };
+
+        const Priority = struct {
+            children: []PriorityChild,
+            order: []usize,
+        };
+
         const Node = struct {
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
                 weighted: []Child,
+                priority: Priority,
                 outlier: Outlier,
             },
         };
@@ -185,7 +196,10 @@ pub fn Runtime(comptime Slot: type) type {
                     weighted,
                     path,
                 ),
-                .priority => error.InvalidChannelOptions,
+                .priority => |priority| self.buildPriority(
+                    priority,
+                    path,
+                ),
                 .outlier_detection => |wrapper| self.buildOutlier(
                     wrapper,
                     path,
@@ -301,6 +315,67 @@ pub fn Runtime(comptime Slot: type) type {
             return node;
         }
 
+        fn buildPriority(
+            self: *Self,
+            config: service_config.PriorityConfig,
+            path: []const []const u8,
+        ) BuildError!*Node {
+            const owned_path = try dupePath(self.allocator, path);
+            errdefer freePath(self.allocator, owned_path);
+            const children = try self.allocator.alloc(
+                PriorityChild,
+                config.children.len,
+            );
+            var initialized: usize = 0;
+            errdefer {
+                for (children[0..initialized]) |child| self.destroy(child.node);
+                self.allocator.free(children);
+            }
+            for (config.children, children) |child_config, *child| {
+                const leaf = child_config.child.leafPolicy();
+                if (leaf != .pick_first and leaf != .round_robin) {
+                    return error.InvalidChannelOptions;
+                }
+                const child_path = try self.allocator.alloc(
+                    []const u8,
+                    path.len + 1,
+                );
+                defer self.allocator.free(child_path);
+                @memcpy(child_path[0..path.len], path);
+                child_path[path.len] = child_config.name;
+                child.* = .{
+                    .ignore_reresolution_requests =
+                        child_config.ignore_reresolution_requests,
+                    .node = try self.build(child_config.child, child_path),
+                };
+                initialized += 1;
+            }
+            const order = try self.allocator.alloc(
+                usize,
+                config.priorities.len,
+            );
+            errdefer self.allocator.free(order);
+            for (config.priorities, order) |name, *slot| {
+                var found: ?usize = null;
+                for (config.children, 0..) |child_config, index| {
+                    if (std.mem.eql(u8, child_config.name, name)) {
+                        found = index;
+                        break;
+                    }
+                }
+                slot.* = found orelse return error.InvalidChannelOptions;
+            }
+            const node = try self.allocator.create(Node);
+            node.* = .{
+                .path = owned_path,
+                .kind = .{ .priority = .{
+                    .children = children,
+                    .order = order,
+                } },
+            };
+            return node;
+        }
+
         fn buildOutlier(
             self: *Self,
             wrapper: @FieldType(
@@ -343,6 +418,11 @@ pub fn Runtime(comptime Slot: type) type {
                 .weighted => |children| {
                     for (children) |child| self.destroy(child.node);
                     self.allocator.free(children);
+                },
+                .priority => |priority| {
+                    for (priority.children) |child| self.destroy(child.node);
+                    self.allocator.free(priority.children);
+                    self.allocator.free(priority.order);
                 },
                 .outlier => |wrapper| self.destroy(wrapper.child),
             }
@@ -393,6 +473,20 @@ pub fn Runtime(comptime Slot: type) type {
                     }
                     unreachable;
                 },
+                .priority => |priority| blk: {
+                    for (priority.order) |child_index| {
+                        const child = priority.children[child_index];
+                        if (self.aggregate(child.node, slots) == .ready) {
+                            break :blk try self.pickNode(
+                                child.node,
+                                slots,
+                                io,
+                                input,
+                            );
+                        }
+                    }
+                    break :blk null;
+                },
                 .outlier => |wrapper| try self.pickNode(
                     wrapper.child,
                     slots,
@@ -413,6 +507,25 @@ pub fn Runtime(comptime Slot: type) type {
                     var connecting = false;
                     var idle = false;
                     for (children) |child| switch (self.aggregate(
+                        child.node,
+                        slots,
+                    )) {
+                        .ready => break :blk .ready,
+                        .connecting => connecting = true,
+                        .idle => idle = true,
+                        .transient_failure => {},
+                    };
+                    break :blk if (connecting)
+                        .connecting
+                    else if (idle)
+                        .idle
+                    else
+                        .transient_failure;
+                },
+                .priority => |priority| blk: {
+                    var connecting = false;
+                    var idle = false;
+                    for (priority.children) |child| switch (self.aggregate(
                         child.node,
                         slots,
                     )) {
@@ -587,6 +700,7 @@ pub fn Runtime(comptime Slot: type) type {
                         return self.pathUsesLeastRequest(child.node, path);
                     }
                 } else false,
+                .priority => false,
                 .outlier => |wrapper| self.pathUsesLeastRequest(
                     wrapper.child,
                     path,
@@ -615,6 +729,9 @@ pub fn Runtime(comptime Slot: type) type {
                 .weighted => |children| for (children) |child| {
                     try self.rebuildRings(child.node, slots);
                 },
+                .priority => |priority| for (priority.children) |child| {
+                    try self.rebuildRings(child.node, slots);
+                },
                 .outlier => |wrapper| try self.rebuildRings(
                     wrapper.child,
                     slots,
@@ -628,6 +745,9 @@ pub fn Runtime(comptime Slot: type) type {
                     leaf.wrr_scheduler.invalidate();
                 },
                 .weighted => |children| for (children) |child| {
+                    self.invalidateWrr(child.node);
+                },
+                .priority => |priority| for (priority.children) |child| {
                     self.invalidateWrr(child.node);
                 },
                 .outlier => |wrapper| self.invalidateWrr(wrapper.child),
@@ -677,6 +797,9 @@ pub fn Runtime(comptime Slot: type) type {
             switch (node.kind) {
                 .leaf => {},
                 .weighted => |children| for (children) |child| {
+                    self.markOutlierMembership(child.node, slot);
+                },
+                .priority => |priority| for (priority.children) |child| {
                     self.markOutlierMembership(child.node, slot);
                 },
                 .outlier => |wrapper| {
