@@ -4,16 +4,31 @@ const http2 = @import("../../mod.zig");
 const cleanup = @import("../response/cleanup.zig");
 
 pub const Upload = struct {
+    /// Optional bytes emitted before `body` as separate DATA slices.
+    prefix: []const u8 = &.{},
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
+    /// Total bytes already committed across `prefix` and `body`.
     written: usize = 0,
     finished: bool = false,
 
     pub fn progress(self: *Upload, connection: anytype, stream_id: u31, deadline: ?std.Io.Clock.Timestamp, comptime Hooks: anytype) Hooks.ErrorType!void {
         if (self.finished) return;
-        if (self.written < self.body.len) {
+        if (self.written < self.prefix.len) {
             var sent: usize = 0;
-            Hooks.data(connection, stream_id, self.body[self.written..], self.trailers.len == 0, &sent, deadline) catch |err| {
+            const slices = [_][]const u8{ self.prefix[self.written..], self.body };
+            Hooks.slices(connection, stream_id, &slices, self.trailers.len == 0, &sent, deadline) catch |err| {
+                self.written += sent;
+                if (err == error.ResponseAvailable) return;
+                // Response cleanup must not append a refund or CANCEL after
+                // an indeterminate request frame prefix.
+                if (connection.aggregate_timeout_unusable) connection.terminal_write_failed = true;
+                return err;
+            };
+            self.written += sent;
+        } else if (self.written < self.prefix.len + self.body.len) {
+            var sent: usize = 0;
+            Hooks.data(connection, stream_id, self.body[self.written - self.prefix.len ..], self.trailers.len == 0, &sent, deadline) catch |err| {
                 self.written += sent;
                 if (err == error.ResponseAvailable) return;
                 // Response cleanup must not append a refund or CANCEL after

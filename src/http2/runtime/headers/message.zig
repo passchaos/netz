@@ -456,8 +456,22 @@ pub fn validateResponseBodyForStatusWithLength(
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
 ) Error!void {
+    return validateResponseBodyForStatusWithBodyLength(
+        status,
+        declared_content_length,
+        body.len,
+        trailers,
+    );
+}
+
+pub fn validateResponseBodyForStatusWithBodyLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body_len: usize,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
     if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
-    if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+    if (body_len != 0 or trailers.len != 0) return error.InvalidContentLength;
     // As in HTTP/1, 304 may describe the selected representation length, but
     // 1xx and 204 responses terminate at the HEADERS block and must not carry a
     // Content-Length that could be mistaken for DATA on this stream.
@@ -484,17 +498,31 @@ pub fn validateOutgoingResponseBodyForStatusWithLength(
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
 ) Error!void {
-    try validateResponseBodyForStatusWithLength(
+    return validateOutgoingResponseBodyForStatusWithBodyLength(
         status,
         declared_content_length,
-        body,
+        body.len,
+        trailers,
+    );
+}
+
+pub fn validateOutgoingResponseBodyForStatusWithBodyLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body_len: usize,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
+    try validateResponseBodyForStatusWithBodyLength(
+        status,
+        declared_content_length,
+        body_len,
         trailers,
     );
     // RFC 9110 Section 15.3.6 forbids response content for 205. Keep this
     // separate from `responseForbidsBody`: HTTP/2 still uses END_STREAM to
     // delimit the response and may carry a trailer section after zero DATA.
     if (status != 205) return;
-    if (body.len != 0) return error.InvalidContentLength;
+    if (body_len != 0) return error.InvalidContentLength;
     if (declared_content_length) |length| {
         if (length != 0) return error.InvalidContentLength;
     }
@@ -523,10 +551,26 @@ pub fn validateResponseBodyForRequestSemanticsWithLength(
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
 ) Error!void {
+    return validateResponseBodyForRequestSemanticsWithBodyLength(
+        status,
+        semantics,
+        declared_content_length,
+        body.len,
+        trailers,
+    );
+}
+
+pub fn validateResponseBodyForRequestSemanticsWithBodyLength(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    declared_content_length: ?usize,
+    body_len: usize,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
     if (semantics.head) {
         if (trailers.len != 0) return error.InvalidContentLength;
         if (declared_content_length) |len| {
-            if (body.len != 0 and len != body.len) return error.InvalidContentLength;
+            if (body_len != 0 and len != body_len) return error.InvalidContentLength;
         }
         return;
     }
@@ -535,7 +579,7 @@ pub fn validateResponseBodyForRequestSemanticsWithLength(
         // HTTP response DATA/trailers would be interpreted as tunnel bytes by
         // the peer. Reject them at the server writer boundary rather than
         // silently framing an ambiguous response.
-        if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+        if (body_len != 0 or trailers.len != 0) return error.InvalidContentLength;
         if ((declared_content_length orelse 0) != 0) return error.InvalidContentLength;
     }
 }

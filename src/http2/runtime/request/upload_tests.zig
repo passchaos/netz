@@ -140,3 +140,33 @@ test "HTTP/2 early complete response survives bounded blocked cancellation outpu
     try std.testing.expect(fixture.connection.aggregate_timeout_unusable);
     try std.testing.expectEqual(@as(usize, 0), fixture.connection.activeLocalStreamCount());
 }
+
+test "HTTP/2 suspended prefixed complete upload preserves prefix and suffix" {
+    if (comptime builtin.os.tag != .linux) return;
+    const prefixed_options: runtime.RequestOptions = .{
+        .method = "POST",
+        .path = "/early",
+        .authority = "localhost",
+        .body_prefix = "pre",
+        .body = "upload",
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var fixture = try BlockedOutput.init(threaded.io(), .client);
+    defer fixture.deinit();
+    try queueResponse(&fixture.connection);
+    const pending = try runtime.testing.sendCompleteRequest(&fixture.connection, prefixed_options);
+    const upload = pending.upload orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pre", upload.prefix);
+    try std.testing.expectEqualStrings("upload", upload.body);
+    try std.testing.expectEqual(@as(usize, 1), upload.written);
+    try std.testing.expectEqual(@as(i64, window.default_value - 1), fixture.connection.send_connection_window.value);
+    try std.testing.expectEqual(@as(i64, 0), (try runtime.testing.sendStreamWindow(&fixture.connection, pending.stream_id)).value);
+    var head = try frame_io.readOwned(allocator, fixture.connection.io, fixture.peer, 16_384);
+    defer head.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.headers, head.frame.header.frame_type);
+    var data = try frame_io.readOwned(allocator, fixture.connection.io, fixture.peer, 16_384);
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings("p", data.frame.payload);
+    try std.testing.expectEqual(@as(u8, 0), data.frame.header.flags);
+}

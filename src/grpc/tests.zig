@@ -107,6 +107,46 @@ fn findHeader(
     return null;
 }
 
+/// Counts allocations at or above a size threshold. Large unary responses
+/// must not materialize a payload-sized staging buffer.
+const LargeAllocationTracker = struct {
+    child: std.mem.Allocator,
+    threshold: usize,
+    large_allocations: usize = 0,
+
+    pub fn allocator(self: *LargeAllocationTracker) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(pointer: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *LargeAllocationTracker = @ptrCast(@alignCast(pointer));
+        if (len >= self.threshold) self.large_allocations += 1;
+        return self.child.rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+        const self: *LargeAllocationTracker = @ptrCast(@alignCast(pointer));
+        return self.child.rawResize(bytes, alignment, len, ret);
+    }
+
+    fn remap(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+        const self: *LargeAllocationTracker = @ptrCast(@alignCast(pointer));
+        return self.child.rawRemap(bytes, alignment, len, ret);
+    }
+
+    fn free(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *LargeAllocationTracker = @ptrCast(@alignCast(pointer));
+        self.child.rawFree(bytes, alignment, ret);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+};
+
 test "gRPC message framing round trips and enforces bounds" {
     var storage: [16]u8 = undefined;
     const encoded = try writeMessageInto(
@@ -1195,4 +1235,96 @@ test "gRPC validates custom metadata and HTTP fallback response" {
         "HTTP status 503 without grpc-status",
         grpc_response.status_message,
     );
+}
+
+test "gRPC unary response uses a borrowed frame prefix for large messages" {
+    const allocator = std.testing.allocator;
+    const payload_len = 100_000;
+    var payload: [payload_len]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index & 0xff);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = payload_len + 16 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        payload: []const u8,
+        tracker: *LargeAllocationTracker,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(
+                shared.server,
+                shared.payload,
+                shared.tracker,
+            ) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(
+            server_ptr: *http2.runtime.Server,
+            response_payload: []const u8,
+            tracker: *LargeAllocationTracker,
+        ) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            var call = try parseUnaryRequest(
+                server_ptr.allocator,
+                &request,
+                response_payload.len + 8,
+            );
+            defer call.deinit();
+            try writeUnaryResponse(
+                &connection,
+                tracker.allocator(),
+                call.stream_id,
+                .{ .message = response_payload },
+            );
+        }
+    };
+
+    var tracker = LargeAllocationTracker{
+        .child = allocator,
+        .threshold = payload_len,
+    };
+    var shared = Shared{
+        .server = &server,
+        .payload = &payload,
+        .tracker = &tracker,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = payload_len + 16 },
+    );
+    defer client.close();
+    var response = try unaryCall(&client, allocator, .{
+        .path = "/demo.Echo/LargeUnary",
+        .authority = "localhost",
+        .message = &payload,
+    });
+    defer response.deinit();
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(Status.ok, response.status);
+    try std.testing.expect(!response.was_compressed);
+    try std.testing.expectEqualSlices(u8, &payload, response.message.?.payload);
+    try std.testing.expectEqual(@as(usize, 0), tracker.large_allocations);
 }

@@ -2942,3 +2942,32 @@ CANCEL, immediate non-fatal acceleration, positive and negative pushback,
 pre-exhausted throttling, last-non-fatal selection, service-config activation,
 and both rejection boundaries. Evidence is recorded in
 `docs/evidence/grpc_shared_hedging/2026-10-31.json`.
+
+## Large unary message prefix slices
+
+`http2.runtime.RequestOptions` and `ResponseOptions` now accept a borrowed
+`body_prefix` slice that is emitted immediately before `body` as ordered DATA
+payload slices. Length validation and automatic `Content-Length` use the
+combined length, and the prefix remains inside the same flow-control and
+deadline transaction as the body. `writeResponseBatch` rejects a non-empty
+prefix because that path serializes one contiguous body.
+
+Ordinary gRPC unary calls use this boundary for encoded messages of at least
+64 KiB. The five-byte gRPC frame prefix is built on the stack and the caller's
+encoded payload is passed directly to HTTP/2, so neither a request nor a
+response materializes a second payload-sized staging buffer. Smaller messages
+keep the previous single-allocation frame and combined HEADERS/DATA burst.
+Suspended request uploads retain both slices: a resumed upload writes the
+remaining prefix and then the remaining body under the original deadline, and
+a complete early response still cancels the unsent suffix.
+
+Focused HTTP/2 tests cover request and response ordering, automatic
+Content-Length, trailers, HEAD suppression, and a suspended prefixed upload
+with one byte of flow-control credit. A gRPC large-unary regression sends and
+receives a 100,000-byte payload through 4-KiB DATA frames and uses a counting
+allocator to prove that `writeUnaryResponse` makes no allocation at or above
+the payload size. The Debug gRPC filter passes 563/563, the HTTP/2 filter
+passes 955/955, package tests pass 26/26, and the grpc-cpp forward matrix
+passes. The reverse grpc-cpp matrix passes on rerun after one transient
+RST_STREAM race under host load. Evidence is recorded in
+`docs/evidence/grpc_unary_prefix/2026-11-02.json`.
