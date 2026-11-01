@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "interop-http-unified-hyper",
+  "command": "zig build interop-http-unified-hyper -Doptimize=ReleaseFast",
+  "server": "Hyper unified server (audited tools/hyper_http2_flow fixture, Tokio current-thread executor)",
+  "client": "netz unified HTTP pool, zio-std-io",
+  "results": [
+    {
+      "protocol": "h1",
+      "alpn": "http/1.1",
+      "requests": 2,
+      "connections": 1,
+      "reusable": true,
+      "admission_timeout": "isolated",
+      "queued_timeout": "isolated",
+      "failed_retirement": "isolated",
+      "completed_return": "isolated",
+      "collector_timeout": "retained",
+      "setup_cache_timeout": "retained",
+      "close_deadline": "complete"
+    },
+    {
+      "protocol": "h2",
+      "alpn": "h2",
+      "requests": 2,
+      "connections": 1,
+      "reusable": true,
+      "admission_timeout": "isolated",
+      "queued_timeout": "isolated",
+      "failed_retirement": "isolated",
+      "completed_return": "isolated",
+      "collector_timeout": "retained",
+      "setup_cache_timeout": "retained",
+      "close_deadline": "complete"
+    }
+  ],
+  "result": "The unified netz HTTP pool selected Hyper protocol=h1 with ALPN http/1.1 and protocol=h2 with ALPN h2, completing two requests on one reusable connection per protocol while preserving the admission/queued/failed-retirement/completed-return isolation and collector/setup-cache/close-deadline contracts.",
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}

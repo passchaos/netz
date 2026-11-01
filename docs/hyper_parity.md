@@ -3269,7 +3269,13 @@ state and returns transport `MAX_STREAMS` credit.
    table instead of its removed `IPv4: listen` line, so the readiness check
    cannot add a spurious connection to nghttpd's one-connection transcript.
    Logs and tool identities are in
-   `docs/evidence/http_external_clients/2026-11-01.json`. The native
+   `docs/evidence/http_external_clients/2026-11-01.json`. A separate unified
+   pool gate drives the same audited Hyper fixture for both protocols: a fresh
+   2026-11-01 run selected Hyper `h1` with ALPN `http/1.1` and `h2` with ALPN
+   `h2`, completing two requests on one reusable connection per protocol while
+   retaining the admission/queued/failed-retirement/completed-return isolation
+   and collector/setup-cache/close-deadline contracts; see
+   `docs/evidence/http_unified_hyper/2026-11-01.json`. The native
    TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
    that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
    plus no-common-ALPN rejection and required-client-certificate tests; verified
