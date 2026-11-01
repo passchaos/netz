@@ -2626,19 +2626,21 @@ The new `bench-http3-quic-go --socket-traffic` mode supplies a strict
 no-privilege userspace boundary while that PCAP rerun is unavailable. It wraps
 both stacks' UDP endpoints, disables GSO, validates sender/receiver accounting,
 and marks timings unusable. On the full v1 2-warmup + 5-measured, four-stream,
-4-MiB-per-stream shape, netz now averages 1,189.293/1,189.145 UDP payload bytes
-for download/upload versus quic-go's 1,186.113/1,186.905. The former packet-fill
-deficit is therefore absent at this boundary. Netz still sends 4.14%/4.77%
-more datagrams and 4.42%/4.97% more bytes, narrowing the remaining investigation
-to retransmission and control/ACK behavior without claiming encrypted-frame or
-kernel-wire equivalence. Structured transport/qlog attribution then matched
-4,257 netz download losses to 4,264 quic-go `dos_prevention` drops and 3,586
-netz upload losses to 3,615 corresponding drops. All quic-go duplicate,
-payload-decrypt, and other drop categories and all netz authentication failures
-were zero. The residual retransmission cost therefore comes from the peer's
-bounded unprocessed-packet queue under this zero-latency workload, not malformed
-netz packets; future pacing work must preserve normal-network throughput rather
-than hiding the receiver limit with a benchmark-only delay.
+4-MiB-per-stream shape, a fresh 2026-11-01 run measures netz averaging
+1,190.000/1,189.105 UDP payload bytes for download/upload versus quic-go's
+1,186.089/1,187.161. The former packet-fill deficit is therefore absent at this
+boundary. Netz still sends 3.33%/4.26% more datagrams and 3.67%/4.43% more
+bytes, narrowing the remaining investigation to retransmission and control/ACK
+behavior without claiming encrypted-frame or kernel-wire equivalence.
+Structured transport/qlog attribution then matched 3,306 netz download losses
+to 3,315 quic-go `dos_prevention` drops and 4,081 netz upload losses to 4,102
+corresponding drops. All quic-go duplicate, payload-decrypt, and other drop
+categories and all netz authentication failures were zero. The residual
+retransmission cost therefore comes from the peer's bounded unprocessed-packet
+queue under this zero-latency workload, not malformed netz packets; future
+pacing work must preserve normal-network throughput rather than hiding the
+receiver limit with a benchmark-only delay. The fresh comparison is recorded in
+`docs/evidence/http3_socket_traffic/2026-11-01.json`.
 Netz now exposes an optional production `max_pacing_rate_bytes_per_second` on
 both direct and handshake-created 1-RTT connections. The token bucket uses the
 lower of that ceiling and `1.25 * cwnd / RTT`, while the default remains

@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-01",
+  "status": "passed",
+  "gate": "bench-http3-quic-go --socket-traffic",
+  "command": "GO_BIN=/nav_env/Temp/go1.24.13/bin/go NETZ_HTTP3_INTEROP_VERSION=1 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --socket-traffic --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304",
+  "scope": "v1, 2 warmup + 5 measured, four streams, 4 MiB per stream, userspace UDP payload boundary, timings unusable by design",
+  "comparison": [
+    {
+      "mode": "upload",
+      "netz_role_pair": "netz-client+quic-go-server",
+      "quic_go_role_pair": "quic-go-client+netz-server",
+      "netz_sent_datagrams": 106399,
+      "quic_go_sent_datagrams": 102049,
+      "netz_datagram_ratio": 1.0426,
+      "netz_sent_payload_bytes": 126519631,
+      "quic_go_sent_payload_bytes": 121148635,
+      "netz_byte_ratio": 1.0443,
+      "netz_mean_payload_bytes": 1189.105,
+      "quic_go_mean_payload_bytes": 1187.161,
+      "netz_packets_lost": 4081,
+      "quic_go_dos_prevention_drops": 4102
+    },
+    {
+      "mode": "download",
+      "netz_role_pair": "quic-go-client+netz-server",
+      "quic_go_role_pair": "netz-client+quic-go-server",
+      "netz_sent_datagrams": 105539,
+      "quic_go_sent_datagrams": 102136,
+      "netz_datagram_ratio": 1.0333,
+      "netz_sent_payload_bytes": 125591452,
+      "quic_go_sent_payload_bytes": 121142415,
+      "netz_byte_ratio": 1.0367,
+      "netz_mean_payload_bytes": 1190.000,
+      "quic_go_mean_payload_bytes": 1186.089,
+      "netz_packets_lost": 3306,
+      "quic_go_dos_prevention_drops": 3315
+    }
+  ],
+  "conclusions": [
+    "Packet fill is no longer the deficit: netz averages 1,189-1,190 UDP payload bytes versus quic-go's 1,186-1,187 at this userspace boundary.",
+    "Netz still sends 3.33-4.26% more datagrams and 3.67-4.43% more bytes than quic-go in the matched roles.",
+    "Structured drop attribution again matches netz losses to quic-go dos_prevention drops (4081 vs 4102 upload, 3306 vs 3315 download); duplicate, payload-decrypt and other quic-go drop categories are zero.",
+    "The residual cost therefore remains the peer's bounded unprocessed-packet queue under this zero-latency workload, not malformed netz packets; this run does not claim encrypted-frame or kernel-wire equivalence."
+  ],
+  "log": "2026-11-01/gate.log",
+  "artifacts": "2026-11-01/"
+}
