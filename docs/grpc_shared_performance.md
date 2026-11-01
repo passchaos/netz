@@ -736,3 +736,16 @@ reduced instructions another 0.15% (3/3 fixed-binary PMU pairs) but was
 wall-neutral to slightly slower across five alternating pairs (median 843,608
 versus 841,579 ns/roundtrip, 2/5 wins). It was not retained; the single swap
 remains in the source tree.
+
+## Direct receive-ring decoding (2026-11-02)
+
+The shared reader now feeds the call-owned DATA ring directly to the gRPC
+decoder instead of first copying each up-to-64-KiB turn into a private chunk.
+The unconsumed ring region remains protected by `head`/`len` while the state
+lock is released; a borrowed single-chunk message is duplicated before the ring
+advances. This removes one full copy per receive turn for multi-chunk messages.
+On the 256-KiB persistent workload, four of five alternating wall pairs were
+faster: median 808,907 ns per roundtrip versus 865,963 ns for the baseline
+(6.6%). Three fixed-binary PMU pairs reduced instructions from 242,819,212 to
+236,558,883 (2.58%, 3/3 wins). The full gRPC Debug gate passes 562/562 with the
+change retained.

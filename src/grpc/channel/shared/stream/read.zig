@@ -86,32 +86,22 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
             state.unlock();
             return .{ .initial_metadata = head };
         }
-        if (call.chunk == null and call.len != 0) {
+        if (call.len != 0) {
             const size = @min(call.len, state.options.max_write_bytes_per_turn);
-            const bytes = state.allocator.alloc(u8, size) catch |err| {
-                state.unlock();
-                fail(call, err);
-                return err;
-            };
             const first = @min(size, call.bytes.len - call.head);
-            @memcpy(bytes[0..first], call.bytes[call.head..][0..first]);
-            @memcpy(bytes[first..], call.bytes[0 .. size - first]);
-            call.head = (call.head + size) % call.bytes.len;
-            call.len -= size;
-            call.credit += size;
-            call.chunk = bytes;
-            call.chunk_offset = 0;
-            state.wakeAllLocked();
-        }
-        if (call.chunk) |bytes| {
-            state.unlock();
             const decoder = if (call.decoder) |*value| value else {
+                state.unlock();
                 fail(call, error.InvalidStreamState);
                 return error.InvalidStreamState;
             };
+            // Feed the call-owned ring directly. The unconsumed ring region is
+            // protected by `head`/`len` while the state lock is released, so a
+            // second reader cannot observe it and the endpoint cannot overwrite
+            // it before this reader commits the consumed prefix below.
+            state.unlock();
             var collector = Collector{ .allocator = state.allocator };
             const progress = decoder.feedLimitedAssembledOwned(
-                bytes[call.chunk_offset..],
+                call.bytes[call.head..][0..first],
                 1,
                 &collector,
                 Collector.consumeBorrowed,
@@ -120,45 +110,34 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
                 fail(call, err);
                 return @errorCast(err);
             };
-            call.chunk_offset += progress.consumed;
+            state.lock();
+            if (call.failureValue()) |failure| {
+                state.unlock();
+                if (collector.result == .message) collector.result.message.deinit();
+                return @errorCast(failure);
+            }
+            if (progress.consumed == 0) {
+                state.unlock();
+                fail(call, error.InvalidStreamState);
+                return error.InvalidStreamState;
+            }
             if (collector.result == .borrowed) {
                 const borrowed = collector.result.borrowed;
-                var payload = borrowed.payload;
-                if (borrowed.payload.len != 0 and
-                    call.chunk_offset == bytes.len)
-                {
-                    @memmove(
-                        bytes[0..borrowed.payload.len],
-                        borrowed.payload,
-                    );
-                    payload = bytes[0..borrowed.payload.len];
-                    if (state.allocator.resize(bytes, borrowed.payload.len)) {
-                        call.chunk = null;
-                        collector.result = .{ .message = .{
-                            .allocator = state.allocator,
-                            .payload = bytes[0..borrowed.payload.len],
-                            .was_compressed = false,
-                        } };
-                    }
-                }
-                if (collector.result == .borrowed) {
-                    collector.result = .{ .message = .{
-                        .allocator = state.allocator,
-                        .payload = state.allocator.dupe(
-                            u8,
-                            payload,
-                        ) catch |err| {
-                            fail(call, err);
-                            return err;
-                        },
-                        .was_compressed = false,
-                    } };
-                }
+                collector.result = .{ .message = .{
+                    .allocator = state.allocator,
+                    .payload = state.allocator.dupe(u8, borrowed.payload) catch |err| {
+                        state.unlock();
+                        fail(call, err);
+                        return err;
+                    },
+                    .was_compressed = false,
+                } };
             }
-            if (call.chunk_offset == bytes.len and call.chunk != null) {
-                state.allocator.free(bytes);
-                call.chunk = null;
-            }
+            call.head = (call.head + progress.consumed) % call.bytes.len;
+            call.len -= progress.consumed;
+            call.credit += progress.consumed;
+            state.wakeAllLocked();
+            state.unlock();
             if (collector.result == .message) {
                 return .{ .message = collector.result.message };
             }
