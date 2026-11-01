@@ -332,9 +332,6 @@ pub fn Runtime(comptime Slot: type) type {
                 self.allocator.free(children);
             }
             for (config.children, children) |child_config, *child| {
-                if (child_config.child.leafPolicy() == .priority) {
-                    return error.InvalidChannelOptions;
-                }
                 const child_path = try self.allocator.alloc(
                     []const u8,
                     path.len + 1,
