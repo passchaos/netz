@@ -1,0 +1,100 @@
+{
+  "command": "MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 MQTT_MATRIX_ROOT=/tmp/netz-mqtt-matrix-durable-qos2-2026-11-01 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast",
+  "date": "2026-11-01",
+  "status": "passed",
+  "mode": "MQTT 5 durable QoS 2 fanout matrix (session_expiry_seconds=3600)",
+  "reference": {
+    "implementation": "Mosquitto",
+    "revision": "5cd2546511596a269dbf53f85858c623b09ebdd6",
+    "source_clean": true
+  },
+  "environment": {
+    "host": "tegra",
+    "arch": "aarch64",
+    "kernel": "6.8.12-1021-rt-tegra",
+    "zig": "0.16.0",
+    "client_cpu": 0,
+    "server_cpu": 1,
+    "sampler_cpu": 2,
+    "schedule": "abba",
+    "samples_per_shape": 4,
+    "paired_samples": 20,
+    "broker_runs": 40,
+    "client_tcp_nodelay": true,
+    "server_tcp_nodelay": true,
+    "rss_source": "proc-vmrss-sampled-2ms",
+    "host_load_note": "Other unrelated jobs were active on the shared host; ABBA pairing and four samples per shape mitigate drift, but p99 and RSS are noisier than throughput direction."
+  },
+  "hashes": {
+    "summary": "see summary.log and environment.log in 2026-11-01-qos2-durable/"
+  },
+  "shapes": [
+    {
+      "shape": "serial",
+      "netz_publishes_per_s": 21292,
+      "mosquitto_publishes_per_s": 29146,
+      "netz_over_mosquitto": 0.731,
+      "netz_p50_ms": 0.036,
+      "mosquitto_p50_ms": 0.024,
+      "netz_p99_ms": 0.057,
+      "mosquitto_p99_ms": 0.047,
+      "netz_rss_kib": 3830,
+      "mosquitto_rss_kib": 2988
+    },
+    {
+      "shape": "publishers-32",
+      "netz_publishes_per_s": 35087,
+      "mosquitto_publishes_per_s": 36546,
+      "netz_over_mosquitto": 0.960,
+      "netz_p50_ms": 1.920,
+      "mosquitto_p50_ms": 1.748,
+      "netz_p99_ms": 3.378,
+      "mosquitto_p99_ms": 3.383,
+      "netz_rss_kib": 4756,
+      "mosquitto_rss_kib": 3420
+    },
+    {
+      "shape": "fanout-32",
+      "netz_publishes_per_s": 2967,
+      "mosquitto_publishes_per_s": 2698,
+      "netz_over_mosquitto": 1.100,
+      "netz_p50_ms": 0.891,
+      "mosquitto_p50_ms": 1.386,
+      "netz_p99_ms": 1.850,
+      "mosquitto_p99_ms": 1.555,
+      "netz_rss_kib": 5124,
+      "mosquitto_rss_kib": 3504
+    },
+    {
+      "shape": "balanced-32x32",
+      "netz_publishes_per_s": 2924,
+      "mosquitto_publishes_per_s": 2880,
+      "netz_over_mosquitto": 1.015,
+      "netz_p50_ms": 20.522,
+      "mosquitto_p50_ms": 21.793,
+      "netz_p99_ms": 40.867,
+      "mosquitto_p99_ms": 44.323,
+      "netz_rss_kib": 6654,
+      "mosquitto_rss_kib": 3472
+    },
+    {
+      "shape": "large-payload",
+      "netz_publishes_per_s": 17802,
+      "mosquitto_publishes_per_s": 17011,
+      "netz_over_mosquitto": 1.046,
+      "netz_p50_ms": 1.705,
+      "mosquitto_p50_ms": 2.179,
+      "netz_p99_ms": 3.169,
+      "mosquitto_p99_ms": 3.671,
+      "netz_rss_kib": 4862,
+      "mosquitto_rss_kib": 3350
+    }
+  ],
+  "conclusions": [
+    "Current durable QoS 2 throughput is at parity or above Mosquitto in four of five shapes: publishers-32 0.960x, fanout-32 1.100x, balanced-32x32 1.015x and large-payload 1.046x.",
+    "Serial durable QoS 2 remains the clear throughput gap at 0.731x (21,292 vs 29,146/s), with p50 0.036 vs 0.024 ms and p99 0.057 vs 0.047 ms.",
+    "RSS is higher in every durable shape (netz/Mosquitto 1.28x-1.92x); balanced-32x32 is the worst at 6,654 vs 3,472 KiB because durable Sessions deep-own queued messages.",
+    "This supersedes the older durable QoS 2 table for current code; that historical capture remains separately scoped."
+  ],
+  "artifacts": "2026-11-01-qos2-durable/"
+}

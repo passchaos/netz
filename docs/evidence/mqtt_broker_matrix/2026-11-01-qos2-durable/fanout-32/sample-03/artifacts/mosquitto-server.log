@@ -1,0 +1,110 @@
+1793527992: Info: running mosquitto as user: passchaos.
+1793527992: mosquitto version 2.1.2 starting
+1793527992: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/fanout-32/sample-03/artifacts/mosquitto.conf.
+1793527992: Bridge support available.
+1793527992: Persistence support available.
+1793527992: TLS support NOT available.
+1793527992: TLS-PSK support NOT available.
+1793527992: Websockets support NOT available.
+1793527992: Opening ipv4 listen socket on port 51919.
+1793527992: mosquitto version 2.1.2 running
+1793527993: New connection from 127.0.0.1:58902 on port 51919.
+1793527993: New client connected from 127.0.0.1:58902 as netz-load-subscriber-0 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58914 on port 51919.
+1793527993: New client connected from 127.0.0.1:58914 as netz-load-subscriber-1 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58918 on port 51919.
+1793527993: New client connected from 127.0.0.1:58918 as netz-load-subscriber-2 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58926 on port 51919.
+1793527993: New client connected from 127.0.0.1:58926 as netz-load-subscriber-3 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58936 on port 51919.
+1793527993: New client connected from 127.0.0.1:58936 as netz-load-subscriber-4 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58946 on port 51919.
+1793527993: New client connected from 127.0.0.1:58946 as netz-load-subscriber-5 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58950 on port 51919.
+1793527993: New client connected from 127.0.0.1:58950 as netz-load-subscriber-6 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58962 on port 51919.
+1793527993: New client connected from 127.0.0.1:58962 as netz-load-subscriber-7 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58966 on port 51919.
+1793527993: New client connected from 127.0.0.1:58966 as netz-load-subscriber-8 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58968 on port 51919.
+1793527993: New client connected from 127.0.0.1:58968 as netz-load-subscriber-9 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58980 on port 51919.
+1793527993: New client connected from 127.0.0.1:58980 as netz-load-subscriber-10 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:58992 on port 51919.
+1793527993: New client connected from 127.0.0.1:58992 as netz-load-subscriber-11 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59006 on port 51919.
+1793527993: New client connected from 127.0.0.1:59006 as netz-load-subscriber-12 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59020 on port 51919.
+1793527993: New client connected from 127.0.0.1:59020 as netz-load-subscriber-13 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59022 on port 51919.
+1793527993: New client connected from 127.0.0.1:59022 as netz-load-subscriber-14 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59034 on port 51919.
+1793527993: New client connected from 127.0.0.1:59034 as netz-load-subscriber-15 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59050 on port 51919.
+1793527993: New client connected from 127.0.0.1:59050 as netz-load-subscriber-16 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59056 on port 51919.
+1793527993: New client connected from 127.0.0.1:59056 as netz-load-subscriber-17 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59060 on port 51919.
+1793527993: New client connected from 127.0.0.1:59060 as netz-load-subscriber-18 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59076 on port 51919.
+1793527993: New client connected from 127.0.0.1:59076 as netz-load-subscriber-19 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59088 on port 51919.
+1793527993: New client connected from 127.0.0.1:59088 as netz-load-subscriber-20 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59104 on port 51919.
+1793527993: New client connected from 127.0.0.1:59104 as netz-load-subscriber-21 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59112 on port 51919.
+1793527993: New client connected from 127.0.0.1:59112 as netz-load-subscriber-22 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59126 on port 51919.
+1793527993: New client connected from 127.0.0.1:59126 as netz-load-subscriber-23 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59140 on port 51919.
+1793527993: New client connected from 127.0.0.1:59140 as netz-load-subscriber-24 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59146 on port 51919.
+1793527993: New client connected from 127.0.0.1:59146 as netz-load-subscriber-25 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59150 on port 51919.
+1793527993: New client connected from 127.0.0.1:59150 as netz-load-subscriber-26 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59166 on port 51919.
+1793527993: New client connected from 127.0.0.1:59166 as netz-load-subscriber-27 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59172 on port 51919.
+1793527993: New client connected from 127.0.0.1:59172 as netz-load-subscriber-28 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59184 on port 51919.
+1793527993: New client connected from 127.0.0.1:59184 as netz-load-subscriber-29 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59194 on port 51919.
+1793527993: New client connected from 127.0.0.1:59194 as netz-load-subscriber-30 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59204 on port 51919.
+1793527993: New client connected from 127.0.0.1:59204 as netz-load-subscriber-31 (p5, c1, k30).
+1793527993: New connection from 127.0.0.1:59206 on port 51919.
+1793527993: New client connected from 127.0.0.1:59206 as netz-load-publisher-0 (p5, c1, k30).
+1793527993: Client netz-load-subscriber-0 [127.0.0.1:58902] disconnected.
+1793527993: Client netz-load-subscriber-1 [127.0.0.1:58914] disconnected.
+1793527993: Client netz-load-subscriber-2 [127.0.0.1:58918] disconnected.
+1793527993: Client netz-load-subscriber-3 [127.0.0.1:58926] disconnected.
+1793527993: Client netz-load-subscriber-4 [127.0.0.1:58936] disconnected.
+1793527993: Client netz-load-subscriber-5 [127.0.0.1:58946] disconnected.
+1793527993: Client netz-load-subscriber-6 [127.0.0.1:58950] disconnected.
+1793527993: Client netz-load-subscriber-7 [127.0.0.1:58962] disconnected.
+1793527993: Client netz-load-subscriber-8 [127.0.0.1:58966] disconnected.
+1793527993: Client netz-load-subscriber-9 [127.0.0.1:58968] disconnected.
+1793527993: Client netz-load-subscriber-10 [127.0.0.1:58980] disconnected.
+1793527993: Client netz-load-subscriber-11 [127.0.0.1:58992] disconnected.
+1793527993: Client netz-load-subscriber-12 [127.0.0.1:59006] disconnected.
+1793527993: Client netz-load-subscriber-13 [127.0.0.1:59020] disconnected.
+1793527993: Client netz-load-subscriber-14 [127.0.0.1:59022] disconnected.
+1793527993: Client netz-load-subscriber-15 [127.0.0.1:59034] disconnected.
+1793527993: Client netz-load-subscriber-16 [127.0.0.1:59050] disconnected.
+1793527993: Client netz-load-subscriber-17 [127.0.0.1:59056] disconnected.
+1793527993: Client netz-load-subscriber-18 [127.0.0.1:59060] disconnected.
+1793527993: Client netz-load-subscriber-19 [127.0.0.1:59076] disconnected.
+1793527993: Client netz-load-subscriber-20 [127.0.0.1:59088] disconnected.
+1793527993: Client netz-load-subscriber-21 [127.0.0.1:59104] disconnected.
+1793527993: Client netz-load-subscriber-22 [127.0.0.1:59112] disconnected.
+1793527993: Client netz-load-subscriber-23 [127.0.0.1:59126] disconnected.
+1793527993: Client netz-load-subscriber-24 [127.0.0.1:59140] disconnected.
+1793527993: Client netz-load-subscriber-25 [127.0.0.1:59146] disconnected.
+1793527993: Client netz-load-subscriber-26 [127.0.0.1:59150] disconnected.
+1793527993: Client netz-load-subscriber-27 [127.0.0.1:59166] disconnected.
+1793527993: Client netz-load-subscriber-28 [127.0.0.1:59172] disconnected.
+1793527993: Client netz-load-subscriber-29 [127.0.0.1:59184] disconnected.
+1793527993: Client netz-load-subscriber-30 [127.0.0.1:59194] disconnected.
+1793527993: Client netz-load-subscriber-31 [127.0.0.1:59204] disconnected.
+1793527993: Client netz-load-publisher-0 [127.0.0.1:59206] disconnected.
+1793527993: mosquitto version 2.1.2 terminating

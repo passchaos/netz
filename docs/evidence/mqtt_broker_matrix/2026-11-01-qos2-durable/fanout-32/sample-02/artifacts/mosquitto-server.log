@@ -1,0 +1,110 @@
+1793527991: Info: running mosquitto as user: passchaos.
+1793527991: mosquitto version 2.1.2 starting
+1793527991: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/fanout-32/sample-02/artifacts/mosquitto.conf.
+1793527991: Bridge support available.
+1793527991: Persistence support available.
+1793527991: TLS support NOT available.
+1793527991: TLS-PSK support NOT available.
+1793527991: Websockets support NOT available.
+1793527991: Opening ipv4 listen socket on port 36433.
+1793527991: mosquitto version 2.1.2 running
+1793527991: New connection from 127.0.0.1:50964 on port 36433.
+1793527991: New client connected from 127.0.0.1:50964 as netz-load-subscriber-0 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:50966 on port 36433.
+1793527991: New client connected from 127.0.0.1:50966 as netz-load-subscriber-1 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:50972 on port 36433.
+1793527991: New client connected from 127.0.0.1:50972 as netz-load-subscriber-2 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:50978 on port 36433.
+1793527991: New client connected from 127.0.0.1:50978 as netz-load-subscriber-3 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:50994 on port 36433.
+1793527991: New client connected from 127.0.0.1:50994 as netz-load-subscriber-4 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:50998 on port 36433.
+1793527991: New client connected from 127.0.0.1:50998 as netz-load-subscriber-5 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51004 on port 36433.
+1793527991: New client connected from 127.0.0.1:51004 as netz-load-subscriber-6 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51008 on port 36433.
+1793527991: New client connected from 127.0.0.1:51008 as netz-load-subscriber-7 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51018 on port 36433.
+1793527991: New client connected from 127.0.0.1:51018 as netz-load-subscriber-8 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51026 on port 36433.
+1793527991: New client connected from 127.0.0.1:51026 as netz-load-subscriber-9 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51038 on port 36433.
+1793527991: New client connected from 127.0.0.1:51038 as netz-load-subscriber-10 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51044 on port 36433.
+1793527991: New client connected from 127.0.0.1:51044 as netz-load-subscriber-11 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51052 on port 36433.
+1793527991: New client connected from 127.0.0.1:51052 as netz-load-subscriber-12 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51054 on port 36433.
+1793527991: New client connected from 127.0.0.1:51054 as netz-load-subscriber-13 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51068 on port 36433.
+1793527991: New client connected from 127.0.0.1:51068 as netz-load-subscriber-14 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51076 on port 36433.
+1793527991: New client connected from 127.0.0.1:51076 as netz-load-subscriber-15 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51086 on port 36433.
+1793527991: New client connected from 127.0.0.1:51086 as netz-load-subscriber-16 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51102 on port 36433.
+1793527991: New client connected from 127.0.0.1:51102 as netz-load-subscriber-17 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51116 on port 36433.
+1793527991: New client connected from 127.0.0.1:51116 as netz-load-subscriber-18 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51122 on port 36433.
+1793527991: New client connected from 127.0.0.1:51122 as netz-load-subscriber-19 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51126 on port 36433.
+1793527991: New client connected from 127.0.0.1:51126 as netz-load-subscriber-20 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51130 on port 36433.
+1793527991: New client connected from 127.0.0.1:51130 as netz-load-subscriber-21 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51138 on port 36433.
+1793527991: New client connected from 127.0.0.1:51138 as netz-load-subscriber-22 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51140 on port 36433.
+1793527991: New client connected from 127.0.0.1:51140 as netz-load-subscriber-23 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51142 on port 36433.
+1793527991: New client connected from 127.0.0.1:51142 as netz-load-subscriber-24 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51144 on port 36433.
+1793527991: New client connected from 127.0.0.1:51144 as netz-load-subscriber-25 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51154 on port 36433.
+1793527991: New client connected from 127.0.0.1:51154 as netz-load-subscriber-26 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51156 on port 36433.
+1793527991: New client connected from 127.0.0.1:51156 as netz-load-subscriber-27 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51170 on port 36433.
+1793527991: New client connected from 127.0.0.1:51170 as netz-load-subscriber-28 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51176 on port 36433.
+1793527991: New client connected from 127.0.0.1:51176 as netz-load-subscriber-29 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51192 on port 36433.
+1793527991: New client connected from 127.0.0.1:51192 as netz-load-subscriber-30 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51196 on port 36433.
+1793527991: New client connected from 127.0.0.1:51196 as netz-load-subscriber-31 (p5, c1, k30).
+1793527991: New connection from 127.0.0.1:51204 on port 36433.
+1793527991: New client connected from 127.0.0.1:51204 as netz-load-publisher-0 (p5, c1, k30).
+1793527991: Client netz-load-subscriber-0 [127.0.0.1:50964] disconnected.
+1793527991: Client netz-load-subscriber-1 [127.0.0.1:50966] disconnected.
+1793527991: Client netz-load-subscriber-2 [127.0.0.1:50972] disconnected.
+1793527991: Client netz-load-subscriber-3 [127.0.0.1:50978] disconnected.
+1793527991: Client netz-load-subscriber-4 [127.0.0.1:50994] disconnected.
+1793527991: Client netz-load-subscriber-5 [127.0.0.1:50998] disconnected.
+1793527991: Client netz-load-subscriber-6 [127.0.0.1:51004] disconnected.
+1793527991: Client netz-load-subscriber-7 [127.0.0.1:51008] disconnected.
+1793527991: Client netz-load-subscriber-8 [127.0.0.1:51018] disconnected.
+1793527991: Client netz-load-subscriber-9 [127.0.0.1:51026] disconnected.
+1793527991: Client netz-load-subscriber-10 [127.0.0.1:51038] disconnected.
+1793527991: Client netz-load-subscriber-11 [127.0.0.1:51044] disconnected.
+1793527991: Client netz-load-subscriber-12 [127.0.0.1:51052] disconnected.
+1793527991: Client netz-load-subscriber-13 [127.0.0.1:51054] disconnected.
+1793527991: Client netz-load-subscriber-14 [127.0.0.1:51068] disconnected.
+1793527991: Client netz-load-subscriber-15 [127.0.0.1:51076] disconnected.
+1793527991: Client netz-load-subscriber-16 [127.0.0.1:51086] disconnected.
+1793527991: Client netz-load-subscriber-17 [127.0.0.1:51102] disconnected.
+1793527991: Client netz-load-subscriber-18 [127.0.0.1:51116] disconnected.
+1793527991: Client netz-load-subscriber-19 [127.0.0.1:51122] disconnected.
+1793527991: Client netz-load-subscriber-20 [127.0.0.1:51126] disconnected.
+1793527991: Client netz-load-subscriber-21 [127.0.0.1:51130] disconnected.
+1793527991: Client netz-load-subscriber-22 [127.0.0.1:51138] disconnected.
+1793527991: Client netz-load-subscriber-23 [127.0.0.1:51140] disconnected.
+1793527991: Client netz-load-subscriber-24 [127.0.0.1:51142] disconnected.
+1793527991: Client netz-load-subscriber-25 [127.0.0.1:51144] disconnected.
+1793527991: Client netz-load-subscriber-26 [127.0.0.1:51154] disconnected.
+1793527991: Client netz-load-subscriber-27 [127.0.0.1:51156] disconnected.
+1793527991: Client netz-load-subscriber-28 [127.0.0.1:51170] disconnected.
+1793527991: Client netz-load-subscriber-29 [127.0.0.1:51176] disconnected.
+1793527991: Client netz-load-subscriber-30 [127.0.0.1:51192] disconnected.
+1793527991: Client netz-load-subscriber-31 [127.0.0.1:51196] disconnected.
+1793527991: Client netz-load-publisher-0 [127.0.0.1:51204] disconnected.
+1793527991: mosquitto version 2.1.2 terminating

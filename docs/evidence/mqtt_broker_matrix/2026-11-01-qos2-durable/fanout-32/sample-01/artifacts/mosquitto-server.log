@@ -1,0 +1,110 @@
+1793527990: Info: running mosquitto as user: passchaos.
+1793527990: mosquitto version 2.1.2 starting
+1793527990: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/fanout-32/sample-01/artifacts/mosquitto.conf.
+1793527990: Bridge support available.
+1793527990: Persistence support available.
+1793527990: TLS support NOT available.
+1793527990: TLS-PSK support NOT available.
+1793527990: Websockets support NOT available.
+1793527990: Opening ipv4 listen socket on port 40075.
+1793527990: mosquitto version 2.1.2 running
+1793527990: New connection from 127.0.0.1:60516 on port 40075.
+1793527990: New client connected from 127.0.0.1:60516 as netz-load-subscriber-0 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60522 on port 40075.
+1793527990: New client connected from 127.0.0.1:60522 as netz-load-subscriber-1 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60528 on port 40075.
+1793527990: New client connected from 127.0.0.1:60528 as netz-load-subscriber-2 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60538 on port 40075.
+1793527990: New client connected from 127.0.0.1:60538 as netz-load-subscriber-3 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60552 on port 40075.
+1793527990: New client connected from 127.0.0.1:60552 as netz-load-subscriber-4 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60560 on port 40075.
+1793527990: New client connected from 127.0.0.1:60560 as netz-load-subscriber-5 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60576 on port 40075.
+1793527990: New client connected from 127.0.0.1:60576 as netz-load-subscriber-6 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60588 on port 40075.
+1793527990: New client connected from 127.0.0.1:60588 as netz-load-subscriber-7 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60590 on port 40075.
+1793527990: New client connected from 127.0.0.1:60590 as netz-load-subscriber-8 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60600 on port 40075.
+1793527990: New client connected from 127.0.0.1:60600 as netz-load-subscriber-9 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60610 on port 40075.
+1793527990: New client connected from 127.0.0.1:60610 as netz-load-subscriber-10 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60626 on port 40075.
+1793527990: New client connected from 127.0.0.1:60626 as netz-load-subscriber-11 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60632 on port 40075.
+1793527990: New client connected from 127.0.0.1:60632 as netz-load-subscriber-12 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60640 on port 40075.
+1793527990: New client connected from 127.0.0.1:60640 as netz-load-subscriber-13 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60652 on port 40075.
+1793527990: New client connected from 127.0.0.1:60652 as netz-load-subscriber-14 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60668 on port 40075.
+1793527990: New client connected from 127.0.0.1:60668 as netz-load-subscriber-15 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60674 on port 40075.
+1793527990: New client connected from 127.0.0.1:60674 as netz-load-subscriber-16 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60688 on port 40075.
+1793527990: New client connected from 127.0.0.1:60688 as netz-load-subscriber-17 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60702 on port 40075.
+1793527990: New client connected from 127.0.0.1:60702 as netz-load-subscriber-18 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60704 on port 40075.
+1793527990: New client connected from 127.0.0.1:60704 as netz-load-subscriber-19 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60716 on port 40075.
+1793527990: New client connected from 127.0.0.1:60716 as netz-load-subscriber-20 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60732 on port 40075.
+1793527990: New client connected from 127.0.0.1:60732 as netz-load-subscriber-21 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60734 on port 40075.
+1793527990: New client connected from 127.0.0.1:60734 as netz-load-subscriber-22 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60742 on port 40075.
+1793527990: New client connected from 127.0.0.1:60742 as netz-load-subscriber-23 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60744 on port 40075.
+1793527990: New client connected from 127.0.0.1:60744 as netz-load-subscriber-24 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60748 on port 40075.
+1793527990: New client connected from 127.0.0.1:60748 as netz-load-subscriber-25 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60758 on port 40075.
+1793527990: New client connected from 127.0.0.1:60758 as netz-load-subscriber-26 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60772 on port 40075.
+1793527990: New client connected from 127.0.0.1:60772 as netz-load-subscriber-27 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60782 on port 40075.
+1793527990: New client connected from 127.0.0.1:60782 as netz-load-subscriber-28 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60798 on port 40075.
+1793527990: New client connected from 127.0.0.1:60798 as netz-load-subscriber-29 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60812 on port 40075.
+1793527990: New client connected from 127.0.0.1:60812 as netz-load-subscriber-30 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60816 on port 40075.
+1793527990: New client connected from 127.0.0.1:60816 as netz-load-subscriber-31 (p5, c1, k30).
+1793527990: New connection from 127.0.0.1:60820 on port 40075.
+1793527990: New client connected from 127.0.0.1:60820 as netz-load-publisher-0 (p5, c1, k30).
+1793527990: Client netz-load-subscriber-0 [127.0.0.1:60516] disconnected.
+1793527990: Client netz-load-subscriber-1 [127.0.0.1:60522] disconnected.
+1793527990: Client netz-load-subscriber-2 [127.0.0.1:60528] disconnected.
+1793527990: Client netz-load-subscriber-3 [127.0.0.1:60538] disconnected.
+1793527990: Client netz-load-subscriber-4 [127.0.0.1:60552] disconnected.
+1793527990: Client netz-load-subscriber-5 [127.0.0.1:60560] disconnected.
+1793527990: Client netz-load-subscriber-6 [127.0.0.1:60576] disconnected.
+1793527990: Client netz-load-subscriber-7 [127.0.0.1:60588] disconnected.
+1793527990: Client netz-load-subscriber-8 [127.0.0.1:60590] disconnected.
+1793527990: Client netz-load-subscriber-9 [127.0.0.1:60600] disconnected.
+1793527990: Client netz-load-subscriber-10 [127.0.0.1:60610] disconnected.
+1793527990: Client netz-load-subscriber-11 [127.0.0.1:60626] disconnected.
+1793527990: Client netz-load-subscriber-12 [127.0.0.1:60632] disconnected.
+1793527990: Client netz-load-subscriber-13 [127.0.0.1:60640] disconnected.
+1793527990: Client netz-load-subscriber-14 [127.0.0.1:60652] disconnected.
+1793527990: Client netz-load-subscriber-15 [127.0.0.1:60668] disconnected.
+1793527990: Client netz-load-subscriber-16 [127.0.0.1:60674] disconnected.
+1793527990: Client netz-load-subscriber-17 [127.0.0.1:60688] disconnected.
+1793527990: Client netz-load-subscriber-18 [127.0.0.1:60702] disconnected.
+1793527990: Client netz-load-subscriber-19 [127.0.0.1:60704] disconnected.
+1793527990: Client netz-load-subscriber-20 [127.0.0.1:60716] disconnected.
+1793527990: Client netz-load-subscriber-21 [127.0.0.1:60732] disconnected.
+1793527990: Client netz-load-subscriber-22 [127.0.0.1:60734] disconnected.
+1793527990: Client netz-load-subscriber-23 [127.0.0.1:60742] disconnected.
+1793527990: Client netz-load-subscriber-24 [127.0.0.1:60744] disconnected.
+1793527990: Client netz-load-subscriber-25 [127.0.0.1:60748] disconnected.
+1793527990: Client netz-load-subscriber-26 [127.0.0.1:60758] disconnected.
+1793527990: Client netz-load-subscriber-27 [127.0.0.1:60772] disconnected.
+1793527990: Client netz-load-subscriber-28 [127.0.0.1:60782] disconnected.
+1793527990: Client netz-load-subscriber-29 [127.0.0.1:60798] disconnected.
+1793527990: Client netz-load-subscriber-30 [127.0.0.1:60812] disconnected.
+1793527990: Client netz-load-subscriber-31 [127.0.0.1:60816] disconnected.
+1793527990: Client netz-load-publisher-0 [127.0.0.1:60820] disconnected.
+1793527990: mosquitto version 2.1.2 terminating

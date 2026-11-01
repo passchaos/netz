@@ -1,0 +1,110 @@
+1793527987: Info: running mosquitto as user: passchaos.
+1793527987: mosquitto version 2.1.2 starting
+1793527987: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/publishers-32/sample-02/artifacts/mosquitto.conf.
+1793527987: Bridge support available.
+1793527987: Persistence support available.
+1793527987: TLS support NOT available.
+1793527987: TLS-PSK support NOT available.
+1793527987: Websockets support NOT available.
+1793527987: Opening ipv4 listen socket on port 53535.
+1793527987: mosquitto version 2.1.2 running
+1793527987: New connection from 127.0.0.1:58706 on port 53535.
+1793527987: New client connected from 127.0.0.1:58706 as netz-load-subscriber-0 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58708 on port 53535.
+1793527987: New client connected from 127.0.0.1:58708 as netz-load-publisher-0 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58712 on port 53535.
+1793527987: New client connected from 127.0.0.1:58712 as netz-load-publisher-1 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58714 on port 53535.
+1793527987: New client connected from 127.0.0.1:58714 as netz-load-publisher-2 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58718 on port 53535.
+1793527987: New client connected from 127.0.0.1:58718 as netz-load-publisher-3 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58734 on port 53535.
+1793527987: New client connected from 127.0.0.1:58734 as netz-load-publisher-4 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58736 on port 53535.
+1793527987: New client connected from 127.0.0.1:58736 as netz-load-publisher-5 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58752 on port 53535.
+1793527987: New client connected from 127.0.0.1:58752 as netz-load-publisher-6 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58756 on port 53535.
+1793527987: New client connected from 127.0.0.1:58756 as netz-load-publisher-7 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58764 on port 53535.
+1793527987: New client connected from 127.0.0.1:58764 as netz-load-publisher-8 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58768 on port 53535.
+1793527987: New client connected from 127.0.0.1:58768 as netz-load-publisher-9 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58784 on port 53535.
+1793527987: New client connected from 127.0.0.1:58784 as netz-load-publisher-10 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58790 on port 53535.
+1793527987: New client connected from 127.0.0.1:58790 as netz-load-publisher-11 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58800 on port 53535.
+1793527987: New client connected from 127.0.0.1:58800 as netz-load-publisher-12 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58816 on port 53535.
+1793527987: New client connected from 127.0.0.1:58816 as netz-load-publisher-13 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58818 on port 53535.
+1793527987: New client connected from 127.0.0.1:58818 as netz-load-publisher-14 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58834 on port 53535.
+1793527987: New client connected from 127.0.0.1:58834 as netz-load-publisher-15 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58850 on port 53535.
+1793527987: New client connected from 127.0.0.1:58850 as netz-load-publisher-16 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58866 on port 53535.
+1793527987: New client connected from 127.0.0.1:58866 as netz-load-publisher-17 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58872 on port 53535.
+1793527987: New client connected from 127.0.0.1:58872 as netz-load-publisher-18 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58882 on port 53535.
+1793527987: New client connected from 127.0.0.1:58882 as netz-load-publisher-19 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58888 on port 53535.
+1793527987: New client connected from 127.0.0.1:58888 as netz-load-publisher-20 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58904 on port 53535.
+1793527987: New client connected from 127.0.0.1:58904 as netz-load-publisher-21 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58912 on port 53535.
+1793527987: New client connected from 127.0.0.1:58912 as netz-load-publisher-22 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58926 on port 53535.
+1793527987: New client connected from 127.0.0.1:58926 as netz-load-publisher-23 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58930 on port 53535.
+1793527987: New client connected from 127.0.0.1:58930 as netz-load-publisher-24 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58940 on port 53535.
+1793527987: New client connected from 127.0.0.1:58940 as netz-load-publisher-25 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58944 on port 53535.
+1793527987: New client connected from 127.0.0.1:58944 as netz-load-publisher-26 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58950 on port 53535.
+1793527987: New client connected from 127.0.0.1:58950 as netz-load-publisher-27 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58958 on port 53535.
+1793527987: New client connected from 127.0.0.1:58958 as netz-load-publisher-28 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58964 on port 53535.
+1793527987: New client connected from 127.0.0.1:58964 as netz-load-publisher-29 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58966 on port 53535.
+1793527987: New client connected from 127.0.0.1:58966 as netz-load-publisher-30 (p5, c1, k30).
+1793527987: New connection from 127.0.0.1:58976 on port 53535.
+1793527987: New client connected from 127.0.0.1:58976 as netz-load-publisher-31 (p5, c1, k30).
+1793527987: Client netz-load-subscriber-0 [127.0.0.1:58706] disconnected.
+1793527987: Client netz-load-publisher-0 [127.0.0.1:58708] disconnected.
+1793527987: Client netz-load-publisher-1 [127.0.0.1:58712] disconnected.
+1793527987: Client netz-load-publisher-2 [127.0.0.1:58714] disconnected.
+1793527987: Client netz-load-publisher-3 [127.0.0.1:58718] disconnected.
+1793527987: Client netz-load-publisher-4 [127.0.0.1:58734] disconnected.
+1793527987: Client netz-load-publisher-5 [127.0.0.1:58736] disconnected.
+1793527987: Client netz-load-publisher-6 [127.0.0.1:58752] disconnected.
+1793527987: Client netz-load-publisher-7 [127.0.0.1:58756] disconnected.
+1793527987: Client netz-load-publisher-8 [127.0.0.1:58764] disconnected.
+1793527987: Client netz-load-publisher-9 [127.0.0.1:58768] disconnected.
+1793527987: Client netz-load-publisher-10 [127.0.0.1:58784] disconnected.
+1793527987: Client netz-load-publisher-11 [127.0.0.1:58790] disconnected.
+1793527987: Client netz-load-publisher-12 [127.0.0.1:58800] disconnected.
+1793527987: Client netz-load-publisher-13 [127.0.0.1:58816] disconnected.
+1793527987: Client netz-load-publisher-14 [127.0.0.1:58818] disconnected.
+1793527987: Client netz-load-publisher-15 [127.0.0.1:58834] disconnected.
+1793527987: Client netz-load-publisher-16 [127.0.0.1:58850] disconnected.
+1793527987: Client netz-load-publisher-17 [127.0.0.1:58866] disconnected.
+1793527987: Client netz-load-publisher-18 [127.0.0.1:58872] disconnected.
+1793527987: Client netz-load-publisher-19 [127.0.0.1:58882] disconnected.
+1793527987: Client netz-load-publisher-20 [127.0.0.1:58888] disconnected.
+1793527987: Client netz-load-publisher-21 [127.0.0.1:58904] disconnected.
+1793527987: Client netz-load-publisher-22 [127.0.0.1:58912] disconnected.
+1793527987: Client netz-load-publisher-23 [127.0.0.1:58926] disconnected.
+1793527987: Client netz-load-publisher-24 [127.0.0.1:58930] disconnected.
+1793527987: Client netz-load-publisher-25 [127.0.0.1:58940] disconnected.
+1793527987: Client netz-load-publisher-26 [127.0.0.1:58944] disconnected.
+1793527987: Client netz-load-publisher-27 [127.0.0.1:58950] disconnected.
+1793527987: Client netz-load-publisher-28 [127.0.0.1:58958] disconnected.
+1793527987: Client netz-load-publisher-29 [127.0.0.1:58964] disconnected.
+1793527987: Client netz-load-publisher-30 [127.0.0.1:58966] disconnected.
+1793527987: Client netz-load-publisher-31 [127.0.0.1:58976] disconnected.
+1793527987: mosquitto version 2.1.2 terminating

@@ -1,0 +1,35 @@
+1793528007: Info: running mosquitto as user: passchaos.
+1793528007: mosquitto version 2.1.2 starting
+1793528007: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/large-payload/sample-01/artifacts/mosquitto.conf.
+1793528007: Bridge support available.
+1793528007: Persistence support available.
+1793528007: TLS support NOT available.
+1793528007: TLS-PSK support NOT available.
+1793528007: Websockets support NOT available.
+1793528007: Opening ipv4 listen socket on port 38883.
+1793528007: mosquitto version 2.1.2 running
+1793528007: New connection from 127.0.0.1:56316 on port 38883.
+1793528007: New client connected from 127.0.0.1:56316 as netz-load-subscriber-0 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56318 on port 38883.
+1793528007: New client connected from 127.0.0.1:56318 as netz-load-subscriber-1 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56322 on port 38883.
+1793528007: New client connected from 127.0.0.1:56322 as netz-load-subscriber-2 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56336 on port 38883.
+1793528007: New client connected from 127.0.0.1:56336 as netz-load-subscriber-3 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56340 on port 38883.
+1793528007: New client connected from 127.0.0.1:56340 as netz-load-publisher-0 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56352 on port 38883.
+1793528007: New client connected from 127.0.0.1:56352 as netz-load-publisher-1 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56362 on port 38883.
+1793528007: New client connected from 127.0.0.1:56362 as netz-load-publisher-2 (p5, c1, k30).
+1793528007: New connection from 127.0.0.1:56378 on port 38883.
+1793528007: New client connected from 127.0.0.1:56378 as netz-load-publisher-3 (p5, c1, k30).
+1793528007: Client netz-load-subscriber-0 [127.0.0.1:56316] disconnected.
+1793528007: Client netz-load-subscriber-1 [127.0.0.1:56318] disconnected.
+1793528007: Client netz-load-subscriber-2 [127.0.0.1:56322] disconnected.
+1793528007: Client netz-load-subscriber-3 [127.0.0.1:56336] disconnected.
+1793528007: Client netz-load-publisher-0 [127.0.0.1:56340] disconnected.
+1793528007: Client netz-load-publisher-1 [127.0.0.1:56352] disconnected.
+1793528007: Client netz-load-publisher-2 [127.0.0.1:56362] disconnected.
+1793528007: Client netz-load-publisher-3 [127.0.0.1:56378] disconnected.
+1793528007: mosquitto version 2.1.2 terminating

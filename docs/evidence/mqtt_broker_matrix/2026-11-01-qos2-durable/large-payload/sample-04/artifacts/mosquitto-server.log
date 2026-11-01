@@ -1,0 +1,35 @@
+1793528008: Info: running mosquitto as user: passchaos.
+1793528008: mosquitto version 2.1.2 starting
+1793528008: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/large-payload/sample-04/artifacts/mosquitto.conf.
+1793528008: Bridge support available.
+1793528008: Persistence support available.
+1793528008: TLS support NOT available.
+1793528008: TLS-PSK support NOT available.
+1793528008: Websockets support NOT available.
+1793528008: Opening ipv4 listen socket on port 54459.
+1793528008: mosquitto version 2.1.2 running
+1793528008: New connection from 127.0.0.1:44132 on port 54459.
+1793528008: New client connected from 127.0.0.1:44132 as netz-load-subscriber-0 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44142 on port 54459.
+1793528008: New client connected from 127.0.0.1:44142 as netz-load-subscriber-1 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44156 on port 54459.
+1793528008: New client connected from 127.0.0.1:44156 as netz-load-subscriber-2 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44158 on port 54459.
+1793528008: New client connected from 127.0.0.1:44158 as netz-load-subscriber-3 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44162 on port 54459.
+1793528008: New client connected from 127.0.0.1:44162 as netz-load-publisher-0 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44164 on port 54459.
+1793528008: New client connected from 127.0.0.1:44164 as netz-load-publisher-1 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44178 on port 54459.
+1793528008: New client connected from 127.0.0.1:44178 as netz-load-publisher-2 (p5, c1, k30).
+1793528008: New connection from 127.0.0.1:44188 on port 54459.
+1793528008: New client connected from 127.0.0.1:44188 as netz-load-publisher-3 (p5, c1, k30).
+1793528009: Client netz-load-subscriber-0 [127.0.0.1:44132] disconnected.
+1793528009: Client netz-load-subscriber-1 [127.0.0.1:44142] disconnected.
+1793528009: Client netz-load-subscriber-2 [127.0.0.1:44156] disconnected.
+1793528009: Client netz-load-subscriber-3 [127.0.0.1:44158] disconnected.
+1793528009: Client netz-load-publisher-0 [127.0.0.1:44162] disconnected.
+1793528009: Client netz-load-publisher-1 [127.0.0.1:44164] disconnected.
+1793528009: Client netz-load-publisher-2 [127.0.0.1:44178] disconnected.
+1793528009: Client netz-load-publisher-3 [127.0.0.1:44188] disconnected.
+1793528009: mosquitto version 2.1.2 terminating

@@ -1,0 +1,17 @@
+1793527986: Info: running mosquitto as user: passchaos.
+1793527986: mosquitto version 2.1.2 starting
+1793527986: Config loaded from /tmp/netz-mqtt-matrix-durable-qos2-2026-11-01/serial/sample-01/artifacts/mosquitto.conf.
+1793527986: Bridge support available.
+1793527986: Persistence support available.
+1793527986: TLS support NOT available.
+1793527986: TLS-PSK support NOT available.
+1793527986: Websockets support NOT available.
+1793527986: Opening ipv4 listen socket on port 36691.
+1793527986: mosquitto version 2.1.2 running
+1793527986: New connection from 127.0.0.1:39376 on port 36691.
+1793527986: New client connected from 127.0.0.1:39376 as netz-load-subscriber-0 (p5, c1, k30).
+1793527986: New connection from 127.0.0.1:39392 on port 36691.
+1793527986: New client connected from 127.0.0.1:39392 as netz-load-publisher-0 (p5, c1, k30).
+1793527986: Client netz-load-subscriber-0 [127.0.0.1:39376] disconnected.
+1793527986: Client netz-load-publisher-0 [127.0.0.1:39392] disconnected.
+1793527986: mosquitto version 2.1.2 terminating

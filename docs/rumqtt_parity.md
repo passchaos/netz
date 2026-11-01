@@ -1941,6 +1941,17 @@ deliveries. Instrumented timing is not used as a benchmark result; the syscall
 count identifies cross-connection write scheduling as the next architectural
 target.
 
+A fresh 2026-11-01 durable QoS 2 matrix on current code now measures serial
+21,292 vs 29,146/s (0.731×), publishers-32 35,087 vs 36,546/s (0.960×),
+fanout-32 2,967 vs 2,698/s (1.100×), balanced-32x32 2,924 vs 2,880/s (1.015×)
+and large-payload 17,802 vs 17,011/s (1.046×). Four of five shapes are at
+parity or above Mosquitto; serial throughput remains the clear deficit. RSS is
+1.28–1.92× Mosquitto in every shape, with balanced-32x32 at 6,654 vs 3,472 KiB
+because durable Sessions deep-own queued messages. This supersedes the older
+durable table for current code; the historical capture remains separately
+scoped. Full rows and hashes are in
+`docs/evidence/mqtt_broker_matrix/2026-11-01-qos2-durable.json`.
+
 The durable cross-connection target is now addressed by two serving-scope
 Session delivery workers rather than one coroutine per connected Session. A
 fixed ring has one entry and one compact state per broker slot, coalesces a
