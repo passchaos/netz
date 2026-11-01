@@ -611,7 +611,6 @@ pub fn Runtime(comptime Slot: type) type {
             path: []const []const u8,
             slots: []Slot,
         ) AggregateState {
-            var connecting = false;
             var idle = false;
             for (slots) |*slot| {
                 if (!pathMatches(slot.endpoint.hierarchicalPath(), path)) {
@@ -620,14 +619,12 @@ pub fn Runtime(comptime Slot: type) type {
                 if (slot.weighted_target_ejected) continue;
                 if (slotReady(slot)) return .ready;
                 if (slot.disabled) continue;
-                if (slot.next_attempt_at_ns != null) connecting = true else idle = true;
+                // A slot waiting for retry backoff is grpc-core's
+                // TRANSIENT_FAILURE, not CONNECTING. Only a never-attempted
+                // slot is IDLE.
+                if (slot.next_attempt_at_ns == null) idle = true;
             }
-            return if (connecting)
-                .connecting
-            else if (idle)
-                .idle
-            else
-                .transient_failure;
+            return if (idle) .idle else .transient_failure;
         }
 
         fn pickLeaf(
