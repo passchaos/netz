@@ -22062,6 +22062,54 @@ pub const ServerDuplexStream = struct {
         return .{ .written = written, .response_available = false };
     }
 
+    /// Write several borrowed DATA slices as one logical burst. The slices
+    /// share one DATA frame sequence instead of producing a separate frame
+    /// for each slice.
+    pub fn writeResponseSlicesBurst(
+        self: *ServerDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+    ) Error!DuplexWriteResult {
+        if (!self.response_started or self.response_finished or self.released) {
+            return error.ConnectionClosed;
+        }
+        var additional: usize = 0;
+        for (slices) |slice| {
+            additional = std.math.add(usize, additional, slice.len) catch
+                return error.MessageTooLarge;
+        }
+        const total = std.math.add(
+            usize,
+            self.response_written,
+            additional,
+        ) catch return error.MessageTooLarge;
+        if (self.response_expected_length) |expected| {
+            if (total > expected or (end_stream and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
+        var sent: usize = 0;
+        self.connection.writeDataSlicesPreparedTrackedUntil(
+            self.stream_id,
+            slices,
+            end_stream,
+            &sent,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => {
+                self.response_written += sent;
+                return @errorCast(err);
+            },
+        };
+        self.response_written += sent;
+        if (end_stream) {
+            self.response_finished = true;
+            self.maybeRelease();
+        }
+        return .{ .written = sent, .response_available = false };
+    }
+
     pub fn finishResponse(
         self: *ServerDuplexStream,
     ) Error!DuplexWriteResult {

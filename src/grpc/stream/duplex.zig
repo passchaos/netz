@@ -126,6 +126,11 @@ const PendingMessage = struct {
     }
 };
 
+/// Large server responses first try one borrowed prefix-plus-payload DATA
+/// burst. The framed fallback and its owned pending message remain for small
+/// messages.
+const borrowed_server_message_threshold: usize = 64 * 1024;
+
 const ReceiveState = enum {
     active,
     terminal_pending,
@@ -1244,6 +1249,12 @@ pub const ServerDuplex = struct {
         if (self.pending_message != null) return error.InvalidStreamState;
         const encoder = self.response_encoder orelse
             return error.InvalidStreamState;
+        if (payload.len > encoder.max_message_size) {
+            return error.GrpcMessageTooLarge;
+        }
+        if (payload.len >= borrowed_server_message_threshold) {
+            return self.writeBorrowedMessage(payload, options, encoder);
+        }
         self.pending_message = .{
             .bytes = try encodeMessageAlloc(
                 self.allocator,
@@ -1253,6 +1264,54 @@ pub const ServerDuplex = struct {
             ),
         };
         return self.resumeMessage();
+    }
+
+    fn writeBorrowedMessage(
+        self: *ServerDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+        encoder: codec.Encoder,
+    ) Error!WriteResult {
+        const algorithm: compression.Algorithm =
+            if (options.disable_compression) .identity else encoder.algorithm;
+        var encoded = try compression.compressAlloc(
+            self.allocator,
+            algorithm,
+            payload,
+            encoder.compression_level,
+        );
+        defer encoded.deinit(self.allocator);
+        _ = try wire.encodedMessageLen(encoded.bytes.len);
+
+        var prefix: [5]u8 = undefined;
+        _ = try wire.writeMessageInto(&prefix, &.{}, encoded.compressed);
+        std.mem.writeInt(
+            u32,
+            prefix[1..5],
+            @intCast(encoded.bytes.len),
+            .big,
+        );
+        const total = std.math.add(
+            usize,
+            prefix.len,
+            encoded.bytes.len,
+        ) catch {
+            self.fail(.internal_error);
+            return error.MessageTooLarge;
+        };
+        const slices = [_][]const u8{ &prefix, encoded.bytes };
+        const result = self.transport.writeResponseSlicesBurst(
+            &slices,
+            false,
+        ) catch |err| {
+            self.fail(.internal_error);
+            return err;
+        };
+        if (result.written != total) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
+        return .complete;
     }
 
     /// Allocate response payload storage with the gRPC prefix already

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "SharedChannel server duplex combined-slice large response",
+  "decision": "accepted",
+  "baseline": {
+    "commit": "7e1b0551",
+    "src/grpc/stream/duplex.zig": "e0fa1d4108720241d9dcaebd774385aa50a8b48565b0f8d989d21402aac37b69",
+    "src/http2/runtime.zig": "6f292feb7407bf45146917adcff944b0950d0551a71ca7ef9d5b39ea397cd1dc",
+    "binary_sha256": "f62e60497a358c5d1e216531a854c13dd9b67cbe21dc2fbf52d4ba9e2de41d8a"
+  },
+  "candidate": {
+    "src/grpc/stream/duplex.zig": "e97bbee47fd15e5945d1f7bf52ce0550ea7fe0d3c81e640348f15a9b622f9c8e",
+    "src/http2/runtime.zig": "4692d78cc1a41abc16cb07a60d258b803cdfa8449c3e233e0e698bf032209d25",
+    "binary_sha256": "475c9831d7f0ff003243a80f219fa3c40fc75918c308d573b9f8536584d6481f",
+    "design": "ServerDuplex.writeMessage uses compression.compressAlloc and a stack five-byte prefix, then writes both slices through ServerDuplexStream.writeResponseSlicesBurst so the prefix and payload share one DATA frame sequence. Small messages keep the framed fallback."
+  },
+  "scope": {
+    "workload": "SharedChannel persistent duplex, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 200,
+    "warmup": 20,
+    "windows": "stream 65535 / connection 65535",
+    "frame_size": 16384,
+    "validation": "full bytes plus peer completion"
+  },
+  "benchmark_method": {
+    "harness": "zig build bench-grpc-shared -- --cached-allocator --payload=262144 --iterations=200 --warmup=20",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [445571, 453356, 453089, 455579, 442884, 448638, 443364, 446494, 450070, 466966],
+    "candidate_samples_ns": [444506, 450611, 443471, 446247, 444391, 446422, 443239, 446188, 439682, 444559],
+    "baseline_median_ns": 447566,
+    "candidate_median_ns": 444532.5,
+    "candidate_over_baseline": 0.9932,
+    "round_wins": "5/5 ABBA rounds",
+    "paired_ratios": [0.9958, 0.9791, 0.9992, 0.9995, 0.9642],
+    "baseline_cache": "hits=1337 misses=95",
+    "candidate_cache": "hits=897 misses=95",
+    "allocations_removed_per_run": 440
+  },
+  "correctness": {
+    "grpc_filter": "563/563 passed",
+    "http2_filter": "951/951 passed",
+    "large_duplex_test": "a 100,000-byte server duplex response passed and a counting allocator observed zero allocations at or above the payload size"
+  },
+  "context": "The earlier writeResponseParts variant emitted a separate five-byte DATA frame and regressed 2.9%. The combined slice burst removes that extra frame, turning the same allocation removal into a small paired win."
+}

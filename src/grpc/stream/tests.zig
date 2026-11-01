@@ -1919,3 +1919,170 @@ fn headerValue(
     }
     return null;
 }
+
+test "gRPC server duplex writes a large response without staging" {
+    const allocator = std.testing.allocator;
+    const large_response = "server-duplex-large-" ** 4096;
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 16 * 1024,
+        .max_body_bytes = large_response.len + 16,
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Tracker = struct {
+        child: std.mem.Allocator,
+        threshold: usize,
+        large_allocations: usize = 0,
+
+        fn asAllocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        fn alloc(pointer: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            if (len >= self.threshold) self.large_allocations += 1;
+            return self.child.rawAlloc(len, alignment, ret);
+        }
+
+        fn resize(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return self.child.rawResize(bytes, alignment, len, ret);
+        }
+
+        fn remap(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return self.child.rawRemap(bytes, alignment, len, ret);
+        }
+
+        fn free(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            self.child.rawFree(bytes, alignment, ret);
+        }
+
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+    };
+
+    var tracker = Tracker{
+        .child = allocator,
+        .threshold = large_response.len,
+    };
+
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        payload: []const u8,
+        tracker: *Tracker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn consume(_: *@This(), message: codec.DecodedMessage) !void {
+            try std.testing.expectEqualStrings("request", message.payload);
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try duplex.acceptDuplex(
+                &connection,
+                self.tracker.asAllocator(),
+                1024,
+            );
+            defer stream.deinit();
+
+            var finished = false;
+            while (!finished) {
+                var event = try stream.readRequestEvent(self, consume);
+                defer event.deinit();
+                switch (event) {
+                    .messages => {},
+                    .finished => finished = true,
+                    .reset => return error.UnexpectedReset,
+                }
+            }
+
+            try stream.startResponse(.{});
+            self.tracker.large_allocations = 0;
+            try std.testing.expectEqual(
+                duplex.WriteResult.complete,
+                try stream.writeMessage(self.payload),
+            );
+            try std.testing.expectEqual(@as(usize, 0), self.tracker.large_allocations);
+            try stream.finishOk();
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .payload = large_response,
+        .tracker = &tracker,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var stream = try duplex.startDuplex(
+        &connection,
+        allocator,
+        .{
+            .path = "/demo.Echo/Bidi",
+            .authority = "localhost",
+        },
+    );
+    defer stream.deinit();
+    try std.testing.expectEqual(
+        duplex.WriteResult.complete,
+        try stream.writeFinalMessage("request"),
+    );
+
+    const Collector = struct {
+        count: usize = 0,
+
+        fn consume(self: *@This(), message: codec.DecodedMessage) !void {
+            try std.testing.expectEqualStrings(large_response, message.payload);
+            self.count += 1;
+        }
+    };
+    var collector: Collector = .{};
+    var head = try stream.readResponseEvent(&collector, Collector.consume);
+    defer head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head.initial_metadata.status);
+    while (collector.count == 0) {
+        var reply = try stream.readResponseEvent(&collector, Collector.consume);
+        defer reply.deinit(allocator);
+        switch (reply) {
+            .messages, .initial_metadata => {},
+            else => return error.UnexpectedResponseEvent,
+        }
+    }
+    var terminal = try stream.readResponseEvent(&collector, Collector.consume);
+    defer terminal.deinit(allocator);
+    try std.testing.expectEqual(wire.Status.ok, terminal.terminal.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}

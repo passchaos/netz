@@ -2979,3 +2979,19 @@ from a 463,199 ns baseline median to 451,370.5 ns (2.55% faster, 5/5 ABBA
 rounds). The gRPC filter passes 562/562, and a full-payload shared-unary run
 passes. Evidence is recorded in
 `docs/evidence/grpc_shared_abandoned_fast_path/2026-11-02.json`.
+
+## Shared server duplex combined-slice responses
+
+A refined borrowed server-response path now writes the five-byte gRPC frame
+prefix and the encoded payload as one combined DATA burst through
+`ServerDuplexStream.writeResponseSlicesBurst`, instead of the separate
+`writeResponseParts` frames that regressed the earlier candidate. Messages
+below 64 KiB keep the existing framed fallback.
+
+On the 256-KiB shared persistent duplex workload with the cached allocator,
+five ABBA rounds moved the median from 447,566 ns to 444,532.5 ns (0.68%
+faster, 5/5 rounds), and cache hits fell from 1,337 to 897 because the
+payload-sized staging allocation disappeared. The gRPC filter passes 563/563,
+the HTTP/2 filter passes 951/951, and a 100,000-byte duplex regression proves
+the response path makes no allocation at or above the payload size. Evidence
+is recorded in `docs/evidence/grpc_shared_duplex_burst/2026-11-02.json`.
