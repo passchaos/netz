@@ -46,6 +46,8 @@ pub fn cachedAwakeTimestamp(io: std.Io) std.Io.Clock.Timestamp {
 
 pub const Backend = struct {
     allocator: std.mem.Allocator,
+    backing_allocator: std.mem.Allocator,
+    cache: ?*@import("alloc.zig").BlockCache = null,
     kind: BackendKind = .zio,
     runtime: *anyopaque,
 
@@ -55,11 +57,31 @@ pub const Backend = struct {
         return initZio(allocator);
     }
 
+    /// Initialize with a bounded message-sized block cache in front of
+    /// `allocator`. The cache is heap-owned so its `std.mem.Allocator`
+    /// remains stable when the returned `Backend` moves.
+    pub fn initCached(
+        allocator: std.mem.Allocator,
+        options: @import("alloc.zig").BlockCache.Options,
+    ) !Backend {
+        const cache = try allocator.create(@import("alloc.zig").BlockCache);
+        errdefer allocator.destroy(cache);
+        cache.* = .init(allocator, options);
+        const runtime = try zio.Runtime.init(cache.allocator(), .{});
+        return .{
+            .allocator = cache.allocator(),
+            .backing_allocator = allocator,
+            .cache = cache,
+            .runtime = @ptrCast(runtime),
+        };
+    }
+
     /// Explicit spelling for applications that want to document the backend.
     pub fn initZio(allocator: std.mem.Allocator) !Backend {
         const runtime = try zio.Runtime.init(allocator, .{});
         return .{
             .allocator = allocator,
+            .backing_allocator = allocator,
             .runtime = @ptrCast(runtime),
         };
     }
@@ -85,6 +107,10 @@ pub const Backend = struct {
 
     pub fn deinit(self: *Backend) void {
         zioRuntime(self.runtime).deinit();
+        if (self.cache) |cache| {
+            cache.deinit();
+            self.backing_allocator.destroy(cache);
+        }
         self.* = undefined;
     }
 
@@ -107,6 +133,17 @@ test "runtime backend initializes zio behind std.Io" {
     try std.testing.expectEqual(@as(usize, 0), metrics.active_stacks);
     try std.testing.expectEqual(@as(usize, 0), metrics.retained_stacks);
     try std.testing.expectEqual(@as(usize, 0), metrics.reserved_virtual_bytes);
+}
+
+test "runtime backend cached allocator reuses message blocks" {
+    var backend = try Backend.initCached(std.testing.allocator, .{});
+    defer backend.deinit();
+    const allocator = backend.allocator;
+    const first = try allocator.alloc(u8, 256 * 1024);
+    allocator.free(first);
+    const second = try allocator.alloc(u8, 256 * 1024);
+    try std.testing.expectEqual(first.ptr, second.ptr);
+    allocator.free(second);
 }
 
 test "runtime cached awake timestamp follows zio event-loop scans" {

@@ -783,4 +783,6 @@ alignment or beyond the cap delegate to the backing allocator. Wrapping
 
 The benchmark exposes `--cached-allocator` and reports `allocator=cached`.
 The cache is opt-in; `Backend.init` continues to use exactly the allocator the
-caller supplies.
+caller supplies. `netz.runtime.Backend.initCached` heap-owns the cache behind
+the runtime facade, so applications can enable it without managing a separate
+allocator lifetime.
