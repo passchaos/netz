@@ -18,29 +18,36 @@
     "connection_survives": true,
     "deadline": "The original awake-clock deadline is not renewed by packet or flow-control progress.",
     "parent_reset_code": "H3_INTERNAL_ERROR",
+    "protected_runtime": {
+      "body_bytes": 1048576,
+      "peer_stream_flow_window": 1024,
+      "reset": "Non-blocking one-packet RESET_STREAM; the protected connection stays usable.",
+      "sibling": "A later request on the same protected connection receives 204."
+    },
     "push_body_bytes": 1048576,
     "push_reset_code": "H3_REQUEST_CANCELLED",
     "sibling_after_timeout": "A later request on the same connection receives 204.",
     "timeout_phase": "Push DATA after the parent and push heads are visible"
   },
   "source_sha256": {
-    "src/http3/runtime.zig": "2d2f265fe8f4dd0a743f59c184f856940777c3aa4c90e6859d687b2860374bf9",
-    "src/http3/runtime/stream/push/tests/send.zig": "3a8f69ba37e2bc690dd5b9c0183675365302a28380d879fc9e98024aff8aafea"
+    "src/http3/runtime.zig": "3948198e8f6df18883c4c8996878731221f6eb62af7a1fb0f6af76a9ddac0fc8",
+    "src/http3/runtime/send/protected.zig": "a7c73fae56c823cd5739c1817297984ca9dcecbf3e8cbc1b1b3015b9f37ebcfa",
+    "src/http3/runtime/stream/push/tests/send.zig": "633d6fffb1e65ca7ad370a8bd0e833f747de71460aa6a768824efe1a800aa54e"
   },
   "status": "verified",
   "verification": {
     "Debug": {
       "full_suite_log": "2026-11-01/tests.Full.Debug.log",
-      "full_suite_tests_passed": 6144,
-      "full_suite_tests_total": 6144,
+      "full_suite_tests_passed": 6145,
+      "full_suite_tests_total": 6145,
       "test_log": "2026-11-01/tests.Debug.log",
-      "tests_passed": 999,
-      "tests_total": 999
+      "tests_passed": 1000,
+      "tests_total": 1000
     },
     "ReleaseFast": {
       "test_log": "2026-11-01/tests.ReleaseFast.log",
-      "tests_passed": 999,
-      "tests_total": 999
+      "tests_passed": 1000,
+      "tests_total": 1000
     }
   }
 }

@@ -46,15 +46,19 @@ or the parent request that failed, preserves the connection and any completed
 sibling response, and returns the original error. A peer push cancellation
 still completes the parent response before returning `RequestCancelled`.
 `tryResetStream` retires the server-initiated push send side without requiring
-a receive half that HTTP/3 never opens. The non-paced one-packet push API and
-the protected server retain their separate contracts.
+a receive half that HTTP/3 never opens. The protected runtime applies the same
+scoped push/parent cleanup through one non-blocking `trySendFrames` attempt;
+the non-paced one-packet push API retains its separate contract.
 
 A regression blocks the push body on flow control, advances the server's awake
 clock past the original deadline, and requires both the push and parent
 streams to reset while the connection stays open and a later request on the
 same connection completes. The same regression also covers a bodyless parent:
 its HEAD/FIN is already complete, so only the push resets and the parent
-response survives. Evidence is recorded in
+response survives. A protected-runtime variant repeats the push timeout with a
+1-MiB body and a 1-KiB peer stream window, requiring the push body to retire
+while the protected connection remains usable for a sibling response. Evidence
+is recorded in
 `docs/evidence/http3_push_timeout/2026-11-01.json`.
 
 ## Evidence

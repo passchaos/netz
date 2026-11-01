@@ -65,6 +65,33 @@ pub const State = struct {
         };
     }
 
+    /// Attempt one protected packet without waiting for pacing or congestion.
+    /// The result reports whether the socket accepted the packet and any
+    /// send error, so an event-loop owner can retry a retained reset later.
+    pub fn trySendFrames(
+        self: *State,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        frames: []const quic.Frame,
+    ) Error!quic.one_rtt.BatchSendResult {
+        const packets = [_][]const quic.Frame{frames};
+        return self.sendPacketBatchProgressUntil(
+            endpoint,
+            to,
+            keys,
+            destination_connection_id,
+            next_packet_number,
+            &packets,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
     pub fn sendFramesWithDeadline(
         self: *State,
         endpoint: *quic.runtime.Endpoint,

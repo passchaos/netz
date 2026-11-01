@@ -974,3 +974,195 @@ test "HTTP/3 handshake paced push timeout retires only its streams" {
     try runPushTimeoutCase(std.testing.allocator, "parent", true);
     try runPushTimeoutCase(std.testing.allocator, "", false);
 }
+
+test "HTTP/3 protected server paced push timeout retires only its streams" {
+    const allocator = std.testing.allocator;
+    const body_len: usize = 1024 * 1024;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_cid = [_]u8{ 0xc5, 0xc6, 0xc7, 0xc8 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var server = try runtime.ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .peer_stream_flow_window = 1024,
+        },
+    );
+    defer server.deinit();
+    var client = try runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const AdvanceIo = struct {
+        delegate: std.Io,
+        base_ns: i96 = 1_000_000,
+        advance: *std.atomic.Value(bool),
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            const offset: i96 = if (self.advance.load(.acquire))
+                10 * std.time.ns_per_s
+            else
+                0;
+            return .fromNanoseconds(self.base_ns + offset);
+        }
+    };
+
+    const Shared = struct {
+        server: *runtime.ProtectedServer,
+        advance: *std.atomic.Value(bool),
+        err: ?anyerror = null,
+        push_retired: bool = false,
+        sibling_status: u16 = 0,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var request = try shared.server.receiveRequest();
+            defer request.deinit(shared.server.quic_server.endpoint.allocator);
+            while (shared.server.control.peer_max_push_id != 0) {
+                try shared.server.pollControlWithTimeout(.fromSeconds(2));
+            }
+            const body = try shared.server.quic_server.endpoint.allocator.alloc(
+                u8,
+                body_len,
+            );
+            defer shared.server.quic_server.endpoint.allocator.free(body);
+            @memset(body, 0x5a);
+            var timed = AdvanceIo{
+                .delegate = shared.server.quic_server.endpoint.io,
+                .advance = shared.advance,
+            };
+            var timed_vtable = timed.delegate.vtable.*;
+            timed_vtable.now = AdvanceIo.now;
+            shared.server.quic_server.endpoint.io = .{
+                .userdata = &timed,
+                .vtable = &timed_vtable,
+            };
+            defer shared.server.quic_server.endpoint.io = timed.delegate;
+            const result = shared.server.sendResponseWithPushPacedAndTimeout(
+                request.from,
+                request.stream_id,
+                .{ .status = 204 },
+                .{
+                    .push_id = 0,
+                    .request = .{
+                        .method = "GET",
+                        .path = "/protected-timeout-push.bin",
+                        .authority = "localhost",
+                    },
+                    .response = .{ .status = 200, .body = body },
+                },
+                .fromSeconds(5),
+            );
+            try std.testing.expectError(error.Timeout, result);
+            try std.testing.expect(shared.server.protected_send.isUsable());
+            try std.testing.expect(
+                shared.server.outbound_bodies.find(first_server_push_stream_id) == null,
+            );
+            try std.testing.expect(!shared.server.request_lifecycle.contains(
+                request.stream_id,
+            ));
+            shared.push_retired = true;
+            shared.server.quic_server.endpoint.io = timed.delegate;
+            var sibling = try shared.server.receiveRequestWithTimeout(.fromSeconds(5));
+            defer sibling.deinit(shared.server.quic_server.endpoint.allocator);
+            shared.sibling_status = 204;
+            try shared.server.sendResponse(sibling.from, sibling.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var advance = std.atomic.Value(bool).init(false);
+    var shared = Shared{ .server = &server, .advance = &advance };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try client.sendMaxPushId(0);
+    const request_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/",
+        .authority = "localhost",
+    });
+    var promise = while (true) {
+        if (try client.receiveResponseEventWithTimeout(
+            request_stream_id,
+            .fromSeconds(5),
+        )) |event| break event;
+    };
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
+
+    advance.store(true, .release);
+    try client.protected_send.sendFrames(
+        &client.quic_client.endpoint,
+        server.address(),
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        &.{.{ .ping = {} }},
+        client.config.max_frames_per_packet,
+    );
+    const sibling_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    var saw_sibling = false;
+    while (!saw_sibling) {
+        const event = (try client.receiveResponseEventWithTimeout(
+            sibling_stream_id,
+            .fromSeconds(5),
+        )) orelse continue;
+        var owned = event;
+        defer owned.deinit(allocator);
+        switch (owned) {
+            .head => |head| {
+                try std.testing.expect(head == .response);
+                try std.testing.expectEqual(@as(u16, 204), head.response.status);
+                saw_sibling = true;
+            },
+            .finished => {},
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.push_retired);
+    try std.testing.expectEqual(@as(u16, 204), shared.sibling_status);
+}

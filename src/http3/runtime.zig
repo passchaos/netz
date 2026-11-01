@@ -20705,8 +20705,9 @@ pub const ProtectedServer = struct {
         prepared_push.response = prepared_push_response.value;
 
         var heads_committed = false;
-        var clean_push_cancellation = false;
-        errdefer if (heads_committed and !clean_push_cancellation) {
+        var push_scoped = false;
+        var parent_scoped = false;
+        errdefer if (heads_committed and !push_scoped and !parent_scoped) {
             self.protected_send.failClosed();
         };
         if (deadline) |absolute| {
@@ -20751,29 +20752,81 @@ pub const ProtectedServer = struct {
         self.promised_push_ids.insertAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
 
-        const push_cancelled = try self.sendProtectedPushBodyAndTrailersUntil(
+        var push_cancelled = false;
+        var push_timeout: ?ReceiveTimeoutError = null;
+        push_cancelled = self.sendProtectedPushBodyAndTrailersUntil(
             to,
             push_stream_id,
             prepared_push.response,
             push.push_id,
             deadline,
-        );
-        _ = try self.sendProtectedPushBodyAndTrailersUntil(
+        ) catch |err| blk: {
+            if (err == error.Timeout and self.tryResetProtectedStream(
+                to,
+                push_stream_id,
+                http3.ApplicationErrorCode.request_cancelled,
+            )) {
+                push_scoped = true;
+                push_timeout = err;
+                break :blk true;
+            }
+            return err;
+        };
+        if (push_cancelled) push_scoped = true;
+        _ = self.sendProtectedPushBodyAndTrailersUntil(
             to,
             request_stream_id,
             prepared_response.value,
             null,
             deadline,
-        );
+        ) catch |err| {
+            if (err == error.Timeout and self.tryResetProtectedStream(
+                to,
+                request_stream_id,
+                http3.ApplicationErrorCode.internal_error,
+            )) {
+                finishServerRequest(
+                    &self.control,
+                    &self.request_lifecycle,
+                    request_stream_id,
+                );
+                parent_scoped = true;
+                return err;
+            }
+            return err;
+        };
         self.control.retirePushPriority(
             self.quic_server.endpoint.allocator,
             push.push_id,
         );
-        if (push_cancelled) {
-            clean_push_cancellation = true;
-            return error.RequestCancelled;
-        }
+        if (push_timeout) |err| return err;
+        if (push_cancelled) return error.RequestCancelled;
         return push_stream_id;
+    }
+
+    fn tryResetProtectedStream(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) bool {
+        const entry = self.outbound_bodies.find(stream_id) orelse return true;
+        const frame = quic.Frame{ .reset_stream = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+            .final_size = entry.send.next_offset,
+        } };
+        const result = self.protected_send.trySendFrames(
+            &self.quic_server.endpoint,
+            to,
+            self.config.send_keys,
+            self.config.peer_connection_id,
+            &self.next_packet_number,
+            &.{frame},
+        ) catch return false;
+        if (result.sent_count == 0 or result.send_error != null) return false;
+        _ = self.outbound_bodies.finish(stream_id);
+        return true;
     }
 
     fn sendProtectedPushBodyAndTrailersUntil(
