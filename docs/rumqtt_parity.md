@@ -4902,9 +4902,13 @@ version-correct Not Authorized CONNACK when they do not match. Empty MQTT 5
 identifiers are checked again after collision-safe assignment, so a compatible
 `auto_id_prefix` succeeds without creating a bypass. Configuration owns and
 validates the UTF-8 prefix, rejects duplicates, and rejects the documented
-incompatible combination with listener `use_username_as_clientid`. As with the
-other main-file values, changing this deprecated directive currently requires
-a process restart; netz does not claim Mosquitto's SIGHUP behavior for it.
+incompatible combination with listener `use_username_as_clientid`. This
+deprecated directive participates in the SIGHUP transaction rather than
+requiring a restart. The production config gate reloads `secure-` to `next-`,
+keeps the already accepted connection usable, rejects clients matching only the
+old prefix, accepts clients matching the new prefix, applies the reloaded
+`auto_id_prefix` to assigned identifiers, and preserves the committed policy
+when a restart-required global change aborts the reload.
 Four source-locked malformed-Will cases directly port Mosquitto's
 `07-will-no-flag.py` and
 `07-will-null-topic.py` for MQTT 3.1.1 and MQTT 5. They remove the complete
