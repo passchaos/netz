@@ -432,7 +432,6 @@ test "gRPC ordinary weighted target WRR filters per-RPC ORCA slots" {
     client_live = false;
     try a_task.await(io);
     try b_task.await(io);
-    try outside_task.await(io);
 }
 
 test "gRPC ordinary weighted target OOB WRR stays leaf local RR" {
@@ -831,7 +830,6 @@ test "gRPC ordinary priority selects the highest ready child" {
     }
     stop.set(io);
     try high_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC ordinary priority falls back to the lower ready child" {
@@ -923,7 +921,6 @@ test "gRPC ordinary priority accepts least-request and WRR children" {
     }
     stop.set(io);
     try high_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC ordinary priority supports nested priority children" {
@@ -978,8 +975,6 @@ test "gRPC ordinary priority supports nested priority children" {
     }
     stop.set(io);
     try high1_peer.await(io);
-    try high2_peer.await(io);
-    try low_peer.await(io);
 }
 
 test "gRPC ordinary priority honors the failover timeout" {
@@ -1072,4 +1067,50 @@ test "gRPC ordinary priority falls back immediately when the high child fails" {
     try std.testing.expectEqualStrings("low", response.message.?.payload);
     stop.set(io);
     try low_peer.await(io);
+}
+
+test "gRPC ordinary priority activates children lazily" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var high_server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer high_server.deinit();
+    var stop: std.Io.Event = .unset;
+    var high_peer = io.async(Peer.run, .{ &high_server, &stop, "high", null });
+    defer _ = high_peer.cancel(io) catch {};
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = high_server.address(), .hierarchical_path = &high_path } },
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &low_path } },
+    };
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{
+        \\  "high":{"config":[{"round_robin":{}}]},
+        \\  "low":{"config":[{"round_robin":{}}]}},
+        \\ "priorities":["high","low"]}}]}
+    );
+    var client = try channel.Channel.initWithServiceConfig(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{
+            .connection_attempt_delay = .fromMilliseconds(100),
+            .priority_failover_timeout = .fromSeconds(10),
+        },
+        &config,
+    );
+    config.deinit();
+    defer client.deinit();
+    for (0..3) |_| {
+        var response = try call(&client);
+        defer response.deinit();
+        try std.testing.expectEqualStrings("high", response.message.?.payload);
+    }
+    try std.testing.expectEqual(@as(usize, 0), client.slots[1].consecutive_failures);
+    try std.testing.expect(client.slots[1].next_attempt_at_ns == null);
+    try std.testing.expect(client.slots[1].connection == null);
+    stop.set(io);
+    try high_peer.await(io);
 }

@@ -42,6 +42,9 @@ pub fn Runtime(comptime Slot: type) type {
         root: *Node,
         outlier_count: usize = 0,
         priority_failover_timeout_ns: i96 = 10 * std.time.ns_per_s,
+        /// grpc-core's kChildRetentionInterval: how long a lower priority
+        /// stays connected after a higher priority becomes READY/IDLE.
+        priority_deactivation_timeout_ns: i96 = 15 * 60 * std.time.ns_per_s,
 
         const Self = @This();
         const AggregateState = enum {
@@ -87,6 +90,9 @@ pub fn Runtime(comptime Slot: type) type {
         const PriorityChild = struct {
             ignore_reresolution_requests: bool,
             node: *Node,
+            activated: bool = false,
+            deactivate_at: ?i96 = null,
+            deactivated: bool = false,
         };
 
         const Priority = struct {
@@ -124,10 +130,25 @@ pub fn Runtime(comptime Slot: type) type {
             config: *const service_config.LoadBalancingNode,
             priority_failover_timeout_ns: i96,
         ) BuildError!Self {
+            return initWithPriorityTimeouts(
+                allocator,
+                config,
+                priority_failover_timeout_ns,
+                15 * 60 * std.time.ns_per_s,
+            );
+        }
+
+        pub fn initWithPriorityTimeouts(
+            allocator: std.mem.Allocator,
+            config: *const service_config.LoadBalancingNode,
+            priority_failover_timeout_ns: i96,
+            priority_deactivation_timeout_ns: i96,
+        ) BuildError!Self {
             var self = Self{
                 .allocator = allocator,
                 .root = undefined,
                 .priority_failover_timeout_ns = priority_failover_timeout_ns,
+                .priority_deactivation_timeout_ns = priority_deactivation_timeout_ns,
             };
             self.root = try self.build(config, &.{});
             return self;
@@ -188,6 +209,231 @@ pub fn Runtime(comptime Slot: type) type {
 
         pub fn shufflesAddressList(self: *const Self, path: []const []const u8) bool {
             return @import("tree_query.zig").shufflesAddressList(self.root, path);
+        }
+
+        pub const PathState = struct {
+            active: bool = false,
+            wake_at: ?i96 = null,
+            deactivate_at: ?i96 = null,
+            deactivate_now: bool = false,
+        };
+
+        pub fn pathState(
+            self: *Self,
+            slots: []Slot,
+            path: []const []const u8,
+            now: i96,
+        ) PathState {
+            var result = PathState{};
+            self.pathStateNode(self.root, slots, path, now, &result);
+            return result;
+        }
+
+        pub fn nextPriorityDeadline(
+            self: *Self,
+            slots: []Slot,
+            now: i96,
+        ) ?i96 {
+            var result: ?i96 = null;
+            for (slots) |slot| {
+                const state = self.pathState(
+                    slots,
+                    slot.endpoint.hierarchicalPath(),
+                    now,
+                );
+                if (state.wake_at) |deadline| {
+                    result = if (result) |current| @min(current, deadline) else deadline;
+                }
+                if (state.deactivate_at) |deadline| {
+                    result = if (result) |current| @min(current, deadline) else deadline;
+                }
+            }
+            return result;
+        }
+
+        const PriorityState = struct {
+            active_index: ?usize,
+            wake_at: ?i96,
+            failover_open: bool,
+        };
+
+        fn evaluatePriority(
+            self: *Self,
+            priority: *Priority,
+            slots: []Slot,
+            now: i96,
+        ) PriorityState {
+            if (priority.order.len == 0) {
+                return .{ .active_index = null, .wake_at = null, .failover_open = true };
+            }
+            const first = priority.children[priority.order[0]];
+            const first_state = self.aggregate(first.node, slots);
+            switch (first_state) {
+                .ready, .idle => {
+                    priority.failover_started_ns = null;
+                    priority.failover_can_start = true;
+                },
+                .connecting => {
+                    if (priority.failover_started_ns == null and
+                        priority.failover_can_start)
+                    {
+                        priority.failover_started_ns = now;
+                    }
+                    priority.failover_can_start = false;
+                },
+                .transient_failure => {
+                    priority.failover_started_ns = null;
+                    priority.failover_can_start = false;
+                },
+            }
+            var result: PriorityState = undefined;
+            if (first_state == .ready or first_state == .idle) {
+                activatePriority(priority, 0);
+                result = .{ .active_index = 0, .wake_at = null, .failover_open = false };
+            } else if (first_state == .connecting) {
+                const pending = if (priority.failover_started_ns) |started| blk: {
+                    const deadline = started +| self.priority_failover_timeout_ns;
+                    if (self.priority_failover_timeout_ns > 0 and now < deadline) {
+                        break :blk deadline;
+                    }
+                    break :blk null;
+                } else null;
+                if (pending) |deadline| {
+                    activatePriority(priority, 0);
+                    result = .{
+                        .active_index = 0,
+                        .wake_at = deadline,
+                        .failover_open = false,
+                    };
+                } else {
+                    result = self.chooseNextPriority(priority, slots);
+                }
+            } else {
+                result = self.chooseNextPriority(priority, slots);
+            }
+            const active_index = result.active_index.?;
+            const active_child = priority.children[priority.order[active_index]];
+            const active_state = self.aggregate(active_child.node, slots);
+            self.updateDeactivation(priority, active_index, active_state, now);
+            return result;
+        }
+
+        fn chooseNextPriority(
+            self: *Self,
+            priority: *Priority,
+            slots: []Slot,
+        ) PriorityState {
+            var index = priority.order.len - 1;
+            for (priority.order[1..], 1..) |child_index, ordinal| {
+                const child = priority.children[child_index];
+                if (self.aggregate(child.node, slots) != .transient_failure) {
+                    index = ordinal;
+                    break;
+                }
+            }
+            activatePriority(priority, index);
+            return .{ .active_index = index, .wake_at = null, .failover_open = true };
+        }
+
+        fn activatePriority(priority: *Priority, index: usize) void {
+            for (priority.order[0 .. index + 1]) |child_index| {
+                const child = &priority.children[child_index];
+                child.activated = true;
+                child.deactivated = false;
+                child.deactivate_at = null;
+            }
+        }
+
+        fn updateDeactivation(
+            self: *Self,
+            priority: *Priority,
+            active_index: usize,
+            active_state: AggregateState,
+            now: i96,
+        ) void {
+            const deactivate_lower = active_state == .ready or active_state == .idle;
+            for (priority.order, 0..) |child_index, ordinal| {
+                const child = &priority.children[child_index];
+                if (ordinal <= active_index) {
+                    child.deactivate_at = null;
+                    child.deactivated = false;
+                    continue;
+                }
+                if (!child.activated) continue;
+                if (!deactivate_lower) {
+                    child.deactivate_at = null;
+                    continue;
+                }
+                if (self.priority_deactivation_timeout_ns <= 0) {
+                    child.activated = false;
+                    child.deactivated = true;
+                    child.deactivate_at = null;
+                    continue;
+                }
+                const deadline = child.deactivate_at orelse blk: {
+                    const value = now +| self.priority_deactivation_timeout_ns;
+                    child.deactivate_at = value;
+                    break :blk value;
+                };
+                if (now >= deadline) {
+                    child.activated = false;
+                    child.deactivated = true;
+                    child.deactivate_at = null;
+                }
+            }
+        }
+
+        fn pathStateNode(
+            self: *Self,
+            node: *Node,
+            slots: []Slot,
+            path: []const []const u8,
+            now: i96,
+            result: *PathState,
+        ) void {
+            if (!pathMatches(path, node.path)) return;
+            switch (node.kind) {
+                .leaf => result.active = true,
+                .outlier => |wrapper| self.pathStateNode(
+                    wrapper.child,
+                    slots,
+                    path,
+                    now,
+                    result,
+                ),
+                .weighted => |children| for (children) |child| {
+                    self.pathStateNode(child.node, slots, path, now, result);
+                },
+                .priority => |*priority| {
+                    const info = self.evaluatePriority(priority, slots, now);
+                    for (priority.order, 0..) |child_index, ordinal| {
+                        const child = priority.children[child_index];
+                        if (!pathMatches(path, child.node.path)) continue;
+                        if (child.activated) {
+                            if (info.active_index) |active| {
+                                if (ordinal > active) {
+                                    if (child.deactivate_at) |deadline| {
+                                        result.deactivate_at =
+                                            if (result.deactivate_at) |current|
+                                                @min(current, deadline)
+                                            else
+                                                deadline;
+                                    }
+                                }
+                            }
+                            self.pathStateNode(child.node, slots, path, now, result);
+                        } else if (child.deactivated) {
+                            result.deactivate_now = true;
+                        } else if (info.wake_at) |deadline| {
+                            result.wake_at = if (result.wake_at) |current|
+                                @min(current, deadline)
+                            else
+                                deadline;
+                        }
+                        break;
+                    }
+                },
+            }
         }
 
         pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
@@ -504,40 +750,12 @@ pub fn Runtime(comptime Slot: type) type {
                     unreachable;
                 },
                 .priority => |*priority| blk: {
-                    if (priority.order.len == 0) break :blk null;
                     const now = std.Io.Clock.awake.now(io).nanoseconds;
-                    const first = priority.children[priority.order[0]];
-                    const first_state = self.aggregate(first.node, slots);
-                    switch (first_state) {
-                        .ready, .idle => {
-                            priority.failover_started_ns = null;
-                            priority.failover_can_start = true;
-                        },
-                        .connecting => {
-                            if (priority.failover_started_ns == null and
-                                priority.failover_can_start)
-                            {
-                                priority.failover_started_ns = now;
-                            }
-                            priority.failover_can_start = false;
-                        },
-                        .transient_failure => {
-                            priority.failover_started_ns = null;
-                            priority.failover_can_start = false;
-                        },
-                    }
-                    const failover_open = self.priority_failover_timeout_ns <= 0 or switch (first_state) {
-                        .ready, .idle => false,
-                        .transient_failure => true,
-                        .connecting => timer: {
-                            const started = priority.failover_started_ns orelse
-                                break :timer true;
-                            break :timer now >= started +|
-                                self.priority_failover_timeout_ns;
-                        },
-                    };
-                    if (!failover_open) {
-                        if (first_state == .ready) {
+                    const info = self.evaluatePriority(priority, slots, now);
+                    const active_index = info.active_index orelse break :blk null;
+                    if (!info.failover_open) {
+                        const first = priority.children[priority.order[active_index]];
+                        if (self.aggregate(first.node, slots) == .ready) {
                             break :blk try self.pickNode(
                                 first.node,
                                 slots,
@@ -1227,4 +1445,77 @@ test "ordinary priority propagates nested pick_first shuffleAddressList" {
     try std.testing.expect(runtime.shufflesAddressList(&.{ "high", "a" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{ "high", "b" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{"low"}));
+}
+
+test "ordinary priority pathState deactivates a lower child after the higher recovers" {
+    const FakeConnection = struct {
+        pub fn isReusable(_: *const @This()) bool {
+            return true;
+        }
+    };
+    const FakeOutlier = struct {
+        pub fn isEjected(_: *const @This()) bool {
+            return false;
+        }
+    };
+    const FakeTarget = struct {
+        hierarchical_path: []const []const u8,
+    };
+    const FakeEndpoint = union(enum) {
+        custom: FakeTarget,
+
+        pub fn hierarchicalPath(self: *const @This()) []const []const u8 {
+            return switch (self.*) {
+                inline else => |target| target.hierarchical_path,
+            };
+        }
+    };
+    const FakeSlot = struct {
+        endpoint: FakeEndpoint,
+        connection: ?FakeConnection = .{},
+        disabled: bool = false,
+        next_attempt_at_ns: ?i96 = null,
+        weighted_target_ejected: bool = false,
+        outlier: FakeOutlier = .{},
+    };
+    const leaf = service_config.LoadBalancingNode{ .round_robin = {} };
+    const children = [_]service_config.PriorityConfig.Child{
+        .{ .name = "high", .child = &leaf },
+        .{ .name = "low", .child = &leaf },
+    };
+    const priorities = [_][]const u8{ "high", "low" };
+    const root = service_config.LoadBalancingNode{ .priority = .{
+        .children = &children,
+        .priorities = &priorities,
+    } };
+    const high_path = [_][]const u8{"high"};
+    const low_path = [_][]const u8{"low"};
+    var slots = [_]FakeSlot{
+        .{ .endpoint = .{ .custom = .{ .hierarchical_path = &high_path } } },
+        .{ .endpoint = .{ .custom = .{ .hierarchical_path = &low_path } } },
+    };
+    var runtime = try Runtime(FakeSlot).initWithPriorityTimeouts(
+        std.testing.allocator,
+        &root,
+        10 * std.time.ns_per_s,
+        200 * std.time.ns_per_ms,
+    );
+    defer runtime.deinit();
+    const t0: i96 = 1000;
+    var low = runtime.pathState(&slots, &low_path, t0);
+    try std.testing.expect(!low.active);
+    // The high child fails and enters retry backoff: the low child activates.
+    slots[0].connection = null;
+    slots[0].next_attempt_at_ns = t0 + 1;
+    low = runtime.pathState(&slots, &low_path, t0 + 10);
+    try std.testing.expect(low.active);
+    // The high child recovers: the low child gets a deactivation deadline.
+    slots[0].connection = .{};
+    low = runtime.pathState(&slots, &low_path, t0 + 20);
+    try std.testing.expect(low.active);
+    const deadline = low.deactivate_at orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline >= t0 + 20 + 200 * std.time.ns_per_ms);
+    low = runtime.pathState(&slots, &low_path, deadline + 1);
+    try std.testing.expect(!low.active);
+    try std.testing.expect(low.deactivate_now);
 }

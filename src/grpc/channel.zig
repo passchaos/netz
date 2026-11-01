@@ -414,12 +414,16 @@ pub const Options = struct {
     /// grpc-core priority child failover timeout. Null uses 10 seconds; zero
     /// makes lower priorities eligible immediately.
     priority_failover_timeout: ?std.Io.Duration = null,
+    /// How long a lower-priority transport stays connected after a higher
+    /// priority becomes READY/IDLE. Null uses grpc-core's 15 minutes.
+    priority_deactivation_timeout: ?std.Io.Duration = null,
 
     pub fn validate(self: Options) error{InvalidChannelOptions}!void {
         try self.backoff.validate();
         if (self.resolver_min_refresh_interval.nanoseconds < 0) return error.InvalidChannelOptions;
         if (self.connection_attempt_delay) |delay| if (delay.nanoseconds <= 0) return error.InvalidChannelOptions;
         if (self.priority_failover_timeout) |timeout| if (timeout.nanoseconds < 0) return error.InvalidChannelOptions;
+        if (self.priority_deactivation_timeout) |timeout| if (timeout.nanoseconds < 0) return error.InvalidChannelOptions;
     }
 };
 
@@ -808,11 +812,13 @@ pub const Channel = struct {
         var result = try init(allocator, io, target, resolved);
         errdefer result.deinit();
         if (owns_composite) {
-            result.weighted_target_runtime = try .initWithPriorityFailoverTimeout(
+            result.weighted_target_runtime = try .initWithPriorityTimeouts(
                 allocator,
                 balancing.root orelse return error.InvalidChannelOptions,
                 (options.priority_failover_timeout orelse
                     std.Io.Duration.fromSeconds(10)).nanoseconds,
+                (options.priority_deactivation_timeout orelse
+                    std.Io.Duration.fromSeconds(15 * 60)).nanoseconds,
             );
             result.selection_policy = if (balancing.policy == .priority)
                 .priority
@@ -1053,7 +1059,20 @@ pub const Channel = struct {
         try self.ensureHostResolution(false, deadline);
         var ready_count: usize = 0;
         var refresh_requested = false;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         for (self.slots, 0..) |*slot, index| {
+            if (self.weighted_target_runtime) |*runtime| {
+                const state = runtime.pathState(
+                    self.slots,
+                    slot.endpoint.hierarchicalPath(),
+                    now,
+                );
+                if (state.deactivate_now) {
+                    if (slot.connection != null) slot.closeConnection();
+                    continue;
+                }
+                if (!state.active) continue;
+            }
             if (slot.connection != null) {
                 self.noteWarmedConnection(index);
                 ready_count += 1;
@@ -2076,6 +2095,15 @@ pub const Channel = struct {
         var earliest = self.outlier_next_evaluation_ns;
         if (self.weighted_target_runtime) |*runtime| {
             if (runtime.nextOutlierDeadline()) |candidate| {
+                earliest = if (earliest) |current|
+                    @min(current, candidate)
+                else
+                    candidate;
+            }
+            if (runtime.nextPriorityDeadline(
+                self.slots,
+                std.Io.Clock.awake.now(self.io).nanoseconds,
+            )) |candidate| {
                 earliest = if (earliest) |current|
                     @min(current, candidate)
                 else

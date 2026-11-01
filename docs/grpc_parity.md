@@ -723,9 +723,16 @@ reporting a failure or requesting re-resolution. A later higher-priority
 failure cancels the countdown and reactivates the lower child, which reconnects
 on demand. Focused regressions cover both the countdown closing a live lower
 transport and reactivation through the existing failover tests. The full gRPC
-Debug gate passes 561/561 with these changes. Lazy activation and the
-deactivation timer currently apply to SharedChannel's background owners; the
-ordinary Channel still warms every endpoint during each call.
+Debug gate passes 562/562 with these changes.
+
+The ordinary Channel now applies the same priority state machine. Its warm
+pass skips endpoints outside the active priority slice, closes a slot whose
+deactivation deadline elapsed, and includes the failover/deactivation deadline
+in `earliestAttempt` so a waiting call wakes and re-evaluates at the exact
+timer. `Channel.Options.priority_deactivation_timeout` overrides the default
+15-minute interval. Regressions cover an unconfigured lower endpoint never
+being attempted and a deterministic runtime state test for activation,
+recovery and deactivation.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.
