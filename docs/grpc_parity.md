@@ -685,6 +685,13 @@ high child is IDLE before its first attempt and TRANSIENT_FAILURE during
 backoff; the failover interval therefore primarily guards a high child whose
 active connection attempt outlives the window.
 
+Both owners now honor `ignoreReresolutionRequests`. A connection failure under
+such a priority child no longer forwards a host re-resolution request from that
+child to the parent; nested priority flags compose, and paths outside the
+flagged child still request refresh normally. Explicit application re-resolution
+entry points remain unaffected. The recursive query lives in
+`src/grpc/channel/tree_query.zig`, shared by both runtimes.
+
 SharedChannel now also applies grpc-core child retention to priority trees.
 When a config update removes a priority child, its subtree and matching
 endpoint transports are retained for `removed_child_retention` (15 minutes by

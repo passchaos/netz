@@ -1051,6 +1051,7 @@ pub const Channel = struct {
         try self.prepareSlots();
         try self.ensureHostResolution(false, deadline);
         var ready_count: usize = 0;
+        var refresh_requested = false;
         for (self.slots, 0..) |*slot, index| {
             if (slot.connection != null) {
                 self.noteWarmedConnection(index);
@@ -1073,6 +1074,8 @@ pub const Channel = struct {
                 if (slot.endpoint.retryable(err)) {
                     slot.consecutive_failures +|= 1;
                     self.scheduleBackoff(slot);
+                    refresh_requested =
+                        refresh_requested or !self.ignoresReresolution(slot);
                 } else {
                     slot.disabled = true;
                 }
@@ -1092,7 +1095,7 @@ pub const Channel = struct {
         if (ready_count == 0) {
             self.setConnectivityState(.transient_failure);
             if (self.host_resolution) |*resolution| {
-                resolution.state.requestRefresh();
+                if (refresh_requested) resolution.state.requestRefresh();
             }
             return error.ConnectionUnavailable;
         }
@@ -1434,7 +1437,9 @@ pub const Channel = struct {
                         retryable_failure = retryable_failure or
                             retryable.load(.acquire);
                         if (self.host_resolution) |*resolution| {
-                            resolution.state.requestRefresh();
+                            if (self.anyReresolutionRequested()) {
+                                resolution.state.requestRefresh();
+                            }
                             retryable_failure = true;
                         }
                         self.setConnectivityState(.transient_failure);
@@ -1490,7 +1495,9 @@ pub const Channel = struct {
                     slot.consecutive_failures +|= 1;
                     self.scheduleBackoff(slot);
                     if (self.host_resolution) |*resolution| {
-                        resolution.state.requestRefresh();
+                        if (!self.ignoresReresolution(slot)) {
+                            resolution.state.requestRefresh();
+                        }
                     }
                     if (!wait_for_ready and self.slots.len == 1) {
                         self.setConnectivityState(.transient_failure);
@@ -1502,7 +1509,9 @@ pub const Channel = struct {
                 return self.select(index, &slot.connection.?);
             }
             if (self.host_resolution) |*resolution| {
-                resolution.state.requestRefresh();
+                if (self.anyReresolutionRequested()) {
+                    resolution.state.requestRefresh();
+                }
                 retryable_failure = true;
             }
             if (!wait_for_ready or !retryable_failure) {
@@ -2135,9 +2144,20 @@ pub const Channel = struct {
         if (!self.hasReadyConnection()) {
             self.setConnectivityState(.transient_failure);
             if (self.host_resolution) |*resolution| {
-                resolution.state.requestRefresh();
+                if (!self.ignoresReresolution(slot)) resolution.state.requestRefresh();
             }
         }
+    }
+
+    fn ignoresReresolution(self: *const Channel, slot: *const Slot) bool {
+        const runtime = self.weighted_target_runtime orelse return false;
+        return runtime.ignoresReresolution(slot.endpoint.hierarchicalPath());
+    }
+
+    fn anyReresolutionRequested(self: *const Channel) bool {
+        if (self.weighted_target_runtime == null) return true;
+        for (self.slots) |*slot| if (!self.ignoresReresolution(slot)) return true;
+        return false;
     }
 
     fn hasReadyConnection(self: *const Channel) bool {

@@ -525,6 +525,9 @@ pub const State = struct {
         if (self.closed or worker.retired) return;
         const source = worker.source;
         if (source.resolver != null) {
+            if (self.weighted_target) |*runtime| {
+                if (runtime.ignoresReresolution(source.endpoint.hierarchicalPath())) return;
+            }
             source.refresh_requested = true;
             source.wake.set(self.io);
         }

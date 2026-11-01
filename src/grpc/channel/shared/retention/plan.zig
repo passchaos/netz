@@ -3,7 +3,7 @@ const std = @import("std");
 const State = @import("../state.zig").State;
 const Generation = @import("../config_generation.zig").Generation;
 const Transfer = @import("../weighted_target/state_transfer.zig").Plan(State.WeightedTarget);
-const query = @import("../weighted_target/tree_query.zig");
+const query = @import("../../tree_query.zig");
 const Manager = @import("manager.zig").Manager;
 const Prepared = @import("../update/prepare.zig").Prepared;
 

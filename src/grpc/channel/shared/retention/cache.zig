@@ -1,7 +1,7 @@
 //! Deactivated named children own their old tree, config arena and endpoints.
 const std = @import("std");
 const Generation = @import("../config_generation.zig").Generation;
-const query = @import("../weighted_target/tree_query.zig");
+const query = @import("../../tree_query.zig");
 const outliers = @import("../weighted_target/outlier.zig");
 const wrr = @import("../weighted_target/weighted_round_robin.zig");
 const Config = @import("../../../service_config.zig").WeightedRoundRobinConfig;

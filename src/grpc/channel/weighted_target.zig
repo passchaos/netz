@@ -181,6 +181,10 @@ pub fn Runtime(comptime Slot: type) type {
             return outlier_support.nextDeadline(self.root);
         }
 
+        pub fn ignoresReresolution(self: *const Self, path: []const []const u8) bool {
+            return @import("tree_query.zig").ignoresReresolution(self.root, path);
+        }
+
         pub fn configureSlots(self: *Self, slots: []Slot) BuildError!void {
             for (slots) |*slot| {
                 slot.least_request_enabled = self.pathUsesLeastRequest(
@@ -1150,4 +1154,36 @@ test "ordinary weighted target outlier membership is allocation transactional" {
         Harness.run,
         .{ &root, &a_path, &b_path },
     );
+}
+
+test "ordinary priority honors ignoreReresolutionRequests" {
+    const FakeSlot = struct {};
+    const leaf = service_config.LoadBalancingNode{ .round_robin = {} };
+    const inner_children = [_]service_config.PriorityConfig.Child{
+        .{ .name = "a", .child = &leaf, .ignore_reresolution_requests = true },
+        .{ .name = "b", .child = &leaf },
+    };
+    const inner_priorities = [_][]const u8{ "a", "b" };
+    const inner = service_config.LoadBalancingNode{ .priority = .{
+        .children = &inner_children,
+        .priorities = &inner_priorities,
+    } };
+    const outer_children = [_]service_config.PriorityConfig.Child{
+        .{ .name = "high", .child = &inner, .ignore_reresolution_requests = true },
+        .{ .name = "low", .child = &leaf },
+    };
+    const outer_priorities = [_][]const u8{ "high", "low" };
+    const outer = service_config.LoadBalancingNode{ .priority = .{
+        .children = &outer_children,
+        .priorities = &outer_priorities,
+    } };
+    var runtime = try Runtime(FakeSlot).init(std.testing.allocator, &outer);
+    defer runtime.deinit();
+    try std.testing.expect(runtime.ignoresReresolution(&.{"high"}));
+    try std.testing.expect(runtime.ignoresReresolution(&.{ "high", "b" }));
+    try std.testing.expect(!runtime.ignoresReresolution(&.{"low"}));
+    var inner_runtime = try Runtime(FakeSlot).init(std.testing.allocator, &inner);
+    defer inner_runtime.deinit();
+    try std.testing.expect(inner_runtime.ignoresReresolution(&.{"a"}));
+    try std.testing.expect(!inner_runtime.ignoresReresolution(&.{"b"}));
 }
