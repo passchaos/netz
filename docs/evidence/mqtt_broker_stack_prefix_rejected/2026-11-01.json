@@ -1,0 +1,69 @@
+{
+  "date": "2026-11-01",
+  "status": "rejected",
+  "experiment": "Reduce the zio coroutine initial committed stack prefix from 256 KiB to 64 KiB for the MQTT broker example.",
+  "motivation": "The broker RSS gap (3.8-5.9 MiB netz vs 3.0-3.5 MiB Mosquitto in the current QoS 1/QoS 2 matrices) suggested per-task stack pages as a contributor.",
+  "implementation": "Added netz.runtime.Backend.initWithOptions with stack_maximum_bytes/stack_committed_bytes, then initialized examples/mqtt_broker.zig with stack_committed_bytes=64*1024. The option was reverted after measurement.",
+  "commands": [
+    "zig build test-lib -Dtest-filter='runtime backend' --summary all",
+    "MQTT_MATRIX_ROOT=/tmp/netz-mqtt-matrix-stack64-2026-11-01 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast"
+  ],
+  "verification": {
+    "runtime_tests": "145/145 passed",
+    "matrix": "5 shapes, 4 ABBA samples each, 40 broker runs, complete=true"
+  },
+  "comparison": [
+    {
+      "shape": "serial",
+      "baseline_netz_publishes_per_s": 57246,
+      "candidate_netz_publishes_per_s": 61499,
+      "baseline_ratio": 1.151,
+      "candidate_ratio": 1.138,
+      "baseline_rss_kib": 3824,
+      "candidate_rss_kib": 4164
+    },
+    {
+      "shape": "publishers-32",
+      "baseline_netz_publishes_per_s": 80792,
+      "candidate_netz_publishes_per_s": 81102,
+      "baseline_ratio": 1.103,
+      "candidate_ratio": 1.067,
+      "baseline_rss_kib": 5172,
+      "candidate_rss_kib": 5512
+    },
+    {
+      "shape": "fanout-32",
+      "baseline_netz_publishes_per_s": 6146,
+      "candidate_netz_publishes_per_s": 6148,
+      "baseline_ratio": 1.112,
+      "candidate_ratio": 1.095,
+      "baseline_rss_kib": 5124,
+      "candidate_rss_kib": 5456
+    },
+    {
+      "shape": "balanced-32x32",
+      "baseline_netz_publishes_per_s": 5937,
+      "candidate_netz_publishes_per_s": 6029,
+      "baseline_ratio": 1.157,
+      "candidate_ratio": 1.155,
+      "baseline_rss_kib": 10434,
+      "candidate_rss_kib": 10360
+    },
+    {
+      "shape": "large-payload",
+      "baseline_netz_publishes_per_s": 30338,
+      "candidate_netz_publishes_per_s": 29508,
+      "baseline_ratio": 1.014,
+      "candidate_ratio": 0.986,
+      "baseline_rss_kib": 5498,
+      "candidate_rss_kib": 6658
+    }
+  ],
+  "conclusions": [
+    "The 64-KiB initial stack prefix did not reduce broker RSS: it increased median RSS in four of five shapes (serial +340 KiB, publishers-32 +340 KiB, fanout-32 +332 KiB, large-payload +1160 KiB) and was only slightly lower in balanced-32x32.",
+    "Throughput was neutral or slightly worse: serial and balanced improved, publishers-32/fanout-32 ratios fell modestly, and large-payload fell from 1.014x to 0.986x versus Mosquitto.",
+    "Stack growth and pool retention therefore make the initial prefix ineffective for this workload; the code change and example opt-in were reverted.",
+    "The remaining broker RSS gap needs a different target, such as allocator/arena retention or per-connection buffer sizing, rather than coroutine stack prefixes."
+  ],
+  "artifacts": "2026-11-01/"
+}

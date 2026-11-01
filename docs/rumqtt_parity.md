@@ -1620,6 +1620,15 @@ values are noisier. Full per-sample records, build logs, environment hashes and
 the strict checker output are in
 `docs/evidence/mqtt_broker_matrix/2026-11-01.json`.
 
+A 64-KiB initial coroutine-stack prefix was tested as an RSS reduction and
+rejected. Across the same five-shape ABBA matrix it raised median broker RSS in
+four shapes (serial +340 KiB, publishers-32 +340 KiB, fanout-32 +332 KiB,
+large-payload +1,160 KiB), was only slightly lower in balanced-32x32, and moved
+the large-payload throughput ratio from 1.014× to 0.986×. Stack growth and pool
+retention make the initial prefix ineffective here; the code change and the
+broker-example opt-in were reverted. The comparison and both matrix summaries
+are in `docs/evidence/mqtt_broker_stack_prefix_rejected/2026-11-01.json`.
+
 
 The same driver and strict artifact pipeline now cover QoS 2. Subscriber tasks
 consume interleaved PUBLISH and PUBREL events through one socket reader, track
