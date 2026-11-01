@@ -34,6 +34,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
     const balancing = @import("balancing.zig").resolve(if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{}, options.channel.selection_policy);
+    if (balancing.policy == .priority) return error.InvalidSharedOptions;
     const policy = @import("balancing.zig").select(balancing, options.channel.selection_policy, if (target == .resolved) target.resolved.policy else .pick_first);
     if (policy == .weighted_target and balancing.policy != .weighted_target) return error.InvalidSharedOptions;
     var weighted_target = if (policy == .weighted_target)

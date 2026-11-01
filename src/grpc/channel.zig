@@ -777,6 +777,7 @@ pub const Channel = struct {
         composite_owned: bool,
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
+        if (balancing.policy == .priority) return error.InvalidChannelOptions;
         var resolved = options;
         const owns_weighted_target = !composite_owned and
             balancing.policy == .weighted_target;
@@ -790,6 +791,7 @@ pub const Channel = struct {
                 .ring_hash => .ring_hash,
                 .weighted_round_robin => .weighted_round_robin,
                 .weighted_target => .round_robin,
+                .priority => .round_robin,
             };
         }
         if (resolved.shuffle_address_list == null and balancing.configured) {

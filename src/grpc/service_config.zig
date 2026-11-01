@@ -58,6 +58,7 @@ pub const LoadBalancingPolicy = enum {
     ring_hash,
     weighted_round_robin,
     weighted_target,
+    priority,
 };
 
 pub const max_load_balancing_depth: usize = 32;
@@ -117,6 +118,17 @@ pub const WeightedTargetConfig = struct {
     };
 };
 
+pub const PriorityConfig = struct {
+    children: []const Child = &.{},
+    priorities: []const []const u8 = &.{},
+
+    pub const Child = struct {
+        name: []const u8,
+        ignore_reresolution_requests: bool = false,
+        child: *const LoadBalancingNode,
+    };
+};
+
 /// Arena-owned recursive representation of the selected service-config LB
 /// policy. Leaf policies retain their complete parsed configuration; composite
 /// policies point at child nodes in the same ServiceConfig arena. This is the
@@ -128,6 +140,7 @@ pub const LoadBalancingNode = union(enum) {
     ring_hash: RingHashConfig,
     weighted_round_robin: WeightedRoundRobinConfig,
     weighted_target: WeightedTargetConfig,
+    priority: PriorityConfig,
     outlier_detection: struct {
         config: OutlierDetectionConfig,
         child: *const LoadBalancingNode,
@@ -141,6 +154,7 @@ pub const LoadBalancingNode = union(enum) {
             .ring_hash => .ring_hash,
             .weighted_round_robin => .weighted_round_robin,
             .weighted_target => .weighted_target,
+            .priority => .priority,
             .outlier_detection => |wrapper| wrapper.child.leafPolicy(),
         };
     }
@@ -154,6 +168,7 @@ pub const LoadBalancingConfig = struct {
     ring_hash: RingHashConfig = .{},
     weighted_round_robin: WeightedRoundRobinConfig = .{},
     weighted_target: WeightedTargetConfig = .{},
+    priority: PriorityConfig = .{},
     outlier_detection: ?OutlierDetectionConfig = null,
     /// Null means no LB policy was configured. The pointed tree is owned by
     /// the ServiceConfig arena and remains valid until `ServiceConfig.deinit`.
@@ -626,6 +641,22 @@ fn parseLoadBalancingAt(
                     .weighted_target = weighted_target,
                 }, .{ .weighted_target = weighted_target });
             }
+            if (std.mem.eql(
+                u8,
+                item.key_ptr.*,
+                "priority_experimental",
+            )) {
+                const priority = try parsePriority(
+                    allocator,
+                    item.value_ptr.*,
+                    depth,
+                );
+                return configuredLoadBalancing(allocator, .{
+                    .policy = .priority,
+                    .configured = true,
+                    .priority = priority,
+                }, .{ .priority = priority });
+            }
             if (std.mem.eql(u8, item.key_ptr.*, "round_robin")) {
                 const options = switch (item.value_ptr.*) {
                     .object => |value| value,
@@ -894,6 +925,106 @@ fn lessWeightedTarget(
     _: void,
     left: WeightedTargetConfig.Target,
     right: WeightedTargetConfig.Target,
+) bool {
+    return std.mem.order(u8, left.name, right.name) == .lt;
+}
+
+fn parsePriority(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    depth: usize,
+) Error!PriorityConfig {
+    const options = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidServiceConfig,
+    };
+    if (options.count() != 2) return error.InvalidServiceConfig;
+    const children_value = options.get("children") orelse
+        return error.InvalidServiceConfig;
+    const priorities_value = options.get("priorities") orelse
+        return error.InvalidServiceConfig;
+    const children_object = switch (children_value) {
+        .object => |object| object,
+        else => return error.InvalidServiceConfig,
+    };
+    const priorities_array = switch (priorities_value) {
+        .array => |array| array.items,
+        else => return error.InvalidServiceConfig,
+    };
+
+    const children = try allocator.alloc(
+        PriorityConfig.Child,
+        children_object.count(),
+    );
+    var index: usize = 0;
+    var iterator = children_object.iterator();
+    while (iterator.next()) |entry| : (index += 1) {
+        const name = entry.key_ptr.*;
+        if (name.len == 0) return error.InvalidServiceConfig;
+        const child_object = switch (entry.value_ptr.*) {
+            .object => |object| object,
+            else => return error.InvalidServiceConfig,
+        };
+        const config_value = child_object.get("config") orelse
+            return error.InvalidServiceConfig;
+        var ignore_reresolution_requests = false;
+        if (child_object.get("ignoreReresolutionRequests")) |ignore_value| {
+            ignore_reresolution_requests = switch (ignore_value) {
+                .bool => |flag| flag,
+                else => return error.InvalidServiceConfig,
+            };
+        }
+        var child_iterator = child_object.iterator();
+        while (child_iterator.next()) |child_entry| {
+            if (!std.mem.eql(u8, child_entry.key_ptr.*, "config") and
+                !std.mem.eql(
+                    u8,
+                    child_entry.key_ptr.*,
+                    "ignoreReresolutionRequests",
+                ))
+            {
+                return error.InvalidServiceConfig;
+            }
+        }
+        const child_entries = switch (config_value) {
+            .array => |array| array.items,
+            else => return error.InvalidServiceConfig,
+        };
+        const child = try parseLoadBalancingAt(allocator, .{
+            .loadBalancingConfig = child_entries,
+        }, depth + 1);
+        children[index] = .{
+            .name = name,
+            .ignore_reresolution_requests = ignore_reresolution_requests,
+            .child = child.root orelse return error.InvalidServiceConfig,
+        };
+    }
+    std.mem.sort(PriorityConfig.Child, children, {}, lessPriorityChild);
+
+    const priorities = try allocator.alloc([]const u8, priorities_array.len);
+    for (priorities_array, 0..) |priority_value, priority_index| {
+        const name = switch (priority_value) {
+            .string => |text| text,
+            else => return error.InvalidServiceConfig,
+        };
+        if (name.len == 0) return error.InvalidServiceConfig;
+        var found = false;
+        for (children) |child| {
+            if (std.mem.eql(u8, child.name, name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return error.InvalidServiceConfig;
+        priorities[priority_index] = name;
+    }
+    return .{ .children = children, .priorities = priorities };
+}
+
+fn lessPriorityChild(
+    _: void,
+    left: PriorityConfig.Child,
+    right: PriorityConfig.Child,
 ) bool {
     return std.mem.order(u8, left.name, right.name) == .lt;
 }
@@ -1554,6 +1685,85 @@ test "gRPC service config parses outlier detection and child policy" {
         ,
         \\{"loadBalancingConfig":[{"outlier_detection_experimental":{
         \\ "childPolicy":[{"unknown":{}}]}}]}
+        ,
+    }) |json| try std.testing.expectError(
+        error.InvalidServiceConfig,
+        ServiceConfig.parse(std.testing.allocator, json),
+    );
+}
+
+test "gRPC service config parses priority children and order" {
+    var parsed = try ServiceConfig.parse(std.testing.allocator,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{
+        \\  "high":{"config":[{"round_robin":{}}],
+        \\   "ignoreReresolutionRequests":true},
+        \\  "low":{"config":[{"pick_first":{}}]}},
+        \\ "priorities":["high","low"]}}]}
+    );
+    defer parsed.deinit();
+    const balancing = parsed.loadBalancingConfig();
+    try std.testing.expectEqual(LoadBalancingPolicy.priority, balancing.policy);
+    const root = balancing.root.?;
+    try std.testing.expectEqual(LoadBalancingPolicy.priority, root.leafPolicy());
+    switch (root.*) {
+        .priority => |priority| {
+            try std.testing.expectEqual(@as(usize, 2), priority.children.len);
+            try std.testing.expectEqualStrings("high", priority.children[0].name);
+            try std.testing.expect(priority.children[0].ignore_reresolution_requests);
+            try std.testing.expect(priority.children[0].child.* == .round_robin);
+            try std.testing.expectEqualStrings("low", priority.children[1].name);
+            try std.testing.expect(!priority.children[1].ignore_reresolution_requests);
+            try std.testing.expect(priority.children[1].child.* == .pick_first);
+            try std.testing.expectEqual(@as(usize, 2), priority.priorities.len);
+            try std.testing.expectEqualStrings("high", priority.priorities[0]);
+            try std.testing.expectEqualStrings("low", priority.priorities[1]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    for ([_][]const u8{
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}]}}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{},"priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}]}},
+        \\ "priorities":["missing"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{}},"priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}],
+        \\  "unknown":true}},"priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}],
+        \\  "ignoreReresolutionRequests":"yes"}},"priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}]}},
+        \\ "priorities":[""]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"":{"config":[{"round_robin":{}}]}},
+        \\ "priorities":[""]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[]}},"priorities":["high"]}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{},"priorities":[],"extra":true}}]}
+        ,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"unknown":{}}]}},
+        \\ "priorities":["high"]}}]}
         ,
     }) |json| try std.testing.expectError(
         error.InvalidServiceConfig,

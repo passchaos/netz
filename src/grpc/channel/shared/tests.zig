@@ -406,3 +406,24 @@ test "gRPC shared channel UNIMPLEMENTED disables health checking for its connect
     try std.testing.expectEqualStrings("health-disabled", response.message.?.payload);
     try peer.await(io);
 }
+
+test "gRPC shared channel rejects parsed priority policy" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.expectError(
+        error.InvalidSharedOptions,
+        shared.SharedChannel.init(
+            allocator,
+            io,
+            .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+            .{
+                .service_config_json =
+                    \\{"loadBalancingConfig":[{"priority_experimental":{
+                    \\ "children":{"high":{"config":[{"round_robin":{}}]}},
+                    \\ "priorities":["high"]}}]}
+                ,
+            },
+        ),
+    );
+}

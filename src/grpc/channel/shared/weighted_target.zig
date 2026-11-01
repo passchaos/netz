@@ -227,6 +227,7 @@ pub fn Runtime(comptime State: type) type {
                     weighted,
                     path,
                 ),
+                .priority => error.InvalidSharedOptions,
                 .outlier_detection => |wrapper| self.buildOutlier(
                     wrapper,
                     path,

@@ -185,6 +185,7 @@ pub fn Runtime(comptime Slot: type) type {
                     weighted,
                     path,
                 ),
+                .priority => error.InvalidChannelOptions,
                 .outlier_detection => |wrapper| self.buildOutlier(
                     wrapper,
                     path,

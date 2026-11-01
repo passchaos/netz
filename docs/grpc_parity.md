@@ -650,6 +650,15 @@ also exposed and fixed a pre-existing SharedChannel leak when a State initialize
 returned before cleanup ownership was installed. Parser evidence is recorded in
 `docs/evidence/grpc_weighted_target_parser/2026-10-31.json`.
 
+The recursive parser now also retains grpc-core's `priority_experimental`
+policy. Named children each own a recursively parsed child policy and an
+optional `ignoreReresolutionRequests` flag, while the ordered `priorities`
+list is validated against the child names. Both Channel owners still reject a
+parsed priority policy at initialization (`InvalidChannelOptions` /
+`InvalidSharedOptions`) instead of silently flattening it to round-robin;
+runtime execution remains explicit integration work. Focused parser and
+rejection tests pass in the service-config and weighted-target suites.
+
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.
 Every background endpoint owner leaves IDLE concurrently. Parent state follows

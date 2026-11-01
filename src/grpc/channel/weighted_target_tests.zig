@@ -784,3 +784,28 @@ const OutlierPeer = struct {
         }
     }
 };
+
+test "gRPC ordinary channel rejects parsed priority policy" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"loadBalancingConfig":[{"priority_experimental":{
+        \\ "children":{"high":{"config":[{"round_robin":{}}]}},
+        \\ "priorities":["high"]}}]}
+    );
+    defer config.deinit();
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+    };
+    try std.testing.expectError(
+        error.InvalidChannelOptions,
+        channel.Channel.initWithServiceConfig(
+            allocator,
+            io,
+            .{ .resolved = .{ .endpoints = &endpoints } },
+            .{},
+            &config,
+        ),
+    );
+}
