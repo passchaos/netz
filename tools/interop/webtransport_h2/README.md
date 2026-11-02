@@ -68,3 +68,11 @@ stream and DATAGRAM through one accepted Session. The native listener returns
 the exact stream reply, consumes and retires that stream, replies to the
 DATAGRAM, and sends CLOSE code 19. The runner requires a separate listener
 transcript and records it under `native_listener` in its JSON report.
+
+The listener runs with one accept worker, one connection slot and a 250-ms
+connection admission budget. Before the successful Session, the Python client
+keeps one TCP socket silent before TLS, completes TLS/h2 on another socket
+without sending the HTTP/2 preface, and sends only a partial preface on a third
+socket. Each must close within the peer's bounded wait. The subsequent Session
+must still exchange the stream, DATAGRAM and CLOSE above. The report records
+these three closures under `native_listener.connection_admission`.

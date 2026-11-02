@@ -18,6 +18,10 @@ pub const Options = struct {
     max_connections: usize = 64,
     max_pending_requests: usize = 256,
     accept_workers: usize = 4,
+    /// One awake budget from accepted TCP socket through TLS/HTTP2 bootstrap
+    /// and owner admission. Idle TCP accept does not consume this budget.
+    /// Timeout releases the slot without affecting established connections.
+    connection_timeout: std.Io.Duration = .fromSeconds(10),
     accept_failure_backoff: std.Io.Duration = .fromMilliseconds(10),
     endpoint: endpoint.Options = .{},
 
@@ -27,7 +31,8 @@ pub const Options = struct {
             self.max_pending_requests == 0 or
             self.accept_workers == 0 or
             self.accept_workers > self.max_connections or
-            self.accept_failure_backoff.nanoseconds <= 0)
+            self.accept_failure_backoff.nanoseconds <= 0 or
+            self.connection_timeout.nanoseconds <= 0)
         {
             return error.InvalidListenerOptions;
         }
@@ -60,82 +65,8 @@ pub const Accepted = struct {
     }
 };
 
-pub const OwnedListener = union(enum) {
-    cleartext: http2.runtime.Server,
-    tls: http2.runtime.TlsServer,
-
-    pub fn io(self: *const OwnedListener) std.Io {
-        return switch (self.*) {
-            .cleartext => |*value| value.io,
-            .tls => |*value| value.io,
-        };
-    }
-
-    pub fn address(self: *const OwnedListener) std.Io.net.IpAddress {
-        return switch (self.*) {
-            .cleartext => |value| value.address(),
-            .tls => |value| value.address(),
-        };
-    }
-
-    fn accept(self: *OwnedListener) http2.runtime.Error!http2.runtime.Connection {
-        return switch (self.*) {
-            .cleartext => |*value| value.accept(),
-            .tls => |*value| value.accept(),
-        };
-    }
-
-    pub fn deinit(self: *OwnedListener) void {
-        switch (self.*) {
-            .cleartext => |*value| value.deinit(),
-            .tls => |*value| value.deinit(),
-        }
-        self.* = undefined;
-    }
-};
-
-pub const ManagedConnection = struct {
-    allocator: std.mem.Allocator,
-    refs: std.atomic.Value(usize) = .init(1),
-    server: endpoint.EndpointServer,
-
-    fn create(
-        allocator: std.mem.Allocator,
-        connection: http2.runtime.Connection,
-        options: endpoint.Options,
-        deadline: std.Io.Clock.Timestamp,
-    ) Error!*ManagedConnection {
-        var owned_connection = connection;
-        var connection_owned = true;
-        errdefer if (connection_owned) owned_connection.closeWithoutCloseNotify();
-        _ = try @import("../../../internal/deadline.zig").usableAwake(owned_connection.io, deadline);
-        try owned_connection.io.checkCancel();
-        const self = try allocator.create(ManagedConnection);
-        errdefer allocator.destroy(self);
-        connection_owned = false;
-        const server = try endpoint.EndpointServer.initWithDeadline(
-            allocator,
-            owned_connection,
-            options,
-            deadline,
-        );
-        self.* = .{
-            .allocator = allocator,
-            .server = server,
-        };
-        return self;
-    }
-
-    fn retain(self: *ManagedConnection) void {
-        _ = self.refs.fetchAdd(1, .monotonic);
-    }
-
-    pub fn release(self: *ManagedConnection) void {
-        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        self.server.deinit();
-        self.allocator.destroy(self);
-    }
-};
+pub const OwnedListener = @import("connection.zig").OwnedListener;
+pub const ManagedConnection = @import("connection.zig").ManagedConnection;
 
 pub const ConnectionSlot = struct {
     generation: u64 = 1,
@@ -243,9 +174,11 @@ pub const State = struct {
         self: *State,
         reservation: Reservation,
         connection: *ManagedConnection,
-    ) bool {
-        self.lock();
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!bool {
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
         defer self.unlock();
+        try self.io.checkCancel();
         if (self.closed) return false;
         const slot = &self.connections[reservation.index];
         if (slot.generation != reservation.generation or
@@ -413,7 +346,7 @@ pub fn acceptLoop(state: *State) std.Io.Cancelable!void {
         };
         var reserved = true;
         defer if (reserved) state.releaseReservation(reservation);
-        const raw = state.listener.accept() catch |err| {
+        const admission = state.listener.accept(state.options.connection_timeout) catch |err| {
             state.releaseReservation(reservation);
             reserved = false;
             state.lock();
@@ -429,6 +362,8 @@ pub fn acceptLoop(state: *State) std.Io.Cancelable!void {
             }
             continue;
         };
+        const raw = admission.connection;
+        const deadline = admission.deadline;
         var raw_owned = true;
         errdefer if (raw_owned) {
             var abandoned = raw;
@@ -438,7 +373,7 @@ pub fn acceptLoop(state: *State) std.Io.Cancelable!void {
             state.allocator,
             raw,
             state.options.endpoint,
-            .fromNow(state.io, .{ .clock = .awake, .raw = state.options.endpoint.operation_timeout }),
+            deadline,
         ) catch |err| {
             raw_owned = false;
             state.releaseReservation(reservation);
@@ -447,7 +382,16 @@ pub fn acceptLoop(state: *State) std.Io.Cancelable!void {
             continue;
         };
         raw_owned = false;
-        if (!state.installConnection(reservation, connection)) {
+        const installed = state.installConnection(reservation, connection, deadline) catch |err| {
+            connection.server.requestShutdownAbortive();
+            connection.release();
+            state.releaseReservation(reservation);
+            reserved = false;
+            if (err == error.Canceled) return error.Canceled;
+            continue;
+        };
+        if (!installed) {
+            connection.server.requestShutdownAbortive();
             connection.release();
             state.releaseReservation(reservation);
             reserved = false;
@@ -494,5 +438,49 @@ fn connectionLoop(
             else => return,
         };
         owned = false;
+    }
+}
+
+test "WebTransport HTTP2 EndpointListener installation preserves reservation after timeout or cancellation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const base = threaded.io();
+    const Mode = enum { expired, wrong_clock, contended, canceled };
+    const Cancel = struct {
+        fn check(_: ?*anyopaque) std.Io.Cancelable!void {
+            return error.Canceled;
+        }
+    };
+    for (std.enums.values(Mode)) |mode| {
+        const listener = try http2.runtime.Server.listen(allocator, base, .{ .ip4 = .loopback(0) }, .{});
+        var slots = [_]ConnectionSlot{.{ .reserved = true }};
+        var requests: [1]?QueuedRequest = .{null};
+        var table = base.vtable.*;
+        if (mode == .canceled) table.checkCancel = Cancel.check;
+        var state = State{
+            .allocator = allocator,
+            .io = .{ .userdata = base.userdata, .vtable = &table },
+            .options = .{},
+            .listener = .{ .cleartext = listener },
+            .connections = &slots,
+            .requests = &requests,
+        };
+        defer state.listener.deinit();
+        // Failed admission cannot inspect or adopt the candidate owner.
+        var candidate: ManagedConnection = undefined;
+        const held = mode == .contended;
+        if (held) state.mutex.lockUncancelable(base);
+        defer if (held) state.mutex.unlock(base);
+        const deadline: std.Io.Clock.Timestamp = switch (mode) {
+            .expired => .fromNow(base, .{ .clock = .awake, .raw = .fromNanoseconds(-1) }),
+            .wrong_clock => .{ .clock = .real, .raw = .zero },
+            .contended => .fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(2) }),
+            .canceled => .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        };
+        try std.testing.expectError(if (mode == .canceled) error.Canceled else error.Timeout, state.installConnection(.{ .index = 0, .generation = 1 }, &candidate, deadline));
+        try std.testing.expect(slots[0].reserved);
+        try std.testing.expect(slots[0].connection == null);
+        try std.testing.expectEqual(@as(u64, 1), slots[0].generation);
     }
 }

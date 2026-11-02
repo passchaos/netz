@@ -34,6 +34,7 @@ test {
     _ = host_connect;
     _ = @import("runtime/connect/deadline_tests.zig");
     _ = @import("runtime/connect/output_deadline_tests.zig");
+    _ = @import("runtime/connect/owned_accept.zig");
     _ = @import("runtime/connect/protocol_error_tests.zig");
     _ = @import("runtime/connect/tls_protocol_error_tests.zig");
     _ = @import("runtime/control/extension_deadline_tests.zig");
@@ -758,6 +759,18 @@ pub const KeepAlive = struct {
         return result;
     }
 };
+
+/// Adopt an accepted TCP socket under one server admission deadline.
+/// Ownership transfers on entry, including expired/wrong-clock deadlines and
+/// cancellation. Listener managers can start the budget after TCP acceptance
+/// and carry it through TLS, HTTP/2 bootstrap and their own owner admission.
+pub fn acceptOwnedStreamWithDeadline(
+    server: anytype,
+    stream: net.Stream,
+    deadline: std.Io.Clock.Timestamp,
+) Error!Connection {
+    return @import("runtime/connect/owned_accept.zig").accept(server, stream, deadline, @TypeOf(server.*).acceptStreamMaybeBefore);
+}
 
 pub const Server = struct {
     io: std.Io,

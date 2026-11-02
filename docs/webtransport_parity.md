@@ -2187,6 +2187,33 @@ Session within the original three-second deadline.
 Machine-readable evidence is recorded in
 `docs/evidence/webtransport_h2_endpoint_listener/2026-10-31.json`.
 
+Listener connection admission now has its own `Options.connection_timeout`
+(default 10 seconds). Its one awake deadline begins after TCP accept and spans
+TLS authentication/ALPN, the HTTP/2 preface and SETTINGS exchange, managed
+EndpointServer creation and connection-table installation. Idle listener waits
+leave the next accepted peer's budget intact. Existing shorter TLS and HTTP/2
+handshake limits still cap their phases. Expiry releases the reserved connection
+slot, aborts an unpublished endpoint and admits the next peer without affecting
+established sibling Sessions; owner creation cannot regain time from the
+separate Session `operation_timeout`.
+
+The HTTP/2 `acceptOwnedStreamWithDeadline` adapter supplies transfer-on-entry
+socket ownership to this manager, including failed deadline validation and
+cancellation. Existing accepted-stream APIs retain their validation-before-
+transfer contract. The owning admission helper lives beside the connection
+logic, and listener transport/managed-owner lifetime now has a separate module.
+Focused regressions cover an idle listener, silent cleartext and TLS peers,
+healthy admission after timeout, expiration between bootstrap and owner
+allocation, and installation with an expired/wrong-clock deadline, occupied
+mutex or cancellation. They also check immediate socket closure on validation,
+cancellation and handshake failure. The independent Python TLS/h2 gate uses
+one worker and one connection slot, holds a pre-TLS socket and two authenticated
+h2 peers (missing and partial prefaces) until each is closed, then completes the
+listener Session's stream/DATAGRAM/CLOSE exchange. This proves bounded handshake
+capacity recovery; it does not claim a limit on established idle Sessions.
+Evidence is recorded in
+`docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03.json`.
+
 The endpoint owners can adopt h2c connections for transport testing, but
 draft-15 Session admission still requires encrypted transport with negotiated
 `h2`; a focused cleartext regression requires EncryptionRequired before a

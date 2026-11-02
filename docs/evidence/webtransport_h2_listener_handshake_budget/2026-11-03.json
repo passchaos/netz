@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "HTTP/2 WebTransport listener connection handshake budget and capacity recovery",
+  "decision": "accepted",
+  "base_head": "19f1a83cbe9a40286f89814b6b2040c519a050cd",
+  "behavior": {
+    "budget": "Options.connection_timeout defaults to 10 seconds; one absolute awake timestamp starts after TCP acceptance and spans TLS/ALPN, HTTP/2 bootstrap, EndpointServer creation and connection-table installation",
+    "idle_accept": "waiting for a new TCP peer does not consume that peer admission budget",
+    "phase_caps": "shorter configured TLS and HTTP/2 handshake deadlines retain their existing caps",
+    "ownership": "acceptOwnedStreamWithDeadline consumes the accepted socket on entry, including validation, cancellation and bootstrap failures; existing validation-before-transfer accepted-stream APIs retain their contracts",
+    "expiry": "owner allocation cannot regain Session operation_timeout; failed installation does not publish the endpoint or mutate the reserved slot, and rollback requests abortive owner shutdown before releasing the reservation",
+    "capacity": "a timed-out handshake releases its reserved connection capacity and the listener continues to accept healthy peers",
+    "structure": "separate listener connection ownership module and HTTP/2 owning admission helper, with nearby unit and socket tests"
+  },
+  "verification": {
+    "targeted_debug": {
+      "command": "zig build test-lib -Dtest-filter='HTTP/2 owned stream admission' -Dtest-filter='HTTP/2 TLS server caller timeout' -Dtest-filter='HTTP/2 accepted TLS stream timeout' -Dtest-filter='WebTransport HTTP2' --summary all",
+      "passed": 214,
+      "total": 214,
+      "exit_code": 0,
+      "log": "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/targeted.Debug.log"
+    },
+    "http2_debug": {
+      "command": "zig build test-lib -Dtest-filter='HTTP/2' -Dtest-filter='WebTransport HTTP2' --summary all",
+      "passed": 1022,
+      "total": 1022,
+      "exit_code": 0,
+      "log": "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/http2.Debug.log"
+    },
+    "package_debug": {
+      "command": "zig build test-package --summary all",
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0,
+      "log": "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/package.Debug.log"
+    },
+    "interop_debug": {
+      "command": "zig build interop-webtransport-h2-python -Doptimize=Debug --summary all -- --report docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "TLSv1.3",
+      "alpn": "h2",
+      "native_listener": {
+        "accepted": true,
+        "capsule_data_fragmentation": true,
+        "close_code": 19,
+        "connection_admission": {
+          "accept_workers": 1,
+          "connection_timeout_ms": 250,
+          "max_connections": 1,
+          "partial_preface_closed": true,
+          "silent_http2_closed": true,
+          "silent_tls_closed": true
+        },
+        "datagram": true,
+        "http2_stream": 1,
+        "stream": true
+      }
+    },
+    "regressions": [
+      "idle TCP listener followed by a silent cleartext peer closes that peer and admits a healthy HTTP/2 connection using the one slot",
+      "silent pre-TLS peer closes under the listener budget; a subsequent authenticated TLS/h2 peer is admitted",
+      "a deterministic one-second clock advance after HTTP/2 bootstrap during first managed-owner allocation exceeds the 100-ms admission deadline, frees that owner, closes its socket and leaves no connected slot",
+      "expired/wrong-clock, contended-mutex and canceled connection installation preserve reserved/generation/owner fields",
+      "owning socket admission closes the transport exactly through validation/cancellation/callback failure and does not call bootstrap on invalid admission",
+      "independent Python peer holds silent pre-TLS, authenticated missing-preface and authenticated partial-preface sockets with one worker/slot and a 250-ms budget; all close and the following Session exchanges exact stream, DATAGRAM and CLOSE"
+    ]
+  },
+  "remaining_scope": "Broader WebTransport browser/proxy coverage, gRPC Core integration policies and cross-protocol superiority evidence remain open; this evidence establishes listener connection admission behavior.",
+  "source_sha256": {
+    "src/http2/runtime.zig": "a479feb396573009138abbe9907194aeb15156e1be19da94eb6de80ddd9329a4",
+    "src/http2/runtime/connect/owned_accept.zig": "e66d1c377b7eaf204ae44261c1037d934d494692fa38e468e642f3acb64f5f68",
+    "src/webtransport/h2/endpoint_listener.zig": "ddcdf9f0f2a4429379a1e2474ce21b006836936851a7c706ee446abc60882a94",
+    "src/webtransport/h2/endpoint_listener/core.zig": "08e4770677ce5a8b0810655262194db61a2be4323b2f9d16d8d261a82ee40a69",
+    "src/webtransport/h2/endpoint_listener/connection.zig": "334f9f39df1b8945731328b1fccf5f7915c82396645471edec3127672f2e7300",
+    "src/webtransport/h2/endpoint_listener/handshake_tests.zig": "4882bdeb334ada29e32221bf2f482441ee5ef663b1eb244f3e5ef89bab1bb7ff",
+    "tools/interop/webtransport_h2/driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
+    "tools/interop/webtransport_h2/run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
+    "tools/interop/webtransport_h2/README.md": "0f02993b390bd4cfc9d3dca1099ebd4b99f9710081070fa25191aeb9b8af5575",
+    "docs/webtransport_parity.md": "86b6a42015daaacadfa741ccd5d412b50a6d7d628c611b53a26232b506e35a37"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/http2.Debug.log": "b1bdaf4d5e7ace350c016b7b39838290c1b4ad98a097445759bb5fdd4b43f839",
+    "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/interop.Debug.json": "812f7085643458531337f83fc223ab4a45b267921a75500cfcc3f2a7daecc6e3",
+    "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/interop.Debug.log": "2779e14f326c6a14062c8be194ee60343489453e968191ac607c0fcd4639bf09",
+    "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/package.Debug.log": "55b6120f7a76e34c8a2a169ba88a1172eb21cd50b9c9ae2dae83ac26db973a30",
+    "docs/evidence/webtransport_h2_listener_handshake_budget/2026-11-03/targeted.Debug.log": "b79ed1a957827ba088965760564c24f1a185ef2c44a111cd25162ae70e2ef15a"
+  }
+}

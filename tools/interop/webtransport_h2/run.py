@@ -78,10 +78,29 @@ def main() -> None:
                     startup += ready
                 if not ready:
                     raise RuntimeError("Netz server failed to start: " + startup)
-                with socket.create_connection(("127.0.0.1", int(ready.split()[1])), timeout=8) as raw:
+                address = ("127.0.0.1", int(ready.split()[1]))
+                admission = {}
+                if mode == "listener":
+                    # One worker and one connection slot: each timeout must
+                    # release both before the next authenticated peer can run.
+                    with socket.create_connection(address, timeout=2) as silent:
+                        assert silent.recv(1) == b"", "silent TLS peer retained the worker"
+                    admission["silent_tls_closed"] = True
+                    for prefix in (b"", b"PRI * HTTP/2.0\r\n"):
+                        with socket.create_connection(address, timeout=2) as raw:
+                            with context(ca, cert, key, False).wrap_socket(raw, server_hostname="origin.internal") as silent:
+                                assert silent.version() == "TLSv1.3" and silent.selected_alpn_protocol() == "h2"
+                                if prefix:
+                                    silent.sendall(prefix)
+                                assert silent.recv(1) == b"", "silent or partial HTTP2 preface retained the worker"
+                    admission.update(silent_http2_closed=True, partial_preface_closed=True,
+                                     connection_timeout_ms=250, accept_workers=1, max_connections=1)
+                with socket.create_connection(address, timeout=8) as raw:
                     with context(ca, cert, key, False).wrap_socket(raw, server_hostname="origin.internal") as tls:
                         peer = Peer(tls, True)
                         trace = exchange(peer)
+                        if admission:
+                            trace["connection_admission"] = admission
                 stdout, stderr = process.communicate(timeout=10)
                 if process.returncode:
                     raise RuntimeError(stdout + stderr)

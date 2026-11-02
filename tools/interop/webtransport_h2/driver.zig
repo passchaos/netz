@@ -278,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
             .protocol_policy = .tls13_only,
             .limits = .{ .enable_connect_protocol = true, .webtransport = credit },
         });
-        var listener = try wt.EndpointListener.initTlsServer(allocator, raw, .{ .max_connections = 1, .max_pending_requests = 1, .accept_workers = 1, .endpoint = .{ .max_sessions = 1, .max_pending_sessions = 1 } });
+        var listener = try wt.EndpointListener.initTlsServer(allocator, raw, .{ .max_connections = 1, .max_pending_requests = 1, .accept_workers = 1, .connection_timeout = .fromMilliseconds(250), .endpoint = .{ .max_sessions = 1, .max_pending_sessions = 1 } });
         defer listener.deinit();
         std.debug.print("READY {d}\n", .{listener.address().getPort()});
         var pending = try listener.receiveRequestWithDeadline(until);
