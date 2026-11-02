@@ -2957,10 +2957,13 @@ A similar server-duplex borrowed path moved the shared 256-KiB workload from
 fell from 1,337 to 897; the extra five-byte DATA frame and second response
 write dominated.
 
-Both implementations and their focused tests were reverted. The reusable
+Both implementations and their focused tests were reverted. A later
+response-only prefix variant, with the request path unchanged, also failed:
+424,415 ns to 428,024 ns (0.85% slower, 2/5 ABBA rounds). The reusable
 ordinary-unary benchmark remains at `examples/bench_grpc_unary.zig`. Rows,
 binary identities and commands are recorded in
-`docs/evidence/grpc_unary_prefix_rejected/2026-11-02.json` and
+`docs/evidence/grpc_unary_prefix_rejected/2026-11-02.json`,
+`docs/evidence/grpc_unary_response_prefix_rejected/2026-11-02.json`, and
 `docs/evidence/grpc_duplex_borrowed_response_rejected/2026-11-02.json`.
 
 ## Shared abandoned-job prune fast path

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "response-only borrowed prefix slices for large ordinary gRPC unary responses",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "a045d971",
+    "src/grpc/call.zig": "8f032c560181b0f9d551eab38584a29677551bc81ed2e75eb5b6f09eeb282de3",
+    "src/http2/runtime.zig": "4692d78cc1a41abc16cb07a60d258b803cdfa8449c3e233e0e698bf032209d25",
+    "binary_sha256": "0899a0114c8828d471f283a110ea6d036b7e22335a11ec30eb0714faff008004"
+  },
+  "candidate": {
+    "src/grpc/call.zig": "84d1266c93221a0741433331be9148e07bb05e66f15de4c511489ee52d94cec3",
+    "src/http2/runtime.zig": "9ab5dc628d2bfc3f248a9e4fc82c05fc8694cf6ebb933d471df7936a82fe0738",
+    "binary_sha256": "ef8026d0da8d40630dcfc3823a0c82be6221d40d0a75df3a1ecc39d98b378295",
+    "design": "ResponseOptions accepted a borrowed body_prefix. Large writeUnaryResponse messages wrote the five-byte gRPC prefix and payload through writeDataSlicesPreparedTrackedUntil instead of a staged framed allocation. Request handling stayed unchanged."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [421260, 431797, 423049, 424847, 423080, 434118, 423983, 433507, 423082, 426876],
+    "candidate_samples_ns": [425020, 428906, 425788, 429252, 423556, 427142, 421837, 432197, 429143, 430565],
+    "baseline_median_ns": 424415,
+    "candidate_median_ns": 428024,
+    "candidate_over_baseline": 1.0085,
+    "round_wins": "2/5 ABBA rounds",
+    "paired_ratios": [1.0010, 1.0084, 0.9924, 0.9960, 1.0115]
+  },
+  "correctness": {
+    "focused_tests": "146/146 body-prefix tests and 145/145 large-message tests passed",
+    "note": "correctness was not the reason for rejection"
+  },
+  "resolution": "The response-prefix source changes and tests were reverted. The accepted shared-unary request ownership and duplex combined-slice burst remain in place."
+}
