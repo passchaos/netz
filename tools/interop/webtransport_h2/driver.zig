@@ -100,7 +100,7 @@ fn reuse(session: *wt.Session, until: std.Io.Clock.Timestamp) !void {
     try std.testing.expectEqual(@as(u32, 18), closed.code);
 }
 
-fn nextEndpoint(client: wt.EndpointClient, handle: wt.endpoint_client.Handle, until: std.Io.Clock.Timestamp) !wt.endpoint_client.Event {
+fn nextEndpoint(client: anytype, handle: wt.endpoint_client.Handle, until: std.Io.Clock.Timestamp) !wt.endpoint_client.Event {
     while (true) {
         var event = try client.receiveWithDeadline(handle, until);
         if (event.value != .progress) return event;
@@ -145,6 +145,37 @@ fn reuseEndpoint(client: wt.EndpointClient, until: std.Io.Clock.Timestamp) !void
     try std.testing.expectEqual(@as(u32, 18), closed.value.closed.code);
     std.debug.print("WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true\n", .{});
     std.debug.print("WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true\n", .{});
+}
+
+fn reuseServerEndpoint(server: wt.EndpointServer, until: std.Io.Clock.Timestamp) !void {
+    var dropped = try server.receiveRequestWithDeadline(until);
+    var dropped_owned = true;
+    defer if (dropped_owned) dropped.deinit();
+    try std.testing.expectEqualStrings("/drop-pending", dropped.path());
+    const prior = dropped.data.handle;
+    dropped.deinit();
+    dropped_owned = false;
+    var request = try server.receiveRequestWithDeadline(until);
+    var request_owned = true;
+    defer if (request_owned) request.deinit();
+    try std.testing.expectEqualStrings("/reuse", request.path());
+    try std.testing.expectEqual(prior.index, request.data.handle.index);
+    try std.testing.expect(prior.generation != request.data.handle.generation);
+    var accepted = try request.acceptWithDeadline(.{
+        .protocols = .{ .values = &.{"interop"}, .required = true },
+        .initial_receive_stream_data = init_credit,
+    }, until);
+    request_owned = false;
+    defer accepted.deinit();
+    try std.testing.expectEqualStrings("interop", accepted.selected_protocol.?);
+    try server.sendDatagramWithDeadline(accepted.handle, "after-error", until);
+    var reply = try nextEndpoint(server, accepted.handle, until);
+    defer reply.deinit();
+    try std.testing.expectEqualStrings("still-healthy", reply.value.datagram);
+    var closed = try nextEndpoint(server, accepted.handle, until);
+    defer closed.deinit();
+    try std.testing.expectEqual(@as(u32, 18), closed.value.closed.code);
+    std.debug.print("WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true\n", .{});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -210,7 +241,8 @@ pub fn main(init: std.process.Init) !void {
         defer server.deinit();
         std.debug.print("READY {d}\n", .{server.address().getPort()});
         var connection = try server.acceptWithDeadline(until);
-        defer connection.close();
+        var connection_owned = true;
+        defer if (connection_owned) connection.close();
         var rejected = try wt.runtime.readRequestWithDeadline(&connection, until);
         defer rejected.deinit(allocator);
         try std.testing.expectEqualStrings("/reject", rejected.request.path);
@@ -219,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
             .body = "retry",
             .trailers = &.{.{ .name = "x-retry", .value = "1" }},
         }, until);
-        for ([_][]const u8{ "/interop", "/bad-reset", "/reuse" }, 0..) |path, index| {
+        for ([_][]const u8{ "/interop", "/bad-reset" }, 0..) |path, index| {
             var pending = try wt.runtime.readRequestWithDeadline(&connection, until);
             defer pending.deinit(allocator);
             try std.testing.expectEqualStrings(path, pending.request.path);
@@ -231,10 +263,13 @@ pub fn main(init: std.process.Init) !void {
             switch (index) {
                 0 => try exchange(&session, until),
                 1 => try invalidReset(&session, until),
-                2 => try reuse(&session, until),
                 else => unreachable,
             }
         }
+        connection_owned = false;
+        var endpoint = try wt.EndpointServer.init(allocator, connection, .{ .max_sessions = 1, .max_pending_sessions = 1 });
+        defer endpoint.deinit();
+        try reuseServerEndpoint(endpoint, until);
     } else return error.InvalidArgument;
     std.debug.print("WebTransport HTTP2 {s} passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io\n", .{args[1]});
 }

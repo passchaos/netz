@@ -3,6 +3,7 @@ const std = @import("std");
 const http2 = @import("../../../http2/mod.zig");
 const runtime = @import("../runtime.zig");
 const job_mod = @import("job.zig");
+const cleanup = @import("cleanup.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -13,10 +14,14 @@ pub fn Worker(comptime State: type) type {
         pub fn run(state: *State) std.Io.Cancelable!void {
             var terminal: ?anyerror = null;
             defer {
-                for (state.pending) |*slot| if (slot.request) |*request| {
-                    request.deinit();
-                    slot.request = null;
-                };
+                for (state.pending) |*slot| {
+                    slot.cleanup.retire();
+                    _ = slot.cleanup.take();
+                    if (slot.request) |*request| {
+                        request.deinit();
+                        slot.request = null;
+                    }
+                }
                 for (state.sessions) |*slot| if (slot.session) |*session| {
                     session.deinit();
                     slot.session = null;
@@ -29,11 +34,14 @@ pub fn Worker(comptime State: type) type {
                 state.release();
             }
             while (true) {
-                while (state.claim()) |job| {
-                    if (job.canceled()) {
-                        _ = state.finish(job, error.Canceled);
+                while (true) {
+                    const claimed = state.claim();
+                    cleanup.drain(state, removePending);
+                    const job = claimed orelse break;
+                    job.checkExecution(state.io) catch |err| {
+                        _ = state.finish(job, err);
                         continue;
-                    }
+                    };
                     const result = execute(state, job) catch |err| {
                         _ = state.finish(job, err);
                         if (state.connection.aggregate_timeout_unusable) {
@@ -61,7 +69,11 @@ pub fn Worker(comptime State: type) type {
                     state.unlock();
                     continue;
                 }
-                state.wake.reset();
+                @import("../endpoint/wake.zig").clear(&state.wake);
+                if (state.cleanup_pending.load(.acquire)) {
+                    state.unlock();
+                    continue;
+                }
                 const pending_blocked = state.pending_input_blocked;
                 state.unlock();
                 if (buffered.blocked or pending_blocked) {
@@ -204,6 +216,7 @@ pub fn Worker(comptime State: type) type {
                 state.next_sequence +%= 1;
                 if (state.next_sequence == 0) state.next_sequence = 1;
                 state.pending_count += 1;
+                slot.cleanup.publish(slot.generation);
                 return;
             };
             unreachable;
@@ -275,6 +288,7 @@ pub fn Worker(comptime State: type) type {
             if (handle.index >= state.pending.len) return false;
             const slot = &state.pending[handle.index];
             if (slot.generation != handle.generation or slot.request == null) return false;
+            slot.cleanup.retire();
             if (deinit) slot.request.?.deinit();
             slot.request = null;
             slot.claimed = false;

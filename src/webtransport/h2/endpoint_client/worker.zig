@@ -68,7 +68,7 @@ pub fn Worker(comptime State: type) type {
                     state.unlock();
                     continue;
                 }
-                state.wake.reset();
+                @import("../endpoint/wake.zig").clear(&state.wake);
                 // Abortive shutdown publishes without taking this mutex.
                 // Recheck after reset so a prior request cannot lose its wake.
                 if (state.abortive_shutdown.load(.acquire)) {

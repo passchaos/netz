@@ -181,6 +181,7 @@ pub fn Job(comptime State: type) type {
         command: Command,
         deadline: std.Io.Clock.Timestamp,
         next: ?*Self = null,
+        waiting_request: bool = false,
         request: ?RequestData = null,
         accepted: ?Accepted = null,
         event: ?Event = null,
@@ -206,6 +207,7 @@ pub fn Job(comptime State: type) type {
         }
         pub fn release(self: *Self) void {
             if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            std.debug.assert(!self.waiting_request);
             if (self.request) |*value| value.deinit();
             if (self.accepted) |*value| value.deinit();
             if (self.event) |*value| value.deinit();
@@ -220,6 +222,10 @@ pub fn Job(comptime State: type) type {
         }
         pub fn canceled(self: *const Self) bool {
             return self.completion.load(.acquire) == .abandoned;
+        }
+        pub fn checkExecution(self: *const Self, io: std.Io) error{ Canceled, Timeout }!void {
+            if (self.canceled()) return error.Canceled;
+            if (self.deadline.clock != .awake or self.deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
         }
         pub fn takeRequest(self: *Self) RequestData {
             const value = self.request.?;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const endpoint = @import("../endpoint_client.zig");
 const Fixture = @import("../../../http2/runtime/duplex/testing.zig").Fixture;
-const queue = @import("queue.zig");
+const queue = @import("../endpoint/queue.zig");
 const allocator = std.testing.allocator;
 
 const Operation = enum {
@@ -176,7 +176,7 @@ test "WebTransport HTTP2 EndpointClient queue cancellation and capacity rejectio
     probe.mutex = &state.mutex;
     // Exercise the pre-commit cancellation seam with a separate queue mutex
     // while the Job still owns its real endpoint parent reference.
-    try std.testing.expectError(error.Canceled, queue.enqueue(&state, job));
+    try std.testing.expectError(error.Canceled, queue.enqueue(&state, job, .{}));
     try std.testing.expectEqual(@as(usize, 1), job.refs.load(.acquire));
     try std.testing.expectEqual(refs, client.state.refs.load(.acquire));
     try std.testing.expect(state.head == null and state.tail == null and state.queued == 0);
@@ -185,7 +185,7 @@ test "WebTransport HTTP2 EndpointClient queue cancellation and capacity rejectio
     state.queued = 1;
     state.head = job;
     state.tail = job;
-    try std.testing.expectError(error.EndpointQueueFull, queue.enqueue(&state, job));
+    try std.testing.expectError(error.EndpointQueueFull, queue.enqueue(&state, job, .{}));
     try std.testing.expect(state.head == job and state.tail == job and state.queued == 1);
     try std.testing.expectEqual(@as(usize, 1), job.refs.load(.acquire));
     try std.testing.expect(job.next == null);

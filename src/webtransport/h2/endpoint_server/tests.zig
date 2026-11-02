@@ -52,7 +52,8 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
 
         fn run(self: *@This()) !void {
             try std.testing.expectError(error.InvalidEndpointOptions, (endpoint.Options{ .max_sessions = 0 }).validate());
-            var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(allocator, self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
+            var faults = @import("../endpoint_client/testing/drop_faults.zig").Faults{ .caller = std.Thread.getCurrentId(), .base = self.listener.io };
+            var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(faults.allocator(), self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
             defer server.deinit();
 
             var rejected = try acceptRequest(server, "/reject");
@@ -67,7 +68,19 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             rejected_owned = false;
 
             var dropped = try acceptRequest(server, "/dropped");
-            dropped.deinit();
+            const dropped_handle = dropped.data.handle;
+            {
+                server.state.mutex.lockUncancelable(self.listener.io);
+                defer server.state.mutex.unlock(self.listener.io);
+                faults.tracking.store(true, .release);
+                faults.deny.store(true, .release);
+                defer faults.tracking.store(false, .release);
+                const queued = server.state.queued;
+                dropped.deinit();
+                try std.testing.expectEqual(@as(usize, 0), faults.attempts.load(.acquire));
+                try std.testing.expectEqual(queued, server.state.queued);
+                try std.testing.expectEqual(dropped_handle.generation, server.state.pending[dropped_handle.index].cleanup.pending.load(.acquire));
+            }
 
             var a_request = try acceptRequest(server, "/a");
             var a_owned = true;

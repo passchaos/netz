@@ -5,22 +5,25 @@ const h2_state = @import("state.zig");
 const session_mod = @import("session.zig");
 const runtime = @import("runtime.zig");
 const job_mod = @import("endpoint_server/job.zig");
+const waiters = @import("endpoint_server/waiters.zig");
 
 pub const Handle = job_mod.Handle;
 pub const PendingHandle = job_mod.PendingHandle;
 pub const Event = job_mod.Event;
 pub const KeyingMaterial = job_mod.Bytes;
 pub const Accepted = job_mod.Accepted;
-pub const Error = runtime.Error || error{ EndpointClosed, EndpointCapacity, PendingCapacity, EndpointQueueFull, StaleSession, StalePendingSession, InvalidEndpointOptions };
+pub const Error = runtime.Error || error{ EndpointClosed, EndpointCapacity, PendingCapacity, RequestWaiterCapacity, EndpointQueueFull, StaleSession, StalePendingSession, InvalidEndpointOptions };
 
 pub const Options = struct {
     max_sessions: usize = 64,
     max_pending_sessions: usize = 64,
     max_queued_commands: usize = 256,
+    /// Includes queued and already waiting receiveRequest operations.
+    max_request_waiters: usize = 64,
     operation_timeout: std.Io.Duration = .fromSeconds(20),
 
     pub fn validate(self: Options) Error!void {
-        if (self.max_sessions == 0 or self.max_sessions > std.math.maxInt(u32) or self.max_pending_sessions == 0 or self.max_pending_sessions > std.math.maxInt(u32) or self.max_queued_commands == 0 or self.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
+        if (self.max_sessions == 0 or self.max_sessions > std.math.maxInt(u32) or self.max_pending_sessions == 0 or self.max_pending_sessions > std.math.maxInt(u32) or self.max_queued_commands == 0 or self.max_request_waiters == 0 or self.operation_timeout.nanoseconds <= 0) return error.InvalidEndpointOptions;
     }
 };
 
@@ -29,6 +32,7 @@ const PendingSlot = struct {
     request: ?runtime.PendingDuplexSession = null,
     claimed: bool = false,
     sequence: u64 = 0,
+    cleanup: @import("endpoint/cleanup_request.zig").Request = .{},
 };
 
 const SessionSlot = struct {
@@ -60,6 +64,8 @@ const State = struct {
     receive_head: ?*Job = null,
     receive_tail: ?*Job = null,
     queued: usize = 0,
+    waiting_requests: usize = 0,
+    cleanup_pending: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
     worker_stopped: bool = false,
     failure: ?anyerror = null,
@@ -85,6 +91,7 @@ const State = struct {
     }
 
     fn finishLocked(self: *State, job: *Job, err: ?anyerror) bool {
+        waiters.complete(self, job);
         job.err = if (self.closed and err != null) error.EndpointClosed else err;
         const delivered = job.completion.cmpxchgStrong(.waiting, .completed, .release, .acquire) == null;
         if (delivered) job.done.set(self.io);
@@ -98,33 +105,15 @@ const State = struct {
         return delivered;
     }
     fn enqueue(self: *State, job: *Job) Error!void {
-        self.lock();
-        defer self.unlock();
-        if (self.closed) return error.EndpointClosed;
-        if (self.failure) |failure| return @errorCast(failure);
-        if (self.queued >= self.options.max_queued_commands) return error.EndpointQueueFull;
-        job.retain();
-        if (self.tail) |tail| tail.next = job else self.head = job;
-        self.tail = job;
-        self.queued += 1;
-        self.wake.set(self.io);
+        return @import("endpoint/queue.zig").enqueue(self, job, .{ .prepare = pruneWaitersLocked, .admit = admitWaiterLocked }) catch |err| return @errorCast(err);
     }
-    fn enqueueDetached(self: *State, operation: job_mod.Command) void {
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = self.options.operation_timeout, .clock = .awake });
-        const job = Job.create(self, operation, deadline) catch return;
-        self.lock();
-        if (self.closed or self.failure != null) {
-            self.unlock();
-            job.release();
-            return;
-        }
-        job.retain();
-        if (self.tail) |tail| tail.next = job else self.head = job;
-        self.tail = job;
-        self.queued += 1;
-        self.wake.set(self.io);
-        self.unlock();
-        job.release();
+
+    fn pruneWaitersLocked(self: *State) void {
+        waiters.prune(self, finishLocked);
+    }
+
+    fn admitWaiterLocked(self: *State, job: *Job) error{RequestWaiterCapacity}!void {
+        return waiters.reserve(self, job);
     }
     pub fn claim(self: *State) ?*Job {
         self.lock();
@@ -200,6 +189,15 @@ const State = struct {
     pub fn waitForRequest(self: *State, job: *Job) void {
         self.lock();
         defer self.unlock();
+        std.debug.assert(job.waiting_request);
+        if (self.closed) {
+            _ = self.finishLocked(job, error.EndpointClosed);
+            return;
+        }
+        job.checkExecution(self.io) catch |err| {
+            _ = self.finishLocked(job, err);
+            return;
+        };
         job.next = null;
         if (self.receive_tail) |tail| tail.next = job else self.receive_head = job;
         self.receive_tail = job;
@@ -211,10 +209,10 @@ const State = struct {
             self.receive_head = job.next;
             if (self.receive_head == null) self.receive_tail = null;
             job.next = null;
-            if (job.canceled() or job.deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
-                _ = self.finishLocked(job, if (job.canceled()) error.Canceled else error.Timeout);
+            job.checkExecution(self.io) catch |err| {
+                _ = self.finishLocked(job, err);
                 continue;
-            }
+            };
             return job;
         }
         return null;
@@ -225,6 +223,7 @@ const State = struct {
         var result: ?std.Io.Clock.Timestamp = null;
         var cursor = self.receive_head;
         while (cursor) |job| : (cursor = job.next) {
+            if (job.canceled()) return .{ .clock = .awake, .raw = std.Io.Clock.awake.now(self.io) };
             if (result == null or std.Io.Clock.Timestamp.compare(job.deadline, .lt, result.?)) result = job.deadline;
         }
         return result;
@@ -281,7 +280,7 @@ pub const PendingRequest = struct {
     }
     pub fn deinit(self: *PendingRequest) void {
         const state = self.state;
-        state.enqueueDetached(.{ .abandon_pending = self.data.handle });
+        @import("endpoint_server/cleanup.zig").request(state, self.data.handle);
         self.data.deinit();
         self.* = undefined;
         state.release();
@@ -344,6 +343,7 @@ pub const EndpointServer = struct {
     }
     fn submit(self: EndpointServer, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
         if (deadline.clock != .awake or deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0) return error.Timeout;
+        try self.state.io.checkCancel();
         const job = try State.Job.create(self.state, operation, deadline);
         errdefer job.release();
         try self.state.enqueue(job);
@@ -369,11 +369,14 @@ pub const EndpointServer = struct {
         const job = try self.submit(.{ .reject = .{ .handle = pending, .options = options } }, deadline);
         job.release();
     }
-    pub fn abandonPendingWithTimeout(self: EndpointServer, pending: PendingHandle, timeout: std.Io.Duration) Error!bool {
-        if (timeout.nanoseconds <= 0) return error.Timeout;
-        const job = try self.submit(.{ .abandon_pending = pending }, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
+    pub fn abandonPendingWithDeadline(self: EndpointServer, pending: PendingHandle, deadline: std.Io.Clock.Timestamp) Error!bool {
+        const job = try self.submit(.{ .abandon_pending = pending }, deadline);
         defer job.release();
         return job.removed.?;
+    }
+    pub fn abandonPendingWithTimeout(self: EndpointServer, pending: PendingHandle, timeout: std.Io.Duration) Error!bool {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.abandonPendingWithDeadline(pending, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
 
     fn command(self: EndpointServer, value: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!void {
@@ -513,4 +516,7 @@ pub const EndpointServer = struct {
 
 test {
     _ = @import("endpoint_server/tests.zig");
+    _ = @import("endpoint_server/admission_tests.zig");
+    _ = @import("endpoint_server/waiter_tests.zig");
+    _ = @import("endpoint_server/cleanup_tests.zig");
 }

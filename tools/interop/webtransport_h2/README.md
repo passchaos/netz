@@ -51,6 +51,10 @@ For each Netz client/server direction, one TLS connection carries:
    Before that final reuse, an extra accepted CONNECT is dropped. The Python
    peer requires `RST_STREAM(CANCEL)` and the native client requires reuse of
    the one Session slot with a new generation.
+   In the Netz server direction, a pending CONNECT is dropped before any
+   acceptance response. The Python client requires `RST_STREAM(CANCEL)`, then
+   opens the final Session through `EndpointServer`'s command queue. The server
+   checks reuse of its one pending-request slot with a new generation.
 
 The runner fails on missing transcript steps, wrong payloads/codes, incomplete
 capsules, unexpected connection termination, failed subprocesses, or Python

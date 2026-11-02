@@ -135,7 +135,7 @@ const State = struct {
     }
 
     fn enqueue(self: *State, job: *Job) Error!void {
-        return @import("endpoint_client/queue.zig").enqueue(self, job) catch |err| return @errorCast(err);
+        return @import("endpoint/queue.zig").enqueue(self, job, .{}) catch |err| return @errorCast(err);
     }
     pub fn claim(self: *State) ?*Job {
         self.lock();

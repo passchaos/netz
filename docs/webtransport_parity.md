@@ -2050,11 +2050,53 @@ observed CANCEL/slot reuse are recorded with source hashes and logs in
 server pump separates new CONNECT admission from routed Session input, pending
 requests retain owned inspection metadata, accept/reject decisions are
 deadline-bound, and optimistic pre-accept Capsule traffic applies bounded
-backpressure. Pending requests, Sessions and commands have independent limits;
+backpressure. Pending requests, Sessions, commands and receive-request callers
+have independent limits;
 dropped pending requests, stale handles and abortive shutdown remain scoped to
 their exact owners. Its TLS regression covers a complete 429 entity, two live
 Sessions, capacity rejection, virtual streams, DATAGRAM, CLOSE/FIN, generation
 reuse, exporter separation and shutdown with a live Session.
+
+EndpointServer command preparation, queue admission and execution now use the
+caller's original deadline. The shared `endpoint/queue.zig` applies deadline-
+aware mutex acquisition and cancellation before committing any queue work;
+the server owner checks command expiration before Session or pending-request
+lookup, including immediate state operations. `abandonPendingWithDeadline`
+adds the same absolute-budget form as other pending-request operations.
+
+`EndpointServer.Options.max_request_waiters` defaults to 64 and bounds queued
+and deferred receiveRequest callers independently of the normal command
+queue. A full receive budget returns RequestWaiterCapacity while Session
+commands remain admissible. The reservation lasts from queue commit to
+completion; cancellation, expiry, owner shutdown and failure all release it.
+New queue admission reclaims expired or abandoned linked waiters. Canceled
+waiters also provide an immediate owner deadline, so a cancellation coinciding
+with wake reset cannot leave them waiting for their old deadline.
+
+Dropping a delivered PendingRequest now uses one generation-scoped atomic
+cleanup marker per fixed pending slot. It does not allocate a cleanup Job,
+acquire the command mutex or exceed the command queue limit. The owner drains
+these requests after claim and before execution, and checks for a concurrent
+request after clearing its wake. Pending slot retirement precedes resource
+release and generation reuse. The shared wake clear acquires earlier release
+publications before inspecting cleanup or cancellation predicates. Retained
+request metadata remains safe to drop after the endpoint owner closes.
+
+Queue, waiter and cleanup regressions cover 19 public deadline entry points,
+held mutex Timeout/Canceled, separate request-receiver capacity, cancellation
+and expiry recovery, delayed expired commands, allocation-disabled request
+drop under a full queue, and metadata retained across owner shutdown. A real
+TLS server case additionally denies caller allocation while dropping an
+actual pending CONNECT under its mutex. The Python peer now exercises the
+server queue as well as the client queue: it requires CANCEL for a dropped
+pending CONNECT, then accepts a new Session through the same one-slot pending
+table and verifies DATAGRAM/CLOSE traffic on that connection.
+
+The complete WebTransport HTTP2 gate passed 200/200 tests, the package gate
+passed 26/26, and the independent Python runner passed 8/8 build steps in both
+TLS/h2 directions. Both client and server queue/cleanup paths now have
+independent wire checks. Logs and source hashes are recorded in
+`docs/evidence/webtransport_h2_server_admission/2026-11-02.json`.
 
 `h2.EndpointListener` now owns the HTTP/2 listener and a bounded set of those
 per-connection EndpointServer owners. Concurrent accept workers prevent one

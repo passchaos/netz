@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "HTTP/2 WebTransport server admission, receiver capacity and pending cleanup",
+  "decision": "accepted",
+  "base_head": "6a624bb6",
+  "behavior": {
+    "command_budget": "shared queue admission uses the original deadline and cancellation checks before commit; the server owner validates command expiration before Session or request lookup",
+    "request_waiters": "max_request_waiters defaults to 64 and reserves one unit from receiveRequest queue commit through completion, separately from normal command queue capacity; full request-receiver budget returns RequestWaiterCapacity",
+    "reservation_release": "complete, expired, canceled and shutdown request receivers release their reservation; admission prunes expired or abandoned linked waiters, and canceled receivers trigger an immediate owner deadline",
+    "pending_cleanup": "PendingRequest drop publishes a generation-scoped cleanup marker in the fixed pending table without Job allocation, mutex acquisition or command capacity; owner drains after claim and before execution",
+    "wake": "the sole owner clears its event with acquire/release RMW, then rechecks cleanup/cancellation predicates; this consumes prior release publications instead of clearing a wake while missing its associated state",
+    "structure": "queue, generation marker and wake helpers live in endpoint/; server waiter and cleanup policies remain in endpoint_server/"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 200,
+      "total": 200,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "connect_requests_per_direction": 5,
+      "server_pending_reset_code": 8,
+      "server_pending_slot_reused": true,
+      "server_command_queue": true,
+      "client_cleanup_and_queue": true,
+      "connection_reuse": true,
+      "exit_code": 0
+    },
+    "regressions": [
+      "19 public server deadline entry points under held queue mutex return Timeout or Canceled without queue, receiver, Session or stream-ID changes; expired and wrong-clock calls do not enter lock wait",
+      "one waiting request receiver exhausts max_request_waiters=1 while Session commands still execute with max_queued_commands=1; cancellation and expiry restore request-receiver capacity",
+      "an expired linked receiver reservation is reclaimed during new admission, and expired queued acceptance is rejected before pending-handle lookup",
+      "pending metadata drop under a held mutex and full queue does not allocate or wait; owner cleans the pending slot before queued work executes",
+      "retained PendingRequest metadata remains safe to release after endpoint owner destruction",
+      "the authenticated TLS server test denies dropping-caller allocation while discarding a genuine pending CONNECT and requires a queued cleanup marker with unchanged queue capacity",
+      "independent Python client requires CANCEL before accepting any response for a dropped pending CONNECT, then opens a new Session on the same connection; native EndpointServer requires the same pending slot with a new generation and exact DATAGRAM/CLOSE delivery"
+    ],
+    "server_entry_points": [
+      "receive_request",
+      "accept",
+      "reject",
+      "abandon_pending",
+      "send_datagram",
+      "receive",
+      "close",
+      "remove",
+      "open_stream",
+      "send_stream",
+      "consume",
+      "retire_stream",
+      "reset_stream",
+      "stop_sending",
+      "grant_data",
+      "grant_streams",
+      "grant_stream_data",
+      "drain",
+      "export_keying_material"
+    ],
+    "reference_peer_packages": {
+      "h2": "4.3.0",
+      "hpack": "4.1.0",
+      "hyperframe": "6.1.0"
+    },
+    "allocation_fault_boundary": "denied allocation is restricted to the dropping caller; the capture proves allocation-free cleanup publication and subsequent owner cleanup, not arbitrary failures during later protocol output"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint/queue.zig": "c51ae864c49ed70e85516fe6a64450e387d83f1365d03ab23aef8aba52aa935f",
+    "src/webtransport/h2/endpoint/cleanup_request.zig": "867bc0862e46713a38d397a6fe3935c8f11b3fccf9abfc03fc14d178e4a4d68b",
+    "src/webtransport/h2/endpoint/wake.zig": "ef96eef5795e7edb4922b5e32005668d91c060cd42f4b12af0a428ca83aef2b9",
+    "src/webtransport/h2/endpoint_client.zig": "4a1f4376f533c0b9b41fc9e6c598106c98cedf8e60368b5790520af424616d55",
+    "src/webtransport/h2/endpoint_client/cleanup.zig": "46f6890baa232b9d3f4259d795843a7f140983e71fe47bdf29c746c0ca0d8476",
+    "src/webtransport/h2/endpoint_client/worker.zig": "83dad62977343fd9f05ce7ec6d975b09186c5fdb4c2f210ed861c3d9936aad82",
+    "src/webtransport/h2/endpoint_server.zig": "b601311eb5004385fde44b7bb79fbc0a2adca881fa641691e70bea27ff7e6707",
+    "src/webtransport/h2/endpoint_server/job.zig": "fa0f862cf4150078dbaab349b04daceb6135922387f19a83cf31908fb29cdf33",
+    "src/webtransport/h2/endpoint_server/worker.zig": "b41dd3d15e19f145d1eae1a9f7976dd4ad56e944a63687e43e0f88658cbec958",
+    "src/webtransport/h2/endpoint_server/waiters.zig": "ce060f75aba0302c4fb335184cf95256e61b2709e2c3477b8c9f37e8d9cb621e",
+    "src/webtransport/h2/endpoint_server/cleanup.zig": "2905f96a5ab2acd7ac6def84c4a3849d37039e8f1dafedbda9e5315bb8a246ea",
+    "src/webtransport/h2/endpoint_server/admission_tests.zig": "878cdd0d7eff570230db7ecabfa8612feec5784b666ad3cc59fd887e464f5563",
+    "src/webtransport/h2/endpoint_server/waiter_tests.zig": "5ce3013c07d3d0e3819df6944dbc7d275aa9e126204246c0d8ddec9ada40de27",
+    "src/webtransport/h2/endpoint_server/cleanup_tests.zig": "6c4b5c45f1bc39783f972c88de0efacb7d76ea95aa79fc7c556485caeed9e478",
+    "src/webtransport/h2/endpoint_server/tests.zig": "07f6f61dd020f643ada140f2f3b71adbec89f0a7396776f3055ae73167c79ffd",
+    "tools/interop/webtransport_h2/driver.zig": "47a33e8844519df841c1ea33905033ffd797109c0ed3e1f21a53e216dc7a1116",
+    "tools/interop/webtransport_h2/peer.py": "1c36f4bf08e106404a5dc6a1937fe178e6fdaafa4ba5312a7961e0d34f56a462",
+    "tools/interop/webtransport_h2/run.py": "bde65bd8135f043e46ff1e68fce5f80b28c687f98e4f4a4df737f87e17672a15",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_server_admission/2026-11-02/webtransport-http2.Debug.log": "1a5e082c30d70f44ffbc0a63b7969d1e5ad6f54ab9162598326dcbeb517bb42b",
+    "docs/evidence/webtransport_h2_server_admission/2026-11-02/package.Debug.log": "d5283cedc5a3238ad61441e5f4259d1846ca262ea3463a8aa3dd3cae25befde8",
+    "docs/evidence/webtransport_h2_server_admission/2026-11-02/interop-python.Debug.log": "6be601651f608acf08ea9af2dbebeadf11167a0dc07b9709ffc0b89b09ba3d4e"
+  },
+  "remaining_scope": "server owner initialization/teardown budgets, broader protocol integration and long-duration/high-concurrency evidence remain open for the overall goal"
+}

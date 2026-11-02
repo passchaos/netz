@@ -102,6 +102,8 @@ def main() -> None:
         if mode == "client":
             assert "WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true" in output, output
             assert "WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true" in output, output
+        else:
+            assert "WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true" in output, output
         print(output.strip())
     directory = Path(__file__).resolve().parent
     report = {"status": "passed", "protocol": "draft-ietf-webtrans-http2-15",
@@ -109,6 +111,7 @@ def main() -> None:
               "tls": "TLSv1.3", "alpn": "h2", "traces": traces,
               "native_client_endpoint_queue": {"connect": True, "datagram": True, "receive": True, "owned_results": True, "reuse_after_error": True},
               "native_client_dropped_cleanup": {"reset_code": 8, "slot_reused": True},
+              "native_server_pending_cleanup": {"reset_code": 8, "slot_reused": True, "queue": True},
               "driver_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
               "source_sha256": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
                                 for name in ("peer.py", "wire.py", "run.py", "driver.zig")}}
