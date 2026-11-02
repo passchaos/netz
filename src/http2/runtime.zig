@@ -292,6 +292,12 @@ const flag_end_headers: u8 = 0x4;
 const default_flow_window = flow_window.default_value;
 const max_flow_window = flow_window.max_value;
 const default_max_frame_size: usize = 16 * 1024;
+/// Recommended SETTINGS_MAX_FRAME_SIZE for large single-stream payloads
+/// (for example a 256-KiB message that then fits one DATA frame). Small
+/// messages stay neutral, but larger frames can increase multiplexing
+/// latency, so the library keeps the 16-KiB spec default unless the
+/// application opts in on both endpoints.
+pub const recommended_large_frame_size: usize = 256 * 1024;
 const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
 // Zig 0.16 Threaded networking submits at most eight iovecs. DATA consumes a

@@ -824,3 +824,20 @@ default while keeping the write turn at 64 KiB. Five ABBA rounds of the
 large-message cost; the extra ring region and feed size cost more than any
 direct-delivery benefit. The option and code changes were reverted. Rows are
 in `docs/evidence/grpc_shared_read_turn_rejected/2026-11-02.json`.
+
+## Large single-stream frame size (2026-11-02)
+
+Both netz endpoints can advertise a 256-KiB HTTP/2
+`SETTINGS_MAX_FRAME_SIZE` through `Limits.max_frame_size` (or
+`http2.runtime.recommended_large_frame_size`). A 256-KiB message then fits one DATA
+frame and takes the decoder's direct path instead of cross-DATA reassembly.
+Three ABBA rounds of the persistent 256-KiB workload moved the median from
+469,913 ns to 402,441.5 ns (14.4% faster, 3/3 rounds). Small 0/512/4-KiB
+persistent and per-call workloads stayed within about 0.7% of the 16-KiB
+default.
+
+The library keeps the 16-KiB spec default because a 256-KiB frame can increase
+multiplexing latency and buffering for concurrent streams. Large single-stream
+applications should opt in on both endpoints; the official grpc-cpp
+comparison remains on fixed 16-KiB defaults. Rows are in
+`docs/evidence/grpc_shared_large_frame/2026-11-02.json`.

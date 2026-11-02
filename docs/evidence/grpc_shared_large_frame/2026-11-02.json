@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "256-KiB HTTP/2 SETTINGS_MAX_FRAME_SIZE for large single-stream messages",
+  "decision": "accepted tuning evidence; default unchanged",
+  "baseline": {
+    "commit": "4c7f1f5a",
+    "max_frame_size": 16384,
+    "binary_sha256": "790000508152cfaa026b30f0813d72a8936a856fd591e6eedc8201cd1096126d"
+  },
+  "candidate": {
+    "max_frame_size": 262144,
+    "constant": "http2.runtime.recommended_large_frame_size",
+    "design": "Both netz endpoints advertise a 256-KiB SETTINGS_MAX_FRAME_SIZE so a 256-KiB message can fit in one DATA frame and take the direct decoder path instead of cross-DATA reassembly."
+  },
+  "scope": {
+    "workload": "SharedChannel persistent duplex, 262144-byte payload",
+    "allocator": "cached",
+    "iterations": 200,
+    "warmup": 20,
+    "validation": "full bytes plus peer completion"
+  },
+  "benchmark_method": {
+    "harness": "netz-bench-grpc-shared --cached-allocator --payload=262144 --iterations=200 --warmup=20 [--max-frame-size=262144]",
+    "schedule": "three ABBA rounds; default, candidate, candidate, default",
+    "runs_per_arm": 6,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [444945, 448689, 468552, 473152, 471274, 474463],
+    "candidate_samples_ns": [401939, 404358, 380392, 408426, 383781, 402944],
+    "baseline_median_ns": 469913,
+    "candidate_median_ns": 402441.5,
+    "candidate_over_baseline": 0.8564,
+    "round_wins": "3/3 ABBA rounds"
+  },
+  "small_message_control": {
+    "payload_0_persistent_ratio": 1.0066,
+    "payload_0_calls_ratio": 0.9993,
+    "payload_512_persistent_ratio": 1.0021,
+    "payload_512_calls_ratio": 1.0019,
+    "payload_4096_persistent_ratio": 0.9979,
+    "payload_4096_calls_ratio": 0.9975,
+    "conclusion": "0/512/4-KiB persistent and per-call workloads stayed within about 0.7% of the 16-KiB default."
+  },
+  "conclusion": "A 256-KiB frame size makes a 256-KiB message fit one DATA frame and improves the persistent large-message workload by about 14.4% with no small-message regression. The library keeps the 16-KiB default because larger frames can increase multiplexing latency; large single-stream applications should opt in on both endpoints through Limits.max_frame_size."
+}
