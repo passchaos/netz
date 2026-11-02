@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "gate": "full library test suite",
+  "head": "8b75abb5",
+  "command": "zig build test-lib --summary all",
+  "result": {
+    "passed": 6185,
+    "total": 6185,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "notes": "Clean rerun after adding the hostname-resolved per-subchannel ordinary Channel health gate test. The suite includes the two-endpoint selection test, the hostname resolver test, and the earlier single-endpoint recovery and call-shape regressions. An earlier run failed the unrelated timing-sensitive mqtt.bridge.outbound_tests 'does not extend expiry across target reconnect' test under heavy host load; that test passes in isolation and the clean rerun above passed it."
+}
