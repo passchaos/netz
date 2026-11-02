@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "SharedChannel publish skips unchanged worker tracker state",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "c56f410c",
+    "src/grpc/channel/connectivity.zig": "c901ecee9b392f3ed17263f85eedab7b4088bacf7b6ebaa7d5181bd231936f98",
+    "src/grpc/channel/shared/state.zig": "4e24ba74787ea02ea75687edd26dde4bbfce8b1eeb8efaa1aeaf9d73a2ee8a4d",
+    "binary_sha256": "349146a35d89a29f4f7be1e15d34265b941a6d8a520045b38c12d569192797d9"
+  },
+  "candidate": {
+    "src/grpc/channel/connectivity.zig": "15aa32fb1519b0fe90447d26c99c0d7cbf935877b9b33aee519eadc397e36c30",
+    "src/grpc/channel/shared/state.zig": "c61a7b1541c8d54776a640eeb209df9b98f83c2c8b99e7d72d4f7a605d858e59",
+    "binary_sha256": "b669cc2af8938ed63a0c35fb3a89e37cb3e2d04bdc6954f22cb2180e2d916c35",
+    "design": "State.publish skipped worker.tracker.setState when the worker's published state and capacity were unchanged, unless the channel was closed/retired or the tracker had abandoned waiters. Worker.published is kept in sync by every external tracker-state mutation."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [410088, 419123, 426048, 426991, 420040, 425833, 417172, 422327, 422959, 424351],
+    "candidate_samples_ns": [420010, 430078, 420944, 421010, 422395, 424401, 418384, 421695, 427696, 428172],
+    "baseline_median_ns": 422643,
+    "candidate_median_ns": 422045,
+    "candidate_over_baseline": 0.99858,
+    "round_wins": "1/5 ABBA rounds",
+    "paired_ratios": [1.0252, 0.9870, 1.0011, 1.0007, 1.0101]
+  },
+  "conclusion": "Skipping the unchanged worker tracker update did not produce a stable gain; four of five rounds were neutral or slower. The source change was reverted. Further lock-path micro-optimization is not supported by this evidence."
+}

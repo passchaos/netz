@@ -3045,3 +3045,8 @@ matched the requested state moved the same median only 430,144 to 426,800.5 ns
 (0.8%, 3/5 rounds) and regressed one round by 5.4%, so it was reverted. The
 accepted prune fast path above is unchanged. Rows are in
 `docs/evidence/grpc_connectivity_set_state_rejected/2026-11-02.json`.
+
+A later attempt skipped `worker.tracker.setState` from `State.publish` when
+the worker's published state and capacity were unchanged. It moved the median
+only 422,643 to 422,045 ns (0.14%, 1/5 rounds) and was reverted. Rows are in
+`docs/evidence/grpc_shared_publish_skip_rejected/2026-11-02.json`.
