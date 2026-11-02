@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "gate": "full library test suite after ordinary Channel health status API",
+  "head": "6891d02f",
+  "command": "zig build test-lib --summary all",
+  "result": {
+    "passed": 6180,
+    "total": 6180,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "notes": "Includes Channel.healthServing() assertions across SERVING, NOT_SERVING, and recovered SERVING in the ordinary Channel health gate integration test."
+}
