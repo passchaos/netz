@@ -301,6 +301,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, tls: bool, bundl
         .tls = .{ .ca_bundle = .{ .bundle = bundle, .lock = lock } },
     } } else .{ .cleartext_host = .{ .host = "localhost", .port = port, .limits = limits } };
     var resolver_context: u8 = 0;
+    try @import("grpc_cpp/ordinary_health.zig").run(allocator, io, target, .{ .context = &resolver_context, .resolve = resolve }, tls);
     var channel = try netz.grpc.SharedChannel.init(allocator, io, target, .{
         .service_config_json = "{\"healthCheckConfig\":{\"serviceName\":\"\"}}",
         .channel = .{ .address_resolver = .{ .context = &resolver_context, .resolve = resolve }, .resolver_min_refresh_interval = .zero },

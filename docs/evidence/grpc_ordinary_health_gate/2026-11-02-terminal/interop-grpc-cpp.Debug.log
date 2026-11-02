@@ -1,0 +1,59 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+netz grpc-cpp ordinary health gate complete: transport=h2c calls=2 serving=true reuse=true
+netz gRPC client interoperated with grpc-cpp: transport=h2c multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large orca=per-rpc+oob shared_orca=oob-background+fanout rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+debug(zio): Spawning thread 0
+netz grpc-cpp ordinary health gate complete: transport=tls calls=2 serving=true reuse=true
+netz gRPC client interoperated with grpc-cpp: transport=tls multiplexed_duplex=2+cancel-isolated shared_unary=2+health-gated+keepalive-exact-ack shared_duplex=2+bounded+operation-deadline+async-cancel-reuse shared_admission=rpc+resolution+control-deadline ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large orca=per-rpc+oob shared_orca=oob-background+fanout rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true connectivity=transition+ready+shutdown deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+debug(zio): Removing thread 0
+debug(zio): Spawning thread 0
+netz gRPC tunneled grpc-cpp TLS through Hyper CONNECT proxy: rpcs=2 tunnel_authority=localhost:54263 tls_identity=foo.test.google.fr certificate_verified=true alpn=h2 proxy_authorization=isolated connection_reused=true client_io=zio-std-io proxy_io=hyper-tokio server_io=grpc-cpp-posix-event-engine
+debug(zio): Removing thread 0
+Hyper CONNECT proxy listening on 127.0.0.1:33541
+Hyper CONNECT proxy tunneled netz TLS HTTP/2: authority=localhost:54263 proxy_authorization=true client_io=zio-std-io proxy_io=hyper-tokio
+debug(zio): Spawning thread 0
+netz gRPC tunneled grpc-cpp TLS through SOCKS5: rpcs=2 remote_dns=true rfc1929=true auth_downgrade=false tls_identity=foo.test.google.fr certificate_verified=true alpn=h2 connection_reused=true client_io=zio-std-io proxy_io=python-socket server_io=grpc-cpp-posix-event-engine
+debug(zio): Removing thread 0
+Python SOCKS5 tunneled netz gRPC TLS: remote_dns=true rfc1929=true auth_downgrade=false target=foo.test.google.fr tunnels=1 rpcs=2 connection_reused=true
+netz grpc-cpp pick-first phase one complete: transport=h2c endpoint=0 client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+netz grpc-cpp pick-first failover complete: transport=h2c endpoint_order=0->1 rpcs=2 request_bytes=271828 response_bytes=314159 certificate_verified=false alpn=none client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+debug(zio): Spawning thread 0
+netz grpc-cpp pick-first phase one complete: transport=tls endpoint=0 client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+netz grpc-cpp pick-first failover complete: transport=tls endpoint_order=0->1 rpcs=2 request_bytes=271828 response_bytes=314159 certificate_verified=true alpn=h2 client_io=zio-std-io server_io=grpc-cpp-posix-event-engine
+debug(zio): Removing thread 0
+Build Summary: 11/11 steps succeeded
+interop-grpc-cpp success
++- run tools/interop/grpc_cpp.sh success 2m
+   +- compile exe netz-grpc-cpp-client Debug native cached 38ms MaxRSS:27M
+   |  +- WriteFile cached
+   |  +- compile obj vort-br-record-optimal Debug native cached 8ms MaxRSS:26M
+   |  +- WriteFile cached
+   |  +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:26M
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- options cached
+   +- compile exe netz-grpc-cpp-pick-first-failover Debug native cached 31ms MaxRSS:27M
+   |  +- WriteFile (reused)
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- WriteFile (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- options (reused)
+   +- compile exe netz-grpc-hyper-proxy-client Debug native cached 36ms MaxRSS:27M
+   |  +- WriteFile (reused)
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- WriteFile (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- options (reused)
+   +- compile exe netz-grpc-socks5-client Debug native cached 40ms MaxRSS:27M
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+
+

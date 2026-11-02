@@ -498,10 +498,7 @@ const ReadyConnection = struct {
 /// Heap-owned wake state shared by every per-subchannel Health Gate. Channel
 /// values are movable, so gates must not borrow an Event or generation field
 /// embedded directly in the Channel struct.
-const HealthSync = struct {
-    generation: std.atomic.Value(u64) = .init(0),
-    changed: std.Io.Event = .unset,
-};
+const HealthSync = health_gate.Sync;
 
 const HostResolution = struct {
     state: *resolver.State,
@@ -1333,8 +1330,7 @@ pub const Channel = struct {
                 self.slotHealthOptions(),
                 .{
                     .state_out = &slot.health_state,
-                    .generation_out = &self.health_sync.?.generation,
-                    .signal = &self.health_sync.?.changed,
+                    .sync = self.health_sync.?,
                 },
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1360,6 +1356,10 @@ pub const Channel = struct {
             .{ .raw = .fromSeconds(5), .clock = .awake },
         );
         while (true) {
+            // Capture the revision before reading states. A publication in
+            // the scan-to-wait gap must force another scan, even if its Event
+            // was already set before we reached waitHealthChange.
+            const generation = self.health_sync.?.snapshot();
             var serving = false;
             var unknown = false;
             for (self.slots) |slot| switch (slot.health_state.load(.acquire)) {
@@ -1373,40 +1373,24 @@ pub const Channel = struct {
                 if (deadlineExpired(self.io, known_deadline)) {
                     return error.Timeout;
                 }
-                try self.waitHealthChange(known_deadline);
+                try self.waitHealthChange(generation, known_deadline);
                 continue;
             }
             if (!wait_for_ready) return error.ConnectionUnavailable;
             if (deadline) |until| {
                 if (deadlineExpired(self.io, until)) return error.Timeout;
             }
-            try self.waitHealthChange(deadline);
+            try self.waitHealthChange(generation, deadline);
         }
     }
 
     fn waitHealthChange(
         self: *Channel,
+        generation: u64,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         const sync = self.health_sync orelse return;
-        const generation = sync.generation.load(.acquire);
-        // A status may have changed between the caller's scan and this read.
-        if (sync.generation.load(.acquire) != generation) return;
-        sync.changed.reset();
-        if (sync.generation.load(.acquire) != generation) return;
-        if (deadline) |until| {
-            sync.changed.waitTimeout(
-                self.io,
-                .{ .deadline = until },
-            ) catch |err| switch (err) {
-                // A spurious wake and the caller's bound are both resolved by
-                // the next scan, which rechecks the absolute deadline.
-                error.Timeout => return,
-                else => return @errorCast(err),
-            };
-        } else {
-            sync.changed.wait(self.io) catch |err| return @errorCast(err);
-        }
+        sync.wait(self.io, generation, deadline) catch |err| return @errorCast(err);
     }
 
     fn unaryResolved(
@@ -2262,8 +2246,7 @@ pub const Channel = struct {
                     self.slotHealthOptions(),
                     .{
                         .state_out = &slot.health_state,
-                        .generation_out = &self.health_sync.?.generation,
-                        .signal = &self.health_sync.?.changed,
+                        .sync = self.health_sync.?,
                     },
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,

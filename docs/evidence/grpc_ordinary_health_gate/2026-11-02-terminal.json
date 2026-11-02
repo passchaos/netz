@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "ordinary Channel Health Watch terminal state and publication wakeup",
+  "decision": "accepted",
+  "base_head": "7d97f94d",
+  "reference": {
+    "implementation": "grpc-core",
+    "revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source": "src/core/load_balancing/health_check_client.cc",
+    "contract": "RecvTrailingMetadataReadyLocked maps UNIMPLEMENTED to READY and disables health checking; SERVING reports READY; non-serving reports TRANSIENT_FAILURE"
+  },
+  "behavior": {
+    "unimplemented": "publishes SERVING once and returns from the Watch worker; later calls keep passing the health gate until endpoint replacement or Channel teardown",
+    "publication": "the waiting owner snapshots the generation before scanning states, and checks that same generation before and after resetting its wake Event",
+    "retry": "UNKNOWN endpoints remain excluded; a healthy sibling is still selectable",
+    "ownership": "heap-owned Sync stays stable when the Channel value moves; its single waiting owner is the ordinary Channel"
+  },
+  "verification": {
+    "health_debug": {
+      "tests_passed": 164,
+      "tests_total": 164,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "tests_passed": 26,
+      "tests_total": 26,
+      "exit_code": 0
+    },
+    "grpc_cpp_debug": {
+      "build_steps_passed": 11,
+      "build_steps_total": 11,
+      "exit_code": 0,
+      "ordinary_health_calls_per_transport": 2,
+      "transports": [
+        "h2c",
+        "certificate-verified TLS"
+      ],
+      "existing_matrix": "shared unary/duplex, bounded operations, keepalive, ORCA, metadata, compression, cancellation, deadlines, RPC/channel soak, HTTP CONNECT, SOCKS5 and pick-first failover"
+    },
+    "regressions": [
+      "real h2c peer returns UNIMPLEMENTED; worker completion is joined under a three-second bound; two unary calls reuse one application connection and both health APIs stay true",
+      "publication between scan and wait returns without parking for bounded and unbounded RPCs",
+      "publication at the futex wait boundary is observed",
+      "wait cancellation preserves Canceled and does not invent a health update"
+    ]
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='health gate' -Dtest-filter='reconnecting health Watch' --summary all",
+    "zig build test-package --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build interop-grpc-cpp --summary all"
+  ],
+  "source_sha256": {
+    "src/grpc/channel.zig": "65a028fa98de77663f0b79b5c1743357fe5dfd5cb2debca83d50fc41da758c88",
+    "src/grpc/channel/health_gate.zig": "4f2089fc0ec002a761ceea675c85bb47310f2e74998c720a9169a9536de44fcf",
+    "src/grpc/channel/health_gate/sync.zig": "0643ff389d52d1b391f688680483908778fa53f4814a806ef0e7c278f8f44950",
+    "src/grpc/channel/health_gate/sync_tests.zig": "d847a9d0cd191d7e1c9fb2928d0121f6848bd413c4d515630107af8c3116a764",
+    "src/grpc/channel/health_gate/disabled_tests.zig": "a6c8ba8af61106c64d7e0b6dff0d711bdd6565bb1e17308dd13575c19992b6f5",
+    "src/grpc/health/reconnecting.zig": "7abc21e91de6a55f0ac08aff34a76c6757b752285c1d8ab65dd6bceccb41d1c1",
+    "tools/interop/grpc_cpp/ordinary_health.zig": "e37fa8007d126232498d45fd4765ada65ad815aa0478200d6960d886b7e31b9a",
+    "tools/interop/grpc_cpp_shared.zig": "8085f7c2b582c54c3b69d08fe93309ac78f512f5823381a084f9b99084cb1e67",
+    "tools/interop/grpc_cpp.sh": "d1386902a35663728efff41bad44baac46001cea4ebfd8dfcc3bccc472921681"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-terminal/health.Debug.log": "fa230e15aaf2fbc4f08348c6c976be294c0ebcd3f1fbcbb3b820036abd557290",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-terminal/package.Debug.log": "77766f73fe764e8d545362997e3c14b1976b9e6d6fb081ebaa1f2fd113f469a3",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-terminal/interop-grpc-cpp.Debug.log": "503ccaf3f4e7afcb07f4a0dc30c7ef04ec6d109e115b414ef82a29c8e57fabd6"
+  },
+  "remaining_scope": "Broader composite/xDS integration and long-duration production stability evidence remain open for the overall goal."
+}

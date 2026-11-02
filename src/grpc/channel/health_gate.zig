@@ -6,6 +6,7 @@
 const std = @import("std");
 const channel = @import("../channel.zig");
 const health = @import("../health/reconnecting.zig");
+pub const Sync = @import("health_gate/sync.zig");
 
 pub const unknown: u8 = 0;
 pub const serving: u8 = 1;
@@ -13,12 +14,11 @@ pub const not_serving: u8 = 2;
 
 /// Optional channel-level observation points. `state_out` lets a Channel
 /// publish the per-subchannel state into the owning Slot without reading the
-/// Gate pointer from selection callbacks. `generation_out` and `signal` wake
-/// a single-owner caller waiting for any subchannel to become serving.
+/// Gate pointer from selection callbacks. `sync` wakes a single-owner caller
+/// waiting for any subchannel to become serving.
 pub const Wiring = struct {
     state_out: ?*std.atomic.Value(u8) = null,
-    generation_out: ?*std.atomic.Value(u64) = null,
-    signal: ?*std.Io.Event = null,
+    sync: ?*Sync = null,
 };
 
 pub const Gate = struct {
@@ -27,7 +27,6 @@ pub const Gate = struct {
     watch: health.ReconnectingWatch,
     task: ?std.Io.Future(void) = null,
     state: std.atomic.Value(u8) = .init(unknown),
-    changed: std.Io.Event = .unset,
     stopped: std.atomic.Value(bool) = .init(false),
     wiring: Wiring = .{},
 
@@ -74,52 +73,6 @@ pub const Gate = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn isKnown(self: *const Gate) bool {
-        return self.state.load(.acquire) != unknown;
-    }
-
-    pub fn isServing(self: *const Gate) bool {
-        return self.state.load(.acquire) != not_serving;
-    }
-
-    /// Null while the Watch has not reported a status yet; otherwise the last
-    /// known serving state.
-    pub fn status(self: *const Gate) ?bool {
-        return switch (self.state.load(.acquire)) {
-            unknown => null,
-            serving => true,
-            not_serving => false,
-            else => unreachable,
-        };
-    }
-
-    pub fn waitForKnown(self: *Gate, deadline: ?std.Io.Clock.Timestamp) !void {
-        return self.waitUntil(deadline, unknown);
-    }
-
-    pub fn waitForServing(self: *Gate, deadline: ?std.Io.Clock.Timestamp) !void {
-        return self.waitUntil(deadline, not_serving);
-    }
-
-    fn waitUntil(self: *Gate, deadline: ?std.Io.Clock.Timestamp, blocked: u8) !void {
-        while (self.state.load(.acquire) == blocked) {
-            if (deadline) |until| {
-                self.changed.waitTimeout(
-                    self.io,
-                    .{ .deadline = until },
-                ) catch |err| switch (err) {
-                    error.Timeout => {
-                        if (self.state.load(.acquire) == blocked) return error.Timeout;
-                        continue;
-                    },
-                    else => return @errorCast(err),
-                };
-            } else {
-                try self.changed.wait(self.io);
-            }
-        }
-    }
-
     fn run(self: *Gate) void {
         while (!self.stopped.load(.acquire)) {
             const until = std.Io.Clock.Timestamp.fromNow(self.io, .{
@@ -138,7 +91,12 @@ pub const Gate = struct {
                 .status => |response| self.setState(
                     if (response.status == .serving) serving else not_serving,
                 ),
-                .disabled => self.setState(serving),
+                .disabled => {
+                    // UNIMPLEMENTED is terminal for this Watch. Polling it
+                    // again returns HealthWatchDisabled without doing I/O.
+                    self.setState(serving);
+                    return;
+                },
                 .retrying => self.setUnknown(),
             }
         }
@@ -146,20 +104,19 @@ pub const Gate = struct {
 
     fn setState(self: *Gate, value: u8) void {
         self.publish(value);
-        self.changed.set(self.io);
     }
 
     fn setUnknown(self: *Gate) void {
         self.publish(unknown);
-        self.changed.set(self.io);
     }
 
     fn publish(self: *Gate, value: u8) void {
         self.state.store(value, .release);
         if (self.wiring.state_out) |out| out.store(value, .release);
-        if (self.wiring.generation_out) |generation| {
-            _ = generation.fetchAdd(1, .acq_rel);
-        }
-        if (self.wiring.signal) |signal| signal.set(self.io);
+        if (self.wiring.sync) |sync| sync.notify(self.io);
     }
 };
+
+test {
+    _ = @import("health_gate/disabled_tests.zig");
+}

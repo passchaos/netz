@@ -3071,9 +3071,8 @@ reject fail-fast calls with `ConnectionUnavailable` when no endpoint is
 serving. `wait_for_ready` calls wait until any endpoint becomes serving or
 their deadline expires. `UNIMPLEMENTED` disables checking for that endpoint and
 allows calls through it. A Watch transport retry returns that endpoint to the
-unknown state and fails open for that endpoint only, so a transient
-Watch-connection failure does not block application connections to healthy
-siblings.
+unknown state; selection skips that endpoint until a new SERVING status or
+UNIMPLEMENTED response arrives. Healthy siblings remain selectable.
 
 A real loopback test starts two health registries and unary responders,
 configures one NOT_SERVING and one SERVING endpoint, and proves that the
@@ -3111,3 +3110,28 @@ least one endpoint is SERVING or UNIMPLEMENTED; false when every known endpoint
 is in a rejected state. `Channel.healthServingAt(index)` exposes the same
 per-endpoint state in current slot order. Evidence is recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-per-endpoint.json`.
+
+The ordinary gate now treats UNIMPLEMENTED as a terminal Watch result. It
+publishes the endpoint as serving and ends its background task, preserving
+that state until the endpoint is replaced or the Channel closes. Previously
+the next poll returned `HealthWatchDisabled`, overwrote the state with UNKNOWN,
+and repeatedly polled without I/O. A real h2c regression joins the completed
+worker under a three-second bound, then completes two unary requests through
+one application connection while both health observation APIs remain true.
+This matches grpc-core's explicit UNIMPLEMENTED-to-READY behavior in
+`src/core/load_balancing/health_check_client.cc`.
+
+Health waiters now snapshot the publication generation before scanning the
+endpoint states. The extracted `channel/health_gate/sync.zig` checks that same
+generation before and after resetting the wake event. A publication between
+the scan and wait therefore forces a new scan instead of being discarded by
+the reset. Deterministic I/O probes cover a publication before waiting with
+bounded and unbounded RPCs, publication at the futex wait boundary, and
+cancellation propagation. The grpc-cpp forward runner additionally completes
+two ordinary Channel calls gated by the independent Health service over both
+h2c and certificate-verified TLS.
+
+The focused health/reconnecting-Watch suite passed 164/164 tests, the package
+suite passed 26/26, and the complete grpc-cpp forward runner passed 11/11 build
+steps. Source hashes and logs are recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-terminal.json`.
