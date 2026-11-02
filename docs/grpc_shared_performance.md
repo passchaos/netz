@@ -791,6 +791,9 @@ recorded in
 
 ## Official grpc-cpp comparison with the cached allocator (2026-11-02)
 
+This table records the historical 16-KiB frame default before the 2026-11-02
+default change; the 256-KiB-default comparison below supersedes it.
+
 The official `grpc_benchmark.py` harness was rerun at `1fe9791f` with the
 cached allocator enabled through a thin wrapper around
 `netz-bench-grpc-shared`. grpc-cpp remained at `03d65cc67c`. Five alternating
