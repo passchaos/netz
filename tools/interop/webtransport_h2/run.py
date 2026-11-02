@@ -67,35 +67,42 @@ def main() -> None:
                 raise RuntimeError(result.stdout + result.stderr + repr(errors))
             outputs.append(result.stderr)
 
-        process = subprocess.Popen([str(args.driver), "server", "0", str(ca), str(cert), str(key)],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            ready = process.stderr.readline()
-            startup = ready
-            while ready and not ready.startswith("READY "):
-                ready = process.stderr.readline()
-                startup += ready
-            if not ready:
-                raise RuntimeError("Netz server failed to start: " + startup)
-            with socket.create_connection(("127.0.0.1", int(ready.split()[1])), timeout=8) as raw:
-                with context(ca, cert, key, False).wrap_socket(raw, server_hostname="origin.internal") as tls:
-                    peer = Peer(tls, True)
-                    traces.append(peer.run())
-            stdout, stderr = process.communicate(timeout=10)
-            if process.returncode:
-                raise RuntimeError(stdout + stderr)
-            outputs.append(stderr)
-        except BaseException as error:
+        def native_server(mode, exchange):
+            process = subprocess.Popen([str(args.driver), mode, "0", str(ca), str(cert), str(key)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
+                ready = process.stderr.readline()
+                startup = ready
+                while ready and not ready.startswith("READY "):
+                    ready = process.stderr.readline()
+                    startup += ready
+                if not ready:
+                    raise RuntimeError("Netz server failed to start: " + startup)
+                with socket.create_connection(("127.0.0.1", int(ready.split()[1])), timeout=8) as raw:
+                    with context(ca, cert, key, False).wrap_socket(raw, server_hostname="origin.internal") as tls:
+                        peer = Peer(tls, True)
+                        trace = exchange(peer)
                 stdout, stderr = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate()
-            raise RuntimeError(f"Python client failed: {error}\nNetz server:\n{stdout}{stderr}") from error
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.communicate()
+                if process.returncode:
+                    raise RuntimeError(stdout + stderr)
+                return stderr, trace
+            except BaseException as error:
+                try:
+                    stdout, stderr = process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                raise RuntimeError(f"Python client failed: {error}\nNetz server:\n{stdout}{stderr}") from error
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+
+        output, trace = native_server("server", Peer.run)
+        outputs.append(output)
+        traces.append(trace)
+        listener_output, listener_trace = native_server("listener", Peer.listener_exchange)
 
     for mode, output in zip(("client", "server"), outputs):
         assert f"WebTransport HTTP2 {mode} passed:" in output, output
@@ -105,10 +112,12 @@ def main() -> None:
         else:
             assert "WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true" in output, output
         print(output.strip())
+    assert "WebTransport HTTP2 EndpointListener passed: accepted=true stream=true datagram=true close=19" in listener_output, listener_output
+    print(listener_output.strip())
     directory = Path(__file__).resolve().parent
     report = {"status": "passed", "protocol": "draft-ietf-webtrans-http2-15",
               "python_packages": {"h2": h2.__version__, "hpack": hpack.__version__, "hyperframe": hyperframe.__version__},
-              "tls": "TLSv1.3", "alpn": "h2", "traces": traces,
+              "tls": "TLSv1.3", "alpn": "h2", "traces": traces, "native_listener": listener_trace,
               "native_client_endpoint_queue": {"connect": True, "datagram": True, "receive": True, "owned_results": True, "reuse_after_error": True},
               "native_client_dropped_cleanup": {"reset_code": 8, "slot_reused": True},
               "native_server_pending_cleanup": {"reset_code": 8, "slot_reused": True, "queue": True},

@@ -13,7 +13,7 @@ from h2.settings import Settings
 from wire import (SETTINGS, Reader, DATAGRAM, CLOSE, DRAIN, PADDING, RESET, STOP,
                   FIN, STREAM, MAX_DATA, MAX_STREAM_DATA, MAX_BIDI, MAX_UNI,
                   DATA_BLOCKED, STREAM_BLOCKED, BIDI_BLOCKED, UNI_BLOCKED,
-                  integer, integers, capsule, control, stream, settings_frame)
+                  integer, integers, varint, capsule, control, stream, settings_frame)
 
 
 class Peer:
@@ -287,3 +287,20 @@ class Peer:
         assert list(incoming) == []
         result.update(invalid_reset_scoped=True, reuse_after_error=True, connect_requests=5)
         return result
+
+    def listener_exchange(self) -> dict:
+        assert self.client
+        sid = self.request("/listener", True)
+        kind, actual, data = self.event()
+        assert (kind, actual) == ("headers", sid)
+        headers = dict(data)
+        assert headers[":status"] == "200" and headers["wt-protocol"] == '"interop"'
+        assert headers["webtransport-init"] == "u=96, bl=100, br=104"
+        self.send(sid, stream(0, b"listener-stream", True) + capsule(DATAGRAM, b"listener-ping"))
+        incoming = self.capsules(sid)
+        assert next(incoming) == (FIN, varint(0) + b"listener-stream-reply")
+        assert next(incoming) == (DATAGRAM, b"listener-pong")
+        assert next(incoming) == (CLOSE, (19).to_bytes(4, "big"))
+        assert list(incoming) == []
+        return {"accepted": True, "stream": True, "datagram": True, "close_code": 19,
+                "http2_stream": sid, "capsule_data_fragmentation": True}

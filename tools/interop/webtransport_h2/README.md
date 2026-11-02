@@ -61,3 +61,10 @@ capsules, unexpected connection termination, failed subprocesses, or Python
 assertions disabled by optimization. This is an independent scripted protocol
 peer; broader draft conformance and browser/proxy deployment matrices remain
 separate evidence requirements.
+
+A third authenticated connection exercises the multi-connection
+`EndpointListener` facade. The Python client sends a fragmented bidirectional
+stream and DATAGRAM through one accepted Session. The native listener returns
+the exact stream reply, consumes and retires that stream, replies to the
+DATAGRAM, and sends CLOSE code 19. The runner requires a separate listener
+transcript and records it under `native_listener` in its JSON report.

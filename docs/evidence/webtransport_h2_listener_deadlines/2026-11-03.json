@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "HTTP/2 WebTransport listener request and connection lookup deadlines",
+  "decision": "accepted",
+  "base_head": "d386b123",
+  "behavior": {
+    "lookup": "all listener Session operations pass the original deadline through connection-table mutex admission and then to the EndpointServer command; cancellation is checked before retaining the connection",
+    "request": "request dequeue uses deadline-aware mutex admission and checks cancellation before consuming ready metadata; expired/canceled attempts leave the first owned queued request intact",
+    "reacquisition": "after an event wake the receiver reacquires State with the original deadline, without renewing the budget or using an uncancellable mutex wait",
+    "lifetime": "receive retains State before entering the wait and transfers that reference to a delivered PendingRequest; failed lookup/receive releases it without relocking State",
+    "shutdown": "close publishes closed before queue draining; each queued request is taken under the mutex and released outside it, allowing registered receivers to observe ListenerClosed without racing destruction or queue cleanup"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 206,
+      "total": 206,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "original_endpoint_directions": 2,
+      "additional_listener_connections": 1,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "listener": {
+        "accepted": true,
+        "fragmented_stream": true,
+        "exact_stream_reply": true,
+        "datagram_round_trip": true,
+        "close_code": 19
+      },
+      "exit_code": 0
+    },
+    "regressions": [
+      "16 public listener operations under a held State mutex return Timeout or Canceled with unchanged queue/connection state and parent references; expired or wrong-clock inputs never enter lock wait",
+      "a request receiver is woken while its second mutex acquisition is held, then returns Timeout under the original budget and releases its State reference without reacquiring the mutex for cleanup",
+      "close with a parked request receiver retains State until that receiver returns ListenerClosed",
+      "the real two-connection TLS listener has an already ready request queue; expired and canceled calls preserve the first queue entry, which later valid callers accept and exchange independent Session traffic",
+      "independent Python TLS client negotiates a Session through actual EndpointListener, sends fragmented stream and DATAGRAM, receives exact stream reply/DATAGRAM and CLOSE code 19"
+    ],
+    "public_entry_points": [
+      "receive_request",
+      "send_datagram",
+      "receive",
+      "close",
+      "remove",
+      "open_stream",
+      "send_stream",
+      "consume",
+      "retire_stream",
+      "reset_stream",
+      "stop_sending",
+      "grant_data",
+      "grant_streams",
+      "grant_stream_data",
+      "drain",
+      "export_keying_material"
+    ],
+    "reference_peer_packages": {
+      "h2": "4.3.0",
+      "hpack": "4.1.0",
+      "hyperframe": "6.1.0"
+    }
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_listener.zig": "a43f680a94c50e2ea669d1c6ecf786701deac883d9c2397533bf7379a8a57d76",
+    "src/webtransport/h2/endpoint_listener/core.zig": "a80784ebbd07dd257261e0d0b336175ca520dd3562ac396a593833c86cef64bf",
+    "src/webtransport/h2/endpoint_listener/runtime.zig": "58c5ead34c2c993ec31d8397a45583cd61e66048dc55d94c89940d3ddf1799c8",
+    "src/webtransport/h2/endpoint_listener/deadline_tests.zig": "73bf133b457edf6a4742a6fc42be42546b104e15b18ba0491b132d55302f5196",
+    "src/webtransport/h2/endpoint_listener/receive_lifetime_tests.zig": "1cbf3c46c9c3e3e3fe4415afbf04f399ad00df6bedad835df1d20ea1b6b567f6",
+    "src/webtransport/h2/endpoint_listener/tests.zig": "453570c2ccb3cb4db13a3431f118800a3b3dfcaf3c9f4f8cff2a2e683e9e2d7e",
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318",
+    "src/webtransport/h2/endpoint_server.zig": "674da6be58c73bc4fda7321b3a5af8e1e26b6e817cb77efcf4601e7888d7a3ba",
+    "tools/interop/webtransport_h2/driver.zig": "79291ca895633edbf1692342269218f0a5f5041ba7048af84cef0c92083bb1ae",
+    "tools/interop/webtransport_h2/peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
+    "tools/interop/webtransport_h2/run.py": "854acbdd5e0a4134f6ca354fda6da96e503ba1b3fe40f46b4fa4403456a21ce2",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_listener_deadlines/2026-11-03/webtransport-http2.Debug.log": "ee5687a0abb79131bb840805c84a42c9cc84eb8d3135b9d021550faa2d842430",
+    "docs/evidence/webtransport_h2_listener_deadlines/2026-11-03/package.Debug.log": "e6753a992cfec40035d837d7581c3b6391a5606f8ac8b52ba64799f636bddb27",
+    "docs/evidence/webtransport_h2_listener_deadlines/2026-11-03/interop-python.Debug.log": "d6e8d2fe196f3b9645d93dc1fcb5145a7e9b230cdda642ea1d0276713fd23069"
+  },
+  "limitations": [
+    "concurrent owner close requires the operation to have entered before the owning handle is destroyed; retaining inside an already-entered operation does not authorize starting calls from a destroyed handle",
+    "listener connection reservation/publication and shutdown pacing have distinct owner lifecycle boundaries beyond this facade lookup/dequeue capture",
+    "broader protocol integration and multi-hour/high-concurrency evidence remain open for the overall goal"
+  ]
+}

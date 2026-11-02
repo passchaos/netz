@@ -207,8 +207,9 @@ pub const EndpointListener = struct {
         self: EndpointListener,
         deadline: std.Io.Clock.Timestamp,
     ) Error!PendingRequest {
-        const queued = try self.state.takeRequest(deadline);
         self.state.retain();
+        errdefer self.state.release();
+        const queued = try self.state.takeRequest(deadline);
         return .{
             .state = self.state,
             .connection_handle = queued.connection_handle,
@@ -231,12 +232,15 @@ pub const EndpointListener = struct {
     fn acquire(
         self: EndpointListener,
         handle: Handle,
+        deadline: std.Io.Clock.Timestamp,
     ) Error!*ManagedConnection {
-        return self.state.acquireConnection(handle.connection);
+        self.state.retain();
+        defer self.state.release();
+        return self.state.acquireConnection(handle.connection, deadline);
     }
 
     pub fn sendDatagramWithDeadline(self: EndpointListener, handle: Handle, data: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.sendDatagramWithDeadline(handle.session, data, deadline);
     }
@@ -245,7 +249,7 @@ pub const EndpointListener = struct {
         return self.sendDatagramWithDeadline(handle, data, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn receiveWithDeadline(self: EndpointListener, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!Event {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.receiveWithDeadline(handle.session, deadline);
     }
@@ -254,7 +258,7 @@ pub const EndpointListener = struct {
         return self.receiveWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn closeWithDeadline(self: EndpointListener, handle: Handle, code: u32, reason: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.closeWithDeadline(handle.session, code, reason, deadline);
     }
@@ -263,7 +267,7 @@ pub const EndpointListener = struct {
         return self.closeWithDeadline(handle, code, reason, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn removeWithDeadline(self: EndpointListener, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!bool {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.removeWithDeadline(handle.session, deadline);
     }
@@ -272,7 +276,7 @@ pub const EndpointListener = struct {
         return self.removeWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn openStreamWithDeadline(self: EndpointListener, handle: Handle, direction: h2_state.Direction, deadline: std.Io.Clock.Timestamp) Error!u62 {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.openStreamWithDeadline(handle.session, direction, deadline);
     }
@@ -281,7 +285,7 @@ pub const EndpointListener = struct {
         return self.openStreamWithDeadline(handle, direction, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn sendStreamWithDeadline(self: EndpointListener, handle: Handle, id: u62, data: []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.sendStreamWithDeadline(handle.session, id, data, fin, deadline);
     }
@@ -290,7 +294,7 @@ pub const EndpointListener = struct {
         return self.sendStreamWithDeadline(handle, id, data, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn consumeWithDeadline(self: EndpointListener, handle: Handle, id: u62, bytes: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.consumeWithDeadline(handle.session, id, bytes, deadline);
     }
@@ -299,7 +303,7 @@ pub const EndpointListener = struct {
         return self.consumeWithDeadline(handle, id, bytes, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn retireStreamWithDeadline(self: EndpointListener, handle: Handle, id: u62, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.retireStreamWithDeadline(handle.session, id, deadline);
     }
@@ -308,7 +312,7 @@ pub const EndpointListener = struct {
         return self.retireStreamWithDeadline(handle, id, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn resetStreamWithDeadline(self: EndpointListener, handle: Handle, id: u62, code: u32, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.resetStreamWithDeadline(handle.session, id, code, deadline);
     }
@@ -317,7 +321,7 @@ pub const EndpointListener = struct {
         return self.resetStreamWithDeadline(handle, id, code, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn stopSendingWithDeadline(self: EndpointListener, handle: Handle, id: u62, code: u32, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.stopSendingWithDeadline(handle.session, id, code, deadline);
     }
@@ -326,7 +330,7 @@ pub const EndpointListener = struct {
         return self.stopSendingWithDeadline(handle, id, code, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantDataWithDeadline(self: EndpointListener, handle: Handle, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.grantDataWithDeadline(handle.session, limit, deadline);
     }
@@ -335,7 +339,7 @@ pub const EndpointListener = struct {
         return self.grantDataWithDeadline(handle, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantStreamsWithDeadline(self: EndpointListener, handle: Handle, direction: h2_state.Direction, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.grantStreamsWithDeadline(handle.session, direction, limit, deadline);
     }
@@ -344,7 +348,7 @@ pub const EndpointListener = struct {
         return self.grantStreamsWithDeadline(handle, direction, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantStreamDataWithDeadline(self: EndpointListener, handle: Handle, id: u62, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.grantStreamDataWithDeadline(handle.session, id, limit, deadline);
     }
@@ -353,7 +357,7 @@ pub const EndpointListener = struct {
         return self.grantStreamDataWithDeadline(handle, id, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn drainWithDeadline(self: EndpointListener, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!void {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.drainWithDeadline(handle.session, deadline);
     }
@@ -362,7 +366,7 @@ pub const EndpointListener = struct {
         return self.drainWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn exportKeyingMaterialWithDeadline(self: EndpointListener, handle: Handle, label: []const u8, context: []const u8, length: usize, deadline: std.Io.Clock.Timestamp) Error!KeyingMaterial {
-        const connection = try self.acquire(handle);
+        const connection = try self.acquire(handle, deadline);
         defer connection.release();
         return connection.server.exportKeyingMaterialWithDeadline(handle.session, label, context, length, deadline);
     }

@@ -100,7 +100,7 @@ fn reuse(session: *wt.Session, until: std.Io.Clock.Timestamp) !void {
     try std.testing.expectEqual(@as(u32, 18), closed.code);
 }
 
-fn nextEndpoint(client: anytype, handle: wt.endpoint_client.Handle, until: std.Io.Clock.Timestamp) !wt.endpoint_client.Event {
+fn nextEndpoint(client: anytype, handle: anytype, until: std.Io.Clock.Timestamp) !wt.endpoint_client.Event {
     while (true) {
         var event = try client.receiveWithDeadline(handle, until);
         if (event.value != .progress) return event;
@@ -270,6 +270,40 @@ pub fn main(init: std.process.Init) !void {
         var endpoint = try wt.EndpointServer.initWithDeadline(allocator, connection, .{ .max_sessions = 1, .max_pending_sessions = 1 }, until);
         defer endpoint.deinit();
         try reuseServerEndpoint(endpoint, until);
+    } else if (std.mem.eql(u8, args[1], "listener")) {
+        var identity = try netz.tls.server_identity_file.load(allocator, io, .cwd(), args[4], args[5]);
+        defer identity.deinit();
+        const raw = try http2.TlsServer.listen(allocator, io, .{ .ip4 = .loopback(port) }, .{
+            .identity = identity.serverIdentity(),
+            .protocol_policy = .tls13_only,
+            .limits = .{ .enable_connect_protocol = true, .webtransport = credit },
+        });
+        var listener = try wt.EndpointListener.initTlsServer(allocator, raw, .{ .max_connections = 1, .max_pending_requests = 1, .accept_workers = 1, .endpoint = .{ .max_sessions = 1, .max_pending_sessions = 1 } });
+        defer listener.deinit();
+        std.debug.print("READY {d}\n", .{listener.address().getPort()});
+        var pending = try listener.receiveRequestWithDeadline(until);
+        var pending_owned = true;
+        defer if (pending_owned) pending.deinit();
+        try std.testing.expectEqualStrings("/listener", pending.path());
+        var accepted = try pending.acceptWithDeadline(.{ .protocols = .{ .values = &.{"interop"}, .required = true }, .initial_receive_stream_data = init_credit }, until);
+        pending_owned = false;
+        defer accepted.deinit();
+        try std.testing.expectEqualStrings("interop", accepted.applicationProtocol().?);
+        var incoming = try nextEndpoint(listener, accepted.handle, until);
+        defer incoming.deinit();
+        try std.testing.expectEqualStrings("listener-stream", incoming.value.stream.data);
+        try std.testing.expect(incoming.value.stream.fin);
+        const id = incoming.value.stream.id;
+        try listener.sendStreamWithDeadline(accepted.handle, id, "listener-stream-reply", true, until);
+        try listener.consumeWithDeadline(accepted.handle, id, incoming.value.stream.data.len, until);
+        try listener.retireStreamWithDeadline(accepted.handle, id, until);
+        var datagram = try nextEndpoint(listener, accepted.handle, until);
+        defer datagram.deinit();
+        try std.testing.expectEqualStrings("listener-ping", datagram.value.datagram);
+        try listener.sendDatagramWithDeadline(accepted.handle, "listener-pong", until);
+        try listener.closeWithDeadline(accepted.handle, 19, "", until);
+        std.debug.print("WebTransport HTTP2 EndpointListener passed: accepted=true stream=true datagram=true close=19\n", .{});
+        return;
     } else return error.InvalidArgument;
     std.debug.print("WebTransport HTTP2 {s} passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io\n", .{args[1]});
 }

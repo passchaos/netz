@@ -2130,6 +2130,43 @@ passed 26/26, and the independent Python TLS/h2 runner passed 8/8 build steps
 in both directions. Logs and source hashes are recorded in
 `docs/evidence/webtransport_h2_owner_admission/2026-11-02.json`.
 
+EndpointListener request reception and connection-table lookups now use the
+caller's original deadline for mutex admission. Every Session operation passes
+that same timestamp through the listener lookup to its EndpointServer command.
+Request reception checks cancellation before removing a queued request, so an
+expired or canceled caller leaves ready owned metadata available to the next
+valid caller. A receiver waking for new input also uses its original deadline
+when reacquiring the State mutex.
+
+The facade retains listener State before beginning a receive or lookup. A
+delivered request takes over the receiver's reference; timeout, cancellation
+and closed-listener results release it. Shutdown marks the listener closed
+before draining queued requests, takes each request under the mutex, and
+releases its metadata and connection outside the lock. A waiting receiver can
+therefore observe ListenerClosed without racing destroyed State or shutdown's
+queue drain. Concurrent close still requires callers to have entered before
+the owning handle is destroyed.
+
+Focused listener regressions cover 16 public operation entry points under
+held-lock Timeout and Canceled, expired/wrong-clock calls, and unchanged queue
+and reference state. A separate case wakes a receiver while its next mutex
+acquisition is blocked and requires Timeout at the original deadline. Another
+closes with a registered receiver and requires ListenerClosed after State
+remains owned through that wait. The real two-connection TLS test also checks
+that expiration and cancellation cannot dequeue an already ready request.
+
+The independent Python TLS/h2 runner now opens a separate connection to the
+actual EndpointListener. It checks accepted application protocol and Init
+limits, fragmented bidirectional-stream input, the exact reply, DATAGRAM
+round trip and CLOSE code 19. This listener transcript complements the
+existing EndpointClient and EndpointServer queue/cleanup paths.
+
+The complete WebTransport HTTP2 gate passed 206/206 tests, the package gate
+passed 26/26, and the expanded Python TLS/h2 runner passed 8/8 build steps
+with both endpoint directions and its additional listener connection. Logs
+and source hashes are recorded in
+`docs/evidence/webtransport_h2_listener_deadlines/2026-11-03.json`.
+
 `h2.EndpointListener` now owns the HTTP/2 listener and a bounded set of those
 per-connection EndpointServer owners. Concurrent accept workers prevent one
 slow handshake from blocking every new peer. A fixed connection table and

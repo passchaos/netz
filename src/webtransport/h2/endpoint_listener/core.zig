@@ -4,6 +4,7 @@ const http2 = @import("../../../http2/mod.zig");
 const h2_state = @import("../state.zig");
 const runtime = @import("../runtime.zig");
 const endpoint = @import("../endpoint_server.zig");
+const timed_mutex = @import("../../../internal/timed_mutex.zig");
 
 pub const Event = endpoint.Event;
 pub const KeyingMaterial = endpoint.KeyingMaterial;
@@ -315,9 +316,16 @@ pub const State = struct {
         self: *State,
         deadline: std.Io.Clock.Timestamp,
     ) Error!QueuedRequest {
-        if (deadline.clock != .awake) return error.Timeout;
         while (true) {
-            self.lock();
+            try timed_mutex.lock(&self.mutex, self.io, deadline);
+            self.io.checkCancel() catch |err| {
+                self.unlock();
+                return err;
+            };
+            if (self.closed) {
+                self.unlock();
+                return error.ListenerClosed;
+            }
             if (self.request_count != 0) {
                 const value = self.requests[self.request_head].?;
                 self.requests[self.request_head] = null;
@@ -327,10 +335,6 @@ pub const State = struct {
                 self.request_space.set(self.io);
                 self.unlock();
                 return value;
-            }
-            if (self.closed) {
-                self.unlock();
-                return error.ListenerClosed;
             }
             self.request_ready.reset();
             self.unlock();
@@ -351,9 +355,11 @@ pub const State = struct {
     pub fn acquireConnection(
         self: *State,
         handle: ConnectionHandle,
+        deadline: std.Io.Clock.Timestamp,
     ) Error!*ManagedConnection {
-        self.lock();
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
         defer self.unlock();
+        try self.io.checkCancel();
         if (self.closed) return error.ListenerClosed;
         if (handle.index >= self.connections.len) return error.StaleConnection;
         const slot = &self.connections[handle.index];
@@ -382,14 +388,20 @@ pub const State = struct {
         self.close();
         self.group.cancel(self.io);
         self.listener.deinit();
-        while (self.request_count != 0) {
+        while (true) {
+            self.lock();
+            if (self.request_count == 0) {
+                self.stopped = true;
+                self.unlock();
+                break;
+            }
             var request = self.requests[self.request_head].?;
             self.requests[self.request_head] = null;
             self.request_head = (self.request_head + 1) % self.requests.len;
             self.request_count -= 1;
+            self.unlock();
             request.deinit();
         }
-        self.stopped = true;
     }
 };
 

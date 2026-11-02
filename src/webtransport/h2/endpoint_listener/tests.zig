@@ -190,7 +190,24 @@ test "WebTransport HTTP2 EndpointListener initialization is transactional" {
 fn exercise() !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    const io = threaded.io();
+    const base = threaded.io();
+    const CancelIo = struct {
+        base: std.Io,
+        caller: std.Thread.Id,
+        armed: std.atomic.Value(bool) = .init(false),
+        var active: ?*@This() = null;
+        fn check(userdata: ?*anyopaque) std.Io.Cancelable!void {
+            const self = active.?;
+            if (std.Thread.getCurrentId() == self.caller and self.armed.swap(false, .acq_rel)) return error.Canceled;
+            return self.base.vtable.checkCancel(userdata);
+        }
+    };
+    var cancellation = CancelIo{ .base = base, .caller = std.Thread.getCurrentId() };
+    CancelIo.active = &cancellation;
+    defer CancelIo.active = null;
+    var table = base.vtable.*;
+    table.checkCancel = CancelIo.check;
+    const io: std.Io = .{ .userdata = base.userdata, .vtable = &table };
     var certificate: [tls.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate,
@@ -292,6 +309,30 @@ fn exercise() !void {
     defer _ = b_task.cancel(io) catch {};
     try a_started.wait(io);
     try b_started.wait(io);
+
+    try listener.state.request_ready.waitTimeout(base, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(3) } });
+    listener.state.mutex.lockUncancelable(base);
+    const original_head = listener.state.request_head;
+    listener.state.mutex.unlock(base);
+    // A ready queue does not override expiration or cancellation. A failed
+    // take leaves its first owned request available to the next valid caller.
+    if (listener.receiveRequestWithDeadline(.fromNow(base, .{ .clock = .awake, .raw = .fromNanoseconds(-1) }))) |value| {
+        var unexpected = value;
+        unexpected.deinit();
+        return error.TestExpectedTimeout;
+    } else |err| try std.testing.expectEqual(error.Timeout, err);
+    cancellation.armed.store(true, .release);
+    if (listener.receiveRequestWithTimeout(.fromSeconds(1))) |value| {
+        var unexpected = value;
+        unexpected.deinit();
+        return error.TestExpectedCancellation;
+    } else |err| try std.testing.expectEqual(error.Canceled, err);
+    {
+        listener.state.mutex.lockUncancelable(base);
+        defer listener.state.mutex.unlock(base);
+        try std.testing.expectEqual(original_head, listener.state.request_head);
+        try std.testing.expect(listener.state.requests[original_head] != null);
+    }
 
     var a_accepted: ?listener_mod.Accepted = null;
     defer if (a_accepted) |*value| value.deinit();
