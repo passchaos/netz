@@ -1118,8 +1118,8 @@ test "unified HTTP pool backs off failed HTTP3 and preserves TCP reuse" {
                 },
             },
             .alt_svc = .{
-                .failure_backoff_initial = .fromMilliseconds(1),
-                .failure_backoff_max = .fromMilliseconds(10),
+                .failure_backoff_initial = .fromSeconds(1),
+                .failure_backoff_max = .fromSeconds(1),
             },
         },
     });
@@ -1160,10 +1160,16 @@ test "unified HTTP pool backs off failed HTTP3 and preserves TCP reuse" {
             .fromSeconds(2),
         ),
     );
-    try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
 
     const expected = [_][]const u8{ "fallback", "backoff" };
     for (expected, 1..) |body, index| {
+        if (index == 2) {
+            // The initial 1 s backoff must expire before the second request
+            // attempts HTTP/3 again. The explicit wait keeps the failure and
+            // suppression counts independent of scheduler latency.
+            try std.Io.sleep(io, .fromMilliseconds(1200), .awake);
+        }
         const uri = try std.fmt.allocPrint(
             allocator,
             "{s}/request-{d}",
