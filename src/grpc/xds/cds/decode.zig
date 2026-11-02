@@ -29,20 +29,11 @@ fn eds(bytes: []const u8, text_limit: usize) Error![]const u8 {
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) source = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 2) service = try pb.text(&reader, text_limit) else try reader.skip(field);
     }
-    var source_reader: pb.Reader = .{ .bytes = source orelse return error.InvalidCdsResource };
-    var supported = false;
-    while (try source_reader.next()) |field| {
-        if ((field.number == 3 or field.number == 5) and field.wire_type == 2) {
-            try pb.validate(try source_reader.bytesValue());
-            supported = true;
-        } else if ((field.number == 1 or field.number == 2 or field.number == 8) and field.wire_type == 2) {
-            _ = try source_reader.bytesValue();
-            supported = false;
-        } else if (field.number == 6 and field.wire_type == 0) {
-            if (try source_reader.varint() != 2) return error.UnsupportedCdsFeature;
-        } else try source_reader.skip(field);
-    }
-    if (!supported) return error.InvalidCdsResource;
+    _ = @import("../config_source.zig").decode(source orelse return error.InvalidCdsResource) catch |err| return switch (err) {
+        error.InvalidConfigSource => error.InvalidCdsResource,
+        error.UnsupportedConfigSource => error.UnsupportedCdsFeature,
+        else => @errorCast(err),
+    };
     return service;
 }
 fn circuit(bytes: []const u8, limit: usize) Error!u32 {

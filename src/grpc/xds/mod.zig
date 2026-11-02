@@ -3,6 +3,8 @@ pub const eds = @import("eds.zig");
 pub const cds = @import("cds.zig");
 pub const routing = @import("routing/mod.zig");
 pub const rds = @import("rds.zig");
+pub const lds = @import("lds.zig");
+pub const config_source = @import("config_source.zig");
 pub const ads = @import("ads.zig");
 test {
     _ = ads;
@@ -10,4 +12,6 @@ test {
     _ = cds;
     _ = routing;
     _ = rds;
+    _ = lds;
+    _ = config_source;
 }

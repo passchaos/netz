@@ -85,7 +85,9 @@ retry.
 This module provides ADS transport and subscription/version state. Typed EDS decoding and publication are provided by
 [the EDS adapter](grpc_eds.md), and [the CDS controller](grpc_cds.md) connects
 EDS-backed CDS policies and limits to transactional CDS/EDS publication.
-[Typed RDS and immutable RPC selectors](grpc_rds.md) now publish routing over
-existing cluster-manager children. Typed LDS/HCM decoding, automatic
+[Typed RDS and immutable RPC selectors](grpc_rds.md) publish routing over
+existing cluster-manager children. [Client LDS/HCM](grpc_lds.md) now selects
+inline/dynamic RDS, inherits HCM duration and drives route subscription updates.
+Automatic
 multi-cluster orchestration, control-plane retry/failover, bootstrap parsing, resource
 expiry and Delta xDS remain required follow-up work for full xDS integration.

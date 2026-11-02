@@ -3649,3 +3649,41 @@ LDS/HCM/bootstrap and automatic CDS/EDS child orchestration, expiry, failover,
 Delta xDS, LRS, HTTP filters, hash capture/substitution and host/path rewriting
 remain required work for complete xDS integration. Current RDS publication
 uses the application's existing cluster-manager topology.
+
+
+## Client LDS/HCM and listener-driven RDS
+
+Client API Listener resources now own HCM route sources, router/optional-filter
+metadata and max-stream defaults. Inline RDS is validated once and transfers
+parsed ownership into a snapshot; dynamic RDS is cached as immutable route data.
+HCM updates with the same name publish a timeout projection over that data,
+retaining its source directly without building generation chains. New route
+names/modes and listener omission clear old admission, and late RDS cannot
+restore inline or deleted listeners. Subscription storage is prepared before
+publication and committed without allocation after the selector update; applied
+cache/version state survives a failed ACK write.
+
+The effective HTTP filter chain has unique non-empty names and one terminal
+router. Unsupported optional filters are ignored before terminal ordering;
+unsupported required filters, disabled/repeated routers, scoped routes and
+unsupported config discovery fail validation. ADS/self ConfigSource validation
+is shared with CDS, with AUTO resolving to the session's v3 URL. Client HCM
+rejects forwarding IP state per grpc-core. Byte/count/storage and nested RDS
+limits bound decoding, while sorted resource names preserve complete-response
+validation before publication.
+
+The independent official LDS/HCM/RDS/ADS and grpc-js-xds validator gate counts
+31 RPCs against two grpc-js backends. It checks inline/dynamic and duplex
+routing, inherited HCM caps, explicit route zero override, cached reprojection,
+name replacement, late RDS, NACK rollback and deletion. An old 300 ms RPC
+finishes normally after a new 20 ms default applies to new calls. Both backend
+HTTP/2 sessions remain reused. Native tests cover owned inline transfer,
+allocation rollback, missing topology, name/cache/version preservation and
+stale/expired decisions. Existing RDS/CDS regression gates verify the shared
+snapshot ownership and ConfigSource changes. See
+[client LDS/HCM behavior](grpc_lds.md) and
+`docs/evidence/grpc_lds/2026-11-03.json`.
+
+Bootstrap, automatic CDS/EDS child orchestration, failover/retry, expiry, Delta
+xDS, LRS, non-router HTTP filters, server filter chains and full security/
+rewriting behavior remain open for the complete control-plane objective.

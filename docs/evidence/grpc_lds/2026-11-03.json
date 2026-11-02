@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "Client LDS/HCM and listener-driven inline/dynamic RDS publication",
+  "decision": "accepted",
+  "base_head": "46b252a9a459712b3b7c25abe2d3adfd0b5017ad",
+  "behavior": {
+    "decode": "owned v3 client API Listener/HCM, unique filter names, effective router terminal and optional unknown handling, ADS/SELF AUTO-or-V3 source, max-stream default, bounded storage and nested RDS",
+    "inline": "inline RDS validates once and transfers parsed ownership to a snapshot; controller and published projection independently retain route storage",
+    "dynamic": "same RDS name reuses cached parsed data and publishes new immutable HCM duration projection, direct source ownership without projection chains; original RPC choice/deadline retained",
+    "changes": "new RDS names/modes clear route admission; old-name RDS cannot restore new routing; inline/deleted listener late RDS validates/ACKs without publication; omission installs rejecting routes",
+    "transaction": "allocate desired subscription before publication, commit names/cache after successful selector update, then accept ADS version and ACK; validation/alloc/topology/stale/deadline failure preserves prior state",
+    "source": "shared ADS/SELF ConfigSource used by CDS and LDS; AUTO follows v3 session, explicit V2/unknown rejected",
+    "limits": "client API Listener over existing application cluster manager; bootstrap, automatic CDS/EDS children, failover/expiry/Delta/LRS, non-router filters, server filter chains and full security/rewrites remain open"
+  },
+  "verification": {
+    "targeted.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC LDS' -Dtest-filter='gRPC xDS config source' -Dtest-filter='gRPC RDS' -Dtest-filter='gRPC CDS' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/targeted.Debug.log",
+      "passed": 179,
+      "total": 179
+    },
+    "grpc.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/grpc.Debug.log",
+      "passed": 655,
+      "total": 655
+    },
+    "package.Debug": {
+      "command": "zig build test-package --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/package.Debug.log",
+      "passed": 26,
+      "total": 26
+    },
+    "interop.Debug": {
+      "command": "zig build interop-grpc-lds --summary all -- --output docs/evidence/grpc_lds/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/interop.Debug.log",
+      "report": "docs/evidence/grpc_lds/2026-11-03/interop.Debug.json"
+    },
+    "rds-regression.Debug": {
+      "command": "zig build interop-grpc-rds --summary all -- --output docs/evidence/grpc_lds/2026-11-03/rds-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/rds-regression.Debug.log",
+      "report": "docs/evidence/grpc_lds/2026-11-03/rds-regression.Debug.json"
+    },
+    "cds-regression.Debug": {
+      "command": "zig build interop-grpc-cds --summary all -- --output docs/evidence/grpc_lds/2026-11-03/cds-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_lds/2026-11-03/cds-regression.Debug.log",
+      "report": "docs/evidence/grpc_lds/2026-11-03/cds-regression.Debug.json"
+    }
+  },
+  "interop": {
+    "inline": true,
+    "dynamic": true,
+    "cached_projection": true,
+    "zero_override": true,
+    "old_deadline_preserved": true,
+    "name_change_cleared": true,
+    "late_rds_ignored": true,
+    "deleted": true,
+    "nacks": 3,
+    "wire_counts": {
+      "Fast": 25,
+      "Slow": 3,
+      "NoCap": 1,
+      "Stream": 2
+    },
+    "labels": {
+      "a": 13,
+      "b": 18
+    },
+    "sessions": [
+      1,
+      1
+    ],
+    "initial_canceled": true,
+    "short_canceled": true,
+    "grpc_js": "1.14.7",
+    "grpc_js_xds": "1.14.2"
+  },
+  "source_sha256": {
+    "docs/grpc_lds.md": "8174ea633e54a112eddbbf439e83cfb10a7ec43dce7e539cfb47d4c549c7a678",
+    "src/grpc/xds/config_source.zig": "aa64598661abfdafd79cbdb6abb0b4a8194d1cf50541f9bc8278c796c18aea59",
+    "src/grpc/xds/lds.zig": "e9333786abf85728d992ddf3d75342511d4d1cd1909bedb78ea2f1d2484cb10c",
+    "src/grpc/xds/lds/apply_listener.zig": "f7659bc770c613c9e1084b21ea516285eed82973d23d5fa23e95c7783278a6da",
+    "src/grpc/xds/lds/apply_routes.zig": "d838829bfc751ffbb3b5120a35caa2a21719b8c3bcd86545205059227ba43a42",
+    "src/grpc/xds/lds/controller.zig": "076227de2d16a458038eeca5d7f51a463af5d376a7145dfbc5828d6a4ceeef59",
+    "src/grpc/xds/lds/controller_tests.zig": "c45e4df463f72f155998bb97c6b16fa6f7eb69877df62670f5227eac437ec49e",
+    "src/grpc/xds/lds/decode.zig": "ffbb8d243e68ef2f4a1777400d4375af867e090ea907a26c960c6e26dd31e06c",
+    "src/grpc/xds/lds/filter.zig": "bb362a50ad9b10e557519c7afa610d6cba0a51cb4a8708545577a8e989b3d76e",
+    "src/grpc/xds/lds/hcm.zig": "af2f47ead7e7013da46ce9bfd3f1b1706e20468711c4d06676a7f275af0cc5f3",
+    "src/grpc/xds/lds/model.zig": "a8f4c28e5702195d4378189fe11f9f7d2a645a65cddd1caba74f2e1c7216a64a",
+    "src/grpc/xds/lds/projection.zig": "292014d7be2a283e23760501ed1af42501c4a2e53d8a4937285f4331ad97cb81",
+    "src/grpc/xds/lds/protobuf.zig": "5ea141bdb003ce36d42fa2223783622685a560495647ebce759ec31802ba5839",
+    "src/grpc/xds/lds/rollback_tests.zig": "f4996052df49ebf143ff2e1f33868a0c0696cfe710dc4cc0dedb90ae380251d8",
+    "src/grpc/xds/lds/testing.zig": "84d064433d7ffe6c1ebf5bb7b568cc097f0702e0aaf84585cab02b4528ff56fa",
+    "src/grpc/xds/lds/tests.zig": "1eb691b08e3d274c53319eb01d32f81efa70ccff279314b3948061077a5f606d",
+    "tools/interop/grpc_lds/README.md": "596dfea9b644c3cd448cd43a6474f3bd05f95a10a574de0b8b533edc7c3fb59d",
+    "tools/interop/grpc_lds/client.zig": "2cca2d9b781967ce991d40027f0a64a934617dcf7b870187fbeb9118e459bad3",
+    "tools/interop/grpc_lds/peer.js": "e4a17a819d3773ef5da3ed406aa768740d0ec6e4c00322cae63cdfd6e26a2d15",
+    "tools/interop/grpc_lds/run.py": "6b0caa1f8d7ec38413842f5c070e5a14c3ed9f9165afeea765c173b17886e84e",
+    "build.zig": "0c266218b886d2f9194b03f7fa54ca4cb9f0b3ed4c13eea4b06f435830f845fe",
+    "docs/grpc_ads.md": "e35105a4833276eac63a5c88b694b2dd2a85792ead25f0fdf7d14691bc5d33bc",
+    "docs/grpc_parity.md": "25fd06544c7555da81299f58c2e32cf65851ead93a4d54e609fc81d9d2b6c8ce",
+    "docs/grpc_rds.md": "e87007ca9c19723b00532c90529cc06b777e4a625ebdf93dbc4250faae488cdb",
+    "src/grpc/xds/cds/decode.zig": "f9cacb7ab3d0409459751e796eb30c4741a0c374e95d924274a6378e0f65adcb",
+    "src/grpc/xds/mod.zig": "099d8d5fa3e9e9578affcd58826a36c17207a45923a4294cef036cf032ed289e",
+    "src/grpc/xds/rds/snapshot.zig": "eb331a0fbc3d3c667f104bffbe382047f3a1e7ad938455168522628f92b268d5"
+  },
+  "reference_grpc_sha256": {
+    "src/core/xds/grpc/xds_listener_parser.cc": "969939fda98c3cf48653306b2ce864e4cef6d90464f545e2e6d9002723bbf2c2",
+    "src/core/xds/grpc/xds_bootstrap_grpc_builder.cc": "d9ce7746aae8f83836874622e6d906cc1ee79b55c3da566a533c03d958cee7cb"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_lds/2026-11-03/cds-regression.Debug.json": "eb6ad0b3c1f14fb19bf1429795445f06c4444106ec32e625c3d4a61d4a3d5926",
+    "docs/evidence/grpc_lds/2026-11-03/cds-regression.Debug.log": "41a62926fce0754397abcce674ad07623cc68d57003560f6ce9a579ac8b0fed0",
+    "docs/evidence/grpc_lds/2026-11-03/grpc.Debug.log": "ef54043fc9973a1fe6c585a467c34fd5160bb1c24d068a207cd7446eeae75272",
+    "docs/evidence/grpc_lds/2026-11-03/interop.Debug.json": "6768c6d454dc586d87e783a9bef4d7e89b3d600c968f73ece9ecb84688fbc75f",
+    "docs/evidence/grpc_lds/2026-11-03/interop.Debug.log": "8a92e947a2f6851d6a18ea03f210ed16702d06adfcb04fcf76140e372f44deaf",
+    "docs/evidence/grpc_lds/2026-11-03/package.Debug.log": "fa3930cad291673937fb8f5584426368c628e7fd918e417a46811ab754055c9a",
+    "docs/evidence/grpc_lds/2026-11-03/rds-regression.Debug.json": "86f6e516e4f0db26ba16c8e86f289ca884cb24ce5f2ef0735ffdcacb3cafb7a9",
+    "docs/evidence/grpc_lds/2026-11-03/rds-regression.Debug.log": "56d72470ef26fcb487fe6ce21c67c979b0bb7f2342e05fa604f83e88d0961f7d",
+    "docs/evidence/grpc_lds/2026-11-03/targeted.Debug.log": "144dac9ac51fba395f3f78bac625927ee56ffe89d13dba324a909d5f62f3bbeb"
+  }
+}

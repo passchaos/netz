@@ -22,6 +22,14 @@ pub const Snapshot = struct {
         if (options.default_max_stream_duration) |duration| if (duration.nanoseconds < 0) return error.InvalidRdsOptions;
         var owned = try @import("decode.zig").decode(gpa, bytes, bounds);
         errdefer owned.deinit();
+        return takeResource(gpa, &owned, bounds, options);
+    }
+    /// Consume a previously decoded resource only on successful construction.
+    /// LDS inline route configs avoid compiling the same RDS image twice.
+    pub fn takeResource(gpa: std.mem.Allocator, owned: *model.Owned, bounds: model.Limits, options: Options) Error!*Snapshot {
+        if (options.authority.len == 0 or options.max_header_bytes == 0) return error.InvalidRdsOptions;
+        if (options.authority.len > bounds.max_text_bytes or !std.unicode.utf8ValidateSlice(options.authority)) return error.InvalidRdsOptions;
+        if (options.default_max_stream_duration) |duration| if (duration.nanoseconds < 0) return error.InvalidRdsOptions;
         const arena = owned.arena.allocator();
         const authority = try arena.dupe(u8, options.authority);
         const host = routing.domain.select(owned.value.virtual_hosts, authority);
@@ -45,8 +53,9 @@ pub const Snapshot = struct {
         const keys = clusters.items[0..count];
         if (owned.arena.queryCapacity() > bounds.max_storage_bytes) return error.RdsLimitExceeded;
         const self = try gpa.create(Snapshot);
-        self.* = .{ .allocator = gpa, .resource = owned, .authority = authority, .virtual_host = host, .required_clusters = keys, .options = options };
+        self.* = .{ .allocator = gpa, .resource = owned.*, .authority = authority, .virtual_host = host, .required_clusters = keys, .options = options };
         self.options.authority = authority;
+        owned.* = undefined;
         return self;
     }
     pub fn retain(self: *Snapshot) void {

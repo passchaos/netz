@@ -111,8 +111,10 @@ non-GRPC paths, inherited retry disable and admission priority. Existing ADS,
 CDS and official RE2 gates provide regression evidence in
 `docs/evidence/grpc_rds/2026-11-03.json`.
 
-This integrates client RDS selection with existing cluster managers. LDS/HCM,
-bootstrap and automatic multi-cluster CDS/EDS orchestration, resource expiry,
+This integrates client RDS selection with existing cluster managers.
+[Client LDS/HCM orchestration](grpc_lds.md) now selects inline/dynamic RDS and
+reprojects cached routes under HCM defaults. Bootstrap and automatic
+multi-cluster CDS/EDS orchestration, resource expiry,
 control-plane failover/Delta xDS, LRS, capture/hash rewriting, HTTP filter
 overrides and host/path rewriting remain open. Unsupported recognized filter,
 rewrite, timeout-offset and plugin features fail validation; this module does
