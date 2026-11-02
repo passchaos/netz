@@ -28,6 +28,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     HandshakeSendFailed,
     HandshakeReceiveFailed,
     PostHandshakeTlsUnavailable,
+    NativeTrustStoreUnavailable,
 };
 pub const AcceptTimeoutError = Error || std.Io.Timeout.Error;
 
@@ -90,6 +91,14 @@ pub const ClientOptions = struct {
     auto_resumption: ?quic.resumption.ticket.handshake.ClientAutoResume = null,
     early_data: ?quic.zero_rtt.handshake.ClientOffer = null,
     server_auth: ?quic.tls.auth.ClientVerifier = null,
+    /// Optional process environment used to honor `SSL_CERT_FILE` and
+    /// `SSL_CERT_DIR` when `server_auth` is null. Null keeps the platform
+    /// store.
+    system_environ: ?std.process.Environ = null,
+    /// Optional caller-owned native trust store reused across handshakes. It
+    /// takes precedence over `system_environ`; the caller must keep it alive
+    /// for the synchronous handshake.
+    system_store: ?*const quic.tls.trust.SystemStore = null,
     client_identity: ?quic.tls.client_auth.ClientIdentity = null,
     /// TLS 1.3 cipher suites offered in preference order.
     cipher_suites: []const quic.tls_client_hello.CipherSuite =
@@ -1566,6 +1575,29 @@ fn connectAttempt(
 ) Error!EstablishedConnection {
     const source = reader.datagramSource();
     try validateConfiguredVersions(options.version, options.available_versions);
+    const auth_now = std.Io.Timestamp.now(endpoint.io, .real);
+    var system_store: ?quic.tls.trust.SystemStore = null;
+    defer if (system_store) |*store| store.deinit();
+    const server_auth = options.server_auth orelse blk: {
+        if (options.system_store) |store| {
+            break :blk store.verifier(auth_now.toSeconds()).clientVerifier();
+        }
+        if (options.system_environ) |environ| {
+            system_store = quic.tls.trust.SystemStore.initWithEnviron(
+                endpoint.allocator,
+                endpoint.io,
+                auth_now,
+                environ,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeTrustStoreUnavailable,
+            };
+            break :blk system_store.?.verifier(
+                auth_now.toSeconds(),
+            ).clientVerifier();
+        }
+        break :blk null;
+    };
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
     }
@@ -2065,7 +2097,7 @@ fn connectAttempt(
         0,
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
-        !resumed and options.server_auth != null,
+        !resumed and server_auth != null,
         options.handshake_recovery,
     ) catch |err| {
         if (err == error.InvalidReservedBits) {
@@ -2092,7 +2124,7 @@ fn connectAttempt(
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try peer_failure.guardTls(splitServerFlight(
         server_handshake.crypto_data,
-        !resumed and options.server_auth != null,
+        !resumed and server_auth != null,
     ));
     const encrypted_extensions = try peer_failure.guardTls(quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions));
     try peer_failure.guardTls(ensureOfferedAlpn(options.alpn_protocols, encrypted_extensions.alpn));
@@ -2146,7 +2178,7 @@ fn connectAttempt(
         {
             return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         }
-    } else if (options.server_auth) |verifier| {
+    } else if (server_auth) |verifier| {
         const raw_certificate_bytes = server_flight.certificate orelse
             return peer_failure.rejectTls(error.InvalidHandshakeFlight);
         const certificate_verify_bytes =
