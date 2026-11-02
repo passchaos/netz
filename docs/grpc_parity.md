@@ -3073,9 +3073,10 @@ watch.
 
 A real loopback test starts a health registry and a unary responder, lets the
 gate observe SERVING, switches the service to NOT_SERVING, observes
-`ConnectionUnavailable`, then switches back to SERVING and completes another
-unary call on the reused connection. The focused test passes 147/147 and the
-gRPC filter passes 564/564. Evidence is recorded in
+`ConnectionUnavailable`, then starts a background recovery task and completes
+a `wait_for_ready` unary call after the service returns to SERVING on the
+reused connection. The focused test passes 147/147 and the gRPC filter passes
+564/564. Evidence is recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02.json`.
 
 A custom `address_resolver` or custom connector is shared with the dedicated

@@ -29,7 +29,7 @@
     "focused": "147/147 passed",
     "grpc_filter": "564/564 passed",
     "full_library": "6178/6178 passed, exit 0",
-    "integration_test": "real loopback health registry and unary responder: SERVING allows a call, NOT_SERVING returns ConnectionUnavailable, restored SERVING completes another call on the reused connection"
+    "integration_test": "real loopback health registry and unary responder: SERVING allows a call, NOT_SERVING returns ConnectionUnavailable, and a wait_for_ready call completes after a background task restores SERVING on the reused connection"
   },
   "limitations": [
     "the dedicated Watch is server-level, not same-subconnection health",

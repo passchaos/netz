@@ -136,11 +136,18 @@ test "ordinary Channel health gate follows a Watch and blocks NOT_SERVING" {
         }),
     );
 
-    _ = try registry.setStatus("demo.Echo", .serving);
-    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    const Recovery = struct {
+        fn run(recovery_io: std.Io, registry_ptr: *grpc.health.Registry) void {
+            std.Io.sleep(recovery_io, .fromMilliseconds(100), .awake) catch {};
+            _ = registry_ptr.setStatus("demo.Echo", .serving) catch {};
+        }
+    };
+    var recovery_task = io.async(Recovery.run, .{ io, &registry });
+    defer recovery_task.cancel(io);
     var recovered = try channel.unary(.{
         .path = "/demo.Echo/Unary",
         .message = "ping",
+        .wait_for_ready = true,
         .timeout = .{ .value = 3, .unit = .second },
     });
     defer recovered.deinit();
