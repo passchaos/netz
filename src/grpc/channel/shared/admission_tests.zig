@@ -129,7 +129,9 @@ test "gRPC shared stream admission retires unsubmitted allocation without cleanu
                 const self: *@This() = @ptrCast(@alignCast(pointer));
                 const memory = self.backing.rawAlloc(len, alignment, ret) orelse return null;
                 self.allocated += 1;
-                if (len == @sizeOf(State.StreamCall)) {
+                // Inject once: another allocation (including the queue Job)
+                // can have the same size after unrelated struct layout changes.
+                if (len == @sizeOf(State.StreamCall) and !self.entered) {
                     self.entered = true;
                     self.mutex.lockUncancelable(self.base);
                 }

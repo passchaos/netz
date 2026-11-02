@@ -1442,8 +1442,8 @@ pub const Channel = struct {
         previous_attempts: ?u8,
     ) Error!call.UnaryResponse {
         try self.validateDropRequest(options);
-        if (try self.dropCategory(attempt_deadline)) |category| return call.policyDropResponse(allocator, category);
-        if (try self.circuitSaturated(attempt_deadline)) return call.circuitBreakerResponse(allocator);
+        if (try self.dropCategory(attempt_deadline, options.xds_cluster)) |category| return call.policyDropResponse(allocator, category);
+        if (try self.circuitSaturated(attempt_deadline, options.xds_cluster)) return call.circuitBreakerResponse(allocator);
         const routing_hash = try self.requestHash(options);
         const ready_connection = try self.ready(
             options.wait_for_ready orelse false,
@@ -1451,7 +1451,7 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(options),
         );
-        if (!self.acquireCircuit(ready_connection.index)) return call.circuitBreakerResponse(allocator);
+        if (!try self.acquireCircuit(ready_connection.index, options.xds_cluster)) return call.circuitBreakerResponse(allocator);
         self.beginRequest(ready_connection.index);
         defer self.finishRequest(ready_connection.index);
         const timeout_header: ?wire.Timeout = if (rpc_deadline) |absolute| blk: {
@@ -1507,8 +1507,8 @@ pub const Channel = struct {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
-        if (try self.dropCategory(deadline)) |_| return error.CallDropped;
-        if (try self.circuitSaturated(deadline)) return error.CallDropped;
+        if (try self.dropCategory(deadline, resolved.options.xds_cluster)) |_| return error.CallDropped;
+        if (try self.circuitSaturated(deadline, resolved.options.xds_cluster)) return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1516,7 +1516,7 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(resolved.options),
         );
-        if (!self.acquireCircuit(ready_connection.index)) return error.CallDropped;
+        if (!try self.acquireCircuit(ready_connection.index, resolved.options.xds_cluster)) return error.CallDropped;
         self.beginRequest(ready_connection.index);
         var owns_request = self.slots[ready_connection.index].least_request_enabled or self.slots[ready_connection.index].circuit_permit != null;
         defer if (owns_request) self.finishRequest(ready_connection.index);
@@ -1567,8 +1567,8 @@ pub const Channel = struct {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
-        if (try self.dropCategory(deadline)) |_| return error.CallDropped;
-        if (try self.circuitSaturated(deadline)) return error.CallDropped;
+        if (try self.dropCategory(deadline, resolved.options.xds_cluster)) |_| return error.CallDropped;
+        if (try self.circuitSaturated(deadline, resolved.options.xds_cluster)) return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1576,7 +1576,7 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(resolved.options),
         );
-        if (!self.acquireCircuit(ready_connection.index)) return error.CallDropped;
+        if (!try self.acquireCircuit(ready_connection.index, resolved.options.xds_cluster)) return error.CallDropped;
         self.beginRequest(ready_connection.index);
         var owns_request = self.slots[ready_connection.index].least_request_enabled or self.slots[ready_connection.index].circuit_permit != null;
         defer if (owns_request) self.finishRequest(ready_connection.index);
@@ -1968,7 +1968,8 @@ pub const Channel = struct {
     }
 
     fn validateDropRequest(self: *const Channel, options: anytype) Error!void {
-        if (self.drop.categories.len == 0 and self.circuit == null) return;
+        const child = if (self.weighted_target_runtime) |*runtime| @import("channel/cluster_impl.zig").contains(runtime.root) else false;
+        if (self.drop.categories.len == 0 and self.circuit == null and !child) return;
         _ = try call.parseRequestMetadata("POST", options.path, &.{ .{ .name = "content-type", .value = "application/grpc" }, .{ .name = "te", .value = "trailers" } });
         try call.validateCustomMetadata(options.metadata);
         try call.validateCustomBinaryMetadata(options.binary_metadata);
@@ -1979,29 +1980,53 @@ pub const Channel = struct {
     pub fn dropStats(self: *const Channel) drop_policy.Stats {
         return self.drop_counters.snapshot();
     }
-    fn dropCategory(self: *Channel, deadline: ?std.Io.Clock.Timestamp) Error!?[]const u8 {
-        if (self.drop.categories.len == 0) return null;
+    fn implPolicy(self: *Channel, cluster: ?[]const u8) error{UnknownCluster}!?*@import("channel/cluster_impl.zig").Policy {
+        const runtime = if (self.weighted_target_runtime) |*value| value else return null;
+        return @import("channel/cluster_impl.zig").forCluster(runtime.root, cluster);
+    }
+    fn admissionBudget(self: *Channel, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (deadline) |until| _ = try @import("../internal/deadline.zig").usableAwake(self.io, until);
         try self.io.checkCancel();
         if (self.canceled.isSet()) return error.Canceled;
-        return self.drop.choose(self.io, &self.drop_counters);
     }
-
+    fn dropCategory(self: *Channel, deadline: ?std.Io.Clock.Timestamp, cluster: ?[]const u8) Error!?[]const u8 {
+        if (self.drop.categories.len != 0) {
+            try self.admissionBudget(deadline);
+            if (self.drop.choose(self.io, &self.drop_counters)) |category| return category;
+        }
+        const policy = (self.implPolicy(cluster) catch return null) orelse return null;
+        if (policy.drops.categories.len == 0) return null;
+        try self.admissionBudget(deadline);
+        return policy.drops.choose(self.io, &policy.counters);
+    }
     pub fn circuitStats(self: *const Channel) circuit_breaker.Stats {
         return if (self.circuit) |policy| policy.stats() else .{};
     }
-    fn circuitSaturated(self: *Channel, deadline: ?std.Io.Clock.Timestamp) Error!bool {
-        const policy = self.circuit orelse return false;
-        if (deadline) |until| _ = try @import("../internal/deadline.zig").usableAwake(self.io, until);
-        try self.io.checkCancel();
-        if (self.canceled.isSet()) return error.Canceled;
-        if (!policy.saturated()) return false;
-        policy.recordRejection();
+    pub fn clusterCircuitStats(self: *Channel, cluster: ?[]const u8) Error!circuit_breaker.Stats {
+        return if (try self.implPolicy(cluster)) |policy| policy.circuit.stats() else .{};
+    }
+    pub fn clusterDropStats(self: *Channel, cluster: ?[]const u8) Error!drop_policy.Stats {
+        return if (try self.implPolicy(cluster)) |policy| policy.counters.snapshot() else .{ .evaluated = 0, .dropped = 0 };
+    }
+    fn circuitSaturated(self: *Channel, deadline: ?std.Io.Clock.Timestamp, cluster: ?[]const u8) Error!bool {
+        if (self.circuit) |policy| {
+            try self.admissionBudget(deadline);
+            if (policy.saturated()) {
+                policy.recordRejection();
+                return true;
+            }
+        }
+        const policy = (try self.implPolicy(cluster)) orelse return false;
+        try self.admissionBudget(deadline);
+        if (!policy.circuit.saturated()) return false;
+        policy.circuit.recordRejection();
         return true;
     }
-    fn acquireCircuit(self: *Channel, index: usize) bool {
-        const policy = self.circuit orelse return true;
-        const permit = policy.acquire() orelse return false;
+    fn acquireCircuit(self: *Channel, index: usize, cluster: ?[]const u8) Error!bool {
+        const child = try self.implPolicy(cluster);
+        const policy = if (child) |value| value.circuit else null;
+        if (self.circuit == null and policy == null) return true;
+        const permit = circuit_breaker.acquirePair(self.circuit, policy) orelse return false;
         std.debug.assert(self.slots[index].circuit_permit == null);
         self.slots[index].circuit_permit = permit;
         return true;

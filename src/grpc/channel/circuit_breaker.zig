@@ -63,14 +63,39 @@ const Counter = struct {
 };
 pub const Permit = struct {
     counter: ?*Counter,
+    secondary: ?*Counter = null,
     /// One owning value; copying a permit does not acquire another request.
     pub fn release(self: *Permit) void {
+        if (self.secondary) |extra| {
+            self.secondary = null;
+            std.debug.assert(extra.active.fetchSub(1, .acq_rel) != 0);
+            extra.release();
+        }
         const counter = self.counter orelse return;
         self.counter = null;
         std.debug.assert(counter.active.fetchSub(1, .acq_rel) != 0);
         counter.release();
     }
 };
+/// Combine channel and cluster constraints; identical identities reserve once
+/// under the stricter limit. Independent budgets are released as one permit.
+pub fn acquirePair(first: ?Policy, second: ?Policy) ?Permit {
+    if (first == null) return if (second) |policy| policy.acquire() else null;
+    if (second == null) return first.?.acquire();
+    if (first.?.counter == second.?.counter) {
+        var policy = first.?;
+        policy.maximum = @min(policy.maximum, second.?.maximum);
+        return policy.acquire();
+    }
+    var permit = first.?.acquire() orelse return null;
+    var extra = second.?.acquire() orelse {
+        permit.release();
+        return null;
+    };
+    permit.secondary = extra.counter;
+    extra.counter = null;
+    return permit;
+}
 pub const Policy = struct {
     counter: *Counter,
     maximum: u32,
@@ -162,6 +187,29 @@ test "gRPC circuit breaker registry construction rolls back allocation failures"
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.run, .{});
     try std.testing.expectError(error.InvalidCircuitBreaker, Policy.init(.{ .cluster = "" }));
+}
+
+test "gRPC circuit breaker combined budgets reserve once for a shared identity and roll back partial reservations" {
+    var first = try Policy.init(.{ .cluster = "combined", .max_concurrent_requests = 2 });
+    defer first.deinit();
+    var same = first.clone();
+    defer same.deinit();
+    same.maximum = 1;
+    var permit = acquirePair(first, same).?;
+    try std.testing.expectEqual(@as(u32, 1), first.stats().active);
+    try std.testing.expect(acquirePair(first, same) == null);
+    permit.release();
+    var second = try Policy.init(.{ .cluster = "other-combined", .max_concurrent_requests = 1 });
+    defer second.deinit();
+    var pair = acquirePair(first, second).?;
+    try std.testing.expectEqual(@as(u32, 1), first.stats().active);
+    try std.testing.expectEqual(@as(u32, 1), second.stats().active);
+    try std.testing.expect(acquirePair(first, second) == null);
+    try std.testing.expectEqual(@as(u32, 1), first.stats().active);
+    pair.release();
+    pair.release();
+    try std.testing.expectEqual(@as(u32, 0), first.stats().active);
+    try std.testing.expectEqual(@as(u32, 0), second.stats().active);
 }
 
 test "gRPC circuit breaker atomic permits enforce the cap across racing owners" {

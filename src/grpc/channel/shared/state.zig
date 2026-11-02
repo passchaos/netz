@@ -961,19 +961,20 @@ pub const State = struct {
     }
     fn claimJobLocked(self: *State, worker: *Worker, job: *Job) ?*Job {
         self.removeQueuedLocked(job);
-        if (self.circuit) |policy| {
-            job.circuit_permit = policy.acquire() orelse {
-                if (job.stream != null) {
-                    self.finishLocked(job, null, error.CallDropped);
-                    return null;
-                }
-                const response = call.circuitBreakerResponse(self.allocator) catch |err| {
-                    self.finishLocked(job, null, err);
-                    return null;
-                };
-                self.finishLocked(job, response, null);
+        if (!(@import("circuit_admission.zig").acquire(self, job) catch |err| {
+            self.finishLocked(job, null, err);
+            return null;
+        })) {
+            if (job.stream != null) {
+                self.finishLocked(job, null, error.CallDropped);
+                return null;
+            }
+            const response = call.circuitBreakerResponse(self.allocator) catch |err| {
+                self.finishLocked(job, null, err);
                 return null;
             };
+            self.finishLocked(job, response, null);
+            return null;
         }
         job.setOwnerWake(worker.wake);
         worker.capacity -= 1;

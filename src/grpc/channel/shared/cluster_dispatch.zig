@@ -16,6 +16,26 @@ pub fn choose(state: anytype, runtime: anytype, claimant: anytype, comptime remo
             continue;
         };
         const cluster = route.jobCluster(job);
+        const dropped = @import("drop_admission.zig").evaluate(state, job) catch |err| {
+            remove(state, job);
+            finish(state, job, null, err);
+            continue;
+        };
+        if (dropped) |response| {
+            remove(state, job);
+            finish(state, job, response, null);
+            continue;
+        }
+        const saturated = @import("circuit_admission.zig").rejectIfSaturated(state, job) catch |err| {
+            remove(state, job);
+            finish(state, job, null, err);
+            continue;
+        };
+        if (saturated) |response| {
+            remove(state, job);
+            finish(state, job, response, null);
+            continue;
+        }
         route.validate(runtime.root, cluster) catch |err| {
             remove(state, job);
             finish(state, job, null, err);

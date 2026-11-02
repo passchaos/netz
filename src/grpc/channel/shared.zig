@@ -125,6 +125,20 @@ pub const SharedChannel = struct {
     pub fn dropStats(self: SharedChannel) channel.drop_policy.Stats {
         return self.state.drop_counters.snapshot();
     }
+    pub fn clusterCircuitStats(self: SharedChannel, cluster: ?[]const u8) Error!channel.circuit_breaker.Stats {
+        self.state.lock();
+        defer self.state.unlock();
+        const runtime = if (self.state.weighted_target) |*value| value else return .{};
+        const policy = (try @import("cluster_impl.zig").forCluster(runtime.root, cluster)) orelse return .{};
+        return policy.circuit.stats();
+    }
+    pub fn clusterDropStats(self: SharedChannel, cluster: ?[]const u8) Error!channel.drop_policy.Stats {
+        self.state.lock();
+        defer self.state.unlock();
+        const runtime = if (self.state.weighted_target) |*value| value else return .{ .evaluated = 0, .dropped = 0 };
+        const policy = (try @import("cluster_impl.zig").forCluster(runtime.root, cluster)) orelse return .{ .evaluated = 0, .dropped = 0 };
+        return policy.counters.snapshot();
+    }
     pub fn hedgingStats(self: SharedChannel) HedgingStats {
         return self.state.hedging_counters.snapshot();
     }

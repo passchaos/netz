@@ -87,6 +87,7 @@ pub fn Runtime(comptime State: type) type {
 
         const Node = struct {
             cluster_manager: bool = false,
+            admission: ?@import("../cluster_impl.zig").Policy = null,
             refs: std.atomic.Value(usize) = .init(1),
             path: []const []const u8,
             kind: union(enum) {
@@ -134,6 +135,10 @@ pub fn Runtime(comptime State: type) type {
                 .priority_deactivation_timeout_ns = priority_deactivation_timeout_ns,
             };
             self.root = try self.build(root_config, &.{});
+            if (!@import("../cluster_impl.zig").validLayout(self.root, true)) {
+                self.destroy(self.root);
+                return error.InvalidSharedOptions;
+            }
             return self;
         }
 
@@ -551,6 +556,13 @@ pub fn Runtime(comptime State: type) type {
                     node.cluster_manager = true;
                     break :blk node;
                 },
+                .cluster_impl => |value| blk: {
+                    const node = try self.build(value.child, path);
+                    errdefer self.destroy(node);
+                    if (node.admission != null) return error.InvalidSharedOptions;
+                    node.admission = @import("../cluster_impl.zig").Policy.init(self.allocator, value.admission) catch |failure| return if (failure == error.OutOfMemory) error.OutOfMemory else error.InvalidSharedOptions;
+                    break :blk node;
+                },
                 .xds_wrr_locality => return error.InvalidSharedOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
@@ -738,6 +750,7 @@ pub fn Runtime(comptime State: type) type {
 
         fn destroy(self: *Self, node: *Node) void {
             if (node.refs.fetchSub(1, .acq_rel) != 1) return;
+            if (node.admission) |*policy| policy.deinit();
             switch (node.kind) {
                 .leaf => |*leaf| {
                     leaf.ring.deinit(self.allocator);
@@ -764,6 +777,8 @@ pub fn Runtime(comptime State: type) type {
             node: *Node,
             state: *State,
         ) connectivity.State {
+            if (node.admission) |policy| if (policy.drops.dropsAll()) return .ready;
+            if (node.admission) |policy| if (policy.discovery_pending) return .connecting;
             return switch (node.kind) {
                 .leaf => self.aggregateLeaf(node, state),
                 .weighted => |weighted| blk: {

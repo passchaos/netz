@@ -133,6 +133,7 @@ pub const PriorityConfig = struct {
 /// policy. Leaf policies retain their complete parsed configuration; composite
 /// policies point at child nodes in the same ServiceConfig arena. This is the
 /// ownership foundation for grpc-core-style recursive policy composition.
+pub const ClusterImplConfig = struct { admission: @import("channel/cluster_impl.zig").Options, child: *const LoadBalancingNode };
 pub const LoadBalancingNode = union(enum) {
     pick_first: PickFirstConfig,
     round_robin,
@@ -142,6 +143,7 @@ pub const LoadBalancingNode = union(enum) {
     weighted_target: WeightedTargetConfig,
     xds_wrr_locality: *const LoadBalancingNode,
     cluster_manager: WeightedTargetConfig,
+    cluster_impl: ClusterImplConfig,
     priority: PriorityConfig,
     outlier_detection: struct {
         config: OutlierDetectionConfig,
@@ -155,7 +157,7 @@ pub const LoadBalancingNode = union(enum) {
             .least_request => .least_request,
             .ring_hash => .ring_hash,
             .weighted_round_robin => .weighted_round_robin,
-            .weighted_target, .xds_wrr_locality, .cluster_manager => .weighted_target,
+            .weighted_target, .xds_wrr_locality, .cluster_manager, .cluster_impl => .weighted_target,
             .priority => .priority,
             .outlier_detection => |wrapper| wrapper.child.leafPolicy(),
         };
@@ -604,6 +606,10 @@ fn parseLoadBalancingAt(
             if (object.count() != 1) return error.InvalidServiceConfig;
             var iterator = object.iterator();
             const item = iterator.next().?;
+            if (std.mem.eql(u8, item.key_ptr.*, "xds_cluster_impl_experimental")) {
+                const parsed = try @import("service_config/cluster_impl.zig").parse(allocator, item.value_ptr.*, depth, parseLoadBalancingAt);
+                return configuredLoadBalancing(allocator, .{ .policy = .weighted_target, .configured = true }, .{ .cluster_impl = parsed });
+            }
             if (std.mem.eql(
                 u8,
                 item.key_ptr.*,

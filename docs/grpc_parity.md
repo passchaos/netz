@@ -3687,3 +3687,32 @@ snapshot ownership and ConfigSource changes. See
 Bootstrap, automatic CDS/EDS child orchestration, failover/retry, expiry, Delta
 xDS, LRS, non-router HTTP filters, server filter chains and full security/
 rewriting behavior remain open for the complete control-plane objective.
+
+
+## Per-cluster xDS admission
+
+Cluster manager children now use xds_cluster_impl_experimental admission
+metadata for their own EDS categories and shared cluster/EDS request counter.
+Priority/locality and endpoint policies remain in their existing runtime tree.
+Ordinary and shared callers resolve the selected child's policy, preserving
+sibling progress around pending, failed, dropped or saturated clusters. Channel
+and cluster constraints compose; equal circuit identities reserve once under
+the minimum cap, and independent constraints release through a single owning
+permit. Stream permits keep count until terminal/cancel cleanup.
+
+Category-only state transfer preserves counters and unchanged queued drop
+samples, while changed categories re-evaluate once. Discovery-pending children
+report CONNECTING and hold fail-fast requests until configuration arrives.
+Missing-endpoint drop-all still rejects locally. Config topology, identity,
+count and recursion validation keep ambiguous/nested admission unsupported.
+Selected cluster telemetry is available alongside existing channel counters.
+
+Native tests cover allocation, separate/same-identity permits, sibling drop
+isolation, ordinary/shared streams and pending/category updates. The actual
+grpc-js-xds picker oracle and independent grpc-js backends count exactly five
+permitted calls per ordinary/shared mode and no rejected payloads. The full
+suite also exposed a size-matching fault injector locking twice after unrelated
+stream/job layout changes; it now enters once and preserves the original
+cleanup-lock assertion. See [cluster admission](grpc_cluster_impl.md) and
+`docs/evidence/grpc_cluster_impl/2026-11-03.json`. Automatic LDS/RDS dependencies
+to CDS/EDS publication and broader bootstrap/failover/expiry/LRS remain open.

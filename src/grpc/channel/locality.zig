@@ -29,6 +29,7 @@ pub fn contains(node: *const Node) bool {
             if (contains(child.child)) break true;
         } else false,
         .outlier_detection => |v| contains(v.child),
+        .cluster_impl => |v| contains(v.child),
         else => false,
     };
 }
@@ -127,6 +128,7 @@ fn expand(allocator: std.mem.Allocator, node: *const Node, endpoints: anytype, p
             break :blk .{ .priority = .{ .children = children, .priorities = value.priorities } };
         },
         .outlier_detection => |value| .{ .outlier_detection = .{ .config = value.config, .child = try expand(allocator, value.child, endpoints, path) } },
+        .cluster_impl => |value| .{ .cluster_impl = .{ .admission = value.admission, .child = try expand(allocator, value.child, endpoints, path) } },
         else => unreachable,
     };
     return result;

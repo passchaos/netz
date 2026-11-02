@@ -109,6 +109,7 @@ pub fn Runtime(comptime Slot: type) type {
 
         const Node = struct {
             cluster_manager: bool = false,
+            admission: ?@import("cluster_impl.zig").Policy = null,
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
@@ -166,6 +167,10 @@ pub fn Runtime(comptime Slot: type) type {
                 .priority_deactivation_timeout_ns = priority_deactivation_timeout_ns,
             };
             self.root = try self.build(config, &.{});
+            if (!@import("cluster_impl.zig").validLayout(self.root, true)) {
+                self.destroy(self.root);
+                return error.InvalidChannelOptions;
+            }
             return self;
         }
 
@@ -499,6 +504,13 @@ pub fn Runtime(comptime Slot: type) type {
                     node.cluster_manager = true;
                     break :blk node;
                 },
+                .cluster_impl => |value| blk: {
+                    const node = try self.build(value.child, path);
+                    errdefer self.destroy(node);
+                    if (node.admission != null) return error.InvalidChannelOptions;
+                    node.admission = @import("cluster_impl.zig").Policy.init(self.allocator, value.admission) catch |failure| return if (failure == error.OutOfMemory) error.OutOfMemory else error.InvalidChannelOptions;
+                    break :blk node;
+                },
                 .xds_wrr_locality => return error.InvalidChannelOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
@@ -706,6 +718,7 @@ pub fn Runtime(comptime Slot: type) type {
         }
 
         fn destroy(self: *Self, node: *Node) void {
+            if (node.admission) |*policy| policy.deinit();
             switch (node.kind) {
                 .leaf => |*leaf| {
                     leaf.ring.deinit(self.allocator);
@@ -820,6 +833,8 @@ pub fn Runtime(comptime Slot: type) type {
             node: *Node,
             slots: []Slot,
         ) AggregateState {
+            if (node.admission) |policy| if (policy.drops.dropsAll()) return .ready;
+            if (node.admission) |policy| if (policy.discovery_pending) return .connecting;
             return switch (node.kind) {
                 .leaf => aggregateLeaf(node.path, slots),
                 .weighted => |children| blk: {

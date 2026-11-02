@@ -6,6 +6,7 @@ pub fn Plan(comptime Runtime: type) type {
     return struct {
         allocator: std.mem.Allocator,
         pairs: std.ArrayList(Pair) = .empty,
+        admissions: std.ArrayList(Pair) = .empty,
 
         const Self = @This();
         const Node = @typeInfo(@FieldType(Runtime, "root")).pointer.child;
@@ -19,10 +20,12 @@ pub fn Plan(comptime Runtime: type) type {
         }
         pub fn deinit(self: *Self) void {
             self.pairs.deinit(self.allocator);
+            self.admissions.deinit(self.allocator);
         }
 
         pub fn collect(self: *Self, old: *Node, next: *Node) std.mem.Allocator.Error!void {
             if (!samePath(old.path, next.path) or old.cluster_manager != next.cluster_manager) return;
+            if (old.admission != null and next.admission != null) try self.admissions.append(self.allocator, .{ .old = old, .next = next });
             if (old.kind == .outlier and next.kind != .outlier) {
                 return self.collect(old.kind.outlier.child, next);
             }
@@ -92,6 +95,7 @@ pub fn Plan(comptime Runtime: type) type {
         /// Called only after all allocation/task admission succeeds. The old
         /// runtime loses each moved buffer so its later destruction is safe.
         pub fn commit(self: *Self) void {
+            for (self.admissions.items) |pair| pair.next.admission.?.transfer(&pair.old.admission.?);
             for (self.pairs.items) |pair| switch (pair.next.kind) {
                 .leaf => |*leaf| {
                     const prior = &pair.old.kind.leaf;

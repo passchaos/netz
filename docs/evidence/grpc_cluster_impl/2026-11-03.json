@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "Selected-cluster drop/circuit admission and composite request permits",
+  "decision": "accepted",
+  "base_head": "51c60552806fa78c821e8eba26c21930d1ea7fe6",
+  "behavior": {
+    "scope": "ordinary and shared cluster-impl runtime metadata on endpoint policy root, cluster-manager RPC selection and sibling isolation",
+    "permits": "compose channel and cluster constraints; shared identity reserves once at min cap; independent identity partial acquisition rolls back, actual stream/unary completion releases combined owning permit",
+    "drops": "channel categories then cluster categories before circuit; marked local UNAVAILABLE or CallDropped, no wire/retry/hedge; drop-all ready even without endpoints",
+    "updates": "shared metadata transfer retains counters and unchanged queued drop revision; category changes evaluate once; pending discovery connects/queues without permits",
+    "validation": "bounded cluster/EDS identity, count/fraction/concurrency and child depth; nested/ambiguous admission fails",
+    "fixture_fix": "size-based StreamCall allocation injection locks once so a same-sized Job allocation cannot lock the occupied mutex again; cleanup-priority assertion remains",
+    "next": "automatic LDS/RDS dependencies and CDS/EDS child publication remain in progress"
+  },
+  "verification": {
+    "targeted.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC cluster impl' -Dtest-filter='gRPC circuit breaker' -Dtest-filter='gRPC cluster manager' --summary all",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/targeted.Debug.log",
+      "passed": 181,
+      "total": 181
+    },
+    "grpc.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/grpc.Debug.log",
+      "passed": 661,
+      "total": 661
+    },
+    "package.Debug": {
+      "command": "zig build test-package --summary all",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/package.Debug.log",
+      "passed": 26,
+      "total": 26
+    },
+    "interop.Debug": {
+      "command": "zig build interop-grpc-cluster-impl --summary all -- --output docs/evidence/grpc_cluster_impl/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/interop.Debug.log",
+      "report": "docs/evidence/grpc_cluster_impl/2026-11-03/interop.Debug.json"
+    },
+    "circuit-regression.Debug": {
+      "command": "zig build interop-grpc-circuit --summary all -- --output docs/evidence/grpc_cluster_impl/2026-11-03/circuit-regression.Debug.json",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/circuit-regression.Debug.log",
+      "report": "docs/evidence/grpc_cluster_impl/2026-11-03/circuit-regression.Debug.json"
+    },
+    "lds-regression.Debug": {
+      "command": "zig build interop-grpc-lds --summary all -- --output docs/evidence/grpc_cluster_impl/2026-11-03/lds-regression.Debug.json",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/lds-regression.Debug.log",
+      "report": "docs/evidence/grpc_cluster_impl/2026-11-03/lds-regression.Debug.json"
+    },
+    "admission.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC shared stream admission retires unsubmitted allocation' --summary all",
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_cluster_impl/2026-11-03/admission.Debug.log",
+      "passed": 161,
+      "total": 161
+    }
+  },
+  "interop": {
+    "results": [
+      {
+        "status": "passed",
+        "mode": "ordinary",
+        "independent_cluster": true,
+        "limit_replacement": true,
+        "category_before_circuit": true,
+        "stream_completion": true,
+        "wire_calls": [
+          "stream",
+          "independent",
+          "extra-a",
+          "release",
+          "resumed-a"
+        ],
+        "sessions": [
+          3,
+          1
+        ]
+      },
+      {
+        "status": "passed",
+        "mode": "shared",
+        "independent_cluster": true,
+        "limit_replacement": true,
+        "category_before_circuit": true,
+        "stream_completion": true,
+        "wire_calls": [
+          "stream",
+          "independent",
+          "extra-a",
+          "release",
+          "resumed-a"
+        ],
+        "sessions": [
+          2,
+          1
+        ]
+      }
+    ],
+    "official_oracle": {
+      "independent_circuit": true,
+      "cluster_drop": true
+    },
+    "grpc_js": "1.14.7"
+  },
+  "source_sha256": {
+    "build.zig": "a4b3c5efb66f3c437d8bf4ec719e8f3332a271fcf350e9990efa65be7fdb52d8",
+    "docs/grpc_circuit.md": "9b904a0e26c673e47626897e430fa778137edf6d0caa62a26a7ed68b8eb36889",
+    "docs/grpc_cluster_impl.md": "818bf497cee83d181a61804b49a6018b4366b9c98928147f813d6e47b5f12f57",
+    "docs/grpc_parity.md": "f3d6c4e8bcc62f37574d1d86aa61a737ba4ffec420b5512578dedb3970c2c5f0",
+    "src/grpc/channel.zig": "617287f161c9d8232ad0eb12a1435e5318e75fddd68d88905efaa42e66da3a54",
+    "src/grpc/channel/circuit_breaker.zig": "1ebed5d2fe9d5aa7eb75154923b0b9e7ca14c303e9763244ceb1ec4b2677ae83",
+    "src/grpc/channel/cluster_impl.zig": "fb21111186180023a296c3787fdb367e6ce919a7842c77c2c786528105e926b4",
+    "src/grpc/channel/cluster_impl/stream_tests.zig": "6f1645cd97046511a0372d7688adc36a5f8cbc417abcc42754319de4047f31d0",
+    "src/grpc/channel/cluster_impl/tests.zig": "2ad990f73a4919329806ef2b21318ccc8d3310af48bc552571a8060a9e8f87f7",
+    "src/grpc/channel/cluster_impl/update_tests.zig": "25fcbe6d3a3f0bbaab7c2370c0f719409e612bd635a19273507f6ab49603f934",
+    "src/grpc/channel/locality.zig": "f5070b9eaa3a7ba8ac606ce2a58ca35dc981a2dbc9f2c2522883313fc7eeae58",
+    "src/grpc/channel/shared.zig": "c0939ff0265bef16dc954cd8910ca859a83638b64b461dd640c5417be3cfb580",
+    "src/grpc/channel/shared/admission_tests.zig": "2fcd60155efe71cee4ecbcb7e799bbcf929c2feb43f8d92aadabecb78aa3cd0e",
+    "src/grpc/channel/shared/circuit_admission.zig": "20e4fff42c25e74a16bff9351814eefc6feaab919e23cbfbf4580af2c07134da",
+    "src/grpc/channel/shared/cluster_dispatch.zig": "68a84c4c4c2c8e729c78e90963eba92fdf3f378bbae0dcad8d5f9a4129b13c55",
+    "src/grpc/channel/shared/drop_admission.zig": "fab465a703acd20876757568e2935bcb71a2724d7354650215accbfe2badaa12",
+    "src/grpc/channel/shared/job.zig": "7a61b0eeb46d405316bc68342bdeca2b56940ddb373c27edf69874b1fcd51c6d",
+    "src/grpc/channel/shared/state.zig": "a6384eb173ac5f028d295ec9b044f9bf4c933ed3e0961620d5a4794be5f59c5a",
+    "src/grpc/channel/shared/weighted_target.zig": "f89d0aca83bdf10c883bd6ac1c2fa28276a855e6a837b3fa95e12a08aa2c18c5",
+    "src/grpc/channel/shared/weighted_target/state_transfer.zig": "23ebe76146147cd7127985c666cb5bb1a51c5fb850e696e80f341cd9199c5d7b",
+    "src/grpc/channel/weighted_target.zig": "16608d3408b3e6fa35db9c5e91e222950c014ea9ed418a61ac1bc57f25513b60",
+    "src/grpc/service_config.zig": "b8ac8b22549758c4843c62560063a6fe9bbd742bc08b4efbc60c31448d981d3e",
+    "src/grpc/service_config/cluster_impl.zig": "8def1ca02ba92edd96b51c1234ec3c289b62d853936fea59959157a12b63c296",
+    "tools/interop/grpc_cluster_impl/README.md": "cc4f37cd829180489b5aef82b90287c2146049e40b631d42f6b36a6bb189c75e",
+    "tools/interop/grpc_cluster_impl/client.zig": "0d9d815093ef4e9f36eb5bce08a7712a3349ee1d43b8482af32434faafe51b3d",
+    "tools/interop/grpc_cluster_impl/peer.js": "fdf959546dac621fec5a7f433ff9ebd2f19bf5b6271edba6d54e2532efad76a7",
+    "tools/interop/grpc_cluster_impl/run.py": "134bf3cdd5da7ed827578240efc77cbd45de06ab1a545c32eb096eab998d51d6",
+    "tools/interop/grpc_lds/run.py": "650abcfe533ca1bf4b07718be895a76f3be8a768ea5aab4807e363dd8f198ef8"
+  },
+  "reference_grpc_sha256": {
+    "src/core/load_balancing/xds/xds_cluster_impl.cc": "2b2fd26a50bb8e9a22b9efe1fa095de3412e2fe229277f0b2adeb2f69a029631"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_cluster_impl/2026-11-03/admission.Debug.log": "c2036290e6a26e03f4a056e8b7e412ee0deff415581a18fbd5b8e58721b31c5a",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/circuit-regression.Debug.json": "a40b28410a643e7db2107adb24de0f0ec475bc90cb6f01c5fa37fd99c0b0fd3a",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/circuit-regression.Debug.log": "ba6be1283c041c69922fe59cd943235a3274b7e941ad45d0272a268d2668f80d",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/grpc.Debug.log": "41165f48bb6ba18675f0d27083408325c4c94db9b5f4bb2cee826a341462b4ab",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/interop.Debug.json": "7f103dfcceb5e9b9749e7c44ff0378825aed63039735ae1c80619fc4bbe65ab4",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/interop.Debug.log": "18541bd9c82cd98fac06a5d38549c7b85e4e97b17f93d8343935e2cc8bd5587f",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/lds-regression.Debug.json": "eae94bcbdd1ef2b3e81c6f77e4881758c553c177a7091aad26fd850c89fb84b8",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/lds-regression.Debug.log": "5581ff21e7c2579669e00489cd3391ef2a113538e89dbbef9484c258a20d78bc",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/package.Debug.log": "fb748b5a215c3367a0a279cec53abf0f6d5ef1fcae49880ccc3b40ce4876e28f",
+    "docs/evidence/grpc_cluster_impl/2026-11-03/targeted.Debug.log": "1db684a0c3bb2ebe69cb9bc2c3a9870ffc4a69d1f4662f67e4ad69d33713efc8"
+  }
+}
