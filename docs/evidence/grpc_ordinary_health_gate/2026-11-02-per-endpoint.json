@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "per-subchannel ordinary Channel Health Watch gate",
+  "decision": "accepted",
+  "head": "ec4ac754",
+  "api": {
+    "option": "Channel.Options.health_check_service",
+    "observability": "Channel.healthServing() is the aggregate state (true when any endpoint is SERVING or UNIMPLEMENTED, false when every known endpoint is rejected, null before any status or before hostname resolution); Channel.healthServingAt(index) reports one endpoint in current slot order"
+  },
+  "design": {
+    "watch_transport": "one dedicated Watch connection per resolved endpoint; health traffic never competes with application RPC readers",
+    "creation": "gates start during Channel.init for pre-resolved slots and when a hostname resolver publishes its first address set",
+    "selection": "ready(), warm(), round-robin, least-request, weighted-round-robin, ring-hash, weighted-target, priority, and hasReadyConnection all skip UNKNOWN and NOT_SERVING subchannels through one health predicate",
+    "wait_for_ready": "waits until any endpoint becomes SERVING or the call deadline expires; fail-fast calls report ConnectionUnavailable when every known endpoint is rejected",
+    "unimplemented": "UNIMPLEMENTED disables checking for that endpoint only and allows calls through it",
+    "watch_failure": "a Watch transport retry returns that endpoint to UNKNOWN; healthy siblings remain selectable",
+    "slot_shuffle": "composite-policy setup recreates gates after reordering slots so each published state stays bound to its new slot",
+    "resolver_scope": "per-endpoint Watch Channels inherit health-disabled channel options with the resolver callback and multi-endpoint selection policy cleared because the target is already concrete",
+    "movable_channel": "the generation counter and wake Event live in a heap-owned HealthSync so gates never borrow a field inside the movable Channel value"
+  },
+  "implementation_files": [
+    "src/grpc/channel.zig",
+    "src/grpc/channel/health_gate.zig",
+    "src/grpc/channel/health_gate_tests.zig",
+    "src/grpc/channel/weighted_target.zig"
+  ],
+  "verification": {
+    "focused": "151/151 passed with -Dtest-filter=\"health gate\"",
+    "full_library": "6184/6184 passed, exit 0",
+    "package": "26/26 passed",
+    "integration_test": "two real loopback registries and unary responders: a NOT_SERVING endpoint plus a SERVING endpoint select the serving one, healthServingAt reports independent states, switching the serving endpoint to NOT_SERVING makes the aggregate false and rejects a fail-fast call, and switching the first endpoint to SERVING restores a successful call",
+    "recovery_test": "the earlier single-endpoint test still completes a wait_for_ready call after a background task restores SERVING on the reused connection",
+    "call_shape_test": "NOT_SERVING still returns ConnectionUnavailable for startStreaming and startDuplex before any business connection is opened"
+  },
+  "limitations": [
+    "each resolved endpoint adds one dedicated Watch connection while health checking is enabled",
+    "a hostname refresh recreates endpoint watches, so each refreshed endpoint briefly reports UNKNOWN",
+    "a custom connector is shared with its endpoint's Watch Channel and must support concurrent use",
+    "healthServingAt indexes follow the current slot order and can change after resolver or composite-policy shuffling"
+  ]
+}
