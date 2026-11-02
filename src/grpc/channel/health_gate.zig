@@ -81,6 +81,7 @@ pub const Gate = struct {
             watch.deinit();
             self.watch = null;
         }
+        var local_failures: usize = 0;
         while (!self.stopped.load(.acquire)) {
             const until = std.Io.Clock.Timestamp.fromNow(self.io, .{
                 .raw = .fromSeconds(1),
@@ -92,11 +93,31 @@ pub const Gate = struct {
             }) catch |err| switch (err) {
                 error.Canceled => break,
                 error.Timeout => continue,
+                error.HealthWatchStopped => {
+                    self.publish(not_serving);
+                    return;
+                },
+                error.HealthWatchDisabled => {
+                    self.publish(serving);
+                    return;
+                },
                 else => {
-                    self.setUnknown();
+                    // ReconnectingWatch returns local resource failures to
+                    // its caller instead of scheduling a transport retry.
+                    // This background owner must pause rather than spin.
+                    self.publish(not_serving);
+                    local_failures +|= 1;
+                    var sample: u64 = undefined;
+                    self.io.random(std.mem.asBytes(&sample));
+                    const retry_at: std.Io.Clock.Timestamp = .fromNow(self.io, .{
+                        .clock = .awake,
+                        .raw = watch.options.backoff.delay(local_failures, sample),
+                    });
+                    (std.Io.Timeout{ .deadline = retry_at }).sleep(self.io) catch break;
                     continue;
                 },
             };
+            local_failures = 0;
             switch (event) {
                 .status => |response| self.setState(
                     if (response.status == .serving) serving else not_serving,
@@ -118,10 +139,6 @@ pub const Gate = struct {
         self.publish(value);
     }
 
-    fn setUnknown(self: *Gate) void {
-        self.publish(unknown);
-    }
-
     fn watchStarted(context: *anyopaque) void {
         const self: *Gate = @ptrCast(@alignCast(context));
         // A fresh Watch is CONNECTING rather than the preceding attempt's
@@ -141,4 +158,5 @@ test {
     _ = @import("health_gate/retry_tests.zig");
     _ = @import("health_gate/cancellation_tests.zig");
     _ = @import("health_gate/restart_tests.zig");
+    _ = @import("health_gate/resource_tests.zig");
 }

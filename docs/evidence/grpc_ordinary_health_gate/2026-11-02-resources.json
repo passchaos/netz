@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "ordinary Health Gate local resource failure backoff",
+  "decision": "accepted",
+  "base_head": "6ecbb052",
+  "behavior": {
+    "local_errors": "ReconnectingWatch returns OutOfMemory and ConcurrencyUnavailable to its polling caller; the ordinary background Gate publishes not_serving and sleeps using the Watch exponential backoff policy rather than polling immediately",
+    "count": "successfully returned Watch events reset the local failure count; ordinary poll timeouts preserve current state and failure count",
+    "cancellation": "backoff sleep is cancellable; Gate deinit cancels and joins its worker before releasing state; worker teardown owns Watch connection resources",
+    "terminal": "HealthWatchStopped publishes rejected and exits; HealthWatchDisabled publishes serving and exits",
+    "test_discovery": "grpc/mod.zig explicitly imports channel/health_gate.zig so filtered tests discover private Gate regressions without relying on unrelated named tests"
+  },
+  "verification": {
+    "health_debug": {
+      "passed": 174,
+      "total": 174,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "original_response_scenarios": 26,
+      "native_rpcs": 76,
+      "watch_attempts": 2,
+      "health_business_rpcs": 2,
+      "scope": "ordinary Watch retry/CONNECTING/capacity recovery and disabled connection release; original response-policy and shared-stream scenarios",
+      "exit_code": 0
+    },
+    "new_fault_regressions": [
+      "real peer sends GOAWAY plus UNAVAILABLE, then allocations fail persistently during replacement setup; blocked local retry preserves failure count; a second failure increases backoff; restored resources complete a health-gated unary call",
+      "real peer sends GOAWAY plus UNAVAILABLE, then custom connector returns persistent ConcurrencyUnavailable; blocked local retry preserves failure count; restored connector completes a health-gated unary call",
+      "both resource faults remain active while Channel closes; cancellable retry is joined and direct TCP input observes EOF or reset rather than using HTTP/2 accept retirement as proof"
+    ],
+    "fault_isolation": "Watch owner thread is identified by the real connector; retry barriers apply only to that owner, while independent socket-write timer tasks keep normal I/O behavior"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='health gate' -Dtest-filter='reconnecting health Watch' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-grpc-response --summary all"
+  ],
+  "source_sha256": {
+    "src/grpc/mod.zig": "9a45863e7dc8e005270799e8ac917237cb7e406ed83704f9842907dd36802e66",
+    "src/grpc/channel.zig": "85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161",
+    "src/grpc/channel/health_gate.zig": "9e9d89ee1a9a072a7f06dd70b401561260cdde6e04bcbe4004d0118037b9baa0",
+    "src/grpc/channel/health_gate/resource_tests.zig": "bf8ca8876309ca578546511d82fae803311ead2ea96a721c2c501174bc83c19c",
+    "src/grpc/channel/health_gate/testing/resource_faults.zig": "ff4c358b0513f53b113fe120f3695c53b6f47f804a78622d0cfc730a478e3edf",
+    "src/grpc/channel/backoff.zig": "d97eaf11f0977d8e567cd7c5d6beb139eb9e5deada4d93ea85a48d0fd38e3984",
+    "src/grpc/health/reconnecting.zig": "743d92f03bd7a8db79b1d522e46616d6ba2f7758187dc2be914cbfb33e4d55b3",
+    "src/grpc/channel/health_gate/admission.zig": "11bc7b025cf7c1723418f6ac2191a22c5a6ae8a0050e71459c784b676cf04842",
+    "src/grpc/channel/health_gate/sync.zig": "0643ff389d52d1b391f688680483908778fa53f4814a806ef0e7c278f8f44950"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-resources/health.Debug.log": "5fe1f0ce484e631ac3aac18b9326924069f3013e58cf0fbd7e1b9e2c2b7e0903",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-resources/package.Debug.log": "fd697b2b3f090da2d733855c79a9ea312e73828ec2ce490515bda2aab419cbf4",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-resources/interop-grpc-response.Debug.log": "2b1a81b863acc64139043683e3d83db5e6b6455d259efdfff8f0815bf2ccc493"
+  },
+  "limitations": [
+    "the new executor fault matrix exercises custom connector admission after transport retirement; it does not prove the separate already-sent Watch response-read admission failure cleanup path",
+    "multi-hour/high-concurrency stability and broader gRPC composite/xDS integration remain open for the full goal"
+  ]
+}

@@ -3210,3 +3210,30 @@ owner gate passed 161/161, and the package gate passed 26/26. The independent
 HTTP/2 runner passed 8/8 build steps with 26 original response scenarios and
 the restart/capacity lifecycle above. Logs and source hashes are recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart.json`.
+
+The ordinary Health Gate now backs off locally returned resource failures.
+`ReconnectingWatch` still propagates `OutOfMemory` and
+`ConcurrencyUnavailable` directly to its polling caller. The background Gate
+publishes a rejected endpoint and waits with the Watch's exponential backoff
+policy instead of immediately polling again. Successful events reset the
+local failure count; ordinary poll timeouts retain the current Watch state.
+The retry sleep is cancellable so Channel shutdown joins the worker and
+releases its connection even while resources remain unavailable.
+
+Real-socket fault regressions fail allocation or connector executor admission
+after a first Watch receives GOAWAY and returns UNAVAILABLE. They hold the local retry sleep, require the
+failure counter to remain unchanged, then restore resources and complete a
+health-gated unary call. The allocation case additionally repeats failure to
+check increasing backoff. Separate shutdown cases cancel the retry while
+failure remains active and require peer-observed connection closure. Timer
+tasks retain ordinary I/O behavior while faults and retry barriers apply to
+the Watch owner. The private Gate is explicitly imported by the gRPC test root
+so narrow filters always discover these regressions.
+
+The health/reconnecting-Watch gate passed 174/174 tests, the public package
+gate passed 26/26, and the independent HTTP/2 response-policy/lifecycle runner
+passed 8/8 build steps. Source hashes and logs are recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-resources.json`. The new
+executor fault matrix exercises connector admission after transport retirement;
+already-sent Watch response-read admission cleanup remains a separate evidence
+boundary.
