@@ -66,6 +66,12 @@ EDS snapshots now install a shared cluster/EDS circuit budget (default 1024),
 configurable with TargetOptions.cluster and max_concurrent_requests. See
 [cluster circuit admission](grpc_circuit.md).
 
+`TargetOptions.locality_weighted = false` projects a direct endpoint child
+under each priority, retaining stable locality suffixes for connection identity
+and multiplying locality and endpoint ring weights with checked uint32 arithmetic. The [CDS controller](grpc_cds.md)
+selects that form for direct policies and supplies the accepted cluster's
+endpoint policy, circuit identity and request limit.
+
 Drop categories are decoded, normalized to requests per million and applied
 before endpoint selection. See [request drop admission](grpc_eds_drop.md) for
 ordered sampling, unary/streaming errors and dynamic updates. UDP, named

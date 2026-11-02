@@ -119,3 +119,25 @@ test "gRPC ADS response tokens cannot acknowledge another client with equal stre
     _ = try second.decide(cds, token_b, null);
     try std.testing.expectEqualStrings("b", second.find(cds).?.version);
 }
+
+test "gRPC ADS prepared subscriptions can roll back without changing pending response state" {
+    var state = subscriptions.State{ .allocator = allocator, .options = .{} };
+    defer state.deinit();
+    try state.set(cds, &.{"original"});
+    const token = try state.received(.{ .type_url = cds, .version = "c1", .nonce = "n1" });
+    var aborted = try state.prepare(cds, &.{"discard"});
+    aborted.deinit();
+    try std.testing.expectEqualStrings("original", state.find(cds).?.names[0]);
+    try state.validateToken(cds, token);
+    var staged = try state.prepare(eds, &.{"endpoint"});
+    defer staged.deinit();
+    try std.testing.expect(state.find(eds) == null);
+    staged.commit();
+    try std.testing.expectEqualStrings("endpoint", state.find(eds).?.names[0]);
+    _ = try state.decide(cds, token, null);
+    var changed = try state.prepare(cds, &.{"changed"});
+    defer changed.deinit();
+    changed.commit();
+    try std.testing.expectEqualStrings("c1", state.find(cds).?.version);
+    try std.testing.expectEqualStrings("n1", state.find(cds).?.nonce);
+}

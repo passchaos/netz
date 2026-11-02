@@ -155,8 +155,7 @@ fn shuffleLeafSubsets(
     defer allocator.free(indices);
     var processed_count: usize = 0;
     for (sources) |source| {
-        const path = source.endpoint.hierarchicalPath();
-        if (!runtime.shufflesAddressList(path)) continue;
+        const path = query.shuffledLeafPath(runtime.root, source.endpoint.hierarchicalPath()) orelse continue;
         var seen = false;
         for (processed[0..processed_count]) |prior| {
             if (query.equal(prior, path)) {
@@ -169,7 +168,7 @@ fn shuffleLeafSubsets(
         processed_count += 1;
         var count: usize = 0;
         for (sources, 0..) |candidate, index| {
-            if (!query.equal(candidate.endpoint.hierarchicalPath(), path)) continue;
+            if (!query.matches(candidate.endpoint.hierarchicalPath(), path)) continue;
             indices[count] = index;
             count += 1;
         }

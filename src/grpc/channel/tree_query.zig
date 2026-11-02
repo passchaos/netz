@@ -71,6 +71,22 @@ pub fn shufflesAddressList(node: anytype, path: []const []const u8) bool {
     };
 }
 
+/// Return the actual shuffled leaf's prefix. Resolver endpoint paths may
+/// retain suffix metadata; those endpoints still belong to one leaf pool.
+pub fn shuffledLeafPath(node: anytype, path: []const []const u8) ?[]const []const u8 {
+    if (!matches(path, node.path)) return null;
+    return switch (node.kind) {
+        .leaf => |leaf| if (leaf.shuffle_address_list) node.path else null,
+        .outlier => |wrapper| shuffledLeafPath(wrapper.child, path),
+        .weighted => |weighted| for (weightedChildren(weighted)) |child| {
+            if (shuffledLeafPath(child.node, path)) |prefix| break prefix;
+        } else null,
+        .priority => |priority| for (priority.children) |child| {
+            if (shuffledLeafPath(child.node, path)) |prefix| break prefix;
+        } else null,
+    };
+}
+
 /// True when the node at `path` is a composite policy that can own retained
 /// children: weighted_target or priority.
 pub fn compositeParent(node: anytype, path: []const []const u8) bool {

@@ -86,7 +86,8 @@ and raising limits with concurrent real RPCs, terminal-only ordinary duplex and 
 release, peer failure/shutdown cleanup and EDS limit installation. Evidence is
 in `docs/evidence/grpc_circuit/2026-11-03.json`.
 
-This adds circuit admission/counting. Typed CDS circuit-breaker extraction,
-per-child cluster-impl integration and LRS reporting remain required steps in
+Typed CDS now extracts the first DEFAULT request threshold through
+[the CDS controller](grpc_cds.md), publishing its limit and identity with EDS
+targets. Per-child cluster-impl integration and LRS reporting remain required steps in
 full xDS configuration integration; the APIs above explicitly attach one circuit
 identity to each channel or EDS projection.

@@ -1,0 +1,235 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "Typed EDS-backed CDS policies, circuit limits and transactional CDS/EDS publication",
+  "decision": "accepted",
+  "base_head": "54d1546a380127c0707d6539c408478636155ea0",
+  "behavior": {
+    "decode": "owned bounded EDS-backed v3 Cluster, ADS/self EDS source, exact logical/service identity, first DEFAULT request threshold default1024 and explicit zero",
+    "policies": "legacy RR/locality and direct ring; ordered typed unknown fallback, RR/ring/pick_first/least_request/WrrLocality, recognized invalid rejection, depth16 and ordinary ServiceConfig validation",
+    "projection": "direct policy leaf selects across localities within priority; checked uint32 locality times endpoint ring weights; stable locality endpoint suffixes preserve transports; shuffle groups by actual leaf prefix",
+    "publication": "selected CDS configuration and matching EDS image are owned; prepare subscription allocation before publication, commit names and accepted config/version without allocation after publication, then ACK",
+    "updates": "same EDS name reprojects cache under new policy/circuit; changed name immediately removes old endpoint/drop admission and awaits matching assignment; omission removes CDS and late EDS cannot restore it",
+    "rollback": "invalid resources/duplicate names/stale tokens/expired deadline/alloc or publication failures retain topology, cached state, desired names and accepted version; ACK failure retains committed version",
+    "limits": "one explicitly selected EDS-backed cluster; rejects security/outlier/LRS/upstream config and DNS/aggregate clusters; runtime ring allocation still capped4096; LDS/RDS/bootstrap/failover/expiry/Delta/LRS remain open"
+  },
+  "verification": {
+    "targeted.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC EDS' -Dtest-filter='gRPC ADS' -Dtest-filter='shuffleAddressList' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/targeted.Debug.log",
+      "passed": 177,
+      "total": 177
+    },
+    "grpc.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/grpc.Debug.log",
+      "passed": 628,
+      "total": 628
+    },
+    "package.Debug": {
+      "command": "zig build test-package --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/package.Debug.log",
+      "passed": 26,
+      "total": 26
+    },
+    "interop.Debug": {
+      "command": "zig build interop-grpc-cds --summary all -- --output docs/evidence/grpc_cds/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/interop.Debug.log",
+      "report": "docs/evidence/grpc_cds/2026-11-03/interop.Debug.json"
+    },
+    "ads-regression.Debug": {
+      "command": "zig build interop-grpc-ads --summary all -- --output docs/evidence/grpc_cds/2026-11-03/ads-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/ads-regression.Debug.log",
+      "report": "docs/evidence/grpc_cds/2026-11-03/ads-regression.Debug.json"
+    },
+    "eds-regression.Debug": {
+      "command": "zig build interop-grpc-eds --summary all -- --output docs/evidence/grpc_cds/2026-11-03/eds-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_cds/2026-11-03/eds-regression.Debug.log",
+      "report": "docs/evidence/grpc_cds/2026-11-03/eds-regression.Debug.json"
+    }
+  },
+  "interop": {
+    "locality": [
+      33,
+      127
+    ],
+    "ring": [
+      26,
+      54
+    ],
+    "switched": [
+      0,
+      20
+    ],
+    "wire_counts": [
+      59,
+      201
+    ],
+    "sessions": [
+      1,
+      1
+    ],
+    "nacks": 4,
+    "zero_limit_pre_wire": true,
+    "cache_republished": true,
+    "switch_cleared_old": true,
+    "late_eds_ignored": true,
+    "grpc_js": "1.14.7",
+    "grpc_js_xds": "1.14.2",
+    "official_cds_oracle": [
+      {
+        "service": "service-a",
+        "limit": 3,
+        "lb": {
+          "xds_wrr_locality": {
+            "child_policy": [
+              {
+                "round_robin": {}
+              }
+            ]
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-a",
+        "limit": 0,
+        "lb": {
+          "ring_hash": {
+            "min_ring_size": 32,
+            "max_ring_size": 64
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-a",
+        "limit": 3,
+        "lb": {
+          "ring_hash": {
+            "min_ring_size": 32,
+            "max_ring_size": 64
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-a",
+        "limit": 3,
+        "lb": {
+          "ring_hash": {
+            "min_ring_size": 32,
+            "max_ring_size": 64
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-a",
+        "limit": 3,
+        "lb": {
+          "xds_wrr_locality": {
+            "child_policy": [
+              {
+                "round_robin": {}
+              }
+            ]
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-a",
+        "limit": 3,
+        "lb": {
+          "xds_wrr_locality": {
+            "child_policy": [
+              {
+                "round_robin": {}
+              }
+            ]
+          }
+        },
+        "typed": false
+      },
+      {
+        "service": "service-b",
+        "limit": 3,
+        "lb": {
+          "xds_wrr_locality": {
+            "child_policy": [
+              {
+                "round_robin": {}
+              }
+            ]
+          }
+        },
+        "typed": true
+      }
+    ]
+  },
+  "source_sha256": {
+    "docs/grpc_cds.md": "bc72b30fe19066f6b46432679717084fc43d7dca22343120c883b34cfb8f2832",
+    "src/grpc/xds/cds.zig": "905e33352315090c5fca795109cc3b897947ee506d2369664b5da7e3d8e4dd0f",
+    "src/grpc/xds/cds/controller.zig": "98755e4cb2c7387d8caa601eb0a42a2ac0385f2eee191cacbbcaf792728e0207",
+    "src/grpc/xds/cds/controller_tests.zig": "b86c1a8668fd26d36175c99b91d2a989ca914ff01721930e8cc80e76c7cfe6ed",
+    "src/grpc/xds/cds/decode.zig": "5f15f4a0633f635123dc0c148edb65b192e9851133435a050bb3bac30bd233af",
+    "src/grpc/xds/cds/policy.zig": "758f05c3bf2694dd00e3c61cc8b94ed5c5bcaeec577f939b9b73b8bb7b8c4079",
+    "src/grpc/xds/cds/protobuf.zig": "087dd1d033bdf8878de5267b8a8159fee82894e673c3aaba6111c660ee3f3ff5",
+    "src/grpc/xds/cds/testing.zig": "387a32e19dbcc628e5debb998a85e96a6d412f09d25898245209215c8add6da0",
+    "src/grpc/xds/cds/tests.zig": "a5bdf74485560bafbfd019743b32282d41437e7bb566f510acf6c4326b2a87b6",
+    "tools/interop/grpc_cds/README.md": "1ecc730b3345083435d69f557d47b70287ddda77ada0bf8b41602aa4b3acd00f",
+    "tools/interop/grpc_cds/client.zig": "85010bed17ef1ff7e3f4ef91812927441a3eb5660f26d6c87b8b9ad9132a9ed3",
+    "tools/interop/grpc_cds/peer.js": "cff6bbb7d5d90537db9cff66d37f793614cc70b09af0acab3ac3927a61891d41",
+    "tools/interop/grpc_cds/run.py": "7b3e93ac4b7502f57f18ba1e19b3672c5888f6bdcacd5d7e29a31a3a208af55e",
+    "build.zig": "6b542bef056cb8c18685a024a41177c56ae6839437f7493371c5252d87b30ff4",
+    "docs/grpc_ads.md": "83f9fe8c107e7baa5b2f9c631a5456729ef1c26865d4efe043b21e1a11ca13a1",
+    "docs/grpc_circuit.md": "5f4e895b2f00c456851925190c8422f0f1fafb768a737fc31f08f972511df136",
+    "docs/grpc_eds.md": "251ff5eb28f22c0e369b1d109d81596b78b656f14296a532b78f715b929ca73f",
+    "docs/grpc_parity.md": "af5d4d758d0d4b876fd3bb11733bf6b36734ccfa245cad109f03d39e5cbe7651",
+    "src/grpc/channel.zig": "0906a3c512f78fc4527e17c3759edc44b9de51054a51ac1dd3637e5783e0018b",
+    "src/grpc/channel/shared/layout.zig": "d9e73d9293adebad5ae3ca5f5f2d3461a30d60aa2e21e9d22468244dd69df514",
+    "src/grpc/channel/shared/weighted_target.zig": "9ad2bca569128ad79db96db7572fe1fa31a449b6d7e04ce7f3cc8937520a2d67",
+    "src/grpc/channel/tree_query.zig": "626abd44518a0a738271a48ac65149d3d0175ccb5a18324025ffcd908591d3d7",
+    "src/grpc/xds/ads/subscriptions.zig": "5d3bd50ac003f6bd8c630835e9a52b879a91dc28b1c69cbbb8d5394da47658e4",
+    "src/grpc/xds/ads/tests.zig": "d0a6cf330668e3ff9b586f2ad3399939cbc072c1cd140c7719cc74a39c104f7b",
+    "src/grpc/xds/eds/target.zig": "26f322ec2a65449987479f18e9c9cea53d7ec2205f300f0a25ddd4522e72c3c1",
+    "src/grpc/xds/eds/tests.zig": "4a1fbeb0c2bf113511c27c600ddec521b06409673d7b87a57918b56f660824cc",
+    "src/grpc/xds/mod.zig": "9ba84ccd7840884282e3daae496fb85960c786e32977b338bc9b09abdd88aaf1"
+  },
+  "reference_grpc_sha256": {
+    "src/core/xds/grpc/xds_cluster_parser.cc": "172e43e917ba5e7ac3ff30451242e09bd7dab66477256580481c50222f128808",
+    "src/core/xds/grpc/xds_lb_policy_registry.cc": "bded61cde62a5243427bd5318e825015197f880e253e54c084aeffec4734ab40",
+    "src/core/xds/grpc/xds_bootstrap_grpc_builder.cc": "d9ce7746aae8f83836874622e6d906cc1ee79b55c3da566a533c03d958cee7cb",
+    "src/core/load_balancing/xds/cds.cc": "d1d97af17a57622a4c357cdf139e83970ae069bf04eb18afcd23586b1d71a234"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_cds/2026-11-03/ads-regression.Debug.json": "5a068badd3f39614ae8429320305a9ee8c0a1ca90fc01223bc2b34b24ee8367b",
+    "docs/evidence/grpc_cds/2026-11-03/ads-regression.Debug.log": "790185531580135552dabce9f45ef6d24e90e7feaf31cd624d85dbcadd495b53",
+    "docs/evidence/grpc_cds/2026-11-03/eds-regression.Debug.json": "57906a02d154bd5abe6752bfd1b8bf54d118ec0babad7c7409e0c1d08804bab0",
+    "docs/evidence/grpc_cds/2026-11-03/eds-regression.Debug.log": "1379399bb11aa2b539273f7ec83790367b9ff4ea1173ab038a87ee92baec8c84",
+    "docs/evidence/grpc_cds/2026-11-03/grpc.Debug.log": "92425b271d9b77ec74147c8b5cfea6a2ee5666cb4a15a20e86540af09f784bb4",
+    "docs/evidence/grpc_cds/2026-11-03/interop.Debug.json": "d390c94e39fff1ab9caae821ca67ec41bd229792517e99021dfdb09e0f29639e",
+    "docs/evidence/grpc_cds/2026-11-03/interop.Debug.log": "8d177d96a9cf60ae4c9315c4b3ab005d607da5616dd16baf267fe110d4903004",
+    "docs/evidence/grpc_cds/2026-11-03/package.Debug.log": "c77fe507e4de1f67e52e8450ca35fae13f7827ba64a3ede883ba8df2211fad93",
+    "docs/evidence/grpc_cds/2026-11-03/targeted.Debug.log": "1e7c2df56be2195b9dc9e91496c98e005baaac32a8fececc882df4b366bcaaa9"
+  }
+}

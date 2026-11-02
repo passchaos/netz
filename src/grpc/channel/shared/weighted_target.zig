@@ -1322,6 +1322,12 @@ test "SharedChannel priority propagates nested pick_first shuffleAddressList" {
     try std.testing.expect(runtime.shufflesAddressList(&.{ "high", "a" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{ "high", "b" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{"low"}));
+    const query = @import("../tree_query.zig");
+    const from_a = query.shuffledLeafPath(runtime.root, &.{ "high", "a", "locality-a" }).?;
+    const from_b = query.shuffledLeafPath(runtime.root, &.{ "high", "a", "locality-b" }).?;
+    try std.testing.expect(query.equal(from_a, from_b));
+    try std.testing.expect(query.equal(from_a, &.{ "high", "a" }));
+    try std.testing.expect(query.shuffledLeafPath(runtime.root, &.{ "high", "b", "suffix" }) == null);
 }
 
 test {

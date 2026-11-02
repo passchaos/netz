@@ -1,0 +1,371 @@
+{
+  "status": "passed",
+  "locality": [
+    33,
+    127
+  ],
+  "ring": [
+    26,
+    54
+  ],
+  "switched": [
+    0,
+    20
+  ],
+  "nacks": 4,
+  "zero_limit_pre_wire": true,
+  "cache_republished": true,
+  "switch_cleared_old": true,
+  "late_eds_ignored": true,
+  "wire_counts": [
+    59,
+    201
+  ],
+  "sessions": [
+    1,
+    1
+  ],
+  "transcript": [
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "backend"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c1",
+      "nonce": "c1",
+      "names": [
+        "backend"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "service-a"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e1",
+      "nonce": "e1",
+      "names": [
+        "service-a"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c1",
+      "nonce": "c1",
+      "names": [
+        "backend",
+        "phase-close"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c2",
+      "nonce": "c2",
+      "names": [
+        "backend",
+        "phase-close"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c2",
+      "nonce": "c2",
+      "names": [
+        "backend",
+        "phase-open"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c3",
+      "nonce": "c3",
+      "names": [
+        "backend",
+        "phase-open"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c3",
+      "nonce": "c3",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c3",
+      "nonce": "bad",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": "InvalidCdsResource"
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c3",
+      "nonce": "duplicate",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": "DuplicateCdsResource"
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c3",
+      "nonce": "security",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": "UnsupportedCdsFeature"
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c4",
+      "nonce": "c4",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e1",
+      "nonce": "e1",
+      "names": [
+        "service-b"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e2",
+      "nonce": "e2",
+      "names": [
+        "service-b"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e2",
+      "nonce": "e2",
+      "names": [
+        "phase-eds-bad",
+        "service-b"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e2",
+      "nonce": "eds-bad",
+      "names": [
+        "phase-eds-bad",
+        "service-b"
+      ],
+      "nack": "InvalidEdsResource"
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c5",
+      "nonce": "c5",
+      "names": [
+        "backend",
+        "phase-bad"
+      ],
+      "nack": ""
+    },
+    {
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e3",
+      "nonce": "e3",
+      "names": [
+        "phase-eds-bad",
+        "service-b"
+      ],
+      "nack": ""
+    }
+  ],
+  "official_cds_oracle": [
+    {
+      "service": "service-a",
+      "limit": 3,
+      "lb": {
+        "xds_wrr_locality": {
+          "child_policy": [
+            {
+              "round_robin": {}
+            }
+          ]
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-a",
+      "limit": 0,
+      "lb": {
+        "ring_hash": {
+          "min_ring_size": 32,
+          "max_ring_size": 64
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-a",
+      "limit": 3,
+      "lb": {
+        "ring_hash": {
+          "min_ring_size": 32,
+          "max_ring_size": 64
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-a",
+      "limit": 3,
+      "lb": {
+        "ring_hash": {
+          "min_ring_size": 32,
+          "max_ring_size": 64
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-a",
+      "limit": 3,
+      "lb": {
+        "xds_wrr_locality": {
+          "child_policy": [
+            {
+              "round_robin": {}
+            }
+          ]
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-a",
+      "limit": 3,
+      "lb": {
+        "xds_wrr_locality": {
+          "child_policy": [
+            {
+              "round_robin": {}
+            }
+          ]
+        }
+      },
+      "typed": false
+    },
+    {
+      "service": "service-b",
+      "limit": 3,
+      "lb": {
+        "xds_wrr_locality": {
+          "child_policy": [
+            {
+              "round_robin": {}
+            }
+          ]
+        }
+      },
+      "typed": true
+    }
+  ],
+  "grpc_js": "1.14.7",
+  "grpc_js_xds": "1.14.2",
+  "source_sha256": {
+    "src/grpc/channel.zig": "0906a3c512f78fc4527e17c3759edc44b9de51054a51ac1dd3637e5783e0018b",
+    "src/grpc/channel/tree_query.zig": "626abd44518a0a738271a48ac65149d3d0175ccb5a18324025ffcd908591d3d7",
+    "src/grpc/channel/shared/layout.zig": "d9e73d9293adebad5ae3ca5f5f2d3461a30d60aa2e21e9d22468244dd69df514",
+    "build.zig": "6b542bef056cb8c18685a024a41177c56ae6839437f7493371c5252d87b30ff4",
+    "src/grpc/channel/ring_hash.zig": "12c26d1ffe9187a207aa82a1d98a4b4a648b0095ed8b07ed7ed2ee132ab62c76",
+    "src/grpc/channel/shared/source.zig": "8e90497197e22a0c4f98b1154c7f3f271f23c77cbdebd57d2c55249191eb93d2",
+    "src/grpc/channel/shared/state.zig": "f119bcb78c6d7d180cb27ae3ef3e47c27c829ec9cca66eabbec0dfe804d3421c",
+    "src/grpc/channel/shared/target_lifetime.zig": "5b3b6ecfbe2749196b6dbe271906f0a2b472442f4bb2b6114192a7148ddbb7a4",
+    "src/grpc/channel/shared/update.zig": "715ad8d67e38b6221593fc2062d9ece257d12336ada1b6001937760fd8d813cc",
+    "src/grpc/channel/shared/update/prepare.zig": "d625bfd7ea6c2121d9acd78ac6a7a05218a872828cf7ab031b76bffe201bd43d",
+    "src/grpc/channel/shared/update/publish.zig": "bc6ef9981afe6feb6d0c584ed407a24965391bc5a28bc5c7fe94462d7b820a99",
+    "src/grpc/channel/shared/weighted_target.zig": "9ad2bca569128ad79db96db7572fe1fa31a449b6d7e04ce7f3cc8937520a2d67",
+    "src/grpc/channel/shared/cluster_dispatch.zig": "cc3d482523a42c2280ee4bff23507887d6e41914d27e4ceea2607ae232056c3a",
+    "src/grpc/channel/shared/weighted_target/selection_tests.zig": "eaf7c49a7c1d78788ad2e1b800603b673f7e0a4eb2c185e1705527b7df624cea",
+    "src/grpc/xds/ads/client.zig": "5b505af1b8f9ff675e9aadb6b9c81e20a328f9945629f4a69c916b1014122b04",
+    "src/grpc/xds/ads/codec.zig": "6ab2328f00591eb349cb4626eaf419a6d8809f559c6f3852b47e1e39d2417fb9",
+    "src/grpc/xds/ads/subscriptions.zig": "5d3bd50ac003f6bd8c630835e9a52b879a91dc28b1c69cbbb8d5394da47658e4",
+    "src/grpc/xds/ads/tests.zig": "d0a6cf330668e3ff9b586f2ad3399939cbc072c1cd140c7719cc74a39c104f7b",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/ads.zig": "82cbac586929385fd9acd455305820ed5b1df065fbfe2298769d88697f40adcb",
+    "src/grpc/xds/cds/controller.zig": "98755e4cb2c7387d8caa601eb0a42a2ac0385f2eee191cacbbcaf792728e0207",
+    "src/grpc/xds/cds/controller_tests.zig": "b86c1a8668fd26d36175c99b91d2a989ca914ff01721930e8cc80e76c7cfe6ed",
+    "src/grpc/xds/cds/decode.zig": "5f15f4a0633f635123dc0c148edb65b192e9851133435a050bb3bac30bd233af",
+    "src/grpc/xds/cds/policy.zig": "758f05c3bf2694dd00e3c61cc8b94ed5c5bcaeec577f939b9b73b8bb7b8c4079",
+    "src/grpc/xds/cds/protobuf.zig": "087dd1d033bdf8878de5267b8a8159fee82894e673c3aaba6111c660ee3f3ff5",
+    "src/grpc/xds/cds/testing.zig": "387a32e19dbcc628e5debb998a85e96a6d412f09d25898245209215c8add6da0",
+    "src/grpc/xds/cds/tests.zig": "a5bdf74485560bafbfd019743b32282d41437e7bb566f510acf6c4326b2a87b6",
+    "src/grpc/xds/cds.zig": "905e33352315090c5fca795109cc3b897947ee506d2369664b5da7e3d8e4dd0f",
+    "src/grpc/xds/eds/apply.zig": "899b7b9da381ca817a8d5716c00e517fcea36b657a1480b8f95ed082eebc0275",
+    "src/grpc/xds/eds/decode.zig": "88cf7607df58ec60a4321d8faa72d39c2d0f48ca7b88c5dcdbda0540d893d067",
+    "src/grpc/xds/eds/target.zig": "26f322ec2a65449987479f18e9c9cea53d7ec2205f300f0a25ddd4522e72c3c1",
+    "src/grpc/xds/eds/testing.zig": "d2428b5cfd07052e2c46ed53ddcc32fda4ed8105856e1608c659d32d63e5a254",
+    "src/grpc/xds/eds/tests.zig": "4a1fbeb0c2bf113511c27c600ddec521b06409673d7b87a57918b56f660824cc",
+    "src/grpc/xds/eds/transport_tests.zig": "84a190f6109e3077361304ab336cb54444240847d81038337adc06eac59a467f",
+    "src/grpc/xds/eds.zig": "fd3de33a5e2a66c6755e23e3fe8c154e275db09d9e6373252e5758d90df8da9d",
+    "src/grpc/xds/mod.zig": "9ba84ccd7840884282e3daae496fb85960c786e32977b338bc9b09abdd88aaf1",
+    "tools/interop/grpc_cds/client.zig": "85010bed17ef1ff7e3f4ef91812927441a3eb5660f26d6c87b8b9ad9132a9ed3",
+    "tools/interop/grpc_cds/peer.js": "cff6bbb7d5d90537db9cff66d37f793614cc70b09af0acab3ac3927a61891d41",
+    "tools/interop/grpc_cds/run.py": "7b3e93ac4b7502f57f18ba1e19b3672c5888f6bdcacd5d7e29a31a3a208af55e",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_proto_sha256": {
+    "envoy/config/cluster/v3/cluster.proto": "a163a314125ed9f1a6d966426c5cf42ae8be726c826ddd05df3dc69f4ab09942",
+    "envoy/config/cluster/v3/circuit_breaker.proto": "317e9d4d23d03ea211d45056d7154d623e791cb0135d594f66dbe6363bd1ad93",
+    "envoy/config/core/v3/config_source.proto": "221023ecf8ce8c89a992afd3aa5507165a3f3fe6956127d35421c6bfc72eb35a",
+    "envoy/config/endpoint/v3/endpoint.proto": "2110b9d177d0e986174bde50647b6694b3f665168c82f35db9bb2444b32c835d",
+    "envoy/extensions/load_balancing_policies/ring_hash/v3/ring_hash.proto": "3e1009927707defd44495a9bdfb940f22780272fda71efd01afaf58412c55476",
+    "envoy/extensions/load_balancing_policies/wrr_locality/v3/wrr_locality.proto": "a2a1f4b174037fb7c15ebf9727f352e62834e172aa3dc605c7b6368613a432f3"
+  },
+  "client_sha256": "4f673fd03d963ad87a043fdaffaa4e6e83765b8fa18e80be089dddc7033a7026"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-cds success
++- run python3 success 934ms
+   +- compile exe netz-grpc-cds-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:26M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:26M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

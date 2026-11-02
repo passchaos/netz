@@ -2074,6 +2074,21 @@ pub fn build(b: *std.Build) void {
     const grpc_ads_step = b.step("interop-grpc-ads", "Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js");
     grpc_ads_step.dependOn(&grpc_ads.step);
 
+    const grpc_cds_client = b.addExecutable(.{
+        .name = "netz-grpc-cds-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_cds/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_cds = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_cds/run.py" });
+    grpc_cds.addArtifactArg(grpc_cds_client);
+    if (b.args) |args| grpc_cds.addArgs(args);
+    const grpc_cds_step = b.step("interop-grpc-cds", "Verify official CDS policy/circuit decoding and transactional CDS/EDS ADS publication with grpc-js-xds/grpc-js");
+    grpc_cds_step.dependOn(&grpc_cds.step);
+
     const grpc_eds_client = b.addExecutable(.{
         .name = "netz-grpc-eds-client",
         .root_module = b.createModule(.{

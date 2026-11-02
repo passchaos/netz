@@ -3540,6 +3540,45 @@ no rejected payload on wire, three channel transports, a peer-observed canceled
 stream, preserved retry throttle and one hedging attempt. Existing EDS/drop
 interop remains required regression evidence. See
 [cluster circuit behavior](grpc_circuit.md) and
-`docs/evidence/grpc_circuit/2026-11-03.json`. Typed CDS extraction, per-child
-cluster implementation, LRS and remaining full control-plane integration are
-still open.
+`docs/evidence/grpc_circuit/2026-11-03.json`. CDS extraction and selected
+cluster publication are covered by the following slice. Per-child cluster
+implementation, LRS and remaining full control-plane integration remain open.
+
+
+## Typed CDS and transactional CDS/EDS application
+
+The EDS-backed Envoy v3 Cluster decoder owns the cluster/EDS identity, first
+DEFAULT circuit request threshold and converted LB configuration. Legacy RR
+retains locality weighting; legacy and modern ring-hash policies project
+across localities under each priority, using checked locality times endpoint
+weights. Stable endpoint locality suffixes preserve connection identity when
+a leaf policy starts selecting across localities. Ordered typed policy conversion supports unknown-type fallback,
+RR/ring/pick-first/least-request/WrrLocality, bounded recursion/counts and
+ordinary ServiceConfig validation. Recognized invalid policy data is rejected.
+
+The selected-cluster controller prepares EDS subscription storage before
+publication, commits it without allocation after publication, owns accepted
+CDS and EDS images, and advances ADS versions before ACK output. Policy/limit
+changes with the same EDS name reproject cached endpoints and drops. Changed
+EDS identity clears the old target and waits for matching new EDS. SotW CDS
+omission removes topology, drops and circuit policy; late EDS is validated and
+ACKed without restoring a removed cluster. Invalid resource sets, duplicate
+names, stale tokens and publication failure preserve accepted state.
+
+The official grpc-js-xds CDS parser supplies independent policy/circuit oracle
+results for legacy RR/ring and typed fallback to WrrLocality. An ADS control
+plane encoded with official Envoy schemas and two grpc-js backends checks
+weighted and stable hash routing, zero-limit rejection with no wire call,
+cache reprojection, changed EDS subscription, four CDS/EDS NACKs, deletion and
+late EDS. Each backend must reuse one HTTP/2 session. Adjacent tests exercise
+first-DEFAULT threshold semantics from grpc-core, modern typed policy bounds,
+allocation rollback, checked weight multiplication and accepted-version
+retention when ACK has no active stream. See [CDS behavior](grpc_cds.md) and
+`docs/evidence/grpc_cds/2026-11-03.json`.
+
+This covers one explicitly selected EDS-backed cluster. Full bootstrap and
+LDS/RDS route selection, resource expiry, control-plane failover/retry,
+Delta xDS, per-child cluster management and LRS remain open. CDS transport
+security, outlier, LRS and upstream configuration fields are rejected, and
+LOGICAL_DNS/aggregate cluster discovery remains unsupported. Ring allocation
+still has the existing 4096-entry runtime cap.

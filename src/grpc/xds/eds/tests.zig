@@ -72,3 +72,19 @@ test "gRPC EDS owned projection preserves priority locality identity and rollbac
     try std.testing.expectError(error.EdsLimitExceeded, resource.decode(allocator, bytes, .{ .max_endpoints = 2 }));
     try std.testing.expectError(error.EdsLimitExceeded, resource.decode(allocator, bytes, .{ .max_bytes = bytes.len - 1 }));
 }
+
+test "gRPC EDS direct CDS policy flattens localities and multiplies ring weights with overflow rejection" {
+    const bytes = try fixture.encode(allocator, "cluster", &.{
+        .{ .region = "a", .weight = 3, .endpoints = &.{.{ .port = 1001, .weight = 2 }} },
+        .{ .region = "b", .weight = 1, .endpoints = &.{.{ .port = 1002 }} },
+    }, null);
+    defer allocator.free(bytes);
+    const direct = try target.Snapshot.create(allocator, bytes, .{}, .{ .authority = "localhost", .locality_weighted = false, .child_policy_json = "[{\"ring_hash_experimental\":{\"minRingSize\":32,\"maxRingSize\":64}}]" });
+    defer direct.release();
+    try std.testing.expectEqual(@as(usize, 2), direct.endpoints[0].hierarchicalPath().len);
+    try std.testing.expectEqual(@as(u32, 6), @import("../../channel/ring_hash.zig").endpointWeight(direct.endpoints[0]));
+    try std.testing.expect(std.mem.indexOf(u8, direct.service_config_json, "xds_wrr_locality") == null);
+    const overflow = try fixture.encode(allocator, "cluster", &.{.{ .region = "a", .weight = std.math.maxInt(u32), .endpoints = &.{.{ .port = 1001, .weight = 2 }} }}, null);
+    defer allocator.free(overflow);
+    try std.testing.expectError(error.InvalidEdsTarget, target.Snapshot.create(allocator, overflow, .{}, .{ .authority = "localhost", .locality_weighted = false }));
+}

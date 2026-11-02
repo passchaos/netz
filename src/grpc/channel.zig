@@ -2525,8 +2525,7 @@ pub const Channel = struct {
         defer self.allocator.free(indices);
         var processed_count: usize = 0;
         for (slots) |slot| {
-            const path = slot.endpoint.hierarchicalPath();
-            if (!runtime.shufflesAddressList(path)) continue;
+            const path = query.shuffledLeafPath(runtime.root, slot.endpoint.hierarchicalPath()) orelse continue;
             var seen = false;
             for (processed[0..processed_count]) |prior| {
                 if (query.equal(prior, path)) {
@@ -2539,7 +2538,7 @@ pub const Channel = struct {
             processed_count += 1;
             var count: usize = 0;
             for (slots, 0..) |candidate, index| {
-                if (!query.equal(candidate.endpoint.hierarchicalPath(), path)) continue;
+                if (!query.matches(candidate.endpoint.hierarchicalPath(), path)) continue;
                 indices[count] = index;
                 count += 1;
             }

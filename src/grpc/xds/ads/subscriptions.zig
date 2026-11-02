@@ -41,7 +41,9 @@ pub const State = struct {
         for (self.entries.items) |*entry| if (std.mem.eql(u8, type_url, entry.type_url)) return entry;
         return null;
     }
-    pub fn set(self: *State, type_url: []const u8, names: []const []const u8) Error!void {
+    /// Prepare all storage before an application publication. One serialized
+    /// caller must commit or discard it before preparing another subscription.
+    pub fn prepare(self: *State, type_url: []const u8, names: []const []const u8) Error!Prepared {
         try codec.typeUrl(type_url);
         if (type_url.len > self.options.max_name_bytes or names.len > self.options.max_names_per_type) return error.DiscoveryLimitExceeded;
         const existing = self.find(type_url);
@@ -69,25 +71,15 @@ pub const State = struct {
             }
         }.less);
         if (owned_names.len > 1) for (owned_names[1..], 0..) |name, index| if (std.mem.eql(u8, name, owned_names[index])) return error.InvalidDiscoveryMessage;
-        if (existing) |entry| {
-            var same = entry.names.len == owned_names.len;
-            if (same) for (entry.names, owned_names) |a, b| {
-                if (!std.mem.eql(u8, a, b)) same = false;
-            };
-            self.allocator.free(entry.names);
-            self.allocator.free(entry.names_storage);
-            entry.names = owned_names;
-            entry.names_storage = storage;
-            entry.dirty = entry.dirty or !same;
-        } else {
-            const key = try self.allocator.dupe(u8, type_url);
-            errdefer self.allocator.free(key);
-            const version = try self.allocator.alloc(u8, 0);
-            errdefer self.allocator.free(version);
-            const nonce = try self.allocator.alloc(u8, 0);
-            errdefer self.allocator.free(nonce);
-            try self.entries.append(self.allocator, .{ .type_url = key, .names = owned_names, .names_storage = storage, .version = version, .nonce = nonce });
-        }
+        const key = try self.allocator.dupe(u8, type_url);
+        errdefer self.allocator.free(key);
+        if (existing == null) try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        return .{ .state = self, .value = .{ .type_url = key, .names = owned_names, .names_storage = storage, .version = &.{}, .nonce = &.{} } };
+    }
+    pub fn set(self: *State, type_url: []const u8, names: []const []const u8) Error!void {
+        var prepared = try self.prepare(type_url, names);
+        defer prepared.deinit();
+        prepared.commit();
     }
     /// Nonces and undecided responses belong to one stream; accepted versions
     /// and desired subscriptions survive reconnect and are replayed.
@@ -147,5 +139,36 @@ pub const State = struct {
         entry.candidate = null;
         entry.dirty = true;
         return entry;
+    }
+};
+
+/// Owned subscription transaction. Preparing may grow the entry array, so
+/// commit re-finds the entry instead of retaining an invalidatable pointer.
+pub const Prepared = struct {
+    state: *State,
+    value: ?Entry,
+    pub fn deinit(self: *Prepared) void {
+        if (self.value) |*entry| entry.deinit(self.state.allocator);
+        self.value = null;
+    }
+    pub fn commit(self: *Prepared) void {
+        const staged = &self.value.?;
+        if (self.state.find(staged.type_url)) |entry| {
+            var same = entry.names.len == staged.names.len;
+            if (same) for (entry.names, staged.names) |a, b| {
+                if (!std.mem.eql(u8, a, b)) same = false;
+            };
+            self.state.allocator.free(entry.names);
+            self.state.allocator.free(entry.names_storage);
+            entry.names = staged.names;
+            entry.names_storage = staged.names_storage;
+            entry.dirty = entry.dirty or !same;
+            staged.names = &.{};
+            staged.names_storage = &.{};
+            self.deinit();
+        } else {
+            self.state.entries.appendAssumeCapacity(staged.*);
+            self.value = null;
+        }
     }
 };

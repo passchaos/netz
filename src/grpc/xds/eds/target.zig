@@ -14,6 +14,8 @@ pub const Options = struct {
     tls: ?struct { host: []const u8, options: http2.runtime.TlsConnectOptions = .{} } = null,
     /// Endpoint-level child policy shared by every locality.
     child_policy_json: []const u8 = "[{\"round_robin\":{}}]",
+    /// Wrap each priority in locality weighting; direct CDS policies flatten it.
+    locality_weighted: bool = true,
     attempt_delay: std.Io.Duration = .fromMilliseconds(250),
 };
 const Json = std.json.Value;
@@ -89,7 +91,7 @@ pub const Snapshot = struct {
             var child = object(arena);
             var locality_policy = object(arena);
             try field(arena, &locality_policy, "childPolicy", parsed_child.value);
-            try field(arena, &child, "config", try policy(arena, "xds_wrr_locality_experimental", locality_policy));
+            try field(arena, &child, "config", if (options.locality_weighted) try policy(arena, "xds_wrr_locality_experimental", locality_policy) else parsed_child.value);
             try field(arena, &child, "ignoreReresolutionRequests", .{ .bool = true });
             try field(arena, &children, priority_name, child);
             for (resource.value.localities) |locality| {
@@ -97,6 +99,9 @@ pub const Snapshot = struct {
                 // Length prefixes preserve exact protobuf identity even for
                 // locality components that contain punctuation or separators.
                 const name = try std.fmt.allocPrint(arena, "{d}:{s}{d}:{s}{d}:{s}", .{ locality.region.len, locality.region, locality.zone.len, locality.zone, locality.sub_zone.len, locality.sub_zone });
+                // Leaf selection matches its priority prefix. Retain locality
+                // suffixes across direct/wrapped policy changes so otherwise
+                // identical transports keep their connection identity.
                 const path = try arena.alloc([]const u8, 2);
                 path[0] = priority_name;
                 path[1] = name;
@@ -104,12 +109,13 @@ pub const Snapshot = struct {
                     // Standard serving picks use UNKNOWN/HEALTHY. DRAINING is
                     // retained in the resource model for override-host routing.
                     if (endpoint.health == .draining) continue;
+                    const weight = if (options.locality_weighted) endpoint.weight else std.math.mul(u32, locality.weight, endpoint.weight) catch return error.InvalidEdsTarget;
                     const key = try std.fmt.allocPrint(arena, "{f}", .{endpoint.addresses[0]});
                     const value: channel.Endpoint = if (endpoint.addresses.len > 1) blk: {
                         const connector = try arena.create(Connector);
                         connector.* = .{ .addresses = endpoint.addresses, .options = retained_options };
-                        break :blk .{ .custom = .{ .context = connector, .connect_fn = Connector.connect, .ring_hash_key = key, .ring_hash_weight = endpoint.weight, .hierarchical_path = path, .locality_weight = locality.weight } };
-                    } else if (options.tls) |tls| .{ .tls_address = .{ .address = endpoint.addresses[0], .tls_host = retained_options.tls.?.host, .authority = authority, .tls = tls.options, .limits = options.limits, .ring_hash_key = key, .ring_hash_weight = endpoint.weight, .hierarchical_path = path, .locality_weight = locality.weight } } else .{ .cleartext_ip = .{ .address = endpoint.addresses[0], .authority = authority, .limits = options.limits, .ring_hash_key = key, .ring_hash_weight = endpoint.weight, .hierarchical_path = path, .locality_weight = locality.weight } };
+                        break :blk .{ .custom = .{ .context = connector, .connect_fn = Connector.connect, .ring_hash_key = key, .ring_hash_weight = weight, .hierarchical_path = path, .locality_weight = locality.weight } };
+                    } else if (options.tls) |tls| .{ .tls_address = .{ .address = endpoint.addresses[0], .tls_host = retained_options.tls.?.host, .authority = authority, .tls = tls.options, .limits = options.limits, .ring_hash_key = key, .ring_hash_weight = weight, .hierarchical_path = path, .locality_weight = locality.weight } } else .{ .cleartext_ip = .{ .address = endpoint.addresses[0], .authority = authority, .limits = options.limits, .ring_hash_key = key, .ring_hash_weight = weight, .hierarchical_path = path, .locality_weight = locality.weight } };
                     try endpoints.append(arena, value);
                 }
             }

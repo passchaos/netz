@@ -82,6 +82,8 @@ native tests also cover constructor and codec allocation failures, bounded
 messages/resources, malformed protobuf, selector ownership and ACK allocation
 retry.
 
-This module provides ADS transport and subscription/version state. Typed EDS decoding and publication are now provided by
-[the EDS adapter](grpc_eds.md). Typed LDS/RDS/CDS decoding, route/config selection, automatic control-plane retry/failover, bootstrap parsing, resource
+This module provides ADS transport and subscription/version state. Typed EDS decoding and publication are provided by
+[the EDS adapter](grpc_eds.md), and [the CDS controller](grpc_cds.md) connects
+EDS-backed CDS policies and limits to transactional CDS/EDS publication.
+Typed LDS/RDS decoding, route/config selection, automatic control-plane retry/failover, bootstrap parsing, resource
 expiry and Delta xDS remain required follow-up work for full xDS integration.
