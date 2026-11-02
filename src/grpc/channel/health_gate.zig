@@ -105,7 +105,14 @@ pub const Gate = struct {
                     // ReconnectingWatch returns local resource failures to
                     // its caller instead of scheduling a transport retry.
                     // This background owner must pause rather than spin.
-                    self.publish(not_serving);
+                    // A retained Watch has not reported a backend failure.
+                    // Preserve its last health observation while backing off
+                    // the local read, so silence cannot permanently reject a
+                    // backend that was already known to be serving.
+                    self.publish(if (watch.watch != null and watch.last_status != null)
+                        (if (watch.last_status.? == .serving) serving else not_serving)
+                    else
+                        not_serving);
                     local_failures +|= 1;
                     var sample: u64 = undefined;
                     self.io.random(std.mem.asBytes(&sample));
@@ -159,4 +166,5 @@ test {
     _ = @import("health_gate/cancellation_tests.zig");
     _ = @import("health_gate/restart_tests.zig");
     _ = @import("health_gate/resource_tests.zig");
+    _ = @import("health_gate/read_interruption_tests.zig");
 }

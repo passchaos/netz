@@ -8,6 +8,7 @@ const {spawn} = require('node:child_process');
 const assert = require('node:assert/strict');
 const {WireRelay} = require('./relay');
 const {HealthGatePeer} = require('./health_gate');
+const {HealthReadPeer} = require('./health_read');
 const referenceVersion = require('@grpc/grpc-js/package.json').version;
 assert.equal(referenceVersion, '1.14.0', 'the reference SDK must match the pinned fixture');
 
@@ -62,7 +63,7 @@ async function reference(client, probe, index, relay) {
   return status.code;
 }
 
-function native(executable, port, manifest, health) {
+function native(executable, port, manifest, health, healthRead) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, [String(port), manifest], {stdio:['ignore','pipe','pipe']});
     let output = '';
@@ -70,6 +71,7 @@ function native(executable, port, manifest, health) {
       output += chunk;
       if (!health.resume && output.includes('netz grpc health retry rejected: unary+streaming+duplex')) health.allowRecovery();
       if (!health.pendingChecked && output.includes('netz grpc health restarted CONNECTING: unary+streaming+duplex-deadlines')) health.allowServing();
+      if (!healthRead.retained && output.includes('netz grpc health read retained: canceled+executor same-watch=true')) healthRead.resume();
     };
     child.stdout.on('data', receive);
     child.stderr.on('data', receive);
@@ -83,6 +85,7 @@ function native(executable, port, manifest, health) {
           assert.ok(output.includes('io=zio-std-io cases='+probes.length+' shared='+probes.filter(probe=>probe.shared).length+' shapes=unary+streaming+duplex+shared reuse=true'));
           assert.ok(output.includes('netz grpc health gate complete: retry+ready+disabled-close calls=2 reuse=true'));
           assert.ok(output.includes('netz grpc health restarted CONNECTING: unary+streaming+duplex-deadlines'));
+          assert.ok(output.includes('netz grpc health read complete: watch=1 resets=0 statuses=serving+not-serving disabled=true'));
           process.stdout.write(output);
           resolve();
         } catch (error) {reject(error);}
@@ -104,8 +107,10 @@ async function main() {
   let relay;
   let clientPort;
   const health = new HealthGatePeer(error => {failure ??= error;});
+  const healthRead = new HealthReadPeer(error => {failure ??= error;});
   server.on('session', session => { sessions.add(session); session.on('error', error => {failure ??= error;}); });
   server.on('stream', (stream, headers) => {
+    if (healthRead.handle(stream, headers)) return;
     if (health.handle(stream, headers)) return;
     const chunks = [];
     let size = 0;
@@ -192,16 +197,17 @@ async function main() {
     finally {client.close();}
     const manifest = path.join(work, 'cases.json');
     fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null, request_payload:probe.requestPayload ?? '', unary_only:probe.unaryOnly ?? false, status_message:probe.statusMessage ?? null,shared_probe:probe.shared ?? false,read_delay_ms:probe.readDelayMs ?? 0}))));
-    try {await native(process.argv[2], port, manifest, health);}
+    try {await native(process.argv[2], port, manifest, health, healthRead);}
     catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}; frames=${JSON.stringify([...relay.captures.values()].map(capture=>({client:capture.clientFrames,server:capture.serverFrames})))}`);}
     if (failure) throw failure;
     assert.deepEqual(counts, probes.map(probe=>(probe.refusedOnce?4:probe.unaryOnly?2:4)+(probe.shared?1:0)));
-    assert.equal(sessions.size, 5, 'original clients plus one dedicated health connection and one reused business connection');
+    assert.equal(sessions.size, 6, 'original clients, health admission transports and one retained read-interruption Watch');
     const healthGate = health.verify();
+    const healthReadRetention = healthRead.verify();
     const noErrorAfterEndStream = relay.assertResets(2);
     assert.equal(transparentRetries,2);
     const differences = probes.flatMap((probe,i) => observed[i] === probe.status ? [] : [{case:probe.name, netz:probe.status, grpcJs:observed[i]}]);
-    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3)+(probe.shared?1:0),0)+2, sharedRpcs:probes.filter(probe=>probe.shared).length, sharedReadAfterRpcDeadline:true, transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, healthGate, differences})+'\n');
+    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3)+(probe.shared?1:0),0)+2, sharedRpcs:probes.filter(probe=>probe.shared).length, sharedReadAfterRpcDeadline:true, transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, healthGate, healthReadRetention, differences})+'\n');
   } finally {
     if (relay) await relay.close();
     for (const session of sessions) session.destroy();

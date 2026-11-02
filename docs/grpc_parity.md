@@ -1863,8 +1863,10 @@ assumes the backend is healthy; UNKNOWN, NOT_SERVING, and SERVICE_UNKNOWN do
 not make it healthy.
 
 Events expose decoded health status, retry deadline and typed RPC/reset or
-transport failure, and explicit check disablement. A failure clears the last
-observed serving state. `waitForServingWith{Timeout,Deadline}` consumes retry
+transport failure, and explicit check disablement. A terminal stream or
+transport failure clears the last observed serving state. Local read timeout,
+cancellation and executor admission failure retain a usable active Watch and
+its last observed state. `waitForServingWith{Timeout,Deadline}` consumes retry
 and unhealthy events under one caller budget. The owning handle can move
 because its private Channel lives on the heap; the service name is copied,
 while target configuration and metadata remain borrowed for its lifetime.
@@ -1892,7 +1894,8 @@ for the subchannel manager.
 `health.startWatchWith{Timeout,Deadline}` and the matching runtime.Client
 methods also bound request HEADERS and DATA output. They intentionally omit
 `grpc-timeout`: the setup operation's deadline is not the lifetime of Health
-Watch. Later bounded reads retain a live stream on timeout, and any pending
+Watch. Later bounded reads retain a usable live stream on local timeout,
+cancellation or executor admission failure, and any pending
 request suffix uses that read's operation budget. Real h2c tests cover
 consecutive failures, terminal OK, backoff reset, UNIMPLEMENTED, malformed
 protobuf, retry sleep cancellation, resumable active reads, explicit
@@ -3213,9 +3216,12 @@ the restart/capacity lifecycle above. Logs and source hashes are recorded in
 
 The ordinary Health Gate now backs off locally returned resource failures.
 `ReconnectingWatch` still propagates `OutOfMemory` and
-`ConcurrencyUnavailable` directly to its polling caller. The background Gate
-publishes a rejected endpoint and waits with the Watch's exponential backoff
-policy instead of immediately polling again. Successful events reset the
+`ConcurrencyUnavailable` directly to its polling caller. For setup failures
+without a retained health observation, the background Gate publishes a
+rejected endpoint and waits with the Watch's exponential backoff policy instead
+of immediately polling again. A local read interruption on a retained active
+Watch preserves its last observed health status during that backoff.
+Successful events reset the
 local failure count; ordinary poll timeouts retain the current Watch state.
 The retry sleep is cancellable so Channel shutdown joins the worker and
 releases its connection even while resources remain unavailable.
@@ -3234,6 +3240,48 @@ The health/reconnecting-Watch gate passed 174/174 tests, the public package
 gate passed 26/26, and the independent HTTP/2 response-policy/lifecycle runner
 passed 8/8 build steps. Source hashes and logs are recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-resources.json`. The new
-executor fault matrix exercises connector admission after transport retirement;
-already-sent Watch response-read admission cleanup remains a separate evidence
-boundary.
+executor fault matrix exercises connector admission after transport retirement.
+The following read-interruption evidence covers the already-sent Watch
+separately.
+
+Local response-read interruptions now preserve the sent Health Watch and
+its incremental input state. The gRPC duplex layer previously treated
+`Canceled` and `ConcurrencyUnavailable` as terminal read errors, reset the
+stream, and caused ReconnectingWatch to discard it. `duplex/client_receive.zig`
+now keeps the decoder and stream when those errors come from a transport read
+whose HTTP/2 connection remains usable. ReconnectingWatch then returns the
+original error while retaining that active Watch, its last observed status,
+attempt count and retry state. Explicit Watch cancellation still ends the
+Watch; RPC deadline expiration, unusable transport, decode and callback errors
+retain their existing terminal behavior.
+
+A real h2c regression covers both local errors before response input, inside
+an HTTP/2 frame header, inside HPACK and inside the DATA/gRPC length prefix.
+It requires the same stream ID and one active local stream after interruption,
+then receives SERVING and terminal UNIMPLEMENTED without a new attempt. The
+bounded-message callback failure regression separately returns these same
+error tags from a consumer callback and requires stream cancellation plus
+later connection reuse, preserving the distinction between interrupted input
+and a failed consumer.
+
+The independent Node HTTP/2 peer emits literal Health protobuf messages,
+first SERVING and then NOT_SERVING/UNIMPLEMENTED after native confirmation of
+both interrupted reads. It requires one Watch attempt and zero stream resets;
+the native side additionally requires its prior SERVING observation and
+stream ID to remain stable, with no retry timer created. It runs alongside the
+existing ordinary admission, capacity recovery and response-policy matrix.
+
+The ordinary Gate also preserves an active Watch's last health observation
+during local read-admission backoff. A real connection first reports SERVING,
+then a fault rejects the Watch owner's response-read admission and pauses its
+local retry. The test requires that same Watch stream and SERVING observation
+to survive while a default-mode unary call completes on the application
+connection. This prevents a quiet serving Watch from staying rejected after
+local resources recover. Setup failures without any retained observation
+continue to reject admission during backoff.
+
+The gRPC/health gate passed 587/587 tests, the public package gate passed
+26/26, and the independent HTTP/2 runner passed 8/8 build steps with the
+retained-Watch probe plus all 26 original response scenarios. Logs and source
+hashes are recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-read-interruption.json`.

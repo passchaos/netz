@@ -156,6 +156,12 @@ test "gRPC bounded message poll retains one DATA suffix while a sibling finishes
 }
 
 test "gRPC bounded message callback failure releases held DATA and preserves reuse" {
+    for ([_]anyerror{ error.RejectSecond, error.Canceled, error.ConcurrencyUnavailable }) |failure| {
+        try exerciseCallbackFailure(failure);
+    }
+}
+
+fn exerciseCallbackFailure(failure: anyerror) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -194,13 +200,14 @@ test "gRPC bounded message callback failure releases held DATA and preserves reu
     const Collector = struct {
         count: usize = 0,
         reject: bool,
+        failure: anyerror,
         fn consume(self: *@This(), message: codec.DecodedMessage) !void {
-            if (self.reject and self.count != 0) return error.RejectSecond;
+            if (self.reject and self.count != 0) return self.failure;
             try std.testing.expectEqualStrings(if (self.reject) "one" else "reused", message.payload);
             self.count += 1;
         }
     };
-    var collector = Collector{ .reject = true };
+    var collector = Collector{ .reject = true, .failure = failure };
     while (collector.count == 0) {
         if (try first.pollResponseEventLimitedWithDeadline(1, deadline, &collector, Collector.consume)) |ready| {
             var event = ready;
@@ -208,12 +215,12 @@ test "gRPC bounded message callback failure releases held DATA and preserves reu
             if (event == .terminal) return error.EarlyTerminal;
         } else _ = try connection.pumpClientDuplexWithDeadline(deadline);
     }
-    try std.testing.expectError(error.RejectSecond, first.pollResponseEventLimitedWithDeadline(1, deadline, &collector, Collector.consume));
+    try std.testing.expectError(failure, first.pollResponseEventLimitedWithDeadline(1, deadline, &collector, Collector.consume));
     try std.testing.expectError(error.ConnectionClosed, first.pollResponseEventLimitedWithDeadline(1, deadline, &collector, Collector.consume));
     var next = try duplex.startDuplexWithIoDeadline(&connection, allocator, .{ .path = "/demo.Echo/Reuse" }, deadline);
     defer next.deinit();
     try std.testing.expectEqual(duplex.WriteResult.complete, try next.writeFinalMessage("next"));
-    var reused = Collector{ .reject = false };
+    var reused = Collector{ .reject = false, .failure = failure };
     while (true) {
         if (try next.pollResponseEventWithDeadline(deadline, &reused, Collector.consume)) |ready| {
             var event = ready;

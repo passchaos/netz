@@ -531,6 +531,10 @@ pub const ClientDuplex = struct {
         );
     }
 
+    /// A local read cancellation or executor admission failure retains the
+    /// stream and decoder while HTTP/2 remains usable. The operation returns
+    /// its original error; a later read resumes that state. Consumer callback
+    /// errors and explicit RPC/stream cancellation retain terminal behavior.
     pub fn readResponseEventWithDeadline(
         self: *ClientDuplex,
         deadline: std.Io.Clock.Timestamp,

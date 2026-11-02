@@ -88,7 +88,7 @@ fn pollWithConnectionCreditMode(self: anytype, deadline: ?std.Io.Clock.Timestamp
             policy,
             absolute,
         ) else self.transport.pollResponseEventWithCreditPolicy(policy)) catch |err| {
-        if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
+        transportReadFailed(self, err, cancel_on_timeout, Hooks);
         return err;
     };
     return if (event) |ready| try transport(self, ready, deadline, max_messages, context, consume, Hooks) else null;
@@ -106,10 +106,22 @@ pub fn read(self: anytype, deadline: ?std.Io.Clock.Timestamp, cancel_on_timeout:
         false,
     )) |event| return event;
     const event = Hooks.readTransport(&self.transport, deadline) catch |err| {
-        if (err != error.Timeout or cancel_on_timeout or self.transport.connection.aggregate_timeout_unusable) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
+        transportReadFailed(self, err, cancel_on_timeout, Hooks);
         return err;
     };
     return transport(self, event, deadline, std.math.maxInt(usize), context, consume, Hooks);
+}
+
+/// HTTP/2 retains its cursor after a local read interruption. Keep the gRPC
+/// decoder and stream when that transport remains usable. This only applies
+/// to transport reads; callback and decode errors follow their own fail path.
+fn transportReadFailed(self: anytype, err: anyerror, cancel_on_timeout: bool, comptime Hooks: anytype) void {
+    const terminal = self.transport.connection.aggregate_timeout_unusable or switch (err) {
+        error.Timeout => cancel_on_timeout,
+        error.Canceled, error.ConcurrencyUnavailable => false,
+        else => true,
+    };
+    if (terminal) Hooks.fail(self, if (err == error.Timeout) .cancel else .internal_error);
 }
 
 fn drain(self: anytype, deadline: ?std.Io.Clock.Timestamp, max_messages: usize, context: anytype, comptime consume: anytype, comptime Hooks: anytype) !Hooks.Event {

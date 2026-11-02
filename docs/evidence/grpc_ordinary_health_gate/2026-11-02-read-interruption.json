@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "retain sent Health Watch across local response-read interruptions",
+  "decision": "accepted",
+  "base_head": "b21d75ef",
+  "regression_before": "the new real h2c read-interruption test failed against base behavior: Canceled from response-read admission reset the gRPC stream and ReconnectingWatch cleared its active Watch",
+  "behavior": {
+    "transport_read": "gRPC duplex transport-read Timeout remains resumable unless its RPC deadline controls the read; Canceled and ConcurrencyUnavailable preserve stream and decoder when HTTP/2 remains usable",
+    "health": "ReconnectingWatch propagates the original local read error while retaining the active sent Watch, partial input, last observed status, attempt count and retry state",
+    "ordinary_gate": "local resource backoff on a retained active Watch preserves its last health observation, allowing a known SERVING backend to keep receiving calls while its Watch remains quiet; setup failures without retained observation still reject admission",
+    "terminal_boundaries": "explicit stream/Watch cancellation, unusable transport, RPC deadline expiry, decode failures and consumer callback failures retain their existing terminal behavior"
+  },
+  "verification": {
+    "grpc_and_health_debug": {
+      "passed": 587,
+      "total": 587,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "original_response_scenarios": 26,
+      "native_rpcs": 76,
+      "read_probe_watch_attempts": 1,
+      "read_probe_resets": 0,
+      "canceled_read_retained": true,
+      "executor_read_retained": true,
+      "read_probe_statuses": [
+        "SERVING",
+        "NOT_SERVING"
+      ],
+      "read_probe_terminal": "UNIMPLEMENTED",
+      "exit_code": 0
+    },
+    "regressions": [
+      "real h2c peer splits its response at no input, four bytes of the HTTP/2 frame header, the last HPACK byte and the DATA/gRPC length prefix; both cancellation and executor admission faults preserve stream ID, one active stream, next stream ID 3, no retry timer and exact status/terminal delivery",
+      "real background Gate receives SERVING, then its response-read executor admission fails and local backoff is paused; original Watch stream and SERVING state remain stable while a default-mode business unary call completes",
+      "the existing bounded-message consumer failure test now returns RejectSecond, Canceled and ConcurrencyUnavailable from callbacks; each still sends INTERNAL_ERROR reset, releases unread DATA and permits later connection reuse",
+      "independent Node HTTP/2 peer sends literal Health protobuf SERVING, withholds the next update until native confirmation of both injected read errors, then sends NOT_SERVING and UNIMPLEMENTED; it requires one Watch and no aborted/reset stream"
+    ],
+    "independent_peer": "Node HTTP/2 framing and literal protobuf Health payloads; the existing response-policy matrix still compares against pinned grpc-js 1.14.0"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='gRPC' -Dtest-filter='health gate' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-grpc-response --summary all"
+  ],
+  "source_sha256": {
+    "src/grpc/mod.zig": "9a45863e7dc8e005270799e8ac917237cb7e406ed83704f9842907dd36802e66",
+    "src/grpc/channel.zig": "85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161",
+    "src/grpc/channel/health_gate.zig": "59a77c070b00ab61a4703b32eb3e024e7b3f745543f1249c470c92739ccbae04",
+    "src/grpc/channel/health_gate/read_interruption_tests.zig": "af006511d8b316ae8a81b42799f76edc524da1f9321144a78d2de64640911aba",
+    "src/grpc/health/client.zig": "8deb14b794e9aa8696a2009676346f6b7a415a6de4adc89520893edbc38129d6",
+    "src/grpc/health/reconnecting.zig": "01e06af1555a125fd3e7bc8331bcc361b9bc08e09ec07d05854f646d4f48e2ec",
+    "src/grpc/health/read_interruption_tests.zig": "f447a99f58de9f9abdbd0e2fa035a3f1694323782c246152bc1fc456b508c64d",
+    "src/grpc/stream/duplex.zig": "f2f5873d4e23252b2e0f7fdb0c99860845f3d30aee70b26d6bc3f38bfd7d577e",
+    "src/grpc/stream/duplex/client_receive.zig": "31d80fbf3958bcb6c023e1531f489ee13061764570b8cf6bd249dc0414441d85",
+    "src/grpc/stream/duplex/limited_receive_tests.zig": "f7441ec4deb3b3dfb668b57494fed5ad90b65773c96afbe33f40e45eef2699ad",
+    "src/http2/runtime.zig": "3ee4ed1fab02189f78b68f42205cfbf3d73206ce0b8b0ca63265c87493e870ef",
+    "src/http2/runtime/frame/io.zig": "8f747d33707ee8d6a9cdd8b2ba4f77922b31d57127ad0b8d659e89b11b452688",
+    "tools/interop/grpc_response/client.js": "179dc13ecc704853908965c5b12968a35cce5936815fb38f10cc4e8fd48a00d9",
+    "tools/interop/grpc_response/health_read.js": "6818e862a4a2a57477e0b6524c66be0da25e36e6e1683e425c023ae6b3448050",
+    "tools/interop/grpc_response/health_read.zig": "4fef6c3c50a902b932e86bacc6e8b88063672cee3d428799cd2ea350b9d5e03c",
+    "tools/interop/grpc_response_client.zig": "52d974235c67f58e6a4d1887bda45f7dcdc1112eb09b57656ac22eae471ddfda"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-read-interruption/grpc-and-health.Debug.log": "95e93fcb07c5de20e2691d6ff7f87d46414c3487e95311eb1dc6c24f74aeab68",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-read-interruption/package.Debug.log": "932b44dec12dab6489e5e97a706f7387b3885a426bb509417da1769a860eb90e",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-read-interruption/interop-grpc-response.Debug.log": "b0ce05df17515fb3e77fcc0dd9790620df7359bb0e26281f72bd1e1b353cd7b8"
+  },
+  "remaining_scope": "Broader gRPC composite/xDS integration and multi-hour/high-concurrency evidence remain open for the complete HTTP/WebSocket/WebTransport/MQTT/gRPC goal."
+}

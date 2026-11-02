@@ -173,8 +173,9 @@ pub const ReconnectingWatch = struct {
     }
 
     /// One absolute budget covers retry sleep, DNS, connect/TLS/bootstrap,
-    /// request output and the next response. A read timeout retains an active
-    /// Watch; an interrupted request write is retired before the next attempt.
+    /// request output and the next response. Local read timeout, cancellation
+    /// and executor admission failure retain an active, usable Watch; an
+    /// interrupted request write is retired before the next attempt.
     pub fn nextWithDeadline(
         self: *ReconnectingWatch,
         deadline: std.Io.Clock.Timestamp,
@@ -229,7 +230,15 @@ pub const ReconnectingWatch = struct {
             if (observer) |listener| listener.started(listener.context);
         }
         var event = self.watch.?.nextWithDeadline(deadline) catch |err| {
-            if (err == error.Timeout and !self.watch.?.terminal_seen) return err;
+            if (!self.watch.?.terminal_seen and
+                self.watch.?.stream.receive_state == .active and
+                !self.watch.?.stream.transport.connection.aggregate_timeout_unusable)
+            {
+                switch (err) {
+                    error.Timeout, error.Canceled, error.ConcurrencyUnavailable => return err,
+                    else => {},
+                }
+            }
             self.dropWatch();
             return self.operationFailed(err, deadline);
         };
@@ -328,4 +337,5 @@ fn expired(io: std.Io, deadline: std.Io.Clock.Timestamp) bool {
 test {
     _ = @import("reconnecting_tests.zig");
     _ = @import("configured_tests.zig");
+    _ = @import("read_interruption_tests.zig");
 }
