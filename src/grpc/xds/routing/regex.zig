@@ -3,6 +3,7 @@ const std = @import("std");
 const model = @import("regex/model.zig");
 pub const Error = model.Error;
 pub const Limits = model.Limits;
+pub const Budget = @import("regex/budget.zig").Budget;
 pub const Workspace = @import("regex/execute.zig").Workspace;
 pub const Regex = struct {
     arena: std.heap.ArenaAllocator,
@@ -26,4 +27,5 @@ pub const Regex = struct {
 };
 test {
     _ = @import("regex/tests.zig");
+    _ = @import("regex/budget_tests.zig");
 }

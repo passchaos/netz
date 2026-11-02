@@ -54,7 +54,7 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
             allocator.free(change.outliers);
         }
     };
-    const same_config = prepared.config == state.config.load(.acquire);
+    const same_config = @import("../config_generation.zig").Generation.sameServiceConfig(prepared.config, state.config.load(.acquire));
     const same_policy = prepared.policy == state.policy;
     var same_layout = prepared.sources.len == state.sources.len;
     if (same_layout) for (prepared.sources, state.sources) |candidate, current| {

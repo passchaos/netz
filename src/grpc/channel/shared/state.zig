@@ -18,8 +18,10 @@ const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
 const Job = @import("job.zig").Job;
+const call_selector = @import("../call_selector.zig");
+var next_channel_id: std.atomic.Value(u64) = .init(1);
 pub const Options = @import("options.zig").Options;
-pub const Error = health.WatchError || orca_oob.Error || channel.Error || service_config.Error || error{ SharedChannelClosed, SharedQueueFull, SharedRetentionFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
+pub const Error = health.WatchError || orca_oob.Error || channel.Error || service_config.Error || call_selector.Error || error{ SharedChannelClosed, SharedQueueFull, SharedRetentionFull, InvalidSharedOptions, StreamReceiveBufferExceeded };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -37,6 +39,7 @@ pub const State = struct {
     config: @import("config_generation.zig").Publication = .init(null),
     update_mutex: std.Io.Mutex = .init,
     config_revision: u64 = 1,
+    channel_id: u64 = 0,
     health_explicit: bool = false,
     orca_explicit: bool = false,
     resolver_policy: channel.SelectionPolicy = .pick_first,
@@ -1105,6 +1108,12 @@ pub const State = struct {
         var resolved: service_config.ResolvedUnary = .{ .options = options, .retry_policy = null, .hedging_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
         if (config_generation) |config| {
             resolved = try config.config.resolveUnary(options);
+            if (config.call_selector) |selected| {
+                resolved = @import("selector.zig").unary(self, selected, resolved, entered, &config.config) catch |err| switch (err) {
+                    error.NoMatchingRoute, error.InvalidRouteAction => return call_selector.unavailable(self.allocator, if (err == error.NoMatchingRoute) error.NoMatchingRoute else error.InvalidRouteAction),
+                    else => return err,
+                };
+            }
         }
         if (explicit_retry) |policy| {
             resolved.retry_policy = policy;
@@ -1132,5 +1141,8 @@ pub const State = struct {
             );
         }
         return retry.runWithDeadline(self, self.allocator, resolved.options, resolved.retry_policy, deadline, attempt);
+    }
+    pub fn allocateChannelId() u64 {
+        return next_channel_id.fetchAdd(1, .monotonic);
     }
 };

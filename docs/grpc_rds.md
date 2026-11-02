@@ -1,0 +1,119 @@
+# RDS resources and per-RPC configuration
+
+`grpc.xds.rds` owns and decodes Envoy v3 `RouteConfiguration`, projects the
+selected authority's virtual host into an immutable selector and publishes it
+through `SharedChannel.Update.call_selector`. A SharedChannel can also retain
+an initial selector through `SharedChannelOptions.call_selector`.
+
+```zig
+const routes = try netz.grpc.xds.rds.Snapshot.create(
+    allocator, route_config_proto, .{},
+    .{ .authority = "payments.example" },
+);
+defer routes.release();
+var application = try netz.grpc.SharedChannel.init(allocator, io, target, .{
+    .service_config_json = cluster_manager_config,
+    .call_selector = routes.descriptor(),
+});
+defer application.deinit();
+var sender = application.sender();
+defer sender.deinit();
+var reply = try sender.unary(.{
+    .path = "/payments.Service/Get", .message = request,
+    .timeout = .{ .value = 3, .unit = .second },
+});
+defer reply.deinit();
+```
+
+RDS-selected cluster manager keys use `cluster:` followed by the protobuf
+cluster name. The manager's child names and endpoint hierarchy must contain
+these keys. A selector's required clusters are checked against the same
+prepared LB topology before publication, so a missing/misconfigured child
+cannot cause traffic to enter an unrelated endpoint policy. Applications can
+replace target, service config and selector in one update. The ADS adapter
+publishes against the application's existing cluster-manager topology; full
+CDS child orchestration remains separate work.
+
+Virtual-host selection uses case-insensitive exact, suffix, prefix and universe
+domain precedence. Routes are evaluated in received order using full safe
+regex or literal exact/prefix matching, all header predicates and optional
+runtime fraction. Binary metadata is absent from the routing view, repeated
+ASCII header values are joined with commas and missing value predicates fail
+before inversion as in grpc-core. Non-gRPC exact/prefix paths and query/CONNECT
+routes are skipped. Unsupported path extensions and metadata/TLS matchers are
+rejected. Matching inappropriate/non-forwarding actions return a local unary
+UNAVAILABLE without transport or a streaming `InvalidRouteAction` error;
+missing routes similarly return local UNAVAILABLE or `NoMatchingRoute`.
+These are configuration errors and are separate from EDS/circuit drops.
+
+Forwarding supports one cluster or relative weighted clusters. Zero weights
+are omitted, positive weights are summed with checked uint32 bounds and the
+deprecated total_weight field does not replace that sum. Cluster choice is
+made once per RPC and stays stable across retries. Header hashes use XXH64 of
+the joined visible value; `io.grpc.channel_id` supplies a stable channel hash.
+Multiple successful hash rules rotate the old hash left by one and XOR the new
+hash, with terminal rules stopping after a hash exists. Without a successful
+rule a random request hash is generated. Unsupported cookie/connection/query
+hash sources are ignored as in grpc-core. Hash regex rewriting is explicitly
+rejected until capture/substitution is implemented. Cluster/hash attributes
+remain internal request options and never become application wire metadata.
+
+Route timeout prefers grpc_timeout_header_max to max_stream_duration; zero
+disables the route/HCM cap, preserving the caller's deadline. An absent route
+cap can use Options.default_max_stream_duration. The selected cap and service
+config/caller timeout are applied to the original RPC entry timestamp, so
+selection time is included. The matching engine checks the original admission
+deadline and cancellation during evaluation, including long regex execution.
+Expired/canceled/closed admission retains its existing priority over local
+no-route status and allocation. Request path/header bytes and resource text,
+host/domain/route/cluster/hash counts, cumulative regex instructions and arena
+storage are bounded. Sorted name/key validation avoids quadratic duplicate
+searches in large resource sets.
+
+Route retry policy overrides virtual-host policy when present, including an
+explicit empty retry_on disabling inherited retry. Supported retry_on codes
+are cancelled, deadline-exceeded, internal, resource-exhausted and unavailable;
+unknown codes do not enable retries. Default num_retries is one, with the
+ordinary maximum clamped to five total attempts. Backoff defaults to 25 ms/
+250 ms with multiplier two; an explicit base interval requires positive time
+and max defaults to ten times base. The retained service-config retry throttle
+is attached to the selected policy and survives selector-only updates.
+Explicit unary retry/hedging APIs retain their caller override behavior.
+
+Selectors are retained in immutable config generations. Selector-only updates
+share parsed service-config storage directly, rather than retaining prior
+generation chains. A reader retains one epoch through unary completion or
+stream admission; queued/active transport inputs own copied cluster strings.
+Existing RPCs retain their route decision when a new selector is published.
+LB/health/ORCA state can recognize unchanged service-config storage, preserving
+backend transports and policy state across route updates. Generic custom
+selectors must be immutable/thread-safe and supply no-allocation retain/release
+callbacks; callback context and service-config views are borrowed for the call.
+
+For ADS updates use `rds.publishUpdateWithDeadline`: it validates every resource
+and checks unique names before publishing the requested selector. SotW
+omission installs a rejecting empty selector. Invalid resources, topology,
+old/cross-client tokens, expired budgets or transaction allocation failure
+leave the old selector/configuration and ADS version intact. Publication then
+advances the accepted ADS version before ACK output. As with CDS/EDS, callers
+must inspect acceptedVersion before NACKing an ACK output failure and use
+flush/reconnect to replay the committed version.
+
+`zig build interop-grpc-rds --summary all` uses official RDS/ADS schemas and
+the actual grpc-js-xds RDS validator with two independent grpc-js backends.
+It checks exact-host precedence, header/safe-regex and weighted dispatch,
+streaming, actual retry attempts and throttle accounting, the route deadline,
+NACK rollback, route deletion and an old in-flight RPC completing after a new
+route becomes active. All 446 permitted RPCs are counted and each backend must
+reuse one HTTP/2 session. Native tests cover allocation/topology rollback,
+constructor ownership, bounded selector epochs, decoder limits, skipped
+non-GRPC paths, inherited retry disable and admission priority. Existing ADS,
+CDS and official RE2 gates provide regression evidence in
+`docs/evidence/grpc_rds/2026-11-03.json`.
+
+This integrates client RDS selection with existing cluster managers. LDS/HCM,
+bootstrap and automatic multi-cluster CDS/EDS orchestration, resource expiry,
+control-plane failover/Delta xDS, LRS, capture/hash rewriting, HTTP filter
+overrides and host/path rewriting remain open. Unsupported recognized filter,
+rewrite, timeout-offset and plugin features fail validation; this module does
+not silently claim their deployment behavior.

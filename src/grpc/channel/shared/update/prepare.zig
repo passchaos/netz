@@ -61,6 +61,9 @@ pub const Prepared = struct {
                 options.removed_child_retention.nanoseconds,
             );
         }
+        if (config) |generation| if (generation.call_selector) |selected| {
+            try @import("../selector.zig").validateLayout(if (self.weighted) |*value| value else @as(?*State.WeightedTarget, null), selected);
+        };
         const name: ?[]const u8 = if (options.disable_health_check) null else options.health_service orelse
             if (config) |generation| generation.config.healthCheckServiceName() else null;
         if (name) |value| self.health_service = try allocator.dupe(u8, value);

@@ -15,6 +15,8 @@ pub const Options = struct {
     disable_health_check: bool = false,
     health_metadata: health.WatchOptions = .{},
     service_config_json: ?[]const u8 = null,
+    /// Initial immutable per-RPC configuration; the channel retains its owner.
+    call_selector: ?@import("../call_selector.zig").Selector = null,
     /// Opt into grpc-core's experimental retryPolicy.perAttemptRecvTimeout.
     /// Attempts remain sequential; this does not enable concurrent hedging.
     enable_per_attempt_recv_timeout: bool = false,

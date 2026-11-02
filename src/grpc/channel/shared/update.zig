@@ -22,6 +22,8 @@ pub const Update = struct {
     circuit_breaker: union(enum) { keep, replace: ?channel.circuit_breaker.Options } = .keep,
     drop_categories: union(enum) { keep, replace: []const channel.drop_policy.Category } = .keep,
     service_config: union(enum) { keep, replace: ?[]const u8 } = .keep,
+    /// Immutable per-RPC selector, retained with the service-config epoch.
+    call_selector: union(enum) { keep, replace: ?@import("../call_selector.zig").Selector } = .keep,
 };
 
 pub fn apply(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) State.Failure!u64 {
@@ -96,6 +98,21 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
             break :blk try Generation.createWithJson(state.allocator, parsed, text);
         } else null,
     };
+    errdefer if (config) |value| value.release();
+    switch (update.call_selector) {
+        .keep => if (old_config) |old| if (old.call_selector) |selected| {
+            if (config == null) {
+                config = try Generation.withSelector(state.allocator, null, selected);
+            } else if (config != old_config) config.?.call_selector = selected.retain();
+        },
+        .replace => |selected| {
+            if (config != null or selected != null) {
+                const replacement = try Generation.withSelector(state.allocator, config, selected);
+                if (config) |value| value.release();
+                config = replacement;
+            }
+        },
+    }
     const owned_config = config;
     config = null;
     const owned_endpoints = endpoints;

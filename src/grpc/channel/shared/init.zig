@@ -19,9 +19,9 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         return error.InvalidSharedOptions;
     }
     try target.validate();
-    var config: ?service_config.ServiceConfig = if (options.service_config_json) |json| try service_config.ServiceConfig.parseWithOptions(
+    var config: ?service_config.ServiceConfig = if (options.service_config_json != null or options.call_selector != null) try service_config.ServiceConfig.parseWithOptions(
         allocator,
-        json,
+        options.service_config_json orelse "{}",
         .{ .enable_per_attempt_recv_timeout = options.enable_per_attempt_recv_timeout },
     ) else null;
     var transferred = false;
@@ -78,6 +78,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     errdefer if (!weighted_target_transferred) if (weighted_target) |*runtime| {
         runtime.deinit();
     };
+    if (options.call_selector) |selected| try @import("selector.zig").validateLayout(if (weighted_target) |*value| value else @as(?*State.WeightedTarget, null), selected);
     const requested_orca = options.orca_oob orelse if (policy == .weighted_round_robin and
         balancing.weighted_round_robin.enable_oob_load_report) @import("../../orca/oob.zig").ClientOptions{
         .report_interval = balancing.weighted_round_robin.oob_reporting_period,
@@ -90,10 +91,11 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const tracker = try connectivity.Tracker.create(allocator, io);
     errdefer if (!transferred) tracker.release();
     const config_generation = if (config) |value|
-        try ConfigGeneration.createWithJson(allocator, value, options.service_config_json.?)
+        try ConfigGeneration.createWithJson(allocator, value, options.service_config_json orelse "{}")
     else
         null;
     config = null;
+    if (options.call_selector) |selected| config_generation.?.call_selector = selected.retain();
     errdefer if (!transferred) if (config_generation) |value| value.release();
     const state = try allocator.create(State);
     var state_initialized = false;
@@ -104,6 +106,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     errdefer if (!transferred) if (circuit) |*circuit_policy| circuit_policy.deinit();
     var retained = options;
     retained.service_config_json = null;
+    retained.call_selector = null;
     retained.channel.drop_categories = &.{};
     retained.channel.circuit_breaker = null;
     retained.health_service = owned_name;
@@ -116,6 +119,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .circuit = circuit,
         .options = retained,
         .config = .init(config_generation),
+        .channel_id = State.allocateChannelId(),
         .health_explicit = options.health_service != null or options.health_metadata.service.len != 0,
         .orca_explicit = options.orca_oob != null,
         .resolver_policy = if (target == .resolved) target.resolved.policy else .pick_first,

@@ -2,6 +2,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const Program = @import("compile.zig").Program;
+const budget_mod = @import("budget.zig");
 pub const Stats = struct { input_bytes: usize = 0, states_visited: usize = 0 };
 const Position = struct {
     start: bool,
@@ -30,6 +31,7 @@ pub const Workspace = struct {
     seen: []usize,
     epoch: usize = 0,
     stats: Stats = .{},
+    budget: ?budget_mod.Budget = null,
     pub fn init(allocator: std.mem.Allocator, program: Program) std.mem.Allocator.Error!Workspace {
         const storage = try allocator.alloc(usize, program.instructions.len * 6);
         errdefer allocator.free(storage);
@@ -48,13 +50,14 @@ pub const Workspace = struct {
         stack[count.*] = index;
         count.* += 1;
     }
-    fn add(self: *Workspace, program: Program, index: usize, context: Position, list: []usize, count: *usize, stack: []usize, seen: []usize) void {
+    fn add(self: *Workspace, program: Program, index: usize, context: Position, list: []usize, count: *usize, stack: []usize, seen: []usize) budget_mod.Error!void {
         var pending: usize = 0;
         self.push(seen, stack, &pending, index);
         while (pending != 0) {
             pending -= 1;
             const current = stack[pending];
             self.stats.states_visited += 1;
+            if (self.stats.states_visited & 4095 == 0) if (self.budget) |budget| try budget.check();
             switch (program.instructions[current]) {
                 .accept, .consume, .byte => {
                     list[count.*] = current;
@@ -78,18 +81,27 @@ pub const Workspace = struct {
         return .{ .value = value, .len = len };
     }
     pub fn matches(self: *Workspace, program: Program, input: []const u8) bool {
+        return self.execute(program, input, null) catch unreachable;
+    }
+    pub fn matchesWithBudget(self: *Workspace, program: Program, input: []const u8, budget: budget_mod.Budget) budget_mod.Error!bool {
+        return self.execute(program, input, budget);
+    }
+    fn execute(self: *Workspace, program: Program, input: []const u8, budget: ?budget_mod.Budget) budget_mod.Error!bool {
         const n = program.instructions.len;
         std.debug.assert(self.storage.len >= n * 6 and self.seen.len >= n * 5);
         self.stats = .{ .input_bytes = input.len };
+        self.budget = budget;
+        if (budget) |active| try active.check();
         @memset(self.seen, 0);
         var counts = [_]usize{0} ** 5;
         const stack = self.storage[n * 5 ..][0..n];
         self.epoch = 1;
-        self.add(program, program.start, position(input, 0), self.storage[0..n], &counts[0], stack, self.seen[0..n]);
+        try self.add(program, program.start, position(input, 0), self.storage[0..n], &counts[0], stack, self.seen[0..n]);
         // Rune transitions advance 1..4 bytes; \C advances exactly one.
         // Five rotating buckets retain only future positions without letting
         // a 4-byte transition overwrite the list being consumed.
         for (0..input.len + 1) |offset| {
+            if (offset & 4095 == 0) if (budget) |active| try active.check();
             const slot = offset % 5;
             const count = counts[slot];
             counts[slot] = 0;
@@ -108,7 +120,7 @@ pub const Workspace = struct {
                 const destination = offset + advance;
                 const bucket = destination % 5;
                 self.epoch = destination + 1;
-                self.add(program, continuation, position(input, destination), self.storage[bucket * n ..][0..n], &counts[bucket], stack, self.seen[bucket * n ..][0..n]);
+                try self.add(program, continuation, position(input, destination), self.storage[bucket * n ..][0..n], &counts[bucket], stack, self.seen[bucket * n ..][0..n]);
             }
         }
         return false;

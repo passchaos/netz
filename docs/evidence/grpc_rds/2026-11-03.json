@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "Typed RDS and immutable per-RPC route/cluster/hash/timeout/retry selection",
+  "decision": "accepted",
+  "base_head": "8b7f2468acabfd22e4297adf436c40fe79cd784d",
+  "behavior": {
+    "routing": "owned v3 RouteConfiguration, exact/suffix/prefix/universe authority precedence, ordered path/header/fraction matching; single/weighted cluster keys map to existing cluster manager children; choice fixed per RPC",
+    "hash": "joined visible header XXH64 and stable channel-ID, rotate/XOR combination and terminal rules, random fallback, binary headers absent; unknown cookie/connection/query sources ignored like grpc-core",
+    "timeout_retry": "original call entry includes selection; cancellation/deadline enforced during regex evaluation; route grpc_timeout_header_max preference/zero disable; inherited or explicit retry disable, grpc-core defaults/status codes, five-attempt clamp and service-config retry throttle",
+    "generations": "immutable selector owner retained per config epoch; parsed config storage is shared without generation chains; worker LB/health/ORCA sees same config storage for route-only updates and preserves transports",
+    "validation": "required cluster keys validated against same prepared topology; bounded bytes/counts/total clusters/regex/storage; sorted duplicate/key detection; constructor and update rollback preserve topology/version",
+    "ads": "validate all resources and duplicate names before selector publication; omission installs rejecting empty selector; accept applied version before ACK output; stale tokens and invalid/failed publication preserve prior state",
+    "errors": "unary missing/inappropriate route returns local UNAVAILABLE with no transport and no EDS drop marker; streaming returns pre-wire typed error; canceled/expired/closed admission remains authoritative",
+    "open_scope": "uses application-provided cluster manager topology; LDS/HCM/bootstrap and automatic multi-cluster CDS/EDS, expiry/failover/Delta/LRS, filters, hash capture/substitution and rewriting remain open"
+  },
+  "verification": {
+    "targeted.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' -Dtest-filter='gRPC shared config generation' -Dtest-filter='gRPC shared admission' -Dtest-filter='gRPC xDS' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/targeted.Debug.log",
+      "passed": 186,
+      "total": 186
+    },
+    "grpc.Debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/grpc.Debug.log",
+      "passed": 647,
+      "total": 647
+    },
+    "package.Debug": {
+      "command": "zig build test-package --summary all",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/package.Debug.log",
+      "passed": 26,
+      "total": 26
+    },
+    "interop.Debug": {
+      "command": "zig build interop-grpc-rds --summary all -- --output docs/evidence/grpc_rds/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/interop.Debug.log",
+      "report": "docs/evidence/grpc_rds/2026-11-03/interop.Debug.json"
+    },
+    "ads-regression.Debug": {
+      "command": "zig build interop-grpc-ads --summary all -- --output docs/evidence/grpc_rds/2026-11-03/ads-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/ads-regression.Debug.log",
+      "report": "docs/evidence/grpc_rds/2026-11-03/ads-regression.Debug.json"
+    },
+    "cds-regression.Debug": {
+      "command": "zig build interop-grpc-cds --summary all -- --output docs/evidence/grpc_rds/2026-11-03/cds-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "log": "docs/evidence/grpc_rds/2026-11-03/cds-regression.Debug.log",
+      "report": "docs/evidence/grpc_rds/2026-11-03/cds-regression.Debug.json"
+    },
+    "regex-regression.Debug": {
+      "command": "zig build interop-grpc-xds-regex --summary all -- --output docs/evidence/grpc_rds/2026-11-03/regex-regression.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 3,
+      "steps_total": 3,
+      "log": "docs/evidence/grpc_rds/2026-11-03/regex-regression.Debug.log",
+      "report": "docs/evidence/grpc_rds/2026-11-03/regex-regression.Debug.json"
+    }
+  },
+  "interop": {
+    "weighted": [
+      105,
+      295
+    ],
+    "nacks": 3,
+    "timeout": true,
+    "local_timeout": true,
+    "throttle_tokens": 3100,
+    "stream": true,
+    "storage_reused": true,
+    "old_route_completed": true,
+    "deleted": true,
+    "wire_counts": {
+      "Unary": 20,
+      "Weighted": 400,
+      "Stream": 1,
+      "Retry": 2,
+      "Slow": 1,
+      "Hold": 1,
+      "After": 20,
+      "Release": 1
+    },
+    "sessions": [
+      1,
+      1
+    ],
+    "retry_attempts": 2,
+    "slow_canceled": true,
+    "grpc_js": "1.14.7",
+    "grpc_js_xds": "1.14.2"
+  },
+  "source_sha256": {
+    "docs/grpc_rds.md": "bd90bb5cd0773120c96d878f37ec1e0a40e9513d7d865c576f1c96460cb46023",
+    "src/grpc/channel/call_selector.zig": "cf075da97f9e9e78e9fe728855a977efb0a81fae8066e69378f5774de5341bb8",
+    "src/grpc/channel/shared/config_storage.zig": "0900c7408e8aa0e2d5820433ebf6f44528305a604e06d03c9c29386d1cd4d918",
+    "src/grpc/channel/shared/selector.zig": "84560f53c1cc55126049afd66fc10e792fd3ea2c837aed5293a4c48c1df8b76d",
+    "src/grpc/xds/rds.zig": "96e375165122ad9227ed77baba112bd2aec4741ac5598128de2f1af63361c000",
+    "src/grpc/xds/rds/action.zig": "65f7d11cbd0d22dde9653fbfc452c33a22c389e542bdcc7d56787a8c7c51c0d5",
+    "src/grpc/xds/rds/apply.zig": "ee3e08b6d565f917fa9f6b942e60bcaa4c843314c462c4c9b955527bcac5d844",
+    "src/grpc/xds/rds/decode.zig": "e06f91534fc0b08e901cb041c1419ec3105181ebc9e6b8949eaf0b5f170bd9a3",
+    "src/grpc/xds/rds/lifecycle_tests.zig": "11d2fb60d7014de5530b05ec391f0dc38159fee37071330c5331877fb0aeedc2",
+    "src/grpc/xds/rds/match.zig": "bf89382498ed6b6d8328c079e4e2dbbb1ff3280fe95605ccb5aff8b47f4ce885",
+    "src/grpc/xds/rds/model.zig": "cd2361de4707c578b9c4e610fb1dc32de7feca18463c480ebb222605c00c23b2",
+    "src/grpc/xds/rds/protobuf.zig": "6b98d9fe99f144c8fabd5c6fbb9713af76c8652d77bc32e9c0579ad80595823b",
+    "src/grpc/xds/rds/retry.zig": "0d9cb1229b3b74f8d345384870af689d0e77e01e619b496a9e463b5dcf5d2050",
+    "src/grpc/xds/rds/snapshot.zig": "ddc3ee59c35da2cc246cc7bfcc24cab552fa17cd07dd0c733e0726964927a745",
+    "src/grpc/xds/rds/testing.zig": "eed3739d1083e3d2358fdca4813990b040662ff2c09bfec2b0c8ad25fc65079e",
+    "src/grpc/xds/rds/tests.zig": "702be827ad4ba1c73619f66f95a32faf59e98452431c4e04482981ba36371448",
+    "src/grpc/xds/rds/transport_tests.zig": "b5894cdfaa296aeca043bf7da4d40358c57a799c52e665f1d0fc1ef28838d999",
+    "src/grpc/xds/routing/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
+    "src/grpc/xds/routing/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
+    "tools/interop/grpc_rds/client.zig": "ad01bc97af27703331b2948b554827adb5858d82f96e0e7bf88ef2db18b3d534",
+    "tools/interop/grpc_rds/peer.js": "b63b9d6b00b614cfd1a73aae3c8240cdc690eda305320924d62bac2ec5596b0b",
+    "tools/interop/grpc_rds/run.py": "86cd6e00a4fe91f55cb558476480b8faf9dade8e9a39c1b7cbcca2d3f4fe6be5",
+    "build.zig": "558ccfb5b5b447d6ef6dc6eb7f6a63183094e50334fd4821ad650d9732aada6b",
+    "docs/grpc_ads.md": "a3b8b2dded18a1925948e5f45bfbd93aa2ffceb10ae1d00baa145bef0c74bcf8",
+    "docs/grpc_parity.md": "1ea4defd9d718beb6fdbcb551456d073d508c9d952c469e006394aea881a4bed",
+    "docs/grpc_xds_routing.md": "31b6836907c1b05da4aa1045cd37c78eaded51e4e4a7da745f7879b25bfd3605",
+    "src/grpc/channel/shared/config_generation.zig": "a5661e1321318082e081b7d97b8f3456cbfaa4814c739d7c34a167970c671851",
+    "src/grpc/channel/shared/init.zig": "e8c446cd195d33f676baabaafd535f656d920cf6e2f9a8cd439055afafd81524",
+    "src/grpc/channel/shared/options.zig": "a0799677198a12585c28ae3a244c2c7985425cf129abf0d5d5671cf4416afccf",
+    "src/grpc/channel/shared/state.zig": "503708471a8ed6b684630756422d8df9824b89a4eebb8f231834831339f50347",
+    "src/grpc/channel/shared/stream/open.zig": "e83ae19ce8c3dad43cec4f7d046f84eab942c1a75884d4476afef3693189de47",
+    "src/grpc/channel/shared/update.zig": "ed44af4128da910853e7f3b8fe357be330d087db0d3ff56ffa0bbad209ddbcb8",
+    "src/grpc/channel/shared/update/prepare.zig": "a86783dd6619054d24620865c6dcc254e24a687d6726e96da6c12fe59643faf3",
+    "src/grpc/channel/shared/update/publish.zig": "cffdfd3617580a1707ac66de4996be2f38ec6c0a0262a35b042311bd94ff3526",
+    "src/grpc/mod.zig": "301c43c81b28150932ce839ea1e0272b259d84f89fce5a5af90fe897e6bafd37",
+    "src/grpc/xds/mod.zig": "7376bbf711bddc83e0aeffdd9978304ef40800a013e3512b07d9eec69ae0c55c",
+    "src/grpc/xds/routing/header.zig": "14cc77b2de4923a6eb1f064b32530d55587717d487f4a57431036e9007b5996f",
+    "src/grpc/xds/routing/regex.zig": "9996f19db03ff5f9969f32d0cef6aad6599ce0d3c05580623e943ef581f6784a",
+    "src/grpc/xds/routing/regex/execute.zig": "c6c167215887b8382671be0b246ef1b7e7813a2395184607e47d759adefe95bd",
+    "src/grpc/xds/routing/string.zig": "2e9b0d1a0d576963388ff88b7ee4b77e7b1f5c3fcb8694583fca2dba4c799e72"
+  },
+  "reference_grpc_sha256": {
+    "src/core/xds/grpc/xds_route_config_parser.cc": "be3b40dae78369e8c95ba3917523e32b82db02b3a2dcfed457ecc4cfbca373a6",
+    "src/core/xds/grpc/xds_routing.cc": "d4808edc7872a6d2eb2d249c04d0436095f0f3eb8911de4b68f676871733e0b8",
+    "src/core/xds/grpc/xds_common_types_parser.cc": "f3cbd65dc3fab247770efd2911f330f7b7bd8eefe486b76ca1d6ea62617093be",
+    "src/core/resolver/xds/xds_resolver.cc": "2d2c9e4b15fa899b3e118140f5f67d5fd34514d9f4a090d77fd26717cb35a251",
+    "src/core/util/matchers.cc": "6f50ee71bed04c385a1e937733345b0b3d0b3de340b68daf7537655e307021ab"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_rds/2026-11-03/ads-regression.Debug.json": "942820871b514853144ff060ee79a11ceaa841956a5ab17ec85d3ed04dce17c5",
+    "docs/evidence/grpc_rds/2026-11-03/ads-regression.Debug.log": "4cd1c9f80f9da1a2c43f111e7ca80edf21df482574a3577881de59a86e2bf638",
+    "docs/evidence/grpc_rds/2026-11-03/cds-regression.Debug.json": "8874b02ae96f5f1094beab675a949a577fb4f68d73869c83f47cb24085f5853e",
+    "docs/evidence/grpc_rds/2026-11-03/cds-regression.Debug.log": "48c54ce41ca4270d05c06350a33e556fd77f04dcd6ee4e00884a82c8f6291f27",
+    "docs/evidence/grpc_rds/2026-11-03/grpc.Debug.log": "46a0435edfec81014848b5c4f801e9137ee1e98e3a7e0786573c796a18a681e0",
+    "docs/evidence/grpc_rds/2026-11-03/interop.Debug.json": "eeb995143e396e418a6be410ceae5d2d4f425b7cfd526be5d0d244248e42a5aa",
+    "docs/evidence/grpc_rds/2026-11-03/interop.Debug.log": "d8b35685b5f63511dee449d4ee88ea729e4c39ffdc9d4e3781506bb16f586461",
+    "docs/evidence/grpc_rds/2026-11-03/package.Debug.log": "7ea3703f27a41f33ca47d7a5ca7c7e11cfca792aea522141d7509a3ba52bb4be",
+    "docs/evidence/grpc_rds/2026-11-03/regex-regression.Debug.json": "5d234941b58c3ae842c31568cd64e3dfb88d0eb80a9073040d325310b290f885",
+    "docs/evidence/grpc_rds/2026-11-03/regex-regression.Debug.log": "bd101deef5c7419f4ca2cda8a20eec4f621d7ac8fb38875e4c368a8d1b515447",
+    "docs/evidence/grpc_rds/2026-11-03/targeted.Debug.log": "d00c7ef28d339cd0f8a1c945c5b65fe4e79cec955158250880cdfef621aa1d6f"
+  }
+}

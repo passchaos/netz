@@ -1,0 +1,200 @@
+{
+  "status": "passed",
+  "ack": true,
+  "nack": true,
+  "latest_nonce": true,
+  "multi_type": true,
+  "replay": true,
+  "bounded_open_lifetime": true,
+  "local_read_timeout": true,
+  "streams": 2,
+  "sessions": 1,
+  "requests": 9,
+  "transcripts": [
+    {
+      "epoch": 1,
+      "version": "",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": true
+    },
+    {
+      "epoch": 1,
+      "version": "",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c1",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-n1",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "e1",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "e-n1",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c1",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-bad",
+      "nack": "resource type mismatch",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c3",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-n3",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 2,
+      "version": "c3",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": true
+    },
+    {
+      "epoch": 2,
+      "version": "e1",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 2,
+      "version": "e2",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "e-n2",
+      "nack": "",
+      "node": false
+    }
+  ],
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "build.zig": "558ccfb5b5b447d6ef6dc6eb7f6a63183094e50334fd4821ad650d9732aada6b",
+    "src/grpc/mod.zig": "301c43c81b28150932ce839ea1e0272b259d84f89fce5a5af90fe897e6bafd37",
+    "src/grpc/channel/shared.zig": "fd7a4fa8e4f377da9c601c3bcc92693d3a09ed749e8ec84317edbc05ab3e86ba",
+    "src/grpc/channel/shared/stream/open.zig": "e83ae19ce8c3dad43cec4f7d046f84eab942c1a75884d4476afef3693189de47",
+    "src/grpc/channel/shared/stream/owner.zig": "c6fd1b90f63e7cce8697c914ee75f3f6cf36da1f5444c8cd68ac7b8990194f2b",
+    "src/grpc/xds/ads/client.zig": "5b505af1b8f9ff675e9aadb6b9c81e20a328f9945629f4a69c916b1014122b04",
+    "src/grpc/xds/ads/codec.zig": "6ab2328f00591eb349cb4626eaf419a6d8809f559c6f3852b47e1e39d2417fb9",
+    "src/grpc/xds/ads/subscriptions.zig": "5d3bd50ac003f6bd8c630835e9a52b879a91dc28b1c69cbbb8d5394da47658e4",
+    "src/grpc/xds/ads/tests.zig": "d0a6cf330668e3ff9b586f2ad3399939cbc072c1cd140c7719cc74a39c104f7b",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/ads.zig": "82cbac586929385fd9acd455305820ed5b1df065fbfe2298769d88697f40adcb",
+    "src/grpc/xds/cds/controller.zig": "98755e4cb2c7387d8caa601eb0a42a2ac0385f2eee191cacbbcaf792728e0207",
+    "src/grpc/xds/cds/controller_tests.zig": "b86c1a8668fd26d36175c99b91d2a989ca914ff01721930e8cc80e76c7cfe6ed",
+    "src/grpc/xds/cds/decode.zig": "5f15f4a0633f635123dc0c148edb65b192e9851133435a050bb3bac30bd233af",
+    "src/grpc/xds/cds/policy.zig": "758f05c3bf2694dd00e3c61cc8b94ed5c5bcaeec577f939b9b73b8bb7b8c4079",
+    "src/grpc/xds/cds/protobuf.zig": "087dd1d033bdf8878de5267b8a8159fee82894e673c3aaba6111c660ee3f3ff5",
+    "src/grpc/xds/cds/testing.zig": "387a32e19dbcc628e5debb998a85e96a6d412f09d25898245209215c8add6da0",
+    "src/grpc/xds/cds/tests.zig": "a5bdf74485560bafbfd019743b32282d41437e7bb566f510acf6c4326b2a87b6",
+    "src/grpc/xds/cds.zig": "905e33352315090c5fca795109cc3b897947ee506d2369664b5da7e3d8e4dd0f",
+    "src/grpc/xds/eds/apply.zig": "899b7b9da381ca817a8d5716c00e517fcea36b657a1480b8f95ed082eebc0275",
+    "src/grpc/xds/eds/decode.zig": "88cf7607df58ec60a4321d8faa72d39c2d0f48ca7b88c5dcdbda0540d893d067",
+    "src/grpc/xds/eds/target.zig": "26f322ec2a65449987479f18e9c9cea53d7ec2205f300f0a25ddd4522e72c3c1",
+    "src/grpc/xds/eds/testing.zig": "d2428b5cfd07052e2c46ed53ddcc32fda4ed8105856e1608c659d32d63e5a254",
+    "src/grpc/xds/eds/tests.zig": "4a1fbeb0c2bf113511c27c600ddec521b06409673d7b87a57918b56f660824cc",
+    "src/grpc/xds/eds/transport_tests.zig": "84a190f6109e3077361304ab336cb54444240847d81038337adc06eac59a467f",
+    "src/grpc/xds/eds.zig": "fd3de33a5e2a66c6755e23e3fe8c154e275db09d9e6373252e5758d90df8da9d",
+    "src/grpc/xds/mod.zig": "7376bbf711bddc83e0aeffdd9978304ef40800a013e3512b07d9eec69ae0c55c",
+    "src/grpc/xds/rds/action.zig": "65f7d11cbd0d22dde9653fbfc452c33a22c389e542bdcc7d56787a8c7c51c0d5",
+    "src/grpc/xds/rds/apply.zig": "ee3e08b6d565f917fa9f6b942e60bcaa4c843314c462c4c9b955527bcac5d844",
+    "src/grpc/xds/rds/decode.zig": "e06f91534fc0b08e901cb041c1419ec3105181ebc9e6b8949eaf0b5f170bd9a3",
+    "src/grpc/xds/rds/lifecycle_tests.zig": "11d2fb60d7014de5530b05ec391f0dc38159fee37071330c5331877fb0aeedc2",
+    "src/grpc/xds/rds/match.zig": "bf89382498ed6b6d8328c079e4e2dbbb1ff3280fe95605ccb5aff8b47f4ce885",
+    "src/grpc/xds/rds/model.zig": "cd2361de4707c578b9c4e610fb1dc32de7feca18463c480ebb222605c00c23b2",
+    "src/grpc/xds/rds/protobuf.zig": "6b98d9fe99f144c8fabd5c6fbb9713af76c8652d77bc32e9c0579ad80595823b",
+    "src/grpc/xds/rds/retry.zig": "0d9cb1229b3b74f8d345384870af689d0e77e01e619b496a9e463b5dcf5d2050",
+    "src/grpc/xds/rds/snapshot.zig": "ddc3ee59c35da2cc246cc7bfcc24cab552fa17cd07dd0c733e0726964927a745",
+    "src/grpc/xds/rds/testing.zig": "eed3739d1083e3d2358fdca4813990b040662ff2c09bfec2b0c8ad25fc65079e",
+    "src/grpc/xds/rds/tests.zig": "702be827ad4ba1c73619f66f95a32faf59e98452431c4e04482981ba36371448",
+    "src/grpc/xds/rds/transport_tests.zig": "b5894cdfaa296aeca043bf7da4d40358c57a799c52e665f1d0fc1ef28838d999",
+    "src/grpc/xds/rds.zig": "96e375165122ad9227ed77baba112bd2aec4741ac5598128de2f1af63361c000",
+    "src/grpc/xds/routing/domain.zig": "456603136723630e6ccde68d2b3ed1651813670cf75bd87946cbde3ba0faf215",
+    "src/grpc/xds/routing/header.zig": "14cc77b2de4923a6eb1f064b32530d55587717d487f4a57431036e9007b5996f",
+    "src/grpc/xds/routing/mod.zig": "6776c0668cb38bda1a37f130edf5e94f53e3e951b9c7d569448e23bbdaac2908",
+    "src/grpc/xds/routing/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
+    "src/grpc/xds/routing/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
+    "src/grpc/xds/routing/regex/classes.zig": "37fc8c80ff0c6a6b0f5ace2bf455901d29aa9e4e30159fc9466076d6d660e63c",
+    "src/grpc/xds/routing/regex/compile.zig": "85d0b651175f160e4b503b49736d41657e5e09f6db59ebf9ad2d54402e38e38a",
+    "src/grpc/xds/routing/regex/escape.zig": "6a3d3a063069a5db34621b9be9cd52554db15512196f577f3122882e636326cf",
+    "src/grpc/xds/routing/regex/execute.zig": "c6c167215887b8382671be0b246ef1b7e7813a2395184607e47d759adefe95bd",
+    "src/grpc/xds/routing/regex/model.zig": "22d8406bb6b34e5c76a16eda7cfd5d4bb1b3946b1a15c75daf61a3626eb18911",
+    "src/grpc/xds/routing/regex/parse.zig": "4a8dc59dec454262e75954f5cff8949f128b9cbb00944d4216f616ecac25a312",
+    "src/grpc/xds/routing/regex/tests.zig": "cd3a312308b3dcc5f1e5fa442930e119c676a137f3b8a2e3e2ccf189538238de",
+    "src/grpc/xds/routing/regex/unicode/groups.zig": "f65ff584956d795d5ed6039c24d1ece22287b6e381790ac6388c0b66aea41413",
+    "src/grpc/xds/routing/regex/unicode.zig": "fc0cc1a9e8c6965db4de0c7383a647760aa17174ac4131c53fa7ef539cf685f4",
+    "src/grpc/xds/routing/regex.zig": "9996f19db03ff5f9969f32d0cef6aad6599ce0d3c05580623e943ef581f6784a",
+    "src/grpc/xds/routing/string.zig": "2e9b0d1a0d576963388ff88b7ee4b77e7b1f5c3fcb8694583fca2dba4c799e72",
+    "src/grpc/xds/routing/tests.zig": "0482918a647fa78c55f36a27844c0bf10e6fa68166a8c8031415d102a2663443",
+    "tools/interop/grpc_ads/client.zig": "401a7346fb57d67ad1f76a1808e798da34604bbb87e822757dc03e078f2f0546",
+    "tools/interop/grpc_ads/peer.js": "9bbaeaa9edf33ba79084b7f0675946d6299b96995fd59eacc1a02ac47c6c52d5",
+    "tools/interop/grpc_ads/run.py": "56bc4cf9d02b71b694a155ac1301f46627a26bddbf02a9760095b4f8af45739a",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_proto_sha256": {
+    "envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+    "envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b",
+    "envoy/config/core/v3/base.proto": "7100d55f77dc8ae318ab9ebed11fbcd90afa44dd6c14511e3ee2312397edc9fe"
+  },
+  "client_sha256": "cac5352209e04ac7a14c991e9f0633e87fa6af8e93251dd76624cb03daf1bad4"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-ads success
++- run python3 success 528ms
+   +- compile exe netz-grpc-ads-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:26M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 9ms MaxRSS:26M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

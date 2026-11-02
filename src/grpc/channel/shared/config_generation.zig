@@ -4,12 +4,17 @@
 //! in-flight method resolution retains the prior generation until it finishes.
 const std = @import("std");
 const service_config = @import("../../service_config.zig");
+const Storage = @import("config_storage.zig").Storage;
+const Selector = @import("../call_selector.zig").Selector;
 
 pub const Generation = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
+    storage: *Storage,
+    /// Borrowed immutable views; only `storage` destroys this arena/text.
     config: service_config.ServiceConfig,
     json: ?[]u8 = null,
+    call_selector: ?Selector = null,
     retired_next: ?*Generation = null,
 
     pub fn create(
@@ -17,7 +22,9 @@ pub const Generation = struct {
         config: service_config.ServiceConfig,
     ) std.mem.Allocator.Error!*Generation {
         const generation = try allocator.create(Generation);
-        generation.* = .{ .allocator = allocator, .config = config };
+        errdefer allocator.destroy(generation);
+        const storage = try Storage.create(allocator, config, null);
+        generation.* = .{ .allocator = allocator, .storage = storage, .config = storage.config };
         return generation;
     }
 
@@ -26,18 +33,36 @@ pub const Generation = struct {
         return self;
     }
     pub fn createWithJson(allocator: std.mem.Allocator, config: service_config.ServiceConfig, json: []const u8) std.mem.Allocator.Error!*Generation {
-        const text = try allocator.dupe(u8, json);
-        errdefer allocator.free(text);
-        const generation = try create(allocator, config);
-        generation.json = text;
+        const generation = try allocator.create(Generation);
+        errdefer allocator.destroy(generation);
+        const storage = try Storage.create(allocator, config, json);
+        generation.* = .{ .allocator = allocator, .storage = storage, .config = storage.config, .json = storage.json };
         return generation;
+    }
+    pub fn withSelector(allocator: std.mem.Allocator, old: ?*Generation, selected: ?Selector) service_config.Error!*Generation {
+        const generation = if (old) |previous| blk: {
+            const value = try allocator.create(Generation);
+            const storage = previous.storage.retain();
+            value.* = .{ .allocator = allocator, .storage = storage, .config = storage.config, .json = storage.json };
+            break :blk value;
+        } else blk: {
+            var parsed = try service_config.ServiceConfig.parse(allocator, "{}");
+            errdefer parsed.deinit();
+            break :blk try createWithJson(allocator, parsed, "{}");
+        };
+        generation.call_selector = if (selected) |value| value.retain() else null;
+        return generation;
+    }
+    pub fn sameServiceConfig(a: ?*Generation, b: ?*Generation) bool {
+        if (a) |left| return if (b) |right| left.storage == right.storage else false;
+        return b == null;
     }
 
     pub fn release(self: *Generation) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         const allocator = self.allocator;
-        self.config.deinit();
-        if (self.json) |json| allocator.free(json);
+        if (self.call_selector) |selected| selected.release();
+        self.storage.release();
         self.* = undefined;
         allocator.destroy(self);
     }

@@ -3607,3 +3607,45 @@ checks the work bound on every native comparison. See
 [matching usage and boundaries](grpc_xds_routing.md) and
 `docs/evidence/grpc_xds_matching/2026-11-03.json`. Typed RDS, immutable selector
 publication and route/cluster control-plane orchestration remain open.
+
+
+## Typed RDS and immutable per-RPC selection
+
+Typed v3 RouteConfiguration resources now provide authority/virtual-host and
+ordered path/header/fraction matching, single/weighted cluster selection,
+header/channel-ID request hashing, route deadlines and retry policy. RDS
+cluster keys map to existing cluster-manager children and are validated against
+the same prepared topology before publication. Unary and streaming entry points
+resolve one retained selector epoch, with copied transport cluster attributes.
+No route/inappropriate actions fail locally before wire traffic. Positive
+cluster weights have uint32 sums, total cluster/regex/storage counts are bounded,
+and sorted name/key validation keeps large configuration updates from using
+quadratic duplicate searches.
+
+Per-RPC selectors share parsed service-config storage directly across route
+updates. They retain their own resource owner and preserve LB/health/ORCA
+state when service configuration is unchanged. The selected route/cluster/hash
+is fixed for retries and active RPCs; original entry deadlines include matching
+time, with cancellation/deadline checks during long regex evaluation. Retry
+inherits virtual-host policy only when absent, preserves explicit retry disable,
+uses grpc-core backoff/status defaults and attaches the channel retry throttle.
+Constructor and transaction failure release provisional selector references
+without changing the prior topology, epoch or ADS version.
+
+The ADS adapter validates the complete resource set and publishes the selected
+RDS snapshot before accepting its version and flushing ACK. Omission installs
+a rejecting selector; rejected configuration and old tokens preserve state.
+The independent official RDS/ADS plus grpc-js-xds validator gate counts 446 RPCs
+against grpc-js backends, including weighted/header/regex routing, duplex,
+retry/throttle, route timeout, NACKs and deletion. A held old RPC completes on
+its original cluster after a new route serves new calls, and both backend
+HTTP/2 sessions must remain reused. Native tests cover constructor/allocator
+rollback, missing topology, bounded generation storage, decoder limits and
+admission priority. Existing ADS/CDS and RE2 gates remain regression evidence.
+See [RDS behavior and boundaries](grpc_rds.md) and
+`docs/evidence/grpc_rds/2026-11-03.json`.
+
+LDS/HCM/bootstrap and automatic CDS/EDS child orchestration, expiry, failover,
+Delta xDS, LRS, HTTP filters, hash capture/substitution and host/path rewriting
+remain required work for complete xDS integration. Current RDS publication
+uses the application's existing cluster-manager topology.

@@ -2090,6 +2090,21 @@ pub fn build(b: *std.Build) void {
     const xds_regex_step = b.step("interop-grpc-xds-regex", "Compare bounded native xDS safe-regex full matching against official RE2 WASM");
     xds_regex_step.dependOn(&xds_regex.step);
 
+    const grpc_rds_client = b.addExecutable(.{
+        .name = "netz-grpc-rds-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_rds/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_rds = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_rds/run.py" });
+    grpc_rds.addArtifactArg(grpc_rds_client);
+    if (b.args) |args| grpc_rds.addArgs(args);
+    const grpc_rds_step = b.step("interop-grpc-rds", "Verify official RDS resources through ADS, immutable selectors and automatic unary/stream cluster dispatch");
+    grpc_rds_step.dependOn(&grpc_rds.step);
+
     const grpc_cds_client = b.addExecutable(.{
         .name = "netz-grpc-cds-client",
         .root_module = b.createModule(.{

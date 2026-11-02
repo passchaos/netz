@@ -133,6 +133,7 @@ pub const SharedStreamEvent = runtime.SharedStreamEvent;
 pub const ChannelTarget = runtime.ChannelTarget;
 pub const ChannelEndpoint = runtime.ChannelEndpoint;
 pub const ChannelSelectionPolicy = runtime.ChannelSelectionPolicy;
+pub const CallConfigSelector = @import("channel/call_selector.zig").Selector;
 pub const ChannelConnectivityState = runtime.ChannelConnectivityState;
 pub const ChannelConnectivitySnapshot = runtime.ChannelConnectivitySnapshot;
 pub const ChannelConnectivityWatch = runtime.ChannelConnectivityWatch;

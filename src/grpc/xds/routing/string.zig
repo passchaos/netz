@@ -33,4 +33,15 @@ pub const Match = union(enum) {
             },
         };
     }
+    pub fn matchesWithBudget(self: Match, gpa: std.mem.Allocator, value: []const u8, budget: ?regex.Budget) (std.mem.Allocator.Error || @import("regex/budget.zig").Error)!bool {
+        if (budget) |active| {
+            try active.check();
+            if (self == .safe_regex) {
+                var workspace = try regex.Workspace.init(gpa, self.safe_regex);
+                defer workspace.deinit();
+                return workspace.matchesWithBudget(self.safe_regex, value, active);
+            }
+        }
+        return self.matches(gpa, value);
+    }
 };

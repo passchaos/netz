@@ -61,6 +61,8 @@ negative folded classes, visible metadata, joined empty values, exact int64
 ranges and virtual-host precedence. Evidence is stored in
 `docs/evidence/grpc_xds_matching/2026-11-03.json`.
 
-This provides matching primitives. Typed RDS resource decoding, per-RPC
-selector publication, route hash rewriting, HTTP filter overrides and full
-LDS/RDS/CDS resolver orchestration remain follow-up work.
+The matching engine also accepts an optional RPC budget, checking cancellation
+and the original deadline during evaluation. [Typed RDS and immutable per-RPC
+selector publication](grpc_rds.md) now use these primitives. Capture/hash
+rewriting, HTTP filter overrides and full LDS/RDS/CDS resolver orchestration
+remain follow-up work.

@@ -17,6 +17,9 @@ pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std
     var resolved: service_config.ResolvedStreaming = .{ .options = options, .hedging_policy = null, .wait_for_ready = options.wait_for_ready orelse false };
     if (config_generation) |config| {
         resolved = try config.config.resolveStreaming(options);
+        if (config.call_selector) |selected| {
+            resolved = try @import("../selector.zig").streaming(state, selected, resolved, entered, admission);
+        }
     }
     if (resolved.hedging_policy != null) return error.InvalidSharedOptions;
     resolved.options.wait_for_ready = resolved.wait_for_ready;

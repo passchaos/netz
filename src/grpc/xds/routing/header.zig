@@ -2,7 +2,7 @@
 const std = @import("std");
 const Field = @import("../../../http2/mod.zig").Hpack.HeaderField;
 const String = @import("string.zig").Match;
-pub const Error = std.mem.Allocator.Error || error{RouteMetadataLimitExceeded};
+pub const Error = std.mem.Allocator.Error || @import("regex/budget.zig").Error || error{RouteMetadataLimitExceeded};
 pub const Value = struct {
     allocator: std.mem.Allocator,
     value: ?[]const u8,
@@ -18,7 +18,9 @@ pub const Request = struct {
     scheme: ?[]const u8 = null,
     metadata: []const Field = &.{},
     max_header_bytes: usize = 65536,
+    budget: ?@import("regex.zig").Budget = null,
     pub fn header(self: Request, gpa: std.mem.Allocator, name: []const u8) Error!Value {
+        if (self.budget) |budget| try budget.check();
         var result = Value{ .allocator = gpa, .value = null };
         if (std.mem.endsWith(u8, name, "-bin")) return result;
         if (std.mem.eql(u8, name, "content-type")) result.value = "application/grpc" else if (std.mem.eql(u8, name, ":path")) result.value = self.path else if (std.mem.eql(u8, name, ":authority")) result.value = self.authority else if (std.mem.eql(u8, name, ":method")) result.value = "POST" else if (std.mem.eql(u8, name, ":scheme")) result.value = self.scheme else {
@@ -61,7 +63,7 @@ pub const Match = struct {
         defer header.deinit();
         const result = switch (self.condition) {
             .present => |wanted| (header.value != null) == wanted,
-            .string => |matcher| try matcher.matches(gpa, header.value orelse return false),
+            .string => |matcher| try matcher.matchesWithBudget(gpa, header.value orelse return false, request.budget),
             .range => |range| blk: {
                 const value = integer(header.value orelse return false) orelse break :blk false;
                 break :blk value >= range.start and value < range.end;

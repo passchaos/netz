@@ -1,0 +1,108 @@
+//! Cluster/weighted selection, timeout/retry and hash attributes from RDS.
+const std = @import("std");
+const pb = @import("protobuf.zig");
+const model = @import("model.zig");
+fn weighted(p: anytype, bytes: []const u8) pb.Error![]const model.Weighted {
+    var reader = pb.Reader{ .bytes = bytes };
+    var values: std.ArrayList(model.Weighted) = .empty;
+    defer values.deinit(p.allocator);
+    var count: usize = 0;
+    var total: u64 = 0;
+    while (try reader.next()) |field| {
+        if (field.number != 1 or field.wire_type != 2) {
+            try reader.skip(field);
+            continue;
+        }
+        if (count >= p.limits.max_clusters_per_route) return error.RdsLimitExceeded;
+        count += 1;
+        try p.noteCluster();
+        var nested = pb.Reader{ .bytes = try reader.bytesValue() };
+        var name: []const u8 = "";
+        var weight: ?u64 = null;
+        while (try nested.next()) |entry| {
+            if (entry.number == 1 and entry.wire_type == 2) name = try pb.text(&nested, p.limits.max_text_bytes) else if (entry.number == 2 and entry.wire_type == 2) weight = try pb.wrapper(try nested.bytesValue()) else if (entry.number == 10 and entry.wire_type == 2) return error.UnsupportedRdsFeature else try nested.skip(entry);
+        }
+        if (name.len == 0 or weight == null or weight.? > std.math.maxInt(u32)) return error.InvalidRdsResource;
+        if (weight.? == 0) continue;
+        total += weight.?;
+        if (total > std.math.maxInt(u32)) return error.InvalidRdsResource;
+        try values.append(p.allocator, .{ .name = name, .key = try std.fmt.allocPrint(p.allocator, "cluster:{s}", .{name}), .weight = @intCast(weight.?) });
+    }
+    if (values.items.len == 0) return error.InvalidRdsResource;
+    // total_weight is deprecated; grpc-core uses the sum of non-zero weights.
+    return values.toOwnedSlice(p.allocator);
+}
+fn hash(p: anytype, bytes: []const u8) pb.Error!?model.HashPolicy {
+    var reader = pb.Reader{ .bytes = bytes };
+    var kind: ?@FieldType(model.HashPolicy, "kind") = null;
+    var terminal = false;
+    while (try reader.next()) |field| {
+        if (field.number == 4 and field.wire_type == 0) terminal = try reader.varint() != 0 else if ((field.number == 1 or field.number == 6) and field.wire_type == 2) {
+            var nested = pb.Reader{ .bytes = try reader.bytesValue() };
+            var name: []const u8 = "";
+            while (try nested.next()) |entry| {
+                if (entry.number == 1 and entry.wire_type == 2) name = try pb.text(&nested, p.limits.max_text_bytes) else if (field.number == 1 and entry.number == 2 and entry.wire_type == 2) return error.UnsupportedRdsFeature else try nested.skip(entry);
+            }
+            if (field.number == 1) {
+                if (name.len == 0) return error.InvalidRdsResource;
+                kind = .{ .header = name };
+            } else kind = if (std.mem.eql(u8, name, "io.grpc.channel_id")) .channel_id else null;
+        } else if ((field.number == 2 or field.number == 3 or field.number == 5) and field.wire_type == 2) {
+            _ = try reader.bytesValue();
+            kind = null; // unsupported cookie/connection/query hash source
+        } else try reader.skip(field);
+    }
+    return if (kind) |selected| .{ .kind = selected, .terminal = terminal } else null;
+}
+fn timeout(bytes: []const u8) pb.Error!?std.Io.Duration {
+    var reader = pb.Reader{ .bytes = bytes };
+    var maximum: ?std.Io.Duration = null;
+    var grpc: ?std.Io.Duration = null;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) maximum = try pb.duration(try reader.bytesValue()) else if (field.number == 2 and field.wire_type == 2) grpc = try pb.duration(try reader.bytesValue()) else if (field.number == 3 and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+    }
+    return grpc orelse maximum;
+}
+pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
+    var reader = pb.Reader{ .bytes = bytes };
+    var specifier: ?u32 = null;
+    var name: []const u8 = "";
+    var weighted_bytes: ?[]const u8 = null;
+    var duration: ?std.Io.Duration = null;
+    var retry: ?@import("../../call.zig").RetryPolicy = null;
+    var retry_present = false;
+    var policies: std.ArrayList(model.HashPolicy) = .empty;
+    defer policies.deinit(p.allocator);
+    var hash_count: usize = 0;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            specifier = 1;
+            name = try pb.text(&reader, p.limits.max_text_bytes);
+        } else if (field.number == 3 and field.wire_type == 2) {
+            specifier = 3;
+            weighted_bytes = try reader.bytesValue();
+        } else if ((field.number == 2 or field.number == 37 or field.number == 39) and field.wire_type == 2) {
+            _ = try reader.bytesValue();
+            specifier = field.number;
+        } else if (field.number == 9 and field.wire_type == 2) {
+            retry_present = true;
+            retry = try @import("retry.zig").parse(p.allocator, try reader.bytesValue(), p.limits.max_text_bytes);
+        } else if (field.number == 36 and field.wire_type == 2) duration = try timeout(try reader.bytesValue()) else if (field.number == 15 and field.wire_type == 2) {
+            if (hash_count >= p.limits.max_hash_policies) return error.RdsLimitExceeded;
+            hash_count += 1;
+            if (try hash(p, try reader.bytesValue())) |policy| try policies.append(p.allocator, policy);
+        } else if ((field.number == 6 or field.number == 11 or field.number == 29 or field.number == 35) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+    }
+    const kind = specifier orelse return error.InvalidRdsResource;
+    if (kind != 1 and kind != 3) return null;
+    const clusters = if (kind == 3) try weighted(p, weighted_bytes.?) else blk: {
+        if (name.len == 0) return error.InvalidRdsResource;
+        try p.noteCluster();
+        const values = try p.allocator.alloc(model.Weighted, 1);
+        values[0] = .{ .name = name, .key = try std.fmt.allocPrint(p.allocator, "cluster:{s}", .{name}), .weight = 1 };
+        break :blk values;
+    };
+    var total: u32 = 0;
+    for (clusters) |cluster| total += cluster.weight;
+    return .{ .clusters = clusters, .total_weight = total, .hash_policies = try policies.toOwnedSlice(p.allocator), .max_stream_duration = duration, .retry_policy = retry, .retry_present = retry_present };
+}
