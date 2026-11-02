@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "SharedChannel owned pump with scan-cached deadlines",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "a045d971",
+    "src/http2/runtime.zig": "4692d78cc1a41abc16cb07a60d258b803cdfa8449c3e233e0e698bf032209d25",
+    "src/grpc/channel/shared/worker.zig": "cd1826579117cdae001951f5963e96c6aac79ec0fcd20c8b20d48a1bccc75d6c",
+    "binary_sha256": "0899a0114c8828d471f283a110ea6d036b7e22335a11ec30eb0714faff008004"
+  },
+  "candidate": {
+    "src/http2/runtime.zig": "fa6c5d189c8a5846ca07129e171ad2977299a97a023770af4787f405897d023d",
+    "src/grpc/channel/shared/worker.zig": "f0ebc065d8c0854f02c35fefa45f5c8bf025814a72643c6f077134486aa8ccf7",
+    "binary_sha256": "a129e7940679dd1aaf8f07b63b55cdd15ce46e729decd6d811f3a1bd0af5807a",
+    "design": "A sole-owner pump variant accepted an absolute output deadline and skipped the per-pump exact clock validation for internally derived read deadlines. The worker passed outputDeadline() computed from the scan-cached awake timestamp."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [422352, 424620, 424584, 426878, 425705, 428769, 418558, 419007, 425719, 426241],
+    "candidate_samples_ns": [422050, 428417, 424565, 426505, 421516, 424869, 424110, 429310, 422332, 429800],
+    "baseline_median_ns": 425162.5,
+    "candidate_median_ns": 424717,
+    "candidate_over_baseline": 0.99895,
+    "round_wins": "2/5 ABBA rounds",
+    "paired_ratios": [1.0041, 0.9995, 0.9905, 1.0189, 1.0002]
+  },
+  "conclusion": "Removing the pump's exact clock reads did not change wall time beyond noise. The source change was reverted; the accepted request ownership and duplex burst changes remain."
+}

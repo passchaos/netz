@@ -3020,3 +3020,12 @@ the grpc-cpp forward matrix passes. Evidence is recorded in
 The earlier inline `OwnedMessage` variant changed `Job` size and collided with
 a test allocator keyed on `@sizeOf(StreamCall)`, causing a deadlock. Keeping
 `owned_message` as `?[]u8` preserves the original layout.
+
+## Rejected owned pump clock cache
+
+A sole-owner pump variant accepted an absolute output deadline and skipped
+the per-pump exact clock validation for internally derived read deadlines,
+using the worker's scan-cached awake timestamp. The 256-KiB shared-unary A/B
+moved only from 425,162.5 ns to 424,717 ns (0.1%, 2/5 ABBA rounds), so the
+change was reverted. Rows and identities are in
+`docs/evidence/grpc_shared_owned_pump_rejected/2026-11-02.json`.
