@@ -45,6 +45,9 @@ For each Netz client/server direction, one TLS connection carries:
 4. A second accepted Session with a deliberately wrong RESET Reliable Size.
    Netz must return StreamStateError and reset only that CONNECT. A third
    accepted Session then exchanges DATAGRAM and CLOSE on the same connection.
+   In the Netz client direction this final Session uses the background
+   `EndpointClient` command queue, checking queued CONNECT, DATAGRAM, receive,
+   owned results and continued reuse after the preceding Session error.
 
 The runner fails on missing transcript steps, wrong payloads/codes, incomplete
 capsules, unexpected connection termination, failed subprocesses, or Python

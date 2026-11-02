@@ -100,6 +100,38 @@ fn reuse(session: *wt.Session, until: std.Io.Clock.Timestamp) !void {
     try std.testing.expectEqual(@as(u32, 18), closed.code);
 }
 
+fn nextEndpoint(client: wt.EndpointClient, handle: wt.endpoint_client.Handle, until: std.Io.Clock.Timestamp) !wt.endpoint_client.Event {
+    while (true) {
+        var event = try client.receiveWithDeadline(handle, until);
+        if (event.value != .progress) return event;
+        event.deinit();
+    }
+}
+
+fn reuseEndpoint(client: wt.EndpointClient, until: std.Io.Clock.Timestamp) !void {
+    var attempt = try client.connectAttemptWithDeadline(.{
+        .path = "/reuse",
+        .authority = "origin.internal",
+        .protocols = .{ .values = &.{ "interop", "other" }, .required = true },
+        .initial_receive_stream_data = init_credit,
+    }, until);
+    var owned = true;
+    defer if (owned) attempt.deinit();
+    var accepted = try attempt.requireAccepted();
+    owned = false;
+    defer accepted.deinit();
+    try std.testing.expectEqual(@as(u16, 200), accepted.status);
+    try std.testing.expectEqualStrings("interop", accepted.selected_protocol.?);
+    try client.sendDatagramWithDeadline(accepted.handle, "after-error", until);
+    var reply = try nextEndpoint(client, accepted.handle, until);
+    defer reply.deinit();
+    try std.testing.expectEqualStrings("still-healthy", reply.value.datagram);
+    var closed = try nextEndpoint(client, accepted.handle, until);
+    defer closed.deinit();
+    try std.testing.expectEqual(@as(u32, 18), closed.value.closed.code);
+    std.debug.print("WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true\n", .{});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -124,7 +156,8 @@ pub fn main(init: std.process.Init) !void {
             .{ .ca_bundle = .{ .bundle = &ca, .lock = &ca_lock }, .protocol_policy = .tls13_only },
             until,
         );
-        defer connection.close();
+        var connection_owned = true;
+        defer if (connection_owned) connection.close();
         var rejection = try wt.runtime.connectAttemptWithDeadline(allocator, &connection, .{
             .path = "/reject",
             .authority = "origin.internal",
@@ -133,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
         try std.testing.expectEqual(@as(u16, 429), rejection.status());
         try std.testing.expectEqualStrings("retry", rejection.body());
         try std.testing.expectEqualStrings("1", rejection.trailers()[0].value);
-        for ([_][]const u8{ "/interop", "/bad-reset", "/reuse" }, 0..) |path, index| {
+        for ([_][]const u8{ "/interop", "/bad-reset" }, 0..) |path, index| {
             var session = try wt.runtime.connectWithDeadline(allocator, &connection, .{
                 .path = path,
                 .authority = "origin.internal",
@@ -144,10 +177,13 @@ pub fn main(init: std.process.Init) !void {
             switch (index) {
                 0 => try exchange(&session, until),
                 1 => try invalidReset(&session, until),
-                2 => try reuse(&session, until),
                 else => unreachable,
             }
         }
+        connection_owned = false;
+        var endpoint = try wt.EndpointClient.initWithDeadline(allocator, connection, .{ .max_sessions = 1 }, until);
+        defer endpoint.deinit();
+        try reuseEndpoint(endpoint, until);
     } else if (std.mem.eql(u8, args[1], "server")) {
         var identity = try netz.tls.server_identity_file.load(allocator, io, .cwd(), args[4], args[5]);
         defer identity.deinit();

@@ -99,11 +99,14 @@ def main() -> None:
 
     for mode, output in zip(("client", "server"), outputs):
         assert f"WebTransport HTTP2 {mode} passed:" in output, output
+        if mode == "client":
+            assert "WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true" in output, output
         print(output.strip())
     directory = Path(__file__).resolve().parent
     report = {"status": "passed", "protocol": "draft-ietf-webtrans-http2-15",
               "python_packages": {"h2": h2.__version__, "hpack": hpack.__version__, "hyperframe": hyperframe.__version__},
               "tls": "TLSv1.3", "alpn": "h2", "traces": traces,
+              "native_client_endpoint_queue": {"connect": True, "datagram": True, "receive": True, "owned_results": True, "reuse_after_error": True},
               "driver_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
               "source_sha256": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
                                 for name in ("peer.py", "wire.py", "run.py", "driver.zig")}}

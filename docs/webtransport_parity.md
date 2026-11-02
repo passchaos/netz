@@ -1984,6 +1984,34 @@ uses concurrent callers, reversed sibling traffic, capacity refusal, stale and
 reused handles, deterministic exporter separation, queued-command abandonment,
 and shutdown with a live Session.
 
+EndpointClient command admission now uses the original operation deadline
+through command preparation and queue-mutex acquisition. Cancellation is
+checked before preparation and again after acquiring the mutex, before queue
+links or ownership change. Failed, expired or canceled admission releases the
+temporary command arena and parent reference without queueing Session work.
+Queue capacity rejection preserves the same caller ownership boundary.
+
+The sole owner also checks a claimed command's absolute deadline before any
+Session lookup, state change or output. An expired command cannot execute just
+because its waiting caller has not yet been scheduled to abandon it. Already
+abandoned commands retain their Canceled result, and completed owned results
+still win later abandonment and transfer to the caller exactly once.
+
+Deterministic queue tests cover 17 public operation entry points under mutex
+contention, original deadline expiry during payload copying, cancellation at
+queue commit, capacity refusal, delayed owner execution and owned-result
+lifetime. The Python TLS/h2 gate now carries its final post-error Session
+through the production EndpointClient queue, requiring queued CONNECT,
+DATAGRAM and receive to preserve the exact response and owned payloads on the
+same connection. Detached cleanup requests retain their separate admission
+and lifecycle policy.
+
+The complete WebTransport HTTP2 gate passed 191/191 tests, the package gate
+passed 26/26, and the expanded independent Python TLS/h2 runner passed 8/8
+build steps in both directions. Its native client now verifies the production
+queue on the reused connection. Logs and source hashes are recorded in
+`docs/evidence/webtransport_h2_endpoint_queue/2026-11-02.json`.
+
 `h2.EndpointServer` now supplies the matching connection owner: a wake-aware
 server pump separates new CONNECT admission from routed Session input, pending
 requests retain owned inspection metadata, accept/reject decisions are

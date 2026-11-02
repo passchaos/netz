@@ -28,10 +28,10 @@ pub fn Worker(comptime State: type) type {
             while (true) {
                 while (!state.abortive_shutdown.load(.acquire)) {
                     const job = state.claim() orelse break;
-                    if (job.canceled()) {
-                        _ = state.finish(job, error.Canceled);
+                    job.checkExecution(state.io) catch |err| {
+                        _ = state.finish(job, err);
                         continue;
-                    }
+                    };
                     execute(state, job) catch |err| {
                         _ = state.finish(job, err);
                         if (state.connection.aggregate_timeout_unusable) {

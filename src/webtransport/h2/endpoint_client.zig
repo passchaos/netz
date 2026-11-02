@@ -133,16 +133,7 @@ const State = struct {
     }
 
     fn enqueue(self: *State, job: *Job) Error!void {
-        self.lock();
-        defer self.unlock();
-        if (self.closed or self.abortive_shutdown.load(.acquire)) return error.EndpointClosed;
-        if (self.failure) |failure| return @errorCast(failure);
-        if (self.queued >= self.options.max_queued_commands) return error.EndpointQueueFull;
-        job.retain();
-        if (self.tail) |tail| tail.next = job else self.head = job;
-        self.tail = job;
-        self.queued += 1;
-        self.wake.set(self.io);
+        return @import("endpoint_client/queue.zig").enqueue(self, job) catch |err| return @errorCast(err);
     }
     fn enqueueDetached(self: *State, operation: job_mod.Command) void {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = self.options.operation_timeout, .clock = .awake });
@@ -382,6 +373,7 @@ pub const EndpointClient = struct {
 
     fn submit(self: EndpointClient, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
         if (deadline.clock != .awake or deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0) return error.Timeout;
+        try self.state.io.checkCancel();
         const job = try State.Job.create(self.state, operation, deadline);
         errdefer job.release();
         try self.state.enqueue(job);
@@ -574,4 +566,7 @@ pub const EndpointClient = struct {
 
 test {
     _ = @import("endpoint_client/tests.zig");
+    _ = @import("endpoint_client/admission_tests.zig");
+    _ = @import("endpoint_client/job_tests.zig");
+    _ = @import("endpoint_client/preparation_tests.zig");
 }

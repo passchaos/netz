@@ -221,6 +221,13 @@ pub fn Job(comptime State: type) type {
             return self.completion.load(.acquire) == .abandoned;
         }
 
+        /// Called by the sole owner before any Session state or output is
+        /// changed. The waiter may not yet have run its own timeout path.
+        pub fn checkExecution(self: *const Self, io: std.Io) error{ Canceled, Timeout }!void {
+            if (self.canceled()) return error.Canceled;
+            if (self.deadline.clock != .awake or self.deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        }
+
         pub fn takeRejection(self: *Self) runtime.Rejection {
             const result = self.rejection.?;
             self.rejection = null;

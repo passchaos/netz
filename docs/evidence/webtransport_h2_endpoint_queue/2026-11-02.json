@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "WebTransport HTTP/2 EndpointClient queue admission and execution deadlines",
+  "decision": "accepted",
+  "base_head": "d60d28a2",
+  "behavior": {
+    "admission": "caller queue mutex admission uses the original absolute deadline; cancellation is checked before command preparation and again before queue commit",
+    "ownership": "temporary command arena and parent reference remain caller-owned until queue commit; timeout, cancellation and full-queue rejection do not change queue links or acquire a worker reference",
+    "execution": "owner checks abandonment and the absolute deadline before executing a claimed command, including immediate Session state operations whose waiter may not yet have run its timeout path",
+    "completion": "existing completion/abandonment arbitration is preserved; a completed owned event can outlive its Job and is transferred once",
+    "structure": "queue admission lives in endpoint_client/queue.zig, with owning-module admission, preparation and Job lifecycle tests"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 191,
+      "total": 191,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "production_endpoint_queue": [
+        "CONNECT",
+        "DATAGRAM send",
+        "DATAGRAM receive",
+        "CLOSE receive"
+      ],
+      "owned_results": true,
+      "reuse_after_session_error": true,
+      "exit_code": 0
+    },
+    "regressions": [
+      "17 public deadline entry points under a held endpoint queue mutex return Timeout or Canceled without queue links, retained command references, Session changes or stream-ID changes",
+      "expired and wrong-clock calls return before entering mutex wait",
+      "cancellation after uncontended queue-lock acquisition and capacity refusal preserve caller Job ownership and queue state",
+      "the command payload arena is allocated while the test advances the operation clock; original deadline expiry rejects before queue commit and frees the arena and parent reference",
+      "an expired but not yet abandoned command reaches the real owner and returns Timeout before stale Session lookup; an already abandoned command remains Canceled; neither starts a stream",
+      "a completed Job wins later abandonment and transfers its owned event beyond Job destruction",
+      "independent Python peer carries the post-error reused Session through the production zio-backed EndpointClient queue and checks accepted protocol, exact DATAGRAM reply and peer CLOSE code 18"
+    ],
+    "public_entry_points": [
+      "connect",
+      "connect_attempt",
+      "send_datagram",
+      "receive",
+      "close",
+      "remove",
+      "open_stream",
+      "send_stream",
+      "consume",
+      "retire_stream",
+      "reset_stream",
+      "stop_sending",
+      "grant_data",
+      "grant_streams",
+      "grant_stream_data",
+      "drain",
+      "export_keying_material"
+    ],
+    "reference_peer_packages": {
+      "h2": "4.3.0",
+      "hpack": "4.1.0",
+      "hyperframe": "6.1.0"
+    }
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client.zig": "fb5c0ca4e37efe1550b032933968ccfedb4fe1f9b60c583a6d35771dc15383b1",
+    "src/webtransport/h2/endpoint_client/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
+    "src/webtransport/h2/endpoint_client/job.zig": "140ea213ef4159ef573a2dbac9a33a5742dd1970d7ac55425e63e1f979de2674",
+    "src/webtransport/h2/endpoint_client/worker.zig": "fa5113c8b2c76cd752f884f52ce4dc6ccb0f7ba7b0d51bbcb988e0e217be767a",
+    "src/webtransport/h2/endpoint_client/admission_tests.zig": "33d533c8922f01c555185bf30b52841a5f923ccc94f7d0acff406706a4353aee",
+    "src/webtransport/h2/endpoint_client/job_tests.zig": "e168a1590af3b1cfe6cccfccb5d552d479298bbc79f053279c8fca5973c7df2f",
+    "src/webtransport/h2/endpoint_client/preparation_tests.zig": "b2d84d50bdb635c7db66d5428f32abe9b741d6f0cb89a38fb0469a21c976429c",
+    "src/webtransport/h2/session.zig": "49ecd75cb98de627659472ea64ff10d1b781532daca6385bf746847e87b5d9ad",
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318",
+    "tools/interop/webtransport_h2/driver.zig": "06480d823af3e93cc165c76222c9d9687f78080405a0b7345bc11bc0b85aa7c4",
+    "tools/interop/webtransport_h2/run.py": "af1378a870e940acb579f3a0e206d76ab070a4c7d232850f2936f8ce633707bf",
+    "tools/interop/webtransport_h2/peer.py": "0871230ce5e0f281f92739908d9065f9bb947239d4f61e83b0f537bd081139ac",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_endpoint_queue/2026-11-02/webtransport-http2.Debug.log": "1d76c100b71f01b518804af94cee7eb286ed67175847f6ba4d4aa02a4271a7fa",
+    "docs/evidence/webtransport_h2_endpoint_queue/2026-11-02/package.Debug.log": "6a3006326adf3449598d429e9b56fff231bdafa111dd04ac97e319bbd97ceeca",
+    "docs/evidence/webtransport_h2_endpoint_queue/2026-11-02/interop-python.Debug.log": "75372c25135848f66780f3bfcd352815baca4c762ad2ef84d7997be16e4f926f"
+  },
+  "limitations": [
+    "detached cleanup requests retain a separate admission/lifecycle path; this capture covers explicit caller commands and owner pre-execution validation",
+    "broad integration and multi-hour/high-concurrency evidence remain open for the full protocol-library goal"
+  ]
+}
