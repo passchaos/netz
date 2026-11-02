@@ -1,10 +1,129 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const quic = @import("../mod.zig");
 const handshake = @import("../handshake.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
 test "QUIC compressed Certificate remains owned after the client handshake" {
     for ([_]quic.tls.certificate_compression.Algorithm{ .zlib, .brotli, .zstd }) |algorithm| try exercise(algorithm);
+}
+
+test "QUIC client verifies native roots from SSL_CERT_FILE" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const pem = try pemCertificate(allocator, &certificate);
+    defer allocator.free(pem);
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io, .{
+        .sub_path = "ca.pem",
+        .data = pem,
+    });
+    const path = try temporary.dir.realPathFileAlloc(
+        io,
+        "ca.pem",
+        allocator,
+    );
+    defer allocator.free(path);
+    const file_entry = try std.fmt.allocPrintSentinel(
+        allocator,
+        "SSL_CERT_FILE={s}",
+        .{path},
+        0,
+    );
+    defer allocator.free(file_entry);
+    var entries = [_]?[*:0]const u8{ file_entry.ptr, null };
+    const block: std.process.Environ.PosixBlock = .{
+        .slice = entries[0..1 :null],
+    };
+    const environ: std.process.Environ = .{ .block = block };
+
+    var server = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Peer = struct {
+        endpoint: *quic.runtime.Endpoint,
+        options: handshake.ServerOptions,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            var connection = handshake.acceptWithTimeout(
+                self.endpoint,
+                self.options,
+                .fromSeconds(3),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+        }
+    };
+    var peer: Peer = .{ .endpoint = &server, .options = .{
+        .local_connection_id = "native-root-server",
+        .identity = .{
+            .certificate_chain = &.{&certificate},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        },
+    } };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    var connection = try handshake.connectWithTimeout(
+        &endpoint,
+        server.address(),
+        .{
+            .original_destination_connection_id = "native-root-origin",
+            .local_connection_id = "native-root-client",
+            .server_name = "localhost",
+            .system_environ = environ,
+        },
+        .fromSeconds(3),
+    );
+    defer connection.deinit();
+    try std.testing.expect(connection.peerCertificates() != null);
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+}
+
+fn pemCertificate(
+    allocator: std.mem.Allocator,
+    certificate_der: []const u8,
+) ![]u8 {
+    const encoded_len = std.base64.standard.Encoder.calcSize(
+        certificate_der.len,
+    );
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, "-----BEGIN CERTIFICATE-----\n");
+    const encoded_start = result.items.len;
+    try result.resize(allocator, encoded_start + encoded_len);
+    _ = std.base64.standard.Encoder.encode(
+        result.items[encoded_start..],
+        certificate_der,
+    );
+    try result.appendSlice(allocator, "\n-----END CERTIFICATE-----\n");
+    return result.toOwnedSlice(allocator);
 }
 
 fn exercise(algorithm: quic.tls.certificate_compression.Algorithm) !void {
