@@ -3050,3 +3050,30 @@ A later attempt skipped `worker.tracker.setState` from `State.publish` when
 the worker's published state and capacity were unchanged. It moved the median
 only 422,643 to 422,045 ns (0.14%, 1/5 rounds) and was reverted. Rows are in
 `docs/evidence/grpc_shared_publish_skip_rejected/2026-11-02.json`.
+
+## Ordinary Channel opt-in Health Watch gate
+
+`Channel.Options.health_check_service` adds an opt-in client Health Watch
+gate to ordinary Channel calls. An empty service name selects overall server
+health; null keeps checking disabled. The gate owns a dedicated Watch
+connection so it never competes with an application RPC reader. SharedChannel
+continues to use its same-connection health owner.
+
+The gate starts lazily on the first unary, streaming, or duplex call. That
+call waits for a known status (bounded by its deadline, or five seconds when
+unbounded) before dispatch. Once known, `NOT_SERVING`, `UNKNOWN`, and
+`SERVICE_UNKNOWN` reject fail-fast calls with `ConnectionUnavailable`;
+`wait_for_ready` calls wait until the service becomes serving or their
+deadline expires. `UNIMPLEMENTED` disables checking and allows calls. A Watch
+transport retry returns to the unknown state and fails open until a new status
+arrives, so a transient Watch-connection failure does not block the application
+connection. The dedicated Watch is a compatibility tradeoff: health is
+server-level rather than same-subconnection, unlike grpc-core's subchannel
+watch.
+
+A real loopback test starts a health registry and a unary responder, lets the
+gate observe SERVING, switches the service to NOT_SERVING, observes
+`ConnectionUnavailable`, then switches back to SERVING and completes another
+unary call on the reused connection. The focused test passes 147/147 and the
+gRPC filter passes 564/564. Evidence is recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02.json`.

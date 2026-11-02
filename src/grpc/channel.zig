@@ -11,6 +11,7 @@ const completion = @import("stream/completion.zig");
 const wire = @import("wire.zig");
 const backoff = @import("channel/backoff.zig");
 const connectivity = @import("channel/connectivity.zig");
+const health_gate = @import("channel/health_gate.zig");
 const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
@@ -417,6 +418,11 @@ pub const Options = struct {
     /// How long a lower-priority transport stays connected after a higher
     /// priority becomes READY/IDLE. Null uses grpc-core's 15 minutes.
     priority_deactivation_timeout: ?std.Io.Duration = null,
+    /// Opt-in client Health Watch gate for ordinary Channel calls. Empty
+    /// selects overall server health; null disables checking. The Watch uses
+    /// a dedicated connection so it does not compete with application RPC
+    /// readers; SharedChannel keeps its same-connection health owner.
+    health_check_service: ?[]const u8 = null,
 
     pub fn validate(self: Options) error{InvalidChannelOptions}!void {
         try self.backoff.validate();
@@ -602,6 +608,7 @@ const HostResolution = struct {
 pub const Channel = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    target: Target,
     slots: []Slot,
     selection_policy: SelectionPolicy,
     backoff_policy: BackoffPolicy,
@@ -610,6 +617,9 @@ pub const Channel = struct {
     connect_allocator: ?*ConnectAllocator = null,
     host_resolution: ?HostResolution = null,
     connectivity_tracker: *connectivity.Tracker,
+    health_service: ?[]u8 = null,
+    health_gate: ?*health_gate.Gate = null,
+    health_channel_options: Options = .{},
     selected_index: ?usize = null,
     next_pick_index: usize = 0,
     wrr_config: ?service_config.WeightedRoundRobinConfig = null,
@@ -717,9 +727,17 @@ pub const Channel = struct {
             }
             std.debug.assert(slot_index == slots.len);
         }
+        const health_service: ?[]u8 = if (options.health_check_service) |name|
+            try allocator.dupe(u8, name)
+        else
+            null;
+        errdefer if (health_service) |name| allocator.free(name);
+        var health_options = options;
+        health_options.health_check_service = null;
         var result = Channel{
             .allocator = allocator,
             .io = io,
+            .target = target,
             .slots = slots,
             .selection_policy = selection_policy,
             .backoff_policy = options.backoff,
@@ -727,6 +745,8 @@ pub const Channel = struct {
             .connection_attempt_delay = options.connection_attempt_delay,
             .host_resolution = host_resolution,
             .connectivity_tracker = connectivity_tracker,
+            .health_service = health_service,
+            .health_channel_options = health_options,
         };
         for (result.slots) |*slot| {
             slot.least_request_enabled =
@@ -789,6 +809,11 @@ pub const Channel = struct {
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
         var resolved = options;
+        if (!composite_owned and resolved.health_check_service == null) {
+            if (config.healthCheckServiceName()) |name| {
+                resolved.health_check_service = name;
+            }
+        }
         const owns_composite = !composite_owned and
             (balancing.policy == .weighted_target or
                 balancing.policy == .priority);
@@ -868,6 +893,14 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
+        if (self.health_gate) |gate| {
+            gate.deinit();
+            self.health_gate = null;
+        }
+        if (self.health_service) |name| {
+            self.allocator.free(name);
+            self.health_service = null;
+        }
         self.connectivity_tracker.setState(.shutdown);
         if (self.host_resolution) |*resolution| {
             resolution.deinit(self.allocator);
@@ -1167,12 +1200,53 @@ pub const Channel = struct {
         return self.unaryResolved(try config.resolveUnary(options));
     }
 
+    fn ensureHealthGate(self: *Channel) Error!void {
+        if (self.health_gate != null or self.health_service == null) return;
+        self.health_gate = health_gate.Gate.create(
+            self.allocator,
+            self.io,
+            self.target,
+            self.health_service.?,
+            self.health_channel_options,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ConnectionUnavailable,
+        };
+    }
+
+    fn healthGateBeforeCall(
+        self: *Channel,
+        deadline: ?std.Io.Clock.Timestamp,
+        wait_for_ready: bool,
+    ) Error!void {
+        if (self.health_service == null) return;
+        try self.ensureHealthGate();
+        const gate = self.health_gate.?;
+        if (!gate.isKnown()) {
+            const until = deadline orelse std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = .fromSeconds(5), .clock = .awake },
+            );
+            gate.waitForKnown(until) catch |err| switch (err) {
+                error.Timeout => return error.Timeout,
+                else => return error.ConnectionUnavailable,
+            };
+        }
+        if (gate.isServing()) return;
+        if (!wait_for_ready) return error.ConnectionUnavailable;
+        gate.waitForServing(deadline) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            else => return error.ConnectionUnavailable,
+        };
+    }
+
     fn unaryResolved(
         self: *Channel,
         resolved: service_config.ResolvedUnary,
     ) Error!call.UnaryResponse {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         var options = resolved.options;
         options.wait_for_ready = resolved.wait_for_ready;
         return retry.runWithDeadline(
@@ -1255,6 +1329,7 @@ pub const Channel = struct {
     ) Error!streaming.ClientWriter {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1312,6 +1387,7 @@ pub const Channel = struct {
     ) Error!duplex.ClientDuplex {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
