@@ -175,6 +175,7 @@ pub const Tracker = struct {
     }
 
     fn pruneAbandonedLocked(self: *Tracker) void {
+        if (!self.abandoned_waiters.load(.acquire)) return;
         if (!self.abandoned_waiters.swap(false, .acq_rel)) return;
         var node = self.waiters.first;
         while (node) |current| {

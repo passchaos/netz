@@ -3029,3 +3029,13 @@ using the worker's scan-cached awake timestamp. The 256-KiB shared-unary A/B
 moved only from 425,162.5 ns to 424,717 ns (0.1%, 2/5 ABBA rounds), so the
 change was reverted. Rows and identities are in
 `docs/evidence/grpc_shared_owned_pump_rejected/2026-11-02.json`.
+
+## Connectivity tracker prune fast path
+
+`Tracker.pruneAbandonedLocked` now checks `abandoned_waiters` with an acquire
+load before the `acq_rel` swap. The waiter abandonment path stores the flag
+and re-locks the tracker, so concurrent cancellation still reaches the next
+prune. Five ABBA rounds on the 256-KiB shared-unary workload moved the median
+from 429,209 ns to 424,903 ns (1.0% faster, 4/5 rounds). The gRPC filter passes
+564/564 and the connectivity-watch filter passes 160/160. Evidence is recorded
+in `docs/evidence/grpc_connectivity_prune_fast_path/2026-11-02.json`.

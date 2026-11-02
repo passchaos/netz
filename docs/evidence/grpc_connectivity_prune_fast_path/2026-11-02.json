@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "connectivity tracker abandoned-waiter prune load fast path",
+  "decision": "accepted",
+  "baseline": {
+    "commit": "7e978c53",
+    "src/grpc/channel/connectivity.zig": "9e943336ff41298355d2a6792358719ea635b40a613c08a634afbf6a8c3d4e4f",
+    "binary_sha256": "0899a0114c8828d471f283a110ea6d036b7e22335a11ec30eb0714faff008004"
+  },
+  "candidate": {
+    "src/grpc/channel/connectivity.zig": "c901ecee9b392f3ed17263f85eedab7b4088bacf7b6ebaa7d5181bd231936f98",
+    "binary_sha256": "349146a35d89a29f4f7be1e15d34265b941a6d8a520045b38c12d569192797d9",
+    "design": "Tracker.pruneAbandonedLocked now performs an acquire load of abandoned_waiters before the acq_rel swap. The abandonment path stores the flag and re-locks the tracker, so a concurrent waiter is still pruned."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [421128, 430950, 422634, 425894, 428462, 431404, 422823, 433996, 429956, 430188],
+    "candidate_samples_ns": [424866, 426026, 422582, 428497, 419684, 424764, 424462, 427557, 424940, 430066],
+    "baseline_median_ns": 429209,
+    "candidate_median_ns": 424903,
+    "candidate_over_baseline": 0.98997,
+    "round_wins": "4/5 ABBA rounds",
+    "paired_ratios": [0.9986, 1.0030, 0.9821, 0.9944, 0.9940]
+  },
+  "correctness": {
+    "grpc_filter": "564/564 passed",
+    "connectivity_watch_filter": "160/160 passed"
+  }
+}
