@@ -155,3 +155,107 @@ test "ordinary Channel health gate follows a Watch and blocks NOT_SERVING" {
 
     if (peer.err) |err| return err;
 }
+
+test "ordinary Channel health gate covers streaming and duplex starts" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var registry = try grpc.health.Registry.init(allocator, io);
+    defer registry.deinit();
+    _ = try registry.setStatus("demo.Echo", .not_serving);
+
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer server.deinit();
+
+    const Handler = struct {
+        fn run(
+            connection: grpc.runtime.ServerConnection,
+            registry_ptr: *grpc.health.Registry,
+        ) anyerror!void {
+            var conn = connection;
+            defer conn.deinit();
+            var stream = try conn.acceptDuplexWithTimeout(.fromSeconds(3));
+            defer stream.deinit();
+            if (!std.mem.eql(u8, stream.path, grpc.health.watch_path)) {
+                return error.UnexpectedPath;
+            }
+            try conn.serveHealthWatch(registry_ptr, &stream);
+        }
+    };
+
+    const Peer = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.health.Registry,
+        tasks: *[4]?std.Io.Future(anyerror!void),
+        accepted: usize = 0,
+        io: std.Io,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            while (true) {
+                const connection = self.server.acceptWithTimeout(.fromSeconds(3)) catch |err| switch (err) {
+                    error.Canceled => return,
+                    else => {
+                        self.err = err;
+                        return;
+                    },
+                };
+                if (self.accepted == self.tasks.len) {
+                    self.err = error.TooManyConnections;
+                    return;
+                }
+                self.tasks[self.accepted] = self.io.async(Handler.run, .{
+                    connection,
+                    self.registry,
+                });
+                self.accepted += 1;
+            }
+        }
+    };
+
+    var tasks: [4]?std.Io.Future(anyerror!void) = .{null} ** 4;
+    defer for (&tasks) |*task| {
+        if (task.*) |*future| {
+            _ = future.cancel(io) catch {};
+        }
+    };
+    var peer = Peer{
+        .server = &server,
+        .registry = &registry,
+        .tasks = &tasks,
+        .io = io,
+    };
+    var peer_task = io.async(Peer.run, .{&peer});
+    defer peer_task.cancel(io);
+
+    var channel = try grpc.Channel.init(
+        allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = server.address() } },
+        .{ .health_check_service = "demo.Echo" },
+    );
+    defer channel.deinit();
+
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        channel.startStreaming(.{
+            .path = "/demo.Echo/Stream",
+            .timeout = .{ .value = 1, .unit = .second },
+        }),
+    );
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        channel.startDuplex(.{
+            .path = "/demo.Echo/Duplex",
+            .timeout = .{ .value = 1, .unit = .second },
+        }),
+    );
+    if (peer.err) |err| return err;
+}

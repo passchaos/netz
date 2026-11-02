@@ -3082,3 +3082,7 @@ reused connection. The focused test passes 147/147 and the gRPC filter passes
 A custom `address_resolver` or custom connector is shared with the dedicated
 Watch Channel, so such callbacks must support concurrent use by both the
 application Channel and the health Channel.
+
+A second focused test starts a NOT_SERVING registry with only a Health Watch
+server and requires both `startStreaming` and `startDuplex` to return
+`ConnectionUnavailable` before any business connection is opened.
