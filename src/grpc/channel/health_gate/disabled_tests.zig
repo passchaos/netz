@@ -27,6 +27,9 @@ test "ordinary Channel health gate keeps UNIMPLEMENTED disabled and ends its wor
             try std.testing.expectEqualStrings(grpc.health.watch_path, watch.path);
             try std.testing.expectEqual(@as(usize, 1), collector.count);
             try watch_connection.writeUnary(watch.transport.stream_id, .{ .status = .unimplemented, .trailers_only = true });
+            // The disabled Watch's dedicated connection must close before
+            // application traffic starts, while the parent Channel is live.
+            try std.testing.expectError(error.ConnectionClosed, watch_connection.readUnaryWithTimeout(.fromSeconds(3)));
 
             var application = try listener.acceptWithTimeout(.fromSeconds(3));
             defer application.deinit();

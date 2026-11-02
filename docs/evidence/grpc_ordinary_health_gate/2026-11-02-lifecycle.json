@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "ordinary Channel Health Watch admission lifecycle",
+  "decision": "accepted",
+  "base_head": "fbd55daa",
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "health_source": "src/core/load_balancing/health_check_client.cc",
+    "readiness_contract": "doc/wait-for-ready.md: CONNECTING does not itself fail either RPC mode; TRANSIENT_FAILURE rejects fail-fast calls and queues wait-for-ready calls",
+    "cpp_server_sha256": "d416309847cc92738db444a46b0ffaf340ab509e6f1593989962bc5b708ad36d",
+    "grpc_js_version": "1.14.0",
+    "independent_health_peer": "Node HTTP/2 with literal gRPC envelopes and protobuf Health payloads"
+  },
+  "behavior": {
+    "worker_ownership": "worker termination destroys the reconnecting Watch, its private Channel, dedicated connection and service-name copy before the parent Channel is destroyed",
+    "retry": "Watch retry events publish a known rejection; unary, streaming and duplex fail-fast starts return ConnectionUnavailable; wait-for-ready remains queued until SERVING or UNIMPLEMENTED",
+    "initial_admission": "pending initial health admission uses only the caller deadline or cancellation for both RPC modes; no implicit five-second timeout",
+    "cancellation": "cancelWaits publishes cancellation and increments the health Sync generation; admission checks it before each state scan; resetCancellation after joining restores admission"
+  },
+  "verification": {
+    "health_debug": {
+      "tests_passed": 170,
+      "tests_total": 170,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "tests_passed": 26,
+      "tests_total": 26,
+      "exit_code": 0
+    },
+    "node_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "response_policy_cases": 26,
+      "native_rpcs": 76,
+      "health_watch_attempts": 2,
+      "health_business_rpcs": 2,
+      "watch_retry_reuses_connection": true,
+      "disabled_connection_closed_before_second_business_response": true,
+      "application_connection_reused": true,
+      "exit_code": 0
+    },
+    "cpp_debug": {
+      "build_steps_passed": 11,
+      "build_steps_total": 11,
+      "transports": [
+        "h2c",
+        "certificate-verified TLS"
+      ],
+      "ordinary_health_calls_per_transport": 2,
+      "scope": "bounded RPC health admission and Watch teardown on parent shutdown, plus existing shared/streaming/compression/metadata/deadline/cancellation/soak/proxy/failover matrix",
+      "exit_code": 0
+    },
+    "regressions": [
+      "UNIMPLEMENTED peer observes EOF on its dedicated Watch connection while the parent Channel continues two business calls",
+      "UNAVAILABLE Watch rejects all three fail-fast starts before any business connection is opened; a succeeding Watch restores a waiting unary call",
+      "a clock advancing ten seconds per read cannot impose a hidden initial-health deadline on either RPC mode",
+      "explicit caller deadline reaches the wake primitive unchanged and Canceled preserves the admission state",
+      "a real unbounded unary caller is parked, cancelWaits wakes it with Canceled, then resetCancellation and SERVING restore a successful call"
+    ]
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='health gate' -Dtest-filter='reconnecting health Watch' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-grpc-response --summary all",
+    "GRPC_CPP_INTEROP_SERVER=/nav_env/Work/grpc/bazel-bin/test/cpp/interop/interop_server zig build interop-grpc-cpp --summary all"
+  ],
+  "source_sha256": {
+    "src/grpc/channel.zig": "85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161",
+    "src/grpc/channel/health_gate.zig": "659b24d86724749b7c16bf2b3bc1692033a406df23ff48b389c623605f4f34a4",
+    "src/grpc/channel/health_gate/admission.zig": "11bc7b025cf7c1723418f6ac2191a22c5a6ae8a0050e71459c784b676cf04842",
+    "src/grpc/channel/health_gate/admission_tests.zig": "e93a03c53355bb97b9dfbe5ef0f1441c3e30f4cb5f76432c8f4f632a509166c3",
+    "src/grpc/channel/health_gate/cancellation_tests.zig": "872b396c00c43acd3f6dc6f4b781289ee6a25dff5e27b9bc0ab6da54c727253c",
+    "src/grpc/channel/health_gate/retry_tests.zig": "749410ccc2f277df3188266660c50703bc05c428b5722e268dee7b55e4bb8af8",
+    "src/grpc/channel/health_gate/disabled_tests.zig": "e4206ccc9acf3b5bfafd8472bbcb8155c7e8634a60808c1cd0427fd65bfb476a",
+    "src/grpc/channel/health_gate/sync.zig": "0643ff389d52d1b391f688680483908778fa53f4814a806ef0e7c278f8f44950",
+    "src/grpc/health/reconnecting.zig": "7abc21e91de6a55f0ac08aff34a76c6757b752285c1d8ab65dd6bceccb41d1c1",
+    "tools/interop/grpc_response/health_gate.js": "68d20e4bb32508db2a975b837eb9d8f76e3f48567038b03b9e1fbf71a25391e8",
+    "tools/interop/grpc_response/health_gate.zig": "aca141b0287f3350ccffc3928548b163628e42f7a3fd848ebfd29e089e17985e",
+    "tools/interop/grpc_response/client.js": "3897dfe8de5938adc1346fb2d56ebd8b686b02db7aa7634472aad77c2bd7f8e0",
+    "tools/interop/grpc_response_client.zig": "a5232b447530cba7462da5f9c1c433fb7ff4c82084c0a3e8e038ce1e8794b40f"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle/health.Debug.log": "75173783543214b618a0c4d0ee733f8bcf4e235a6af985eb2acdd75302c3d242",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle/package.Debug.log": "0733146f3ba729679b7c33d33f7af78ec9679f09b8b49205b0ae265a7889ef6a",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle/interop-grpc-response.Debug.log": "e08804b6a5a89acc6127ea94855f254cb5d8f6c9258ae47b094317fd5558ecda",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle/interop-grpc-cpp.Debug.log": "d5a74c8f8e915cfe0f9f1aae137cbd1324b00af7a7cd998f6797097fd97aba50"
+  },
+  "remaining_scope": "Broader composite/xDS integration and long-duration/high-concurrency stability evidence remain open for the overall protocol-library goal."
+}

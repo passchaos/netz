@@ -3064,15 +3064,17 @@ SharedChannel continues to use its same-connection health owner.
 
 Gates start during `Channel.init` for pre-resolved endpoints, or when a
 hostname resolver publishes its first address set. If the first call arrives
-before any status is known, it waits for one (bounded by its deadline, or five
-seconds when unbounded) before dispatch. Selection skips endpoints whose state
+before any status is known, it waits for one before dispatch, bounded only by
+its explicit deadline or cancellation. The initial CONNECTING phase does not
+itself fail either RPC mode. Selection skips endpoints whose state
 is UNKNOWN or NOT_SERVING; `NOT_SERVING`, `UNKNOWN`, and `SERVICE_UNKNOWN`
 reject fail-fast calls with `ConnectionUnavailable` when no endpoint is
 serving. `wait_for_ready` calls wait until any endpoint becomes serving or
 their deadline expires. `UNIMPLEMENTED` disables checking for that endpoint and
-allows calls through it. A Watch transport retry returns that endpoint to the
-unknown state; selection skips that endpoint until a new SERVING status or
-UNIMPLEMENTED response arrives. Healthy siblings remain selectable.
+allows calls through it. A failed Watch marks that endpoint as rejected while
+it retries, matching grpc-core's TRANSIENT_FAILURE admission. Fail-fast calls
+report `ConnectionUnavailable`; wait-for-ready calls continue awaiting SERVING
+or UNIMPLEMENTED. Healthy siblings remain selectable.
 
 A real loopback test starts two health registries and unary responders,
 configures one NOT_SERVING and one SERVING endpoint, and proves that the
@@ -3105,7 +3107,7 @@ wins. The Health Watch's own transport Channel sets both fields so a
 ServiceConfig-driven Watch cannot recursively start another health gate.
 
 `Channel.healthServing()` exposes the aggregate state: null before any Watch
-status, when checking is disabled, or before a hostname resolves; true when at
+status or failure, when checking is disabled, or before a hostname resolves; true when at
 least one endpoint is SERVING or UNIMPLEMENTED; false when every known endpoint
 is in a rejected state. `Channel.healthServingAt(index)` exposes the same
 per-endpoint state in current slot order. Evidence is recorded in
@@ -3135,3 +3137,44 @@ The focused health/reconnecting-Watch suite passed 164/164 tests, the package
 suite passed 26/26, and the complete grpc-cpp forward runner passed 11/11 build
 steps. Source hashes and logs are recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-terminal.json`.
+
+The Watch worker now owns destruction of its reconnecting Watch. Every worker
+exit releases the private Channel, its dedicated connection and the copied
+service name before the parent Channel is destroyed. An UNIMPLEMENTED h2c
+regression requires peer-observed connection EOF while two business calls still
+reuse their separate application connection. The Gate remains a stable state
+publisher until the parent joins and frees it.
+
+`channel/health_gate/admission.zig` now owns the state scan and admission wait.
+Watch retry failures are known rejections rather than UNKNOWN, so unary,
+streaming and duplex fail-fast starts reject without opening a business
+connection. A succeeding Watch restores a waiting unary call. Initial pending
+health admission has no implicit time limit for either RPC mode; a deterministic
+clock probe advances ten seconds per read and requires both modes to recover
+through an unbounded wait. Explicit deadlines pass unchanged to the wake
+primitive. This follows grpc-core's distinction between CONNECTING and
+TRANSIENT_FAILURE in `doc/wait-for-ready.md`.
+
+`Channel.cancelWaits()` now notifies health admission through the same Sync
+generation. Admission checks cancellation before each state scan, preserving
+the scan-to-wait wake guarantee for both health publications and cancellation.
+A real-socket regression parks an unbounded unary call, cancels it, observes
+`Canceled`, then uses `resetCancellation()` and a subsequent SERVING update to
+complete a new call. The Health Watch remains live throughout cancellation.
+
+The independent Node HTTP/2 response-policy peer also covers this lifecycle.
+It returns UNAVAILABLE for the first Watch, waits for native confirmation that
+all three fail-fast starts rejected, then sends SERVING on a second Watch over
+the same dedicated connection. After one business response it finishes the
+Watch with UNIMPLEMENTED. A second business response requires the dedicated
+connection to close while the application connection is reused. Exact gRPC
+envelopes and protobuf Health payloads are checked independently of the netz
+health codec and registry.
+
+The health/reconnecting-Watch gate passed 170/170 tests and the public package
+gate passed 26/26. The independent response-policy gate passed 8/8 build steps
+with 26 original scenarios, 76 native RPCs, two Watch attempts and two health-
+gated business calls. The grpc-cpp bounded h2c/TLS and proxy/failover matrix
+passed 11/11 build steps, including ordinary health admission and parent-
+shutdown Watch teardown. Evidence and source hashes are recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle.json`.

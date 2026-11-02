@@ -965,10 +965,12 @@ pub const Channel = struct {
         self.* = undefined;
     }
 
-    /// Interrupt current or future wait-for-ready backoff. In-progress socket
-    /// connection attempts retain their bounded attempt deadline.
+    /// Interrupt current or future health admission and wait-for-ready
+    /// backoff. In-progress socket connection attempts retain their bounded
+    /// attempt deadline.
     pub fn cancelWaits(self: *Channel) void {
         self.canceled.set(self.io);
+        if (self.health_sync) |sync| sync.notify(self.io);
     }
 
     /// Re-enable waits after the caller has joined every canceled operation.
@@ -996,9 +998,9 @@ pub const Channel = struct {
 
     /// Aggregate health status for the opt-in ordinary Channel gate.
     /// Null means checking is disabled, no endpoints are resolved yet, or no
-    /// Watch status has arrived. With multiple subchannels, true means at
-    /// least one endpoint is SERVING and false means every known endpoint is
-    /// NOT_SERVING.
+    /// Watch status or failure has arrived. With multiple subchannels, true
+    /// means at least one endpoint is SERVING or checking was disabled by
+    /// UNIMPLEMENTED; false means every known endpoint is rejected or retrying.
     pub fn healthServing(self: *const Channel) ?bool {
         if (self.health_service == null) return null;
         var known = false;
@@ -1351,46 +1353,11 @@ pub const Channel = struct {
     ) Error!void {
         if (self.health_service == null or self.slots.len == 0) return;
         try self.ensureSlotHealthGates();
-        const known_deadline = deadline orelse std.Io.Clock.Timestamp.fromNow(
-            self.io,
-            .{ .raw = .fromSeconds(5), .clock = .awake },
-        );
-        while (true) {
-            // Capture the revision before reading states. A publication in
-            // the scan-to-wait gap must force another scan, even if its Event
-            // was already set before we reached waitHealthChange.
-            const generation = self.health_sync.?.snapshot();
-            var serving = false;
-            var unknown = false;
-            for (self.slots) |slot| switch (slot.health_state.load(.acquire)) {
-                health_gate.serving => serving = true,
-                health_gate.not_serving => {},
-                health_gate.unknown => unknown = true,
-                else => unreachable,
-            };
-            if (serving) return;
-            if (unknown) {
-                if (deadlineExpired(self.io, known_deadline)) {
-                    return error.Timeout;
-                }
-                try self.waitHealthChange(generation, known_deadline);
-                continue;
-            }
-            if (!wait_for_ready) return error.ConnectionUnavailable;
-            if (deadline) |until| {
-                if (deadlineExpired(self.io, until)) return error.Timeout;
-            }
-            try self.waitHealthChange(generation, deadline);
-        }
-    }
-
-    fn waitHealthChange(
-        self: *Channel,
-        generation: u64,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!void {
-        const sync = self.health_sync orelse return;
-        sync.wait(self.io, generation, deadline) catch |err| return @errorCast(err);
+        health_gate.waitForReady(self.io, self.health_sync.?, self.slots, .{
+            .wait_for_ready = wait_for_ready,
+            .deadline = deadline,
+            .canceled = &self.canceled,
+        }) catch |err| return @errorCast(err);
     }
 
     fn unaryResolved(

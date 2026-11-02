@@ -7,6 +7,7 @@ const std = @import("std");
 const channel = @import("../channel.zig");
 const health = @import("../health/reconnecting.zig");
 pub const Sync = @import("health_gate/sync.zig");
+pub const waitForReady = @import("health_gate/admission.zig").wait;
 
 pub const unknown: u8 = 0;
 pub const serving: u8 = 1;
@@ -24,7 +25,7 @@ pub const Wiring = struct {
 pub const Gate = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    watch: health.ReconnectingWatch,
+    watch: ?health.ReconnectingWatch,
     task: ?std.Io.Future(void) = null,
     state: std.atomic.Value(u8) = .init(unknown),
     stopped: std.atomic.Value(bool) = .init(false),
@@ -69,17 +70,23 @@ pub const Gate = struct {
             _ = task.await(self.io);
         }
         self.task = null;
-        self.watch.deinit();
         self.allocator.destroy(self);
     }
 
     fn run(self: *Gate) void {
+        const watch = &self.watch.?;
+        // The worker is the sole Watch owner. Termination releases its
+        // connection and allocation even while the Channel remains alive.
+        defer {
+            watch.deinit();
+            self.watch = null;
+        }
         while (!self.stopped.load(.acquire)) {
             const until = std.Io.Clock.Timestamp.fromNow(self.io, .{
                 .raw = .fromSeconds(1),
                 .clock = .awake,
             });
-            const event = self.watch.nextWithDeadline(until) catch |err| switch (err) {
+            const event = watch.nextWithDeadline(until) catch |err| switch (err) {
                 error.Canceled => break,
                 error.Timeout => continue,
                 else => {
@@ -97,7 +104,9 @@ pub const Gate = struct {
                     self.setState(serving);
                     return;
                 },
-                .retrying => self.setUnknown(),
+                // A failed Watch is a known admission failure. Fail-fast
+                // calls reject it while wait-for-ready calls await recovery.
+                .retrying => self.setState(not_serving),
             }
         }
     }
@@ -119,4 +128,6 @@ pub const Gate = struct {
 
 test {
     _ = @import("health_gate/disabled_tests.zig");
+    _ = @import("health_gate/retry_tests.zig");
+    _ = @import("health_gate/cancellation_tests.zig");
 }

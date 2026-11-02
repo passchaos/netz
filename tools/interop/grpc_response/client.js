@@ -7,6 +7,7 @@ const path = require('node:path');
 const {spawn} = require('node:child_process');
 const assert = require('node:assert/strict');
 const {WireRelay} = require('./relay');
+const {HealthGatePeer} = require('./health_gate');
 const referenceVersion = require('@grpc/grpc-js/package.json').version;
 assert.equal(referenceVersion, '1.14.0', 'the reference SDK must match the pinned fixture');
 
@@ -61,12 +62,16 @@ async function reference(client, probe, index, relay) {
   return status.code;
 }
 
-function native(executable, port, manifest) {
+function native(executable, port, manifest, health) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, [String(port), manifest], {stdio:['ignore','pipe','pipe']});
     let output = '';
-    child.stdout.on('data', chunk => {output += chunk;});
-    child.stderr.on('data', chunk => {output += chunk;});
+    const receive = chunk => {
+      output += chunk;
+      if (output.includes('netz grpc health retry rejected: unary+streaming+duplex')) health.allowRecovery();
+    };
+    child.stdout.on('data', receive);
+    child.stderr.on('data', receive);
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('native response-policy timeout')); }, 30000);
     child.on('error', error => {clearTimeout(timer); reject(error);});
     child.on('exit', code => {
@@ -75,6 +80,7 @@ function native(executable, port, manifest) {
       else {
         try {
           assert.ok(output.includes('io=zio-std-io cases='+probes.length+' shared='+probes.filter(probe=>probe.shared).length+' shapes=unary+streaming+duplex+shared reuse=true'));
+          assert.ok(output.includes('netz grpc health gate complete: retry+ready+disabled-close calls=2 reuse=true'));
           process.stdout.write(output);
           resolve();
         } catch (error) {reject(error);}
@@ -95,8 +101,10 @@ async function main() {
   let failure;
   let relay;
   let clientPort;
+  const health = new HealthGatePeer(error => {failure ??= error;});
   server.on('session', session => { sessions.add(session); session.on('error', error => {failure ??= error;}); });
   server.on('stream', (stream, headers) => {
+    if (health.handle(stream, headers)) return;
     const chunks = [];
     let size = 0;
     stream.on('error', () => {});
@@ -182,15 +190,16 @@ async function main() {
     finally {client.close();}
     const manifest = path.join(work, 'cases.json');
     fs.writeFileSync(manifest, JSON.stringify(probes.map((probe,i) => ({path:`/fixture.Response/Case${i}`, status:probe.status, messages:probe.messages ?? 0, payload:probe.payload ?? '', details:probe.details ?? false, authority:probe.requestAuthority ?? null, host:probe.requestHost ?? null, request_payload:probe.requestPayload ?? '', unary_only:probe.unaryOnly ?? false, status_message:probe.statusMessage ?? null,shared_probe:probe.shared ?? false,read_delay_ms:probe.readDelayMs ?? 0}))));
-    try {await native(process.argv[2], port, manifest);}
+    try {await native(process.argv[2], port, manifest, health);}
     catch (error) {throw new Error(`${error.message}; peer=${failure?.message ?? 'none'}; counts=${JSON.stringify(counts)}; connections=${sessions.size}; frames=${JSON.stringify([...relay.captures.values()].map(capture=>({client:capture.clientFrames,server:capture.serverFrames})))}`);}
     if (failure) throw failure;
     assert.deepEqual(counts, probes.map(probe=>(probe.refusedOnce?4:probe.unaryOnly?2:4)+(probe.shared?1:0)));
-    assert.equal(sessions.size, 3, 'official, direct-native and shared-native clients must each reuse one HTTP/2 connection');
+    assert.equal(sessions.size, 5, 'original clients plus one dedicated health connection and one reused business connection');
+    const healthGate = health.verify();
     const noErrorAfterEndStream = relay.assertResets(2);
     assert.equal(transparentRetries,2);
     const differences = probes.flatMap((probe,i) => observed[i] === probe.status ? [] : [{case:probe.name, netz:probe.status, grpcJs:observed[i]}]);
-    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3)+(probe.shared?1:0),0), sharedRpcs:probes.filter(probe=>probe.shared).length, sharedReadAfterRpcDeadline:true, transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, differences})+'\n');
+    process.stdout.write(JSON.stringify({reference:`grpc-js-${referenceVersion}`, cases:probes.length, nativeRpcs:probes.reduce((total,probe)=>total+(probe.unaryOnly?1:3)+(probe.shared?1:0),0)+2, sharedRpcs:probes.filter(probe=>probe.shared).length, sharedReadAfterRpcDeadline:true, transparentRetries, maxConcurrentStreams:1, noErrorAfterEndStream, healthGate, differences})+'\n');
   } finally {
     if (relay) await relay.close();
     for (const session of sessions) session.destroy();

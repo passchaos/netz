@@ -128,5 +128,6 @@ pub fn main(init: std.process.Init) !void {
         }
         shared_count += 1;
     }
+    try @import("grpc_response/health_gate.zig").run(allocator, io, port);
     std.debug.print("netz gRPC response policy complete io=zio-std-io cases={d} shared={d} shapes=unary+streaming+duplex+shared reuse=true\n", .{ probes.value.len, shared_count });
 }

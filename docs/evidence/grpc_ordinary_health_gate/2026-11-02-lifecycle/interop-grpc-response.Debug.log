@@ -1,0 +1,17 @@
+netz grpc health retry rejected: unary+streaming+duplex
+netz grpc health gate complete: retry+ready+disabled-close calls=2 reuse=true
+netz gRPC response policy complete io=zio-std-io cases=26 shared=2 shapes=unary+streaming+duplex+shared reuse=true
+{"reference":"grpc-js-1.14.0","cases":26,"nativeRpcs":76,"sharedRpcs":2,"sharedReadAfterRpcDeadline":true,"transparentRetries":2,"maxConcurrentStreams":1,"noErrorAfterEndStream":2,"healthGate":{"watchAttempts":2,"businessRpcs":2,"failFast":"unary+streaming+duplex","waitForReady":true,"disabledConnectionClosed":true},"differences":[{"case":"data-fin-no-status","netz":2,"grpcJs":13},{"case":"html-entity-no-status","netz":2,"grpcJs":8}]}
+Build Summary: 8/8 steps succeeded
+interop-grpc-response success
++- run python3 success 6s
+   +- compile exe netz-grpc-response-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 10ms MaxRSS:26M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 4ms MaxRSS:26M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+
