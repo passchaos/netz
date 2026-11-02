@@ -1718,6 +1718,7 @@ fn connectVailStreamAttempt(
         else
             null,
         .system_environ = options.tls.environ,
+        .system_store = options.tls.system_store,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,

@@ -423,6 +423,8 @@ pub const TlsClientOptions = struct {
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
     /// roots, matching rustls-native-certs.
     environ: ?std.process.Environ = null,
+    /// Optional caller-owned native trust store reused across handshakes.
+    system_store: ?*const vail.x509.trust.SystemStore = null,
     /// Forward EOF without close_notify.  This is useful only when the HTTP
     /// layer independently verifies body length (for example Content-Length).
     allow_truncation_attacks: bool = false,
@@ -444,6 +446,8 @@ pub const VailTlsClientOptions = struct {
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
     /// roots, matching rustls-native-certs.
     environ: ?std.process.Environ = null,
+    /// Optional caller-owned native trust store reused across handshakes.
+    system_store: ?*const vail.x509.trust.SystemStore = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -5576,6 +5580,7 @@ fn verifiedTlsClientOptions(
         .verify_host = options.verify_host,
         .ca_bundle = options.ca_bundle,
         .system_environ = options.environ,
+        .system_store = options.system_store,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,

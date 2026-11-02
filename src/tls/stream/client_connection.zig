@@ -83,6 +83,10 @@ pub const VerifiedOptions = struct {
     /// `SSL_CERT_DIR` when no caller CA bundle is supplied. Null keeps the
     /// platform store.
     system_environ: ?std.process.Environ = null,
+    /// Optional caller-owned system store reused across handshakes. It takes
+    /// precedence over `system_environ`; the caller must keep it alive for the
+    /// synchronous handshake.
+    system_store: ?*const vail.x509.trust.SystemStore = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Stapled OCSP policy applied by the built-in system/caller-bundle
     /// verifier. A custom `server_verifier` must own its OCSP policy and

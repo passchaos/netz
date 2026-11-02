@@ -3928,6 +3928,8 @@ pub const TlsConnectOptions = struct {
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
     /// roots, matching rustls-native-certs.
     environ: ?std.process.Environ = null,
+    /// Optional caller-owned native trust store reused across handshakes.
+    system_store: ?*const vail.x509.trust.SystemStore = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -3958,6 +3960,7 @@ fn verifiedTlsClientOptions(
         .verify_host = options.verify_host,
         .ca_bundle = options.ca_bundle,
         .system_environ = options.environ,
+        .system_store = options.system_store,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,
@@ -3990,6 +3993,15 @@ test "HTTP/2 TLS options forward native certificate environment" {
         .environ = std.testing.environ,
     });
     try std.testing.expect(mapped.system_environ != null);
+}
+
+test "HTTP/2 TLS options forward reusable native trust store" {
+    var store = vail.x509.trust.SystemStore.initEmpty(std.testing.allocator);
+    defer store.deinit();
+    const mapped = verifiedTlsClientOptions("example.com", .{
+        .system_store = &store,
+    });
+    try std.testing.expect(mapped.system_store != null);
 }
 
 pub const Role = enum {

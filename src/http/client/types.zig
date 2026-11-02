@@ -412,6 +412,7 @@ pub fn verifiedTlsOptions(
         .verify_host = tls.verify_host,
         .ca_bundle = tls.ca_bundle,
         .system_environ = tls.environ,
+        .system_store = tls.system_store,
         .server_verifier = tls.server_verifier,
         .stapled_ocsp = tls.stapled_ocsp,
         .request_ocsp = tls.request_ocsp,

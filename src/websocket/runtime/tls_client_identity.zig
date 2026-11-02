@@ -128,6 +128,7 @@ fn verifiedOptions(
         else
             null,
         .system_environ = tls_options.environ,
+        .system_store = tls_options.system_store,
         .server_verifier = identity_options.server_verifier,
         .stapled_ocsp = identity_options.stapled_ocsp,
         .request_ocsp = identity_options.request_ocsp,
