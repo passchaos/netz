@@ -1,0 +1,10 @@
+{
+  "revision": "2da0056814cf180480a19f5cf811e7e1c054bf6d",
+  "source_sha256": {
+    "re2/unicode_groups.cc": "e00735cd8ba1f87ea5c0c78c07de7836e9ad02cc84f4ef8cf90e2b0edfd99e68",
+    "re2/unicode_casefold.cc": "e2fcd199b8cee45ac053c26e55a810756c530060e90c2ab267513adb4bfdb707",
+    "LICENSE": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449"
+  },
+  "unicode_groups": 199,
+  "fold_ranges": 372
+}

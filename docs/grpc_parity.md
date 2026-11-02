@@ -3582,3 +3582,28 @@ Delta xDS, per-child cluster management and LRS remain open. CDS transport
 security, outlier, LRS and upstream configuration fields are rejected, and
 LOGICAL_DNS/aggregate cluster discovery remains unsupported. Ring allocation
 still has the existing 4096-entry runtime cap.
+
+
+## Native xDS request matching
+
+RDS now has native matching foundations: RE2 boolean/full-match semantics,
+literal and header predicates and virtual-host domain precedence. The bounded
+Thompson engine supports Unicode categories/scripts and simple case folding,
+classes, grouping/alternation/repetition, flags and assertions, quoting and
+byte escapes. Five rotating position buckets combine UTF-8 rune and byte
+consumption while deduplicating each instruction once per input position.
+Balanced syntax trees, explicit compile bounds and reusable workspaces keep
+construction, matching work and memory controlled. Captures are grouping for
+boolean matching; extraction and substitution remain open.
+
+Pinned RE2 Unicode tables include reproducible generation, source hashes and
+BSD attribution. Native tests cover adversarial overlapping alternatives,
+allocator rollback, Unicode/byte behavior and resource/syntax bounds. Header
+tests check comma joining of duplicate and empty values, absent/binary header
+semantics, signed int64 ranges and literal case rules. Domain tests check exact,
+suffix, prefix and universe precedence, longest matches and ties. The official
+RE2 WASM differential gate exercises a deterministic generated corpus and
+checks the work bound on every native comparison. See
+[matching usage and boundaries](grpc_xds_routing.md) and
+`docs/evidence/grpc_xds_matching/2026-11-03.json`. Typed RDS, immutable selector
+publication and route/cluster control-plane orchestration remain open.

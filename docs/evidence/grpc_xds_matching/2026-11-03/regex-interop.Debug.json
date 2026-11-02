@@ -1,0 +1,30 @@
+{
+  "status": "passed",
+  "patterns": 643,
+  "match_vectors": 128847,
+  "seed": "0x52534453",
+  "re2_wasm": "1.0.2",
+  "linear_work_bound": true,
+  "source_sha256": {
+    "src/grpc/xds/routing/regex/classes.zig": "37fc8c80ff0c6a6b0f5ace2bf455901d29aa9e4e30159fc9466076d6d660e63c",
+    "src/grpc/xds/routing/regex/compile.zig": "85d0b651175f160e4b503b49736d41657e5e09f6db59ebf9ad2d54402e38e38a",
+    "src/grpc/xds/routing/regex/escape.zig": "6a3d3a063069a5db34621b9be9cd52554db15512196f577f3122882e636326cf",
+    "src/grpc/xds/routing/regex/execute.zig": "bb4ef75687136192da188c65d8d71d638bfb7d9ced322db864fe45128f62d835",
+    "src/grpc/xds/routing/regex/model.zig": "22d8406bb6b34e5c76a16eda7cfd5d4bb1b3946b1a15c75daf61a3626eb18911",
+    "src/grpc/xds/routing/regex/parse.zig": "4a8dc59dec454262e75954f5cff8949f128b9cbb00944d4216f616ecac25a312",
+    "src/grpc/xds/routing/regex/tests.zig": "cd3a312308b3dcc5f1e5fa442930e119c676a137f3b8a2e3e2ccf189538238de",
+    "src/grpc/xds/routing/regex/unicode/LICENSE.re2": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449",
+    "src/grpc/xds/routing/regex/unicode/fold.bin": "9b256a73e6ece3e5250c8552dfa6a5aa07cf17d50a4c0365ad59a034bcd16f48",
+    "src/grpc/xds/routing/regex/unicode/groups.bin": "315ea1bb4930da7a031dc51d0acd24ccbf6ce06dc5554d262d6dbe02ef8e5edf",
+    "src/grpc/xds/routing/regex/unicode/groups.zig": "f65ff584956d795d5ed6039c24d1ece22287b6e381790ac6388c0b66aea41413",
+    "src/grpc/xds/routing/regex/unicode/source.json": "da37faacc5e9355f6065c82c9da208531c750c2d3dd047f993bae3fa22d19a9a",
+    "src/grpc/xds/routing/regex/unicode.zig": "fc0cc1a9e8c6965db4de0c7383a647760aa17174ac4131c53fa7ef539cf685f4",
+    "src/grpc/xds/routing/regex.zig": "122329e412a52d7abf73ec6e36372cd0389d42a891c5731a97a17566dc1292a9",
+    "tools/interop/grpc_xds_matching/regex_client.zig": "b093b70bdcb8adb22426664c959a9ff8a506f1a9e9bc2b67a7727d16bd56ef28",
+    "tools/interop/grpc_xds_matching/regex_peer.js": "ec293d33b95b94b35be41edf1221d6b95441c3a9f189a70fa4c628fc225514a1",
+    "tools/interop/grpc_xds_matching/regex_run.py": "9883de70ca3cb5c9cd66e9347fa900e68fbf3a3ce372b1e02815346197519213",
+    "tools/codegen/xds_unicode/generate.py": "405e3328c8c26529690dd5bc0fd800e683f6b41732ac291c0784329ebc02e4ba"
+  },
+  "client_sha256": "87388a91545edc594d7f9b2c0701635495b9bfbcd71393b2b618ed6fd203c5b6",
+  "corpus_sha256": "46312d12a4e89d8de5b55499ab94d322926d5426bbcbf835b78a00860103d3ca"
+}

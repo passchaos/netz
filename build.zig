@@ -2074,6 +2074,22 @@ pub fn build(b: *std.Build) void {
     const grpc_ads_step = b.step("interop-grpc-ads", "Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js");
     grpc_ads_step.dependOn(&grpc_ads.step);
 
+    const xds_regex_module = b.createModule(.{ .root_source_file = b.path("src/grpc/xds/routing/regex.zig"), .target = target, .optimize = optimize });
+    const xds_regex_client = b.addExecutable(.{
+        .name = "netz-grpc-xds-regex-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_xds_matching/regex_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xds_regex", .module = xds_regex_module }},
+        }),
+    });
+    const xds_regex = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_xds_matching/regex_run.py" });
+    xds_regex.addArtifactArg(xds_regex_client);
+    if (b.args) |args| xds_regex.addArgs(args);
+    const xds_regex_step = b.step("interop-grpc-xds-regex", "Compare bounded native xDS safe-regex full matching against official RE2 WASM");
+    xds_regex_step.dependOn(&xds_regex.step);
+
     const grpc_cds_client = b.addExecutable(.{
         .name = "netz-grpc-cds-client",
         .root_module = b.createModule(.{
