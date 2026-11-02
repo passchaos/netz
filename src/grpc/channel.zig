@@ -22,6 +22,7 @@ const least_request = @import("channel/least_request.zig");
 const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
 const proxy_policy = @import("channel/proxy_policy.zig");
+pub const drop_policy = @import("channel/drop_policy.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
 const net = std.Io.net;
@@ -40,6 +41,8 @@ pub const ProxyDirectReason = proxy_policy.DirectReason;
 
 pub const Error = streaming.Error || resolver.Error || ConnectError || error{
     InvalidChannelOptions,
+    InvalidDropPolicy,
+    CallDropped,
     MissingRequestHash,
     UnknownCluster,
     ChannelBusy,
@@ -414,6 +417,7 @@ pub const TlsHostProxyTarget = struct {
 };
 
 pub const Options = struct {
+    drop_categories: []const drop_policy.Category = &.{},
     backoff: BackoffPolicy = .{},
     /// Null uses the resolved target policy (pick_first for single targets).
     selection_policy: ?SelectionPolicy = null,
@@ -675,6 +679,8 @@ pub const Channel = struct {
     ring_hash_ring: ring_hash.Ring = .{},
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
+    drop: drop_policy.Policy = .{},
+    drop_counters: drop_policy.Counters = .{},
     canceled: std.Io.Event = .unset,
 
     pub fn init(
@@ -783,9 +789,13 @@ pub const Channel = struct {
         var health_options = options;
         health_options.health_check_service = null;
         health_options.disable_health_check = true;
+        var drop = try drop_policy.Policy.init(allocator, options.drop_categories);
+        errdefer drop.deinit();
+        health_options.drop_categories = &.{};
         var result = Channel{
             .allocator = allocator,
             .io = io,
+            .drop = drop,
             .target = target,
             .slots = slots,
             .selection_policy = selection_policy,
@@ -811,10 +821,13 @@ pub const Channel = struct {
         if (result.shuffle_address_list) result.shuffleSlots();
         if (result.health_service != null) {
             result.ensureSlotHealthGates() catch |err| {
+                // The construction rollback still owns the local drop value.
+                result.drop = .{};
                 result.deinit();
                 return err;
             };
         }
+        if (result.drop.dropsAll()) result.setConnectivityState(.ready);
         return result;
     }
 
@@ -954,6 +967,7 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
+        self.drop.deinit();
         if (self.health_service) |name| {
             self.allocator.free(name);
             self.health_service = null;
@@ -1415,6 +1429,8 @@ pub const Channel = struct {
         _: ?wire.Timeout,
         previous_attempts: ?u8,
     ) Error!call.UnaryResponse {
+        try self.validateDropRequest(options);
+        if (try self.dropCategory(attempt_deadline)) |category| return call.policyDropResponse(allocator, category);
         const routing_hash = try self.requestHash(options);
         const ready_connection = try self.ready(
             options.wait_for_ready orelse false,
@@ -1476,6 +1492,8 @@ pub const Channel = struct {
     ) Error!streaming.ClientWriter {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        try self.validateDropRequest(resolved.options);
+        if (try self.dropCategory(deadline)) |_| return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1533,6 +1551,8 @@ pub const Channel = struct {
     ) Error!duplex.ClientDuplex {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
+        try self.validateDropRequest(resolved.options);
+        if (try self.dropCategory(deadline)) |_| return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1929,6 +1949,26 @@ pub const Channel = struct {
             ringSlotKey,
             ringSlotWeight,
         );
+    }
+
+    fn validateDropRequest(self: *const Channel, options: anytype) Error!void {
+        if (self.drop.categories.len == 0) return;
+        _ = try call.parseRequestMetadata("POST", options.path, &.{ .{ .name = "content-type", .value = "application/grpc" }, .{ .name = "te", .value = "trailers" } });
+        try call.validateCustomMetadata(options.metadata);
+        try call.validateCustomBinaryMetadata(options.binary_metadata);
+        if (comptime @hasField(@TypeOf(options), "message")) {
+            if (options.message.len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
+        }
+    }
+    pub fn dropStats(self: *const Channel) drop_policy.Stats {
+        return self.drop_counters.snapshot();
+    }
+    fn dropCategory(self: *Channel, deadline: ?std.Io.Clock.Timestamp) Error!?[]const u8 {
+        if (self.drop.categories.len == 0) return null;
+        if (deadline) |until| _ = try @import("../internal/deadline.zig").usableAwake(self.io, until);
+        try self.io.checkCancel();
+        if (self.canceled.isSet()) return error.Canceled;
+        return self.drop.choose(self.io, &self.drop_counters);
     }
 
     fn beginRequest(self: *Channel, index: usize) void {
@@ -2614,7 +2654,7 @@ pub const Channel = struct {
         self: *Channel,
         state: ConnectivityState,
     ) void {
-        self.connectivity_tracker.setState(state);
+        self.connectivity_tracker.setState(if (state != .shutdown and self.drop.dropsAll()) .ready else state);
     }
 };
 

@@ -17,6 +17,8 @@ pub const Update = struct {
     /// Retained on success by canonical inventory and source/worker owners.
     /// Requires target != null; callers may release their reference on return.
     target_lifetime: ?TargetLifetime = null,
+    /// Dynamic RPC admission categories; an empty replacement disables drops.
+    drop_categories: union(enum) { keep, replace: []const channel.drop_policy.Category } = .keep,
     service_config: union(enum) { keep, replace: ?[]const u8 } = .keep,
 };
 
@@ -47,6 +49,11 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     options.health_metadata.service = "";
     var orca_override = if (state.orca_explicit and state.orca_oob != null) try state.orca_oob.?.clone() else null;
     errdefer if (orca_override) |*value| value.deinit();
+    var drop = switch (update.drop_categories) {
+        .keep => try state.drop.clone(state.allocator),
+        .replace => |categories| try channel.drop_policy.Policy.init(state.allocator, categories),
+    };
+    errdefer drop.deinit();
     const old_config = state.retainConfig();
     defer if (old_config) |config| config.release();
     const resolver_policy = if (update.target) |target| if (target == .resolved) target.resolved.policy else channel.SelectionPolicy.pick_first else state.resolver_policy;
@@ -90,5 +97,7 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     orca_override = null;
     const owned_lifetime = lifetime;
     lifetime = null;
-    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime);
+    const owned_drop = drop;
+    drop = .{};
+    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop);
 }

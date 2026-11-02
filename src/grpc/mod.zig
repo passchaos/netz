@@ -8,6 +8,7 @@
 pub const wire = @import("wire.zig");
 pub const auth = @import("auth.zig");
 pub const status_details = @import("status_details.zig");
+pub const drop_policy = @import("channel/drop_policy.zig");
 pub const xds = @import("xds/mod.zig");
 pub const orca = @import("orca.zig");
 pub const orca_oob = @import("orca/oob.zig");
@@ -169,6 +170,8 @@ pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
     _ = xds;
+    _ = drop_policy;
+    _ = @import("channel/drop_runtime_tests.zig");
     _ = @import("channel/connectivity.zig");
     _ = @import("channel/shared.zig");
     _ = compression;

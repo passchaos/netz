@@ -98,14 +98,18 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     const state = try allocator.create(State);
     var state_initialized = false;
     errdefer if (!state_initialized) allocator.destroy(state);
+    var drop = try channel.drop_policy.Policy.init(allocator, options.channel.drop_categories);
+    errdefer if (!transferred) drop.deinit();
     var retained = options;
     retained.service_config_json = null;
+    retained.channel.drop_categories = &.{};
     retained.health_service = owned_name;
     retained.health_metadata.service = owned_name orelse "";
     retained.orca_oob = null;
     state.* = .{
         .allocator = allocator,
         .io = io,
+        .drop = drop,
         .options = retained,
         .config = .init(config_generation),
         .health_explicit = options.health_service != null or options.health_metadata.service.len != 0,
@@ -178,5 +182,6 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
             state.unlock();
         }
     }
+    if (state.drop.dropsAll()) state.tracker.setState(.ready);
     return state;
 }

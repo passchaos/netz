@@ -69,9 +69,6 @@ pub const Snapshot = struct {
         if (options.authority.len == 0 or options.attempt_delay.nanoseconds <= 0) return error.InvalidEdsTarget;
         var resource = try decode.decode(gpa, bytes, bounds);
         errdefer resource.deinit();
-        // Keep drop policy visible to callers. Until the cluster-impl filter
-        // owns it, publication refuses a positive drop instead of ignoring it.
-        for (resource.value.drops) |drop| if (drop.requests_per_million != 0) return error.UnsupportedEdsPolicy;
         const arena = resource.arena.allocator();
         const authority = try arena.dupe(u8, options.authority);
         var retained_options = options;
@@ -146,6 +143,6 @@ pub const Snapshot = struct {
         return .{ .context = self, .retain_fn = retainContext, .release_fn = releaseContext };
     }
     pub fn publishWithDeadline(self: *Snapshot, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
-        return destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.service_config_json } }, deadline);
+        return destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .drop_categories = .{ .replace = self.resource.value.drops }, .service_config = .{ .replace = self.service_config_json } }, deadline);
     }
 };

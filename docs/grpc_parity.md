@@ -3440,7 +3440,7 @@ Numeric TCP IPv4/IPv6 socket addresses and additional-address logical endpoints
 are retained; multiple addresses use the shared full-HTTP/2 connection race.
 Malformed weights/addresses, duplicate locality/address identity and priority
 gaps reject a candidate. Drop categories normalize to requests per million,
-while current publication refuses nonzero drops pending cluster-impl admission.
+and publication now installs ordered request-drop admission as described below.
 
 The ADS publication helper checks response ownership/type/token and decodes all
 resources before updating the selected assignment. Channel failure leaves the
@@ -3473,3 +3473,36 @@ that owner. Validation follows the current priority selection, so recovery of
 a higher priority invalidates a cached lower-priority choice. This preserves
 priority semantics while preventing all owners from dropping different picks
 and leaving a ready job parked until its deadline.
+
+
+## EDS request drop execution
+
+EDS publication now installs decoded drop categories atomically with its target
+and service config. The cohesive `channel/drop_policy.zig` module owns category
+names and performs independent per-category uniform sampling in received order.
+The first matched category selects the rejection reason. Ordinary Channel and
+SharedChannel evaluate application admission before backend selection; unary
+returns marked, owned UNAVAILABLE with no HTTP transport, while streaming open
+returns `CallDropped` before HEADERS. Retry returns marked drops without another
+attempt or retry-throttle debit; hedging treats a drop as a fatal winner.
+
+SharedChannel's explicit drop replacement uses the existing transactional
+publication path. Pending calls reevaluate once when policy contents change,
+unchanged policy/wakeups retain their admission sample, and active calls finish
+normally. Drop-all reports READY and rejects even an empty EDS assignment.
+Disabled policy skips random sampling and category allocations. Monotonic
+`dropStats()` count policy evaluations and rejections across updates; metadata,
+message-size and expired-budget errors retain local validation before sampling.
+Internal health/control transports do not inherit application drop categories.
+
+The independent `interop-grpc-eds-drop` gate executes the actual official
+cluster-impl picker for ordered threshold vectors and checks native ordinary and
+shared traffic against grpc-js backend counts. Its ADS server uses the official
+EDS protobuf to deliver half/full/disabled/full-empty policies. Full-drop retry,
+hedging and stream openings produce no application calls; disabled policy
+resumes delivery on the same HTTP/2 session. Adjacent tests additionally cover
+queued-policy replacement, active RPC completion, invalid/canceled input,
+allocator rollback and retry-throttle preservation. See
+[request drop semantics](grpc_eds_drop.md) and
+`docs/evidence/grpc_eds_drop/2026-11-03.json`. Circuit breaking and LRS reporting
+remain open with the broader xDS/control-plane objective.

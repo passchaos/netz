@@ -23,7 +23,9 @@ test "gRPC EDS decodes priority locality endpoint weights health and additional 
     try std.testing.expectEqual(@as(usize, 2), a.endpoints[0].addresses.len);
     try std.testing.expectEqual(resource.Health.draining, a.endpoints[1].health);
     try std.testing.expectEqual(@as(u32, 1234), owned.value.drops[0].requests_per_million);
-    try std.testing.expectError(error.UnsupportedEdsPolicy, target.Snapshot.create(allocator, encoded, .{}, .{ .authority = "localhost" }));
+    const snapshot = try target.Snapshot.create(allocator, encoded, .{}, .{ .authority = "localhost" });
+    defer snapshot.release();
+    try std.testing.expectEqual(@as(u32, 1234), snapshot.resource.value.drops[0].requests_per_million);
 }
 
 test "gRPC EDS rejects duplicate locality addresses priority gaps and invalid endpoint weights" {

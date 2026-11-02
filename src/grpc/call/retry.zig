@@ -83,6 +83,7 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
             try sleepForRetry(connection.io, delay, deadline);
             continue;
         }
+        if (response.was_dropped) return response;
         if (options.transparent_retry and !transparent_used and !response.response_committed and
             response.reset != null and response.reset.?.error_code == .refused_stream)
         {

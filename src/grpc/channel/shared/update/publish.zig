@@ -199,6 +199,11 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
         state.weighted_target = prepared.weighted;
         prepared.weighted = previous_weighted;
     }
+    const drop_changed = !state.drop.equivalent(prepared.drop);
+    const previous_drop = state.drop;
+    state.drop = prepared.drop;
+    prepared.drop = previous_drop;
+    if (drop_changed) state.drop_revision +%= 1;
     state.policy = prepared.policy;
     state.resolver_policy = prepared.resolver_policy;
     state.shuffle_addresses = prepared.shuffle;

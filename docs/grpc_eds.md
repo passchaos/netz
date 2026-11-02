@@ -62,9 +62,9 @@ endpoint connection identity. Config-only updates retain the target owner too.
 TLS verification bundles, callbacks and custom contexts within supplied TLS
 options retain their existing caller-owned lifetime contracts.
 
-Drop categories are decoded and normalized to requests per million. Serving
-publication currently rejects nonzero drops with `UnsupportedEdsPolicy` until
-the cluster-implementation admission filter owns their execution. UDP, named
+Drop categories are decoded, normalized to requests per million and applied
+before endpoint selection. See [request drop admission](grpc_eds_drop.md) for
+ordered sampling, unary/streaming errors and dynamic updates. UDP, named
 ports/custom resolvers, non-socket addresses and LEDS alternate locality config
 forms are rejected. Endpoint metadata, auto-host-rewrite, active health-check
 configuration and policy stale-time/overprovisioning integration need further

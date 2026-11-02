@@ -301,7 +301,7 @@ pub fn run(
                     }
                     continue;
                 };
-                if (response.status == .ok or
+                if (response.was_dropped or response.status == .ok or
                     !policy.isNonFatal(response.status))
                 {
                     if (response.status == .ok) {

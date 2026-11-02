@@ -429,6 +429,8 @@ pub const UnaryResponse = struct {
     /// Conservative replay evidence: response heads commit a call, while a
     /// pre-head peer reset can remain eligible for transparent/explicit retry.
     response_committed: bool = true,
+    /// Local LB policy rejection; retry and hedging must not launch another attempt.
+    was_dropped: bool = false,
     status: Status,
     status_message: []u8,
     status_details: ?details_mod.Owned = null,
@@ -447,6 +449,10 @@ pub const UnaryResponse = struct {
         self.* = undefined;
     }
 };
+
+pub fn policyDropResponse(allocator: std.mem.Allocator, category: []const u8) std.mem.Allocator.Error!UnaryResponse {
+    return .{ .allocator = allocator, .transport = null, .was_dropped = true, .status = .unavailable, .status_message = try std.fmt.allocPrint(allocator, "EDS-configured drop: {s}", .{category}), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
+}
 
 pub fn perAttemptTimeoutResponse(
     allocator: std.mem.Allocator,

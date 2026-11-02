@@ -22,6 +22,7 @@ pub const Job = struct {
     previous_attempts: ?u8,
     routing_hash: ?ring_hash.RequestHash = null,
     selected_worker: ?*State.Worker = null,
+    drop_revision: u64 = 0,
     stream: ?*@import("state.zig").State.StreamCall = null,
     next: ?*Job = null,
     result: ?call.UnaryResponse = null,

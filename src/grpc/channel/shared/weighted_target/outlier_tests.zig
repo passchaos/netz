@@ -49,6 +49,11 @@ test "gRPC SharedChannel weighted target outlier ejects only failing child endpo
     }
     var sender = client.sender();
     defer sender.deinit();
+    // Establish one request-volume interval explicitly. A scheduler delay
+    // between the four real RPCs must not rotate away the first failure.
+    client.state.lock();
+    client.state.weighted_target.?.root.kind.weighted.children[0].node.kind.outlier.next_evaluation_ns = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5)).nanoseconds;
+    client.state.unlock();
     var initial = [_]usize{ 0, 0 };
     for (0..4) |_| {
         var response = try call(sender);
@@ -56,7 +61,29 @@ test "gRPC SharedChannel weighted target outlier ejects only failing child endpo
         initial[@intFromBool(response.status == .ok)] += 1;
     }
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, &initial);
-    try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+    client.state.lock();
+    var volume_ready = true;
+    for (client.state.workers.items) |worker| {
+        const bucket = &worker.weighted_outliers[0];
+        volume_ready = volume_ready and bucket.successes.load(.acquire) + bucket.failures.load(.acquire) == 2;
+    }
+    client.state.weighted_target.?.root.kind.weighted.children[0].node.kind.outlier.next_evaluation_ns = std.Io.Clock.awake.now(io).addDuration(.fromMilliseconds(20)).nanoseconds;
+    client.state.wakeAllLocked();
+    client.state.unlock();
+    try std.testing.expect(volume_ready);
+    const evaluation_deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) });
+    while (true) {
+        client.state.lock();
+        var ejected: usize = 0;
+        for (client.state.workers.items) |worker| ejected += @intFromBool(worker.weighted_outliers[0].isEjected());
+        // Keep the selection check independent of when the endpoint owners
+        // are scheduled again; expiry is rearmed in the final phase below.
+        if (ejected == 1) client.state.weighted_target.?.root.kind.weighted.children[0].node.kind.outlier.next_evaluation_ns = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5)).nanoseconds;
+        client.state.unlock();
+        if (ejected == 1) break;
+        if (evaluation_deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
     for (0..5) |_| {
         var response = try call(sender);
         defer response.deinit();
@@ -76,6 +103,10 @@ test "gRPC SharedChannel weighted target outlier ejects only failing child endpo
         }
         try std.testing.expectEqual(@as(usize, 1), ejected);
     }
+    client.state.lock();
+    client.state.weighted_target.?.root.kind.weighted.children[0].node.kind.outlier.next_evaluation_ns = std.Io.Clock.awake.now(io).addDuration(.fromMilliseconds(20)).nanoseconds;
+    client.state.wakeAllLocked();
+    client.state.unlock();
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     var after_expiry = try call(sender);
     defer after_expiry.deinit();

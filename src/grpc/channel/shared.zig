@@ -117,6 +117,9 @@ pub const SharedChannel = struct {
     pub fn keepAliveStats(self: SharedChannel) KeepAliveStats {
         return self.state.keepalive_counters.snapshot();
     }
+    pub fn dropStats(self: SharedChannel) channel.drop_policy.Stats {
+        return self.state.drop_counters.snapshot();
+    }
     pub fn hedgingStats(self: SharedChannel) HedgingStats {
         return self.state.hedging_counters.snapshot();
     }

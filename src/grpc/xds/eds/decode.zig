@@ -7,7 +7,7 @@ pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_localities: 
 pub const Health = enum(u32) { unknown = 0, healthy = 1, unhealthy = 2, draining = 3, timeout = 4, degraded = 5, _ };
 pub const Endpoint = struct { addresses: []const std.Io.net.IpAddress, weight: u32 = 1, health: Health = .unknown, hostname: []const u8 = "" };
 pub const Locality = struct { region: []const u8 = "", zone: []const u8 = "", sub_zone: []const u8 = "", weight: u32, priority: u32, endpoints: []const Endpoint };
-pub const Drop = struct { category: []const u8, requests_per_million: u32 };
+pub const Drop = @import("../../channel/drop_policy.zig").Category;
 pub const Assignment = struct { cluster_name: []const u8, localities: []const Locality, drops: []const Drop, priority_count: usize };
 pub const Owned = struct {
     arena: std.heap.ArenaAllocator,

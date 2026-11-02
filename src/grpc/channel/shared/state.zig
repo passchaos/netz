@@ -44,6 +44,9 @@ pub const State = struct {
     orca_oob: ?orca_config.Config = null,
     tracker: *connectivity.Tracker,
     policy: channel.SelectionPolicy,
+    drop: channel.drop_policy.Policy = .{},
+    drop_revision: u64 = 1,
+    drop_counters: channel.drop_policy.Counters = .{},
     weighted_target: ?WeightedTarget = null,
     retention: Retention = .{},
     weighted_target_selected: ?*Worker = null,
@@ -142,6 +145,7 @@ pub const State = struct {
         self.allocator.free(self.canonical_endpoints);
         if (self.target_lifetime) |owner| owner.release();
         self.config.deinit();
+        self.drop.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
         self.tracker.release();
@@ -414,6 +418,7 @@ pub const State = struct {
     pub fn aggregateLocked(self: *State) connectivity.State {
         self.evaluateOutliersLocked();
         if (self.closed) return .shutdown;
+        if (self.drop.dropsAll()) return .ready;
         if (!self.demand) return .idle;
         if (self.weighted_target) |*runtime| {
             return runtime.aggregate(self);
@@ -498,6 +503,24 @@ pub const State = struct {
         var cursor = self.head;
         while (cursor) |job| {
             const next = job.next;
+            if (job.deadline) |until| if (until.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, error.Timeout);
+                cursor = next;
+                continue;
+            };
+            const dropped = @import("drop_admission.zig").evaluate(self, job) catch |err| {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, err);
+                cursor = next;
+                continue;
+            };
+            if (dropped) |response| {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, response, null);
+                cursor = next;
+                continue;
+            }
             if (self.weighted_target) |*runtime| @import("../cluster_route.zig").validate(runtime.root, @import("../cluster_route.zig").jobCluster(job)) catch |err| {
                 self.removeQueuedLocked(job);
                 self.finishLocked(job, null, err);
@@ -943,6 +966,21 @@ pub const State = struct {
         if (self.closed) {
             self.unlock();
             return error.SharedChannelClosed;
+        }
+        if (self.drop.categories.len != 0) self.io.checkCancel() catch |err| {
+            self.unlock();
+            return err;
+        };
+        const dropped = @import("drop_admission.zig").evaluate(self, job) catch |err| {
+            self.unlock();
+            return err;
+        };
+        if (dropped) |response| {
+            job.retain();
+            self.finishLocked(job, response, null);
+            self.tracker.setState(self.aggregateLocked());
+            self.unlock();
+            return;
         }
         if (self.weighted_target) |*runtime| {
             @import("../cluster_route.zig").validate(runtime.root, @import("../cluster_route.zig").jobCluster(job)) catch |err| {
