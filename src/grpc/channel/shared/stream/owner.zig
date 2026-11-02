@@ -28,7 +28,7 @@ pub fn Owner(comptime State: type) type {
                 worker.connection.?.limits.initial_window_size;
             if (maximum > state.options.max_buffered_stream_bytes) return error.InvalidSharedOptions;
             call.bytes = try state.allocator.alloc(u8, @max(maximum, 1));
-            var stream = try duplex.startDuplexWithDeadlines(worker.connection.?, state.allocator, call.options, call.deadline, earlier(call.deadline, output));
+            var stream = try duplex.startDuplexWithDeadlines(worker.connection.?, state.allocator, call.options, call.deadline, earlier(job.deadline, earlier(call.deadline, output)));
             errdefer stream.deinit();
             try stream.transport.deferResponseStreamCredit();
             call.retain();

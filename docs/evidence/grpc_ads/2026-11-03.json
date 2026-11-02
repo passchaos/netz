@@ -1,0 +1,209 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "feature": "xDS v3 state-of-the-world ADS transport and accepted-version state",
+  "decision": "accepted",
+  "base_head": "48220834acfbba07a6600699bb106aa4adb6f175",
+  "behavior": {
+    "wire": "standard v3 DiscoveryRequest/DiscoveryResponse envelopes, opaque Any resources, protobuf singular-last semantics and unknown-field skipping",
+    "node": "owned first-request Node id/cluster/locality/user-agent/client-features and serialized Struct metadata; later requests omit Node",
+    "subscriptions": "copied sorted unique resource names with explicit wildcard list, bounded type/name storage and deferred per-type writes while a response awaits decision",
+    "versions": "ACK advances accepted version; NACK retains previous accepted version and sends non-OK google.rpc.Status with current nonce",
+    "tokens": "stable client identity, stream epoch and response sequence prevent cross-client, stale-stream and superseded same-type decisions",
+    "replay": "stream terminal or write ambiguity clears old nonces/NACKs, preserves desired names/applied versions and explicit reconnect replays them",
+    "ack_allocation": "an applied ACK remains dirty with its accepted version when encoding allocation fails; later flush sends it successfully",
+    "deadlines": "one connect budget covers stream queue/HEADERS admission and subscription replay, separate from optional whole-RPC lifetime; local read timeout/cancellation/executor interruption preserves a live stream",
+    "bounds": "explicit envelope/resource bytes/count and subscription-type/name bounds; malformed envelopes and unexpected resource types retire the current stream while resource-type mismatch remains available for NACK",
+    "structure": "cohesive ADS codec, subscription and client modules with nearby pure and real-duplex tests"
+  },
+  "verification": {
+    "ads_debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC ADS' --summary all",
+      "passed": 159,
+      "total": 159,
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_ads/2026-11-03/ads.Debug.log"
+    },
+    "grpc_debug": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "passed": 594,
+      "total": 594,
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_ads/2026-11-03/grpc.Debug.log"
+    },
+    "package_debug": {
+      "command": "zig build test-package --summary all",
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0,
+      "log": "docs/evidence/grpc_ads/2026-11-03/package.Debug.log"
+    },
+    "interop_debug": {
+      "command": "zig build interop-grpc-ads --summary all -- --output docs/evidence/grpc_ads/2026-11-03/interop.Debug.json",
+      "exit_code": 0,
+      "steps_passed": 8,
+      "steps_total": 8,
+      "grpc_js": "1.14.7",
+      "streams": 2,
+      "sessions": 1,
+      "requests": 9,
+      "transcripts": [
+        {
+          "epoch": 1,
+          "version": "",
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "names": [
+            "a"
+          ],
+          "nonce": "",
+          "nack": "",
+          "node": true
+        },
+        {
+          "epoch": 1,
+          "version": "",
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "names": [
+            "a"
+          ],
+          "nonce": "",
+          "nack": "",
+          "node": false
+        },
+        {
+          "epoch": 1,
+          "version": "c1",
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "names": [
+            "a",
+            "b"
+          ],
+          "nonce": "c-n1",
+          "nack": "",
+          "node": false
+        },
+        {
+          "epoch": 1,
+          "version": "e1",
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "names": [
+            "a"
+          ],
+          "nonce": "e-n1",
+          "nack": "",
+          "node": false
+        },
+        {
+          "epoch": 1,
+          "version": "c1",
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "names": [
+            "a",
+            "b"
+          ],
+          "nonce": "c-bad",
+          "nack": "resource type mismatch",
+          "node": false
+        },
+        {
+          "epoch": 1,
+          "version": "c3",
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "names": [
+            "a",
+            "b"
+          ],
+          "nonce": "c-n3",
+          "nack": "",
+          "node": false
+        },
+        {
+          "epoch": 2,
+          "version": "c3",
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "names": [
+            "a",
+            "b"
+          ],
+          "nonce": "",
+          "nack": "",
+          "node": true
+        },
+        {
+          "epoch": 2,
+          "version": "e1",
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "names": [
+            "a"
+          ],
+          "nonce": "",
+          "nack": "",
+          "node": false
+        },
+        {
+          "epoch": 2,
+          "version": "e2",
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "names": [
+            "a"
+          ],
+          "nonce": "e-n2",
+          "nack": "",
+          "node": false
+        }
+      ]
+    },
+    "regressions": [
+      "Node and NACK encoding, opaque resource payload ownership and independent per-type version state",
+      "resource count/bytes and envelope limits, malformed/truncated/invalid-UTF8 protobuf, unknown fields and scalar-last semantics",
+      "desired-name copies, duplicate/capacity refusal and allocation failure sweeps",
+      "ACK/NACK version/nonce state, superseded decisions, reset replay and cross-client token rejection",
+      "real duplex two-stream exchange with wildcard/name subscription changes and wrong-type NACK",
+      "ACK encoding allocation failure preserves accepted version and retries via flush",
+      "constructor allocator sweeps preserve parent sender references",
+      "occupied State mutex and expired/wrong-clock opening admission return Timeout without queueing or losing desired subscriptions",
+      "short stream admission timeout leaves long-lived stream available for later discovery data",
+      "independent official Envoy protobuf/grpc-js peer validates exact Node/Struct, nine requests, latest nonce and one HTTP/2 session across stream reconnect"
+    ]
+  },
+  "references": {
+    "grpc_core_commit": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "grpc_core_ads_source": "/nav_env/Work/grpc/src/core/xds/xds_client/xds_client.cc",
+    "grpc_core_ads_source_sha256": "3748dd972e24a47c7f0b2c2a72973e8e3cd4576772c5381e5a52db5aff48cf66",
+    "official_envoy_proto_sha256": {
+      "envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+      "envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b",
+      "envoy/config/core/v3/base.proto": "7100d55f77dc8ae318ab9ebed11fbcd90afa44dd6c14511e3ee2312397edc9fe"
+    }
+  },
+  "remaining_scope": "Typed LDS/RDS/CDS/EDS resource validation and config publication, route selectors, bootstrap parsing, automatic retry/failover, resource expiry and Delta xDS remain open along with the overall cross-protocol industry-best objective.",
+  "source_sha256": {
+    "build.zig": "d65ec6787a5a01275198877c6891188dc0ed44e179805aea2dbd9d8cb3af566a",
+    "src/grpc/mod.zig": "d09233c3740fc345ffd644ea4d6fa904ce48ec8d9435cf7f5d17a2da367f645d",
+    "src/grpc/channel/shared.zig": "60d6769117e4809461c56c5f7f14f6bc84077ae031e216b07751ed0a9d2aca06",
+    "src/grpc/channel/shared/stream/open.zig": "b0093a3de0d0a7b38b3200d5448cb4c5c820a6f4462bf0465f34f100a4584431",
+    "src/grpc/channel/shared/stream/owner.zig": "21fba840ecdc032f4a06432bd65cf8d26ff57e9e5983d059222266dd5050bc51",
+    "src/grpc/xds/ads/client.zig": "0fc17b28446664a93cfc8175dfaa60b9e4a919f76f3af7831e1e517672ea0ab9",
+    "src/grpc/xds/ads/codec.zig": "6ab2328f00591eb349cb4626eaf419a6d8809f559c6f3852b47e1e39d2417fb9",
+    "src/grpc/xds/ads/subscriptions.zig": "2a90dd1f9b981f9e7c2425cddc5c4219b3974ec8c4061f5a73d71725516a99be",
+    "src/grpc/xds/ads/tests.zig": "e42ff545033667c7798fb0471e6186b85b60eea18187ab7f67951cb8fb880c85",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/ads.zig": "82cbac586929385fd9acd455305820ed5b1df065fbfe2298769d88697f40adcb",
+    "src/grpc/xds/mod.zig": "c74f6637775e35f9dd822480eb4811bcba9e6f9eac5f05589b50a20cc8cf4efb",
+    "tools/interop/grpc_ads/client.zig": "401a7346fb57d67ad1f76a1808e798da34604bbb87e822757dc03e078f2f0546",
+    "tools/interop/grpc_ads/peer.js": "9bbaeaa9edf33ba79084b7f0675946d6299b96995fd59eacc1a02ac47c6c52d5",
+    "tools/interop/grpc_ads/run.py": "56bc4cf9d02b71b694a155ac1301f46627a26bddbf02a9760095b4f8af45739a",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b",
+    "docs/grpc_parity.md": "4803ca2d3819aa084ae4d781d5e0c83f7532441adabfa29225ba16cdd7ad0790",
+    "docs/grpc_ads.md": "239804e8aab1fe9d52d8456c29fa09ea7d332a950032462b706155c6d24f5dcc",
+    "tools/interop/grpc_ads/README.md": "7ff4b00bd725309ce9d8ca3c0107f113a10567006a2be952a39abdada6058db9"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ads/2026-11-03/ads.Debug.log": "39006c13a4af888a0cdb26c7a8931513a522acc34304e7476ac99a8e2de0e9ec",
+    "docs/evidence/grpc_ads/2026-11-03/grpc.Debug.log": "f0025f13408df06fcee124c7c99abfbc2f84ba04489e0b9dbe4f000b45f4a515",
+    "docs/evidence/grpc_ads/2026-11-03/interop.Debug.json": "ff19c0c689354786661b4e414ec82c35ab2122d402cc589549f168350d552647",
+    "docs/evidence/grpc_ads/2026-11-03/interop.Debug.log": "14f81722da30936345d7f374e5c8cdd746165917dd374cdb0b82330d15e9183c",
+    "docs/evidence/grpc_ads/2026-11-03/package.Debug.log": "51c89ebd1238aa78871a586c6c1cc2313afda0b2b75092eb3422599a4c8c1273"
+  }
+}

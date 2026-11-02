@@ -1,0 +1,156 @@
+{
+  "status": "passed",
+  "ack": true,
+  "nack": true,
+  "latest_nonce": true,
+  "multi_type": true,
+  "replay": true,
+  "bounded_open_lifetime": true,
+  "local_read_timeout": true,
+  "streams": 2,
+  "sessions": 1,
+  "requests": 9,
+  "transcripts": [
+    {
+      "epoch": 1,
+      "version": "",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": true
+    },
+    {
+      "epoch": 1,
+      "version": "",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c1",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-n1",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "e1",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "e-n1",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c1",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-bad",
+      "nack": "resource type mismatch",
+      "node": false
+    },
+    {
+      "epoch": 1,
+      "version": "c3",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "c-n3",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 2,
+      "version": "c3",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "names": [
+        "a",
+        "b"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": true
+    },
+    {
+      "epoch": 2,
+      "version": "e1",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "",
+      "nack": "",
+      "node": false
+    },
+    {
+      "epoch": 2,
+      "version": "e2",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "names": [
+        "a"
+      ],
+      "nonce": "e-n2",
+      "nack": "",
+      "node": false
+    }
+  ],
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "build.zig": "d65ec6787a5a01275198877c6891188dc0ed44e179805aea2dbd9d8cb3af566a",
+    "src/grpc/mod.zig": "d09233c3740fc345ffd644ea4d6fa904ce48ec8d9435cf7f5d17a2da367f645d",
+    "src/grpc/channel/shared.zig": "60d6769117e4809461c56c5f7f14f6bc84077ae031e216b07751ed0a9d2aca06",
+    "src/grpc/channel/shared/stream/open.zig": "b0093a3de0d0a7b38b3200d5448cb4c5c820a6f4462bf0465f34f100a4584431",
+    "src/grpc/channel/shared/stream/owner.zig": "21fba840ecdc032f4a06432bd65cf8d26ff57e9e5983d059222266dd5050bc51",
+    "src/grpc/xds/ads/client.zig": "0fc17b28446664a93cfc8175dfaa60b9e4a919f76f3af7831e1e517672ea0ab9",
+    "src/grpc/xds/ads/codec.zig": "6ab2328f00591eb349cb4626eaf419a6d8809f559c6f3852b47e1e39d2417fb9",
+    "src/grpc/xds/ads/subscriptions.zig": "2a90dd1f9b981f9e7c2425cddc5c4219b3974ec8c4061f5a73d71725516a99be",
+    "src/grpc/xds/ads/tests.zig": "e42ff545033667c7798fb0471e6186b85b60eea18187ab7f67951cb8fb880c85",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/ads.zig": "82cbac586929385fd9acd455305820ed5b1df065fbfe2298769d88697f40adcb",
+    "src/grpc/xds/mod.zig": "c74f6637775e35f9dd822480eb4811bcba9e6f9eac5f05589b50a20cc8cf4efb",
+    "tools/interop/grpc_ads/client.zig": "401a7346fb57d67ad1f76a1808e798da34604bbb87e822757dc03e078f2f0546",
+    "tools/interop/grpc_ads/peer.js": "9bbaeaa9edf33ba79084b7f0675946d6299b96995fd59eacc1a02ac47c6c52d5",
+    "tools/interop/grpc_ads/run.py": "56bc4cf9d02b71b694a155ac1301f46627a26bddbf02a9760095b4f8af45739a",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_proto_sha256": {
+    "envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+    "envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b",
+    "envoy/config/core/v3/base.proto": "7100d55f77dc8ae318ab9ebed11fbcd90afa44dd6c14511e3ee2312397edc9fe"
+  },
+  "client_sha256": "3cb8484824ada49cd2ce24a8bf449a68a95e01791c00a132b4540c7eac395cd5"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-ads success
++- run python3 success 480ms
+   +- compile exe netz-grpc-ads-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:28M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:28M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

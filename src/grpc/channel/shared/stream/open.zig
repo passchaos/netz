@@ -6,6 +6,11 @@ const call = @import("../../../call.zig");
 const Job = @import("../job.zig").Job;
 
 pub fn open(state: anytype, options: streaming.RequestOptions, entered: std.Io.Timestamp) @TypeOf(state.*).Failure!*@TypeOf(state.*).StreamCall {
+    return openUntil(state, options, entered, null);
+}
+
+pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std.Io.Timestamp, admission: ?std.Io.Clock.Timestamp) @TypeOf(state.*).Failure!*@TypeOf(state.*).StreamCall {
+    if (admission) |until| _ = try @import("../../../../internal/deadline.zig").usableAwake(state.io, until);
     const State = @TypeOf(state.*);
     const config_generation = state.retainConfig();
     defer if (config_generation) |config| config.release();
@@ -18,7 +23,8 @@ pub fn open(state: anytype, options: streaming.RequestOptions, entered: std.Io.T
     const deadline: ?std.Io.Clock.Timestamp = if (resolved.options.timeout) |timeout| .{ .raw = entered.addDuration(timeout.duration()), .clock = .awake } else null;
     // Resolve against one retained immutable generation so a later dynamic
     // publication cannot invalidate borrowed method-policy strings.
-    try state.lockBefore(deadline);
+    const opening_deadline = @import("../../../../internal/deadline.zig").earlier(deadline, admission);
+    try state.lockBefore(opening_deadline);
     const closed = state.closed;
     state.unlock();
     if (closed) return error.SharedChannelClosed;
@@ -32,7 +38,7 @@ pub fn open(state: anytype, options: streaming.RequestOptions, entered: std.Io.T
         if (!submitted) stream.retireUnsubmitted(err);
         stream.release();
     }
-    const job = try Job.createStream(state, stream, deadline, resolved.wait_for_ready);
+    const job = try Job.createStream(state, stream, opening_deadline, resolved.wait_for_ready);
     defer job.release();
     try state.enqueue(job);
     submitted = true;

@@ -600,8 +600,10 @@ reset race from closing with unread upload bytes.
    SharedChannel now also implements the grpc-core
    `outlier_detection_experimental` composite policy described below.
    The xDS locality adapter now expands resolver locality weights through
-   `xds_wrr_locality_experimental`, as described below. ADS discovery, cluster
-   implementation and other xDS control-plane policies remain open. Cluster
+   `xds_wrr_locality_experimental`, as described below. ADS transport now has
+   owned v3 envelopes and subscription/version state as described below; typed
+   resource/config integration, cluster implementation and other xDS control
+   plane work remain open. Cluster
    manager selection now follows each RPC-local cluster attribute below.
 
 Machine-readable SharedChannel ORCA evidence is recorded in
@@ -3382,3 +3384,48 @@ transport evidence; the cluster implementation, ADS discovery, load reporting
 and other xDS control-plane integration remain open. Machine-readable logs and
 source/reference digests are recorded in
 `docs/evidence/grpc_cluster_manager/2026-11-03.json`.
+
+
+## v3 ADS transport and accepted configuration versions
+
+`grpc.xds.ads.Client` now drives the standard v3
+`AggregatedDiscoveryService/StreamAggregatedResources` method through
+SharedChannel's background HTTP/2 owner. The new cohesive codec, subscription
+state and client modules retain owned resource envelopes, desired names,
+accepted versions and current-stream nonces. Node id, cluster, locality,
+user-agent, client features and serialized Struct metadata are copied into the
+first request of each stream. Envelope message bytes, resource count/size,
+resource-type count and names have explicit bounds; resource payload schemas
+remain available as opaque Any bytes for validation/application before ACK.
+
+ACK advances the applied version; NACK sends a non-OK google.rpc.Status and the
+previous accepted version. Per-type pending responses defer only their own
+subscription output. Latest desired names coalesce into that type's ACK/NACK,
+and client-identity/epoch/sequence tokens reject cross-client, old-stream or
+superseded response decisions.
+A server terminal or ambiguous write failure clears per-stream nonce/NACK state;
+a later explicit connect replays desired subscriptions and accepted versions.
+A pre-wire ACK allocation failure preserves the actually applied version as
+dirty and retryable. Local receive timeout/cancellation/executor interruption
+preserves the active stream while its overall RPC lifetime remains valid.
+
+SharedChannel Sender now exposes stream-open timeout/deadline forms with an
+admission budget separate from the long-lived RPC timeout. The same opening
+budget spans queue admission, HEADERS submission and completion wait. ADS
+connect uses it plus subscription output under one deadline; a short opening
+budget does not kill later discovery delivery. Adjacent live-socket tests verify
+ACK/NACK, wildcard/name subscription changes, version replay, stale decisions,
+constructor allocation cleanup, held-mutex admission rollback and ACK allocation
+failure followed by a successful flush. Codec/state tests include malformed
+protobuf, type mismatch exposure, limits, sorted ownership and allocator sweeps.
+
+The independent `interop-grpc-ads` runner loads the official Envoy v3 discovery
+and Node protobuf schemas through the pinned grpc-js-xds dependencies. It checks
+exact Node/Struct fields, interleaved CDS/EDS versions, wrong-type NACK with
+previous version, latest nonce, replay without old-stream nonce/error, local
+read timeout recovery and delivery after a 50-ms opening budget. Two ADS streams
+must use one HTTP/2 connection and the server must see exactly nine requests.
+See [ADS usage and boundaries](grpc_ads.md) and
+`docs/evidence/grpc_ads/2026-11-03.json`. Typed resource validation/application,
+route selection, bootstrap/failover/resource expiry and Delta xDS remain open
+rather than being inferred from this transport evidence.

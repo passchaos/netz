@@ -2059,6 +2059,21 @@ pub fn build(b: *std.Build) void {
     const grpc_cluster_manager_step = b.step("interop-grpc-cluster-manager", "Verify per-RPC cluster picking, failed-child isolation and config updates with official grpc-js-xds/grpc-js");
     grpc_cluster_manager_step.dependOn(&grpc_cluster_manager.step);
 
+    const grpc_ads_client = b.addExecutable(.{
+        .name = "netz-grpc-ads-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_ads/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_ads = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_ads/run.py" });
+    grpc_ads.addArtifactArg(grpc_ads_client);
+    if (b.args) |args| grpc_ads.addArgs(args);
+    const grpc_ads_step = b.step("interop-grpc-ads", "Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js");
+    grpc_ads_step.dependOn(&grpc_ads.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

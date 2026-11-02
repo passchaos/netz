@@ -45,6 +45,14 @@ pub const Sender = struct {
         const entered = std.Io.Clock.awake.now(self.state.io);
         return .{ .call = try @import("shared/stream/open.zig").open(self.state, options, entered) };
     }
+    /// Bound stream admission separately from the RPC lifetime in options.timeout.
+    pub fn startDuplexWithDeadline(self: Sender, options: streaming.RequestOptions, deadline: std.Io.Clock.Timestamp) Error!Duplex {
+        return .{ .call = try @import("shared/stream/open.zig").openUntil(self.state, options, std.Io.Clock.awake.now(self.state.io), deadline) };
+    }
+    pub fn startDuplexWithTimeout(self: Sender, options: streaming.RequestOptions, timeout: std.Io.Duration) Error!Duplex {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startDuplexWithDeadline(options, .fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
     fn unaryResolved(self: Sender, options: call.UnaryCallOptions, retry_policy: ?call.RetryPolicy, hedging_policy: ?call.HedgingPolicy) Error!call.UnaryResponse {
         const entered = std.Io.Clock.awake.now(self.state.io);
         if (options.message.len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
