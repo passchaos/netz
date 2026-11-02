@@ -155,6 +155,9 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     const previous_endpoints = state.canonical_endpoints;
     state.canonical_endpoints = prepared.endpoints;
     prepared.endpoints = previous_endpoints;
+    const previous_lifetime = state.target_lifetime;
+    state.target_lifetime = prepared.target_lifetime;
+    prepared.target_lifetime = previous_lifetime;
     for (changes.items) |change| {
         if (change.worker.pending_settings) |settings| settings.destroy();
         change.worker.pending_settings = null;

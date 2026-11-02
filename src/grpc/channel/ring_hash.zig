@@ -67,6 +67,21 @@ pub fn sameEndpointIdentity(left: anytype, right: @TypeOf(left)) bool {
         inline else => |left_value, tag| blk: {
             var normalized_left = left_value;
             var normalized_right = @field(right, @tagName(tag));
+            // Resolver-owned snapshots may contain equal strings at new addresses.
+            // Preserve connection identity while each source retains its owner.
+            if (normalized_left.hierarchical_path.len != normalized_right.hierarchical_path.len) break :blk false;
+            for (normalized_left.hierarchical_path, normalized_right.hierarchical_path) |a, b| if (!std.mem.eql(u8, a, b)) break :blk false;
+            normalized_right.hierarchical_path = normalized_left.hierarchical_path;
+            inline for (.{ "authority", "host", "tls_host", "ring_hash_key" }) |field| {
+                if (comptime @hasField(@TypeOf(left_value), field)) {
+                    const T = @TypeOf(@field(normalized_left, field));
+                    const a: ?[]const u8 = @field(normalized_left, field);
+                    const b: ?[]const u8 = @field(normalized_right, field);
+                    if ((a == null) != (b == null)) break :blk false;
+                    if (a) |text| if (!std.mem.eql(u8, text, b.?)) break :blk false;
+                    @field(normalized_right, field) = @as(T, @field(normalized_left, field));
+                }
+            }
             normalized_left.ring_hash_weight = 1;
             normalized_right.ring_hash_weight = 1;
             normalized_left.locality_weight = 0;

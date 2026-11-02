@@ -452,6 +452,37 @@ pub fn Runtime(comptime State: type) type {
             return self.outlier_count;
         }
 
+        /// A cached pending pick must remain in the currently chosen priority,
+        /// not merely on any still-connected lower-priority worker.
+        pub fn selectable(self: *Self, state: *State, worker: *Worker, job: anytype) bool {
+            return self.workerAvailable(state, worker) and self.selectedPath(self.root, state, worker, job);
+        }
+        fn selectedPath(self: *Self, node: *Node, state: *State, worker: *Worker, job: anytype) bool {
+            const path = worker.source.endpoint.hierarchicalPath();
+            if (!pathMatches(path, node.path)) return false;
+            if (node.cluster_manager) return self.selectedPath(@import("../cluster_route.zig").select(node, @import("../cluster_route.zig").jobCluster(job)) catch return false, state, worker, job);
+            return switch (node.kind) {
+                .leaf => true,
+                .outlier => |wrapper| self.selectedPath(wrapper.child, state, worker, job),
+                .weighted => |weighted| for (weighted.children) |child| {
+                    if (self.selectedPath(child.node, state, worker, job)) break true;
+                } else false,
+                .priority => |*priority| blk: {
+                    const info = self.evaluatePriority(priority, state);
+                    const active = info.active_index orelse break :blk false;
+                    if (!info.failover_open) {
+                        const child = priority.children[priority.order[active]];
+                        break :blk self.aggregateNode(child.node, state) == .ready and self.selectedPath(child.node, state, worker, job);
+                    }
+                    for (priority.order) |index| {
+                        const child = priority.children[index];
+                        if (self.aggregateNode(child.node, state) == .ready) break :blk self.selectedPath(child.node, state, worker, job);
+                    }
+                    break :blk false;
+                },
+            };
+        }
+
         pub fn available(
             self: *Self,
             state: *State,
@@ -1291,4 +1322,8 @@ test "SharedChannel priority propagates nested pick_first shuffleAddressList" {
     try std.testing.expect(runtime.shufflesAddressList(&.{ "high", "a" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{ "high", "b" }));
     try std.testing.expect(!runtime.shufflesAddressList(&.{"low"}));
+}
+
+test {
+    _ = @import("weighted_target/selection_tests.zig");
 }

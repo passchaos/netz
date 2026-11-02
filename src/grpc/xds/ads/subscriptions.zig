@@ -120,6 +120,10 @@ pub const State = struct {
         entry.pending_sequence = self.sequence;
         return .{ .owner_id = self.owner_id, .epoch = self.epoch, .sequence = self.sequence };
     }
+    pub fn validateToken(self: *State, type_url: []const u8, token: Token) Error!void {
+        const entry = self.find(type_url) orelse return error.UnknownDiscoveryType;
+        if (token.owner_id != self.owner_id or token.epoch != self.epoch or entry.pending_sequence != token.sequence) return error.StaleDiscoveryResponse;
+    }
     /// The application's acceptance is authoritative even if the ACK write
     /// later fails: a reconnect must advertise the version actually applied.
     pub fn decide(self: *State, type_url: []const u8, token: Token, nack: ?codec.Nack) Error!*Entry {

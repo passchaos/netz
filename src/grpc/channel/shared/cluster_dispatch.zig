@@ -27,7 +27,7 @@ pub fn choose(state: anytype, runtime: anytype, claimant: anytype, comptime remo
             continue;
         }
         const picked = if (job.selected_worker) |worker|
-            if (runtime.available(state, worker)) worker else null
+            if (runtime.selectable(state, worker, job)) worker else null
         else
             null;
         job.selected_worker = picked orelse (runtime.pick(state, job) catch |err| {
@@ -35,7 +35,10 @@ pub fn choose(state: anytype, runtime: anytype, claimant: anytype, comptime remo
             finish(state, job, null, err);
             continue;
         });
-        if (job.selected_worker) |worker| if (worker == claimant) return job;
+        if (job.selected_worker) |worker| {
+            if (worker == claimant) return job;
+            worker.wake.set(state.io);
+        }
     }
     return null;
 }

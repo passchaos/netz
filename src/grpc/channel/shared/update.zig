@@ -8,14 +8,20 @@ const Prepared = @import("update/prepare.zig").Prepared;
 const Options = @import("options.zig").Options;
 const orca_config = @import("orca/config.zig");
 
+pub const TargetLifetime = @import("target_lifetime.zig").Lifetime;
+
 pub const Update = struct {
     /// Null preserves the complete canonical inventory. An empty resolved set
     /// removes every endpoint while already admitted RPCs finish.
     target: ?channel.Target = null,
+    /// Retained on success by canonical inventory and source/worker owners.
+    /// Requires target != null; callers may release their reference on return.
+    target_lifetime: ?TargetLifetime = null,
     service_config: union(enum) { keep, replace: ?[]const u8 } = .keep,
 };
 
 pub fn apply(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) State.Failure!u64 {
+    if (update.target == null and update.target_lifetime != null) return error.InvalidSharedOptions;
     state.retain();
     defer state.release();
     if (deadline != null) try @import("../../../internal/timed_mutex.zig").lock(&state.update_mutex, state.io, deadline) else try state.update_mutex.lock(state.io);
@@ -60,6 +66,9 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
         },
     } else try state.allocator.dupe(channel.Endpoint, state.canonical_endpoints);
     errdefer state.allocator.free(endpoints);
+    var lifetime = if (update.target != null) update.target_lifetime else state.target_lifetime;
+    if (lifetime) |owner| lifetime = owner.retain();
+    errdefer if (lifetime) |owner| owner.release();
     state.unlock();
     locked = false;
     var config: ?*Generation = switch (update.service_config) {
@@ -79,5 +88,7 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     endpoints = &.{};
     const owned_orca = orca_override;
     orca_override = null;
-    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca);
+    const owned_lifetime = lifetime;
+    lifetime = null;
+    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime);
 }

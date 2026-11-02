@@ -133,6 +133,16 @@ pub const Client = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.rejectWithDeadline(update, nack, .fromNow(self.sender.state.io, .{ .clock = .awake, .raw = timeout }));
     }
+    /// Validate before applying a candidate resource snapshot. A serialized
+    /// caller can then mark acceptance immediately after actual publication.
+    pub fn validateUpdate(self: *Client, update: Update) Error!void {
+        if (!update.resourcesMatchType()) return error.InvalidDiscoveryMessage;
+        try self.subscriptions.validateToken(update.response.value.type_url, update.token);
+    }
+    pub fn acceptAppliedUpdate(self: *Client, update: Update) Error!void {
+        try self.validateUpdate(update);
+        _ = try self.subscriptions.decide(update.response.value.type_url, update.token, null);
+    }
     pub fn acknowledgeWithDeadline(self: *Client, update: Update, deadline: std.Io.Clock.Timestamp) Error!void {
         _ = try deadline_policy.usableAwake(self.sender.state.io, deadline);
         try self.sender.state.io.checkCancel();

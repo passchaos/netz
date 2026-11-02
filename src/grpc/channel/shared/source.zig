@@ -13,6 +13,7 @@ pub fn Source(comptime Worker: type) type {
         suspended: bool = false,
         activation: std.Io.Event = .unset,
         endpoint: channel.Endpoint,
+        target_lifetime: ?@import("target_lifetime.zig").Lifetime = null,
         ring_hash_weight: u32 = 1,
         resolver: ?*resolver.State = null,
         authority: ?[]u8 = null,
@@ -80,6 +81,7 @@ pub fn Source(comptime Worker: type) type {
             if (self.authority) |value| allocator.free(value);
             allocator.free(self.current);
             if (self.pending) |members| allocator.free(members);
+            if (self.target_lifetime) |owner| owner.release();
         }
         pub fn latest(self: *const Self) []*Worker {
             return self.pending orelse self.current;

@@ -11,6 +11,7 @@ pub const Prepared = struct {
     allocator: std.mem.Allocator,
     config: ?*Generation,
     endpoints: []channel.Endpoint,
+    target_lifetime: ?@import("../target_lifetime.zig").Lifetime = null,
     sources: []*State.Source = &.{},
     policy: channel.SelectionPolicy,
     resolver_policy: channel.SelectionPolicy,
@@ -22,11 +23,12 @@ pub const Prepared = struct {
     retired_children: ?*State.Retention.Entry = null,
 
     /// Consumes the generation, canonical inventory and explicit ORCA clone.
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoints: []channel.Endpoint, resolver_policy: channel.SelectionPolicy, options: Options, config: ?*Generation, orca_override: ?orca_config.Config) State.Failure!Prepared {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoints: []channel.Endpoint, resolver_policy: channel.SelectionPolicy, options: Options, config: ?*Generation, orca_override: ?orca_config.Config, target_lifetime: ?@import("../target_lifetime.zig").Lifetime) State.Failure!Prepared {
         var self = Prepared{
             .allocator = allocator,
             .config = config,
             .endpoints = endpoints,
+            .target_lifetime = target_lifetime,
             .policy = undefined,
             .resolver_policy = resolver_policy,
             .balancing = @import("../balancing.zig").resolve(if (config) |generation| generation.config.loadBalancingConfig() else .{}, options.channel.selection_policy),
@@ -62,6 +64,9 @@ pub const Prepared = struct {
             self.orca_oob = try orca_config.Config.init(allocator, .{ .report_interval = balancing.weighted_round_robin.oob_reporting_period });
         }
         self.sources = try @import("../layout.zig").create(allocator, io, target, options, self.policy, if (self.weighted) |*runtime| runtime else null, self.shuffle, false);
+        if (target_lifetime) |owner| {
+            for (self.sources) |source| source.target_lifetime = owner.retain();
+        }
         return self;
     }
 
@@ -75,6 +80,7 @@ pub const Prepared = struct {
         for (self.sources) |source| source.release();
         self.allocator.free(self.sources);
         self.allocator.free(self.endpoints);
+        if (self.target_lifetime) |owner| owner.release();
         if (self.weighted) |*runtime| runtime.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();

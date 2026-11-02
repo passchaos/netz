@@ -3429,3 +3429,47 @@ See [ADS usage and boundaries](grpc_ads.md) and
 `docs/evidence/grpc_ads/2026-11-03.json`. Typed resource validation/application,
 route selection, bootstrap/failover/resource expiry and Delta xDS remain open
 rather than being inferred from this transport evidence.
+
+
+## Typed EDS to reference-owned channel targets
+
+`grpc.xds.eds` now decodes bounded v3 `ClusterLoadAssignment` resources and
+projects dense priorities, weighted locality identities, serving health states
+and endpoint weights into existing recursive priority/locality child policies.
+Numeric TCP IPv4/IPv6 socket addresses and additional-address logical endpoints
+are retained; multiple addresses use the shared full-HTTP/2 connection race.
+Malformed weights/addresses, duplicate locality/address identity and priority
+gaps reject a candidate. Drop categories normalize to requests per million,
+while current publication refuses nonzero drops pending cluster-impl admission.
+
+The ADS publication helper checks response ownership/type/token and decodes all
+resources before updating the selected assignment. Channel failure leaves the
+old topology and accepted version intact. Successful publication advances its
+ADS accepted version before ACK output, so an ACK timeout/allocation failure
+cannot erase the configuration actually applied. Omission in a valid SotW
+response publishes an empty target. Caller-owned resources can be released after
+publication because Update's optional target-lifetime descriptor is retained
+by canonical inventory and source/worker owners, including removed-child
+retention. Distinct snapshots compare endpoint identity by path/key/host string
+content so unchanged ordinary endpoints reuse their connections. Existing
+unowned resolver targets retain their previous borrowed-storage contract.
+
+Native tests cover typed weight/health/additional-address decoding, dense
+priority/locality validation, limits, malformed protobuf, allocator rollback,
+reference ownership after caller release, equal-snapshot connection reuse,
+config-only owner retention and healthy alternate-address connection success.
+The independent `interop-grpc-eds` control plane emits official Envoy resource
+protobufs over ADS, while four grpc-js backends count initial/restored weighting,
+primary-priority health failover and complete call counts. It also checks an
+invalid-resource NACK with unchanged topology/version and valid SotW deletion,
+requiring one backend HTTP/2 session per endpoint across updates.
+See [EDS usage and boundaries](grpc_eds.md) and
+`docs/evidence/grpc_eds/2026-11-03.json`. LDS/RDS/CDS route integration, EDS drop
+execution and remaining bootstrap/failover/expiry behavior remain open.
+
+The same EDS runner exposed owner competition in nested priority/locality picks.
+A pending priority job now keeps a stable selected worker until claim and wakes
+that owner. Validation follows the current priority selection, so recovery of
+a higher priority invalidates a cached lower-priority choice. This preserves
+priority semantics while preventing all owners from dropping different picks
+and leaving a ready job parked until its deadline.

@@ -30,6 +30,7 @@ pub const State = struct {
     group: std.Io.Group = .init,
     workers: std.ArrayList(*Worker) = .empty,
     canonical_endpoints: []channel.Endpoint = &.{},
+    target_lifetime: ?@import("target_lifetime.zig").Lifetime = null,
     sources: []*Source = &.{},
     shuffle_addresses: bool = false,
     resolution_changed: std.Io.Event = .unset,
@@ -139,6 +140,7 @@ pub const State = struct {
         for (self.sources) |source| source.release();
         self.allocator.free(self.sources);
         self.allocator.free(self.canonical_endpoints);
+        if (self.target_lifetime) |owner| owner.release();
         self.config.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
@@ -626,19 +628,22 @@ pub const State = struct {
     fn pickLocked(self: *State, claimant: *Worker) Error!?*Worker {
         self.evaluateOutliersLocked();
         if (self.weighted_target) |*runtime| {
-            if (self.policy != .priority) {
-                if (self.weighted_target_selected) |selected| {
-                    if (runtime.available(self, selected)) return selected;
-                    self.weighted_target_selected = null;
+            const job = self.head orelse return null;
+            if (self.policy == .priority) {
+                if (job.selected_worker) |selected| {
+                    if (runtime.selectable(self, selected, job)) return selected;
+                    job.selected_worker = null;
                 }
+            } else if (self.weighted_target_selected) |selected| {
+                if (runtime.selectable(self, selected, job)) return selected;
+                self.weighted_target_selected = null;
             }
             const selected = try runtime.pick(
                 self,
                 self.head orelse return null,
             ) orelse return null;
-            if (self.policy != .priority) {
-                self.weighted_target_selected = selected;
-            }
+            if (self.policy == .priority) job.selected_worker = selected else self.weighted_target_selected = selected;
+            if (selected != claimant) selected.wake.set(self.io);
             return selected;
         }
         if (self.policy == .pick_first) {

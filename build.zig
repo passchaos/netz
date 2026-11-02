@@ -2074,6 +2074,21 @@ pub fn build(b: *std.Build) void {
     const grpc_ads_step = b.step("interop-grpc-ads", "Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js");
     grpc_ads_step.dependOn(&grpc_ads.step);
 
+    const grpc_eds_client = b.addExecutable(.{
+        .name = "netz-grpc-eds-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_eds/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_eds = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_eds/run.py" });
+    grpc_eds.addArtifactArg(grpc_eds_client);
+    if (b.args) |args| grpc_eds.addArgs(args);
+    const grpc_eds_step = b.step("interop-grpc-eds", "Verify official EDS resources from ADS through typed validation, dynamic publication and priority/locality RPC routing");
+    grpc_eds_step.dependOn(&grpc_eds.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{
