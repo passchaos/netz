@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-02",
+  "feature": "WebTransport over HTTP/2 draft-15 regression after native certificate and browser-interop work",
+  "commit": "5ca7ec5c",
+  "command": "zig build interop-webtransport-h2-python -Doptimize=ReleaseFast --summary all",
+  "result": "passed",
+  "directions": 2,
+  "tls": "TLSv1.3",
+  "alpn": "h2",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "verified": {
+    "rejected_status": 429,
+    "connect_requests_per_direction": 4,
+    "virtual_streams_per_healthy_session": 4,
+    "datagram": true,
+    "credit_resume": true,
+    "reset": true,
+    "reliable_size": 6,
+    "stop": true,
+    "stop_code": 4294967295,
+    "invalid_reset_scoped": true,
+    "reuse_after_error": true,
+    "drain": true,
+    "close": true
+  },
+  "scope": {
+    "independent_peer": true,
+    "browser_deployment_matrix": false,
+    "complete_draft_conformance": false
+  },
+  "conclusion": "The HTTP/2 WebTransport draft-15 implementation still passes the independent Python peer in both directions after the recent TLS and browser-interop changes. Browser HTTP/2 deployment coverage remains a separate open matrix item."
+}
