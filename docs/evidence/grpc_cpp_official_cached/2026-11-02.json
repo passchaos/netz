@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "official grpc-cpp streaming ping-pong comparison with cached allocator",
+  "decision": "accepted evidence",
+  "netz_revision": "1fe9791fc658f1b7c14757181899650d99b2b586",
+  "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+  "cpu": 12,
+  "samples": 5,
+  "schedule": "alternating netz/grpc-cpp samples",
+  "warmup": 100,
+  "iterations": 2000,
+  "validation": "full-bytes for netz; grpc-cpp real_time",
+  "netz_binary_sha256": "329d38593832d0ecc8167431a9de9d6da746b40019f2f22f65975ec633e473a1",
+  "netz_wrapper_sha256": "1adf958074ee7984c696b223d18495de0a34dd673438284deda3c4059ed7ca4c",
+  "grpc_cpp_binary_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+  "wrapper": "exec netz-bench-grpc-shared --cached-allocator \"$@\"",
+  "results": [
+    {"mode": "persistent", "payload_bytes": 0, "netz_median_ns": 17474, "grpc_cpp_median_ns": 43762, "netz_over_grpc_cpp": 0.399},
+    {"mode": "persistent", "payload_bytes": 512, "netz_median_ns": 18122, "grpc_cpp_median_ns": 45073, "netz_over_grpc_cpp": 0.402},
+    {"mode": "persistent", "payload_bytes": 4096, "netz_median_ns": 22295, "grpc_cpp_median_ns": 49970, "netz_over_grpc_cpp": 0.446},
+    {"mode": "persistent", "payload_bytes": 262144, "netz_median_ns": 443349, "grpc_cpp_median_ns": 398854, "netz_over_grpc_cpp": 1.112},
+    {"mode": "calls", "payload_bytes": 0, "netz_median_ns": 54368, "grpc_cpp_median_ns": 128150, "netz_over_grpc_cpp": 0.424},
+    {"mode": "calls", "payload_bytes": 512, "netz_median_ns": 55116, "grpc_cpp_median_ns": 127931, "netz_over_grpc_cpp": 0.431},
+    {"mode": "calls", "payload_bytes": 4096, "netz_median_ns": 59116, "grpc_cpp_median_ns": 134077, "netz_over_grpc_cpp": 0.441},
+    {"mode": "calls", "payload_bytes": 262144, "netz_median_ns": 500531, "grpc_cpp_median_ns": 512543, "netz_over_grpc_cpp": 0.977}
+  ],
+  "conclusion": "With the cached allocator, netz is 2.2-2.5x faster for 0/512/4-KiB persistent and per-call workloads, 11.2% slower for 256-KiB persistent streaming ping-pong, and 2.3% faster for 256-KiB per-call RPCs. This supersedes the earlier 1.2-1.25x large-message estimate."
+}

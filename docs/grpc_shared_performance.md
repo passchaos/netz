@@ -788,3 +788,29 @@ the runtime facade, so applications can enable it without managing a separate
 allocator lifetime. Alternating-pair rows, source hashes and the PMU note are
 recorded in
 [the allocator evidence](evidence/grpc_shared/2026-11-02-allocator.json).
+
+## Official grpc-cpp comparison with the cached allocator (2026-11-02)
+
+The official `grpc_benchmark.py` harness was rerun at `1fe9791f` with the
+cached allocator enabled through a thin wrapper around
+`netz-bench-grpc-shared`. grpc-cpp remained at `03d65cc67c`. Five alternating
+samples pinned CPU 12, used 100 warmups and 2,000 measured roundtrips, and
+validated every netz payload byte. Ratios below are netz / grpc-cpp, so lower
+is better.
+
+| Mode | Payload | netz median ns | grpc-cpp median ns | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent | 0 | 17,474 | 43,762 | 0.399 |
+| Persistent | 512 | 18,122 | 45,073 | 0.402 |
+| Persistent | 4 KiB | 22,295 | 49,970 | 0.446 |
+| Persistent | 256 KiB | 443,349 | 398,854 | 1.112 |
+| RPC per roundtrip | 0 | 54,368 | 128,150 | 0.424 |
+| RPC per roundtrip | 512 | 55,116 | 127,931 | 0.431 |
+| RPC per roundtrip | 4 KiB | 59,116 | 134,077 | 0.441 |
+| RPC per roundtrip | 256 KiB | 500,531 | 512,543 | 0.977 |
+
+With the cached allocator, netz remains 2.2-2.5x faster for small messages,
+is 11.2% slower for the persistent 256-KiB streaming ping-pong, and is 2.3%
+faster for the 256-KiB per-call RPC mode. This supersedes the earlier
+1.2-1.25x large-message estimate. Full rows and binary identities are in
+`docs/evidence/grpc_cpp_official_cached/2026-11-02.json`.
