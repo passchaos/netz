@@ -13,4 +13,5 @@ pub const EndpointListener = runtime.EndpointListener;
 
 test {
     _ = runtime;
+    _ = @import("endpoint_listener/admission_tests.zig");
 }

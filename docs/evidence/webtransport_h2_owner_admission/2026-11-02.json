@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "HTTP/2 WebTransport server owner admission and failure rollback",
+  "decision": "accepted",
+  "base_head": "8658e8bf",
+  "behavior": {
+    "budget": "EndpointServer.initWithDeadline transfers ownership on entry and applies one caller deadline/cancellation through fixed-table allocation and owner admission, with checks before tables, before worker assignment and after startup",
+    "rollback": "failed or late candidates close abortively without protocol shutdown output; already assigned workers are stopped and joined before owner allocation is released",
+    "accept": "cleartext/TLS deadline accept constructors pass the same original deadline to owner initialization",
+    "listener": "managed-owner initialization after raw acceptance receives the configured endpoint operation timeout; Canceled releases its connection reservation and terminates the accept worker",
+    "structure": "client/server worker assignment and rollback share endpoint/initialization.zig; server table construction is isolated in endpoint_server/init.zig"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 203,
+      "total": 203,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "server_queue_uses_deadline_adoption": true,
+      "scope": "normal queue/admission, pending cleanup, generation reuse and full Capsule exchange after successful deadline adoption; failure cases are exercised by the module socket-backed regressions",
+      "exit_code": 0
+    },
+    "initialization_modes": [
+      "expired",
+      "wrong_clock",
+      "cancel_entry",
+      "cancel_before_start",
+      "cancel_after_start",
+      "fail_state",
+      "fail_pending",
+      "fail_sessions",
+      "owner_failure",
+      "late_allocation",
+      "late_owner"
+    ],
+    "case_invariants": "original error is preserved, no worker is assigned when budget/cancellation fails before startup, late/canceled started candidates are joined, provisional raw TCP reaches EOF without protocol bytes, and leak-checking allocator releases all tables",
+    "allocation_sweep": "checkAllAllocationFailures over deadline adoption and abortive owner destruction",
+    "listener_cancellation": "raw HTTP/2 acceptance completes, the first managed allocation arms owner-admission cancellation, accept group must join within the test budget and release its one connection reservation with no installed connection",
+    "existing_coverage": "client reconnect completion, TLS server/listener multi-connection flow, pending request cleanup and independent client/server queues remain in the complete HTTP2 WebTransport gate"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint/initialization.zig": "ae386e327476efbbe0f37a05b24f0a313d53d413973093d38c58029a0e6f8bbd",
+    "src/webtransport/h2/endpoint_client/init.zig": "b9dbba2614903501d8dc8dddeb64931d3c931c984f243bd386c98244921755df",
+    "src/webtransport/h2/endpoint_client.zig": "4a1f4376f533c0b9b41fc9e6c598106c98cedf8e60368b5790520af424616d55",
+    "src/webtransport/h2/endpoint_server.zig": "674da6be58c73bc4fda7321b3a5af8e1e26b6e817cb77efcf4601e7888d7a3ba",
+    "src/webtransport/h2/endpoint_server/init.zig": "efbb5f4a875e3a79c320745e988804a720790614fa1a25878905787b03753ff2",
+    "src/webtransport/h2/endpoint_server/init_tests.zig": "c789e7553b5d1f77a1fcbd8abd59e351904e41ea2578a7026b7a26fd21de8036",
+    "src/webtransport/h2/endpoint_server/worker.zig": "46a3de1778d84536e1af7c196293c7618059e83b64238ec2b9c56c7942a41bcd",
+    "src/webtransport/h2/endpoint_listener.zig": "b431e33206b50893f0cee8506589c27dcf5b412a18613eeb35a422196861ef64",
+    "src/webtransport/h2/endpoint_listener/core.zig": "c8541a99a54b584e190d31a05e8c645dadac880d4405e798b76282479861f11c",
+    "src/webtransport/h2/endpoint_listener/admission_tests.zig": "2329e47d42009a7c73562ed89559b923fcff1de0d2b2a84ff9ab0d16114fc427",
+    "src/http2/runtime.zig": "3ee4ed1fab02189f78b68f42205cfbf3d73206ce0b8b0ca63265c87493e870ef",
+    "tools/interop/webtransport_h2/driver.zig": "ef0e1f65a7b2f1b42b144c3690b9a7a8f8fe19e594bc3ee782d5f480d318041e"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_owner_admission/2026-11-02/webtransport-http2.Debug.log": "5d22b94bcf9b5be4fefedbd2459db7871a13bbfd8fb7a4109f888019d4deb06c",
+    "docs/evidence/webtransport_h2_owner_admission/2026-11-02/package.Debug.log": "59e3ddb7641586d257610be02b4521036303941bdc287b4998d39b9d2238ed47",
+    "docs/evidence/webtransport_h2_owner_admission/2026-11-02/interop-python.Debug.log": "99f5b0db8d57082c99e4e49488caa03fd0a7019230201890139bd524296aa4da"
+  },
+  "limitations": [
+    "final owner destruction still joins cooperative I/O tasks; this evidence does not claim preemption of arbitrary custom allocator or I/O callbacks",
+    "listener reservation, connection-table publication/lookup and close pacing retain separate lifecycle budgets",
+    "broader protocol integration and multi-hour/high-concurrency evidence remain open for the overall library goal"
+  ]
+}

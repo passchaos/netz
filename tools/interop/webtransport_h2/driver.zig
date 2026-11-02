@@ -267,7 +267,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         connection_owned = false;
-        var endpoint = try wt.EndpointServer.init(allocator, connection, .{ .max_sessions = 1, .max_pending_sessions = 1 });
+        var endpoint = try wt.EndpointServer.initWithDeadline(allocator, connection, .{ .max_sessions = 1, .max_pending_sessions = 1 }, until);
         defer endpoint.deinit();
         try reuseServerEndpoint(endpoint, until);
     } else return error.InvalidArgument;

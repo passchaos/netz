@@ -14,6 +14,11 @@ pub fn Worker(comptime State: type) type {
         pub fn run(state: *State) std.Io.Cancelable!void {
             var terminal: ?anyerror = null;
             defer {
+                const abortive = state.abortive_shutdown.load(.acquire);
+                if (abortive) {
+                    state.connection.aggregate_timeout_unusable = true;
+                    state.connection.terminal_write_failed = true;
+                }
                 for (state.pending) |*slot| {
                     slot.cleanup.retire();
                     _ = slot.cleanup.take();
@@ -29,13 +34,17 @@ pub fn Worker(comptime State: type) type {
                 };
                 state.pending_count = 0;
                 state.session_count = 0;
-                state.connection.close();
+                if (abortive) state.connection.closeWithoutCloseNotify() else state.connection.close();
                 state.workerStopped(terminal);
                 state.release();
             }
             while (true) {
                 while (true) {
                     const claimed = state.claim();
+                    if (state.abortive_shutdown.load(.acquire)) {
+                        if (claimed) |job| _ = state.finish(job, error.EndpointClosed);
+                        return;
+                    }
                     cleanup.drain(state, removePending);
                     const job = claimed orelse break;
                     job.checkExecution(state.io) catch |err| {
@@ -61,7 +70,7 @@ pub fn Worker(comptime State: type) type {
                 };
                 if (buffered.progress and !buffered.blocked) continue;
                 state.lock();
-                if (state.closed) {
+                if (state.closed or state.abortive_shutdown.load(.acquire)) {
                     state.unlock();
                     return;
                 }
@@ -70,6 +79,10 @@ pub fn Worker(comptime State: type) type {
                     continue;
                 }
                 @import("../endpoint/wake.zig").clear(&state.wake);
+                if (state.abortive_shutdown.load(.acquire)) {
+                    state.unlock();
+                    return;
+                }
                 if (state.cleanup_pending.load(.acquire)) {
                     state.unlock();
                     continue;

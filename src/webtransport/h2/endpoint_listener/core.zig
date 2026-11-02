@@ -102,17 +102,21 @@ pub const ManagedConnection = struct {
         allocator: std.mem.Allocator,
         connection: http2.runtime.Connection,
         options: endpoint.Options,
+        deadline: std.Io.Clock.Timestamp,
     ) Error!*ManagedConnection {
         var owned_connection = connection;
         var connection_owned = true;
-        errdefer if (connection_owned) owned_connection.close();
+        errdefer if (connection_owned) owned_connection.closeWithoutCloseNotify();
+        _ = try @import("../../../internal/deadline.zig").usableAwake(owned_connection.io, deadline);
+        try owned_connection.io.checkCancel();
         const self = try allocator.create(ManagedConnection);
         errdefer allocator.destroy(self);
         connection_owned = false;
-        const server = try endpoint.EndpointServer.init(
+        const server = try endpoint.EndpointServer.initWithDeadline(
             allocator,
             owned_connection,
             options,
+            deadline,
         );
         self.* = .{
             .allocator = allocator,
@@ -422,10 +426,12 @@ pub fn acceptLoop(state: *State) std.Io.Cancelable!void {
             state.allocator,
             raw,
             state.options.endpoint,
-        ) catch {
+            .fromNow(state.io, .{ .clock = .awake, .raw = state.options.endpoint.operation_timeout }),
+        ) catch |err| {
             raw_owned = false;
             state.releaseReservation(reservation);
             reserved = false;
+            if (err == error.Canceled) return error.Canceled;
             continue;
         };
         raw_owned = false;

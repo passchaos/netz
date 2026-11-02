@@ -25,25 +25,5 @@ pub fn create(comptime Client: type, comptime State: type, comptime Slot: type, 
     connection_owned = false;
     state_owned = false;
     slots_owned = false;
-    state.retain();
-    state.group.concurrent(state.io, start, .{state}) catch |err| {
-        state.closed = true;
-        state.worker_stopped = true;
-        if (deadline != null) state.connection.closeWithoutCloseNotify() else state.connection.close();
-        state.release();
-        state.release();
-        return err;
-    };
-    var client = Client{ .state = state };
-    if (deadline) |until| {
-        _ = deadline_policy.usableAwake(state.io, until) catch |err| {
-            client.deinitAbortive();
-            return err;
-        };
-        state.io.checkCancel() catch |err| {
-            client.deinitAbortive();
-            return err;
-        };
-    }
-    return client;
+    return @import("../endpoint/initialization.zig").start(Client, start, state, deadline);
 }

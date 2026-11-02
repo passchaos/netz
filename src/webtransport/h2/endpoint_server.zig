@@ -68,6 +68,7 @@ const State = struct {
     cleanup_pending: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
     worker_stopped: bool = false,
+    abortive_shutdown: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
 
     pub const Job = job_mod.Job(State);
@@ -292,41 +293,22 @@ pub const EndpointServer = struct {
 
     /// Takes ownership of an already negotiated server HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointServer {
-        var connection = connection_value;
-        var connection_owned = true;
-        errdefer if (connection_owned) connection.close();
-        try options.validate();
-        const state = try allocator.create(State);
-        var state_owned = true;
-        errdefer if (state_owned) allocator.destroy(state);
-        const pending = try allocator.alloc(PendingSlot, options.max_pending_sessions);
-        var pending_owned = true;
-        errdefer if (pending_owned) allocator.free(pending);
-        const sessions = try allocator.alloc(SessionSlot, options.max_sessions);
-        var sessions_owned = true;
-        errdefer if (sessions_owned) allocator.free(sessions);
-        @memset(pending, .{});
-        @memset(sessions, .{});
-        state.* = .{ .allocator = allocator, .io = connection.io, .options = options, .connection = connection, .pending = pending, .sessions = sessions };
-        connection_owned = false;
-        state_owned = false;
-        pending_owned = false;
-        sessions_owned = false;
-        state.retain();
-        state.group.concurrent(state.io, State.Worker.run, .{state}) catch |err| {
-            state.closed = true;
-            state.worker_stopped = true;
-            state.connection.close();
-            state.release();
-            state.release();
-            return err;
-        };
-        return .{ .state = state };
+        return initUntil(allocator, connection_value, options, null);
+    }
+
+    /// Transfer ownership on entry, including timeout and cancellation. A
+    /// failed or late owner is stopped without further protocol shutdown output.
+    pub fn initWithDeadline(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointServer {
+        return initUntil(allocator, connection_value, options, deadline);
+    }
+
+    fn initUntil(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, deadline: ?std.Io.Clock.Timestamp) Error!EndpointServer {
+        return @import("endpoint_server/init.zig").create(EndpointServer, State, PendingSlot, SessionSlot, State.Worker.run, allocator, connection_value, options, deadline);
     }
     pub fn acceptConnectionWithDeadline(allocator: std.mem.Allocator, listener: *http2.runtime.Server, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointServer {
         try options.validate();
         const connection = try listener.acceptWithDeadline(deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn acceptConnectionWithTimeout(allocator: std.mem.Allocator, listener: *http2.runtime.Server, options: Options, timeout: std.Io.Duration) Error!EndpointServer {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -335,7 +317,7 @@ pub const EndpointServer = struct {
     pub fn acceptTlsConnectionWithDeadline(allocator: std.mem.Allocator, listener: *http2.runtime.TlsServer, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointServer {
         try options.validate();
         const connection = try listener.acceptWithDeadline(deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn acceptTlsConnectionWithTimeout(allocator: std.mem.Allocator, listener: *http2.runtime.TlsServer, options: Options, timeout: std.Io.Duration) Error!EndpointServer {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -505,6 +487,17 @@ pub const EndpointServer = struct {
         self.state.close();
     }
 
+    /// Request abortive owner cleanup without acquiring the endpoint mutex.
+    pub fn requestShutdownAbortive(self: EndpointServer) void {
+        self.state.abortive_shutdown.store(true, .release);
+        self.state.wake.set(self.state.io);
+    }
+
+    pub fn deinitAbortive(self: *EndpointServer) void {
+        self.requestShutdownAbortive();
+        self.deinit();
+    }
+
     pub fn deinit(self: *EndpointServer) void {
         const state = self.state;
         state.close();
@@ -519,4 +512,5 @@ test {
     _ = @import("endpoint_server/admission_tests.zig");
     _ = @import("endpoint_server/waiter_tests.zig");
     _ = @import("endpoint_server/cleanup_tests.zig");
+    _ = @import("endpoint_server/init_tests.zig");
 }

@@ -1,0 +1,103 @@
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true
+WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true
+WebTransport HTTP2 client passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true
+WebTransport HTTP2 server passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+{
+  "alpn": "h2",
+  "driver_sha256": "65827915c345d25e5046f4a3ad2deccf6cc7d742995bf4a953c978179fd0a3be",
+  "native_client_dropped_cleanup": {
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "native_client_endpoint_queue": {
+    "connect": true,
+    "datagram": true,
+    "owned_results": true,
+    "receive": true,
+    "reuse_after_error": true
+  },
+  "native_server_pending_cleanup": {
+    "queue": true,
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "protocol": "draft-ietf-webtrans-http2-15",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "ef0e1f65a7b2f1b42b144c3690b9a7a8f8fe19e594bc3ee782d5f480d318041e",
+    "peer.py": "1c36f4bf08e106404a5dc6a1937fe178e6fdaafa4ba5312a7961e0d34f56a462",
+    "run.py": "bde65bd8135f043e46ff1e68fce5f80b28c687f98e4f4a4df737f87e17672a15",
+    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "status": "passed",
+  "tls": "TLSv1.3",
+  "traces": [
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_connect_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "server",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    },
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_pending_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "client",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    }
+  ]
+}
+WebTransport HTTP2 Python interoperability passed: directions=2 rejected=429 independent_capsules=true
+Build Summary: 8/8 steps succeeded
+interop-webtransport-h2-python success
++- run uv success 768ms
+   +- compile exe netz-webtransport-h2-interop Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:28M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:28M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+

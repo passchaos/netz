@@ -2098,6 +2098,38 @@ TLS/h2 directions. Both client and server queue/cleanup paths now have
 independent wire checks. Logs and source hashes are recorded in
 `docs/evidence/webtransport_h2_server_admission/2026-11-02.json`.
 
+`EndpointServer.initWithDeadline` now carries a connection's original caller
+budget through fixed-table allocation and owner startup. It transfers
+ownership on entry, including Timeout, Canceled and allocation/admission
+failure. The deadline and cancellation are checked before allocating tables,
+before assigning the worker and after startup. Late or failed candidates are
+stopped and joined through explicit abortive cleanup, releasing their transport
+without extending failure cleanup with protocol shutdown output.
+Both cleartext and TLS accept deadline constructors use this path. Client and
+server owner startup and rollback now share `endpoint/initialization.zig`.
+
+The multi-connection listener also bounds managed-owner creation after raw
+acceptance using its configured endpoint operation timeout. Its accept loop
+returns on owner-admission cancellation after releasing the connection
+reservation, preserving the task's cancellation boundary instead of ignoring
+it and entering another accept. Listener connection-table publication and
+lookup retain their separate mutex-admission verification boundaries.
+
+Socket-backed initialization cases cover expired and wrong-clock budgets,
+cancellation at entry, cancellation after table allocation and after worker
+startup, each fixed allocation failure, unavailable owner concurrency, and
+clock expiry during allocation or just after the worker is assigned. Failed
+adoption requires physical TCP EOF with no protocol bytes, and an allocation
+failure sweep checks complete provisional-table reclamation. A real listener
+case cancels the first managed-owner admission, then requires its accept group
+to finish and its connection reservation to be released. The independent
+Python TLS/h2 server queue path now adopts through the deadline constructor.
+
+The complete WebTransport HTTP2 gate passed 203/203 tests, the package gate
+passed 26/26, and the independent Python TLS/h2 runner passed 8/8 build steps
+in both directions. Logs and source hashes are recorded in
+`docs/evidence/webtransport_h2_owner_admission/2026-11-02.json`.
+
 `h2.EndpointListener` now owns the HTTP/2 listener and a bounded set of those
 per-connection EndpointServer owners. Concurrent accept workers prevent one
 slow handshake from blocking every new peer. A fixed connection table and
