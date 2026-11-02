@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "larger SharedChannel read turn for 256-KiB messages",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "07096182",
+    "read_turn_bytes": 65536,
+    "write_turn_bytes": 65536,
+    "binary_sha256": "ceca495dad0fba3223d5f76cfda70efa8f78e19e1749a1e7b4486942a54124d5"
+  },
+  "candidate": {
+    "read_turn_bytes": 262144,
+    "write_turn_bytes": 65536,
+    "design": "A separate max_read_bytes_per_turn option let the shared reader feed a 256-KiB ring region to the decoder in one turn while keeping the write turn at 64 KiB."
+  },
+  "scope": {
+    "workload": "SharedChannel persistent duplex, 262144-byte payload",
+    "allocator": "cached",
+    "iterations": 200,
+    "warmup": 20,
+    "validation": "full bytes plus peer completion"
+  },
+  "benchmark_method": {
+    "harness": "netz-bench-grpc-shared --cached-allocator --payload=262144 --iterations=200 --warmup=20",
+    "schedule": "five ABBA rounds; default, candidate, candidate, default",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [441890, 465323, 439745, 439920, 441735, 445802, 441099, 441796, 441522, 450264],
+    "candidate_samples_ns": [449102, 466303, 456245, 464007, 435460, 447286, 447513, 469481, 438267, 442890],
+    "baseline_median_ns": 441765.5,
+    "candidate_median_ns": 448307.5,
+    "candidate_over_baseline": 1.0148,
+    "round_wins": "2/5 ABBA rounds",
+    "paired_ratios": [1.0090, 1.0461, 0.9946, 1.0386, 0.9881]
+  },
+  "conclusion": "A 256-KiB read turn did not reduce the persistent large-message cost; the extra ring region and larger feed hurt more than any direct-delivery benefit. The option and code changes were reverted."
+}

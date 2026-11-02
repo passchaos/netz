@@ -814,3 +814,13 @@ is 11.2% slower for the persistent 256-KiB streaming ping-pong, and is 2.3%
 faster for the 256-KiB per-call RPC mode. This supersedes the earlier
 1.2-1.25x large-message estimate. Full rows and binary identities are in
 `docs/evidence/grpc_cpp_official_cached/2026-11-02.json`.
+
+## Rejected larger read turn (2026-11-02)
+
+A separate `max_read_bytes_per_turn` option was measured against the 64-KiB
+default while keeping the write turn at 64 KiB. Five ABBA rounds of the
+256-KiB persistent workload moved the median from 441,765.5 ns to 448,307.5 ns
+(1.5% slower, 2/5 wins). A larger read region did not reduce the persistent
+large-message cost; the extra ring region and feed size cost more than any
+direct-delivery benefit. The option and code changes were reverted. Rows are
+in `docs/evidence/grpc_shared_read_turn_rejected/2026-11-02.json`.
