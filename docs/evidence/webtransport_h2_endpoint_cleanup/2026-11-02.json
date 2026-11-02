@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "allocation-free generation-scoped EndpointClient accepted-result cleanup",
+  "decision": "accepted",
+  "base_head": "ff6e1969",
+  "behavior": {
+    "drop": "dropping an accepted CONNECT result publishes one atomic removal request for its fixed slot without allocating a Job, taking the endpoint mutex or occupying the command queue",
+    "capacity": "at most one pending generation per fixed Session slot; requests coalesce and one endpoint pending flag avoids scanning slots on ordinary turns without cleanup work",
+    "generation": "live generation publication precedes result delivery; retirement clears it before resource release; pending is acquired before checking live generation so an old request cannot replace a newer generation request",
+    "owner": "after claiming a command, process cleanup before execution, including cleanup published while claim was waiting on the mutex; recheck the cleanup flag after wake reset to retain a concurrent request",
+    "lifetime": "the accepted result retains State through its request publication; owner shutdown retires fixed slots, so retained accepted results remain safe to drop after the endpoint owner is destroyed"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 194,
+      "total": 194,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "native_client_connect_requests": 5,
+      "native_server_connect_requests": 4,
+      "dropped_reset_code": 8,
+      "same_slot_new_generation": true,
+      "connection_reused": true,
+      "exit_code": 0
+    },
+    "regressions": [
+      "duplicate removal requests coalesce; the valid new generation replaces an already pending stale request; subsequent stale requests cannot overwrite it",
+      "drop an accepted result while endpoint mutex is held and command queue is full, with both available and denied caller allocations; require zero allocation attempts and no mutex wait, unchanged queue links/count and no new Job reference",
+      "the real owner processes cleanup published while claim was blocked before executing the existing command; occupied failed Session marker is removed and its generation advances",
+      "retain an accepted result across endpoint owner destruction, then drop it with caller allocation disabled without touching freed State",
+      "real authenticated TLS multiplexed-Session case drops a genuine accepted result under the endpoint mutex with caller allocations denied; cleanup stays pending without another queue entry and subsequent traffic proceeds",
+      "independent Python peer accepts a CONNECT that is dropped, requires RST_STREAM(CANCEL), then receives a new CONNECT on the same connection; native max_sessions=1 client requires the same slot with a new generation and exchanges exact DATAGRAM and CLOSE"
+    ],
+    "fault_boundary": "allocation denial is restricted to the dropping caller; these tests prove cleanup publication cannot fail from caller Job allocation or mutex admission, and do not assert behavior of arbitrary allocator failures in later wire output",
+    "reference_peer_packages": {
+      "h2": "4.3.0",
+      "hpack": "4.1.0",
+      "hyperframe": "6.1.0"
+    }
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client.zig": "2512a0aa04ac61bcdbd891e04cdaef1dfe8eada6a3fb2e94a615780bcfe09c9f",
+    "src/webtransport/h2/endpoint_client/cleanup.zig": "891aac6997dc533c0beb3e238826e7819980891971167adf9a0d8dc7d53a01c1",
+    "src/webtransport/h2/endpoint_client/cleanup_tests.zig": "2d675180e3d0b045e34dfdedc048866eae5adf45f30d6aca5dedc9885148fa78",
+    "src/webtransport/h2/endpoint_client/testing/drop_faults.zig": "1091b717b28cb49a8caa30290506a5ec5e5851a05234449712eadaff0c1ec3f2",
+    "src/webtransport/h2/endpoint_client/tests.zig": "9178bde779aa68d7b81b0ea66a05acebf3038ff81b2a3899085db7500368f734",
+    "src/webtransport/h2/endpoint_client/worker.zig": "a0f3257953694ca2c101bca464c3c45e3d66ff26b4dc10b880bd8dae303e74cc",
+    "src/webtransport/h2/endpoint_client/job.zig": "140ea213ef4159ef573a2dbac9a33a5742dd1970d7ac55425e63e1f979de2674",
+    "src/webtransport/h2/endpoint_client/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
+    "src/webtransport/h2/session.zig": "49ecd75cb98de627659472ea64ff10d1b781532daca6385bf746847e87b5d9ad",
+    "tools/interop/webtransport_h2/driver.zig": "4dfdcb50d9a68e665a4c1a05ab49a4b6015982a67ae68658dc30b1a684743748",
+    "tools/interop/webtransport_h2/peer.py": "0c97af63ddfbf34c56a883ebd59fef5a78de08cc80888361eacdd5d74ab7bb37",
+    "tools/interop/webtransport_h2/run.py": "7716c3cf439c854e21cb5fc183f0c91959e277ae39b4abfd3f00cd31efedf768",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_endpoint_cleanup/2026-11-02/webtransport-http2.Debug.log": "03048ff309802ca03ec0e98a2098c1ac59cc194100514509aafe51c54ee64470",
+    "docs/evidence/webtransport_h2_endpoint_cleanup/2026-11-02/package.Debug.log": "84c503031e2f94cfb31c47671c6dfb90c339626c7c6019ba47e2a4f9bd028f32",
+    "docs/evidence/webtransport_h2_endpoint_cleanup/2026-11-02/interop-python.Debug.log": "ed540fe60ba00796371bc5750b1fa33682441c18bec1f8f247384ab9b2ca91bb"
+  },
+  "remaining_scope": "server admission/cleanup surfaces, broad protocol integration and multi-hour/high-concurrency evidence remain open for the full library goal"
+}

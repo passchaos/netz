@@ -176,7 +176,8 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     var peer_task = io.async(Peer.run, .{&peer});
     defer _ = peer_task.cancel(io) catch {};
 
-    var client = try endpoint.EndpointClient.connectTlsAddressWithTimeout(allocator, io, server.address(), "localhost", "localhost", .{ .enable_connect_protocol = true, .webtransport = credit }, .{
+    var drop_faults = @import("testing/drop_faults.zig").Faults{ .caller = std.Thread.getCurrentId(), .base = io };
+    var client = try endpoint.EndpointClient.connectTlsAddressWithTimeout(drop_faults.allocator(), io, server.address(), "localhost", "localhost", .{ .enable_connect_protocol = true, .webtransport = credit }, .{
         .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() },
         .protocol_policy = .tls13_only,
     }, .{ .max_sessions = 2 }, .fromSeconds(3));
@@ -269,7 +270,19 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
 
     var dropped_attempt = try client.connectAttemptWithTimeout(.{ .path = "/dropped", .authority = "localhost" }, .fromSeconds(3));
     try std.testing.expect(dropped_attempt.accepted());
-    dropped_attempt.deinit();
+    const dropped = dropped_attempt.accepted_session.?.handle;
+    {
+        client.state.mutex.lockUncancelable(io);
+        defer client.state.mutex.unlock(io);
+        drop_faults.tracking.store(true, .release);
+        drop_faults.deny.store(true, .release);
+        defer drop_faults.tracking.store(false, .release);
+        const queued = client.state.queued;
+        dropped_attempt.deinit();
+        try std.testing.expectEqual(@as(usize, 0), drop_faults.attempts.load(.acquire));
+        try std.testing.expectEqual(queued, client.state.queued);
+        try std.testing.expectEqual(dropped.generation, client.state.slots[dropped.index].cleanup.pending.load(.acquire));
+    }
 
     const OpenAttempt = struct {
         fn run(value: endpoint.EndpointClient) !endpoint.ConnectAttempt {

@@ -270,10 +270,15 @@ class Peer:
         self.send(bad, stream(uni, b"abc") + control(RESET, uni, 42, 2))
         kind, sid, code = self.event()
         assert (kind, sid) == ("reset", bad), (kind, sid, code)
+        if not self.client:
+            dropped = self.additional("/drop")
+            kind, sid, code = self.event()
+            assert (kind, sid, code) == ("reset", dropped, 8), (kind, sid, code)
+            result.update(dropped_connect_cleanup=True, dropped_reset_code=8)
         good = self.additional("/reuse")
         incoming = self.capsules(good)
         assert next(incoming) == (DATAGRAM, b"after-error")
         self.send(good, capsule(DATAGRAM, b"still-healthy") + capsule(CLOSE, (18).to_bytes(4, "big")), True)
         assert list(incoming) == []
-        result.update(invalid_reset_scoped=True, reuse_after_error=True, connect_requests=4)
+        result.update(invalid_reset_scoped=True, reuse_after_error=True, connect_requests=4 if self.client else 5)
         return result

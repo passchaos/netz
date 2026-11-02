@@ -2003,14 +2003,48 @@ queue commit, capacity refusal, delayed owner execution and owned-result
 lifetime. The Python TLS/h2 gate now carries its final post-error Session
 through the production EndpointClient queue, requiring queued CONNECT,
 DATAGRAM and receive to preserve the exact response and owned payloads on the
-same connection. Detached cleanup requests retain their separate admission
-and lifecycle policy.
+same connection. Accepted-result cleanup now uses the fixed-slot request
+mechanism described below rather than another queue command.
 
 The complete WebTransport HTTP2 gate passed 191/191 tests, the package gate
 passed 26/26, and the expanded independent Python TLS/h2 runner passed 8/8
 build steps in both directions. Its native client now verifies the production
 queue on the reused connection. Logs and source hashes are recorded in
 `docs/evidence/webtransport_h2_endpoint_queue/2026-11-02.json`.
+
+Dropping an accepted EndpointClient CONNECT attempt now requests Session
+removal without allocating a Job or acquiring the endpoint mutex. Each fixed
+slot publishes its live generation and holds one atomic pending removal
+generation. Repeated requests coalesce, while a stale result cannot overwrite
+a newer generation's request or remove the Session that reused its slot. One
+endpoint-level pending flag keeps ordinary command turns from rescanning slots
+when there is no cleanup work. The request holds no additional queue entry or
+parent reference; the accepted result's existing State reference keeps the
+fixed slots alive through publication.
+
+The owner drains removal requests after claiming a command, before executing
+it, so requests arriving during mutex contention are handled before the next
+Session operation. It also rechecks pending cleanup after resetting its wake
+event, preserving a concurrent dropped-result notification. Session removal
+retires the published generation before releasing Session state and advancing
+the slot's generation. Owner shutdown retires every slot before its resources
+are released; accepted results retained past shutdown remain safe to drop.
+
+The queue-full and mutex-contention regression drops an accepted result with
+caller allocation disabled, requires zero allocation attempts and no mutex
+wait, then checks that the owner removes its occupied slot before processing
+the queued command. Another case retains the result across owner destruction.
+The real TLS multiplexed-Session test also disables caller allocations while
+dropping a genuine accepted result under the endpoint mutex. The independent
+Python peer adds a dropped CONNECT, requires RST_STREAM(CANCEL), then exchanges
+DATAGRAM and CLOSE on the same connection. The native client requires reuse of
+the one Session slot with a new generation.
+
+The complete WebTransport HTTP2 gate passed 194/194 tests, the package gate
+passed 26/26, and the expanded Python TLS/h2 runner passed 8/8 build steps in
+both directions. The caller-allocation fault boundary and independently
+observed CANCEL/slot reuse are recorded with source hashes and logs in
+`docs/evidence/webtransport_h2_endpoint_cleanup/2026-11-02.json`.
 
 `h2.EndpointServer` now supplies the matching connection owner: a wake-aware
 server pump separates new CONNECT admission from routed Session input, pending

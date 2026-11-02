@@ -2,6 +2,7 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
 const job_mod = @import("job.zig");
+const cleanup = @import("cleanup.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -15,11 +16,15 @@ pub fn Worker(comptime State: type) type {
                     state.connection.aggregate_timeout_unusable = true;
                     state.connection.terminal_write_failed = true;
                 }
-                for (state.slots) |*slot| if (slot.session) |*session| {
-                    session.deinit();
-                    slot.session = null;
+                for (state.slots) |*slot| {
+                    slot.cleanup.retire();
+                    _ = slot.cleanup.take();
+                    if (slot.session) |*session| {
+                        session.deinit();
+                        slot.session = null;
+                    }
                     slot.failure = null;
-                };
+                }
                 state.active_sessions = 0;
                 if (abortive) state.connection.closeWithoutCloseNotify() else state.connection.close();
                 state.workerStopped(terminal);
@@ -27,7 +32,9 @@ pub fn Worker(comptime State: type) type {
             }
             while (true) {
                 while (!state.abortive_shutdown.load(.acquire)) {
-                    const job = state.claim() orelse break;
+                    const claimed = state.claim();
+                    cleanup.drain(state, removeHandle);
+                    const job = claimed orelse break;
                     job.checkExecution(state.io) catch |err| {
                         _ = state.finish(job, err);
                         continue;
@@ -67,6 +74,12 @@ pub fn Worker(comptime State: type) type {
                 if (state.abortive_shutdown.load(.acquire)) {
                     state.unlock();
                     return;
+                }
+                // Cleanup requests publish without acquiring this mutex.
+                // Recheck after reset to retain a simultaneously queued drop.
+                if (cleanup.pending(state)) {
+                    state.unlock();
+                    continue;
                 }
                 const active = state.connection.activeClientDuplexCount() != 0;
                 state.unlock();
@@ -226,6 +239,7 @@ pub fn Worker(comptime State: type) type {
                 errdefer accepted.deinit();
                 slot.session = session;
                 state.active_sessions += 1;
+                slot.cleanup.publish(slot.generation);
                 job.accepted = accepted;
                 return;
             };
@@ -240,6 +254,7 @@ pub fn Worker(comptime State: type) type {
             if (slot.generation != handle.generation or !slot.occupied()) {
                 return false;
             }
+            slot.cleanup.retire();
             if (slot.session) |*session| session.deinit();
             slot.session = null;
             slot.failure = null;

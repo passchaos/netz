@@ -109,6 +109,18 @@ fn nextEndpoint(client: wt.EndpointClient, handle: wt.endpoint_client.Handle, un
 }
 
 fn reuseEndpoint(client: wt.EndpointClient, until: std.Io.Clock.Timestamp) !void {
+    var dropped = try client.connectAttemptWithDeadline(.{
+        .path = "/drop",
+        .authority = "origin.internal",
+        .protocols = .{ .values = &.{ "interop", "other" }, .required = true },
+        .initial_receive_stream_data = init_credit,
+    }, until);
+    var dropped_owned = true;
+    defer if (dropped_owned) dropped.deinit();
+    try std.testing.expect(dropped.accepted());
+    const prior = dropped.accepted_session.?.handle;
+    dropped.deinit();
+    dropped_owned = false;
     var attempt = try client.connectAttemptWithDeadline(.{
         .path = "/reuse",
         .authority = "origin.internal",
@@ -122,6 +134,8 @@ fn reuseEndpoint(client: wt.EndpointClient, until: std.Io.Clock.Timestamp) !void
     defer accepted.deinit();
     try std.testing.expectEqual(@as(u16, 200), accepted.status);
     try std.testing.expectEqualStrings("interop", accepted.selected_protocol.?);
+    try std.testing.expectEqual(prior.index, accepted.handle.index);
+    try std.testing.expect(prior.generation != accepted.handle.generation);
     try client.sendDatagramWithDeadline(accepted.handle, "after-error", until);
     var reply = try nextEndpoint(client, accepted.handle, until);
     defer reply.deinit();
@@ -129,6 +143,7 @@ fn reuseEndpoint(client: wt.EndpointClient, until: std.Io.Clock.Timestamp) !void
     var closed = try nextEndpoint(client, accepted.handle, until);
     defer closed.deinit();
     try std.testing.expectEqual(@as(u32, 18), closed.value.closed.code);
+    std.debug.print("WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true\n", .{});
     std.debug.print("WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true\n", .{});
 }
 

@@ -48,6 +48,9 @@ For each Netz client/server direction, one TLS connection carries:
    In the Netz client direction this final Session uses the background
    `EndpointClient` command queue, checking queued CONNECT, DATAGRAM, receive,
    owned results and continued reuse after the preceding Session error.
+   Before that final reuse, an extra accepted CONNECT is dropped. The Python
+   peer requires `RST_STREAM(CANCEL)` and the native client requires reuse of
+   the one Session slot with a new generation.
 
 The runner fails on missing transcript steps, wrong payloads/codes, incomplete
 capsules, unexpected connection termination, failed subprocesses, or Python

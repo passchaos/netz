@@ -53,7 +53,7 @@ pub const ConnectAttempt = struct {
     pub fn deinit(self: *ConnectAttempt) void {
         if (self.accepted_session) |*value| {
             if (self.state) |state| {
-                state.enqueueDetached(.{ .remove = value.handle });
+                @import("endpoint_client/cleanup.zig").request(state, value.handle);
             }
             value.deinit();
         }
@@ -67,6 +67,7 @@ const Slot = struct {
     generation: u64 = 1,
     session: ?session_mod.Session = null,
     failure: ?anyerror = null,
+    cleanup: @import("endpoint_client/cleanup.zig").Request = .{},
 
     pub fn occupied(self: Slot) bool {
         return self.session != null or self.failure != null;
@@ -90,6 +91,7 @@ const State = struct {
     closed: bool = false,
     worker_stopped: bool = false,
     abortive_shutdown: std.atomic.Value(bool) = .init(false),
+    cleanup_pending: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
     failure_code: std.atomic.Value(u16) = .init(0),
 
@@ -135,24 +137,6 @@ const State = struct {
     fn enqueue(self: *State, job: *Job) Error!void {
         return @import("endpoint_client/queue.zig").enqueue(self, job) catch |err| return @errorCast(err);
     }
-    fn enqueueDetached(self: *State, operation: job_mod.Command) void {
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = self.options.operation_timeout, .clock = .awake });
-        const job = Job.create(self, operation, deadline) catch return;
-        self.lock();
-        if (self.closed or self.abortive_shutdown.load(.acquire) or self.failure != null) {
-            self.unlock();
-            job.release();
-            return;
-        }
-        job.retain();
-        if (self.tail) |tail| tail.next = job else self.head = job;
-        self.tail = job;
-        self.queued += 1;
-        self.wake.set(self.io);
-        self.unlock();
-        job.release();
-    }
-
     pub fn claim(self: *State) ?*Job {
         self.lock();
         defer self.unlock();
@@ -569,4 +553,5 @@ test {
     _ = @import("endpoint_client/admission_tests.zig");
     _ = @import("endpoint_client/job_tests.zig");
     _ = @import("endpoint_client/preparation_tests.zig");
+    _ = @import("endpoint_client/cleanup_tests.zig");
 }
