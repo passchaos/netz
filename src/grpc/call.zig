@@ -231,6 +231,8 @@ pub const UnaryCallOptions = struct {
     /// Precomputed grpc-core `RequestHashAttribute` value used by
     /// `ring_hash_experimental` when no requestHashHeader is configured.
     request_hash: ?u64 = null,
+    /// RPC-local xDS cluster attribute. It is never serialized as a header.
+    xds_cluster: ?[]const u8 = null,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

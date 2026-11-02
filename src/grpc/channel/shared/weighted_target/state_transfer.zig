@@ -22,7 +22,7 @@ pub fn Plan(comptime Runtime: type) type {
         }
 
         pub fn collect(self: *Self, old: *Node, next: *Node) std.mem.Allocator.Error!void {
-            if (!samePath(old.path, next.path)) return;
+            if (!samePath(old.path, next.path) or old.cluster_manager != next.cluster_manager) return;
             if (old.kind == .outlier and next.kind != .outlier) {
                 return self.collect(old.kind.outlier.child, next);
             }

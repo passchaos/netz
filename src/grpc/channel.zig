@@ -41,6 +41,7 @@ pub const ProxyDirectReason = proxy_policy.DirectReason;
 pub const Error = streaming.Error || resolver.Error || ConnectError || error{
     InvalidChannelOptions,
     MissingRequestHash,
+    UnknownCluster,
     ChannelBusy,
     ConnectionUnavailable,
     Canceled,
@@ -1181,6 +1182,10 @@ pub const Channel = struct {
         self: *Channel,
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
+        return self.warmForRequest(deadline, null);
+    }
+
+    fn warmForRequest(self: *Channel, deadline: std.Io.Clock.Timestamp, input: ?weighted_target.RequestInput) Error!usize {
         if (self.canceled.isSet()) return error.Canceled;
         self.exitIdle();
         try self.prepareSlots();
@@ -1190,6 +1195,7 @@ pub const Channel = struct {
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         for (self.slots, 0..) |*slot, index| {
             if (self.weighted_target_runtime) |*runtime| {
+                if (input) |request| if (!@import("channel/cluster_route.zig").accepts(runtime.root, request.xds_cluster, slot.endpoint.hierarchicalPath())) continue;
                 const state = runtime.pathState(
                     self.slots,
                     slot.endpoint.hierarchicalPath(),
@@ -1772,6 +1778,7 @@ pub const Channel = struct {
         input: weighted_target.RequestInput,
     ) Error!ReadyConnection {
         const runtime = &self.weighted_target_runtime.?;
+        try @import("channel/cluster_route.zig").validate(runtime.root, input.xds_cluster);
         while (true) {
             try self.ensureHostResolution(wait_for_ready, deadline);
             try self.waitForHealth(wait_for_ready, deadline);
@@ -1781,6 +1788,7 @@ pub const Channel = struct {
                     self.selected_index = null;
                 }
             }
+            if (!wait_for_ready and @import("channel/cluster_route.zig").contains(runtime.root) and runtime.clusterState(self.slots, input.xds_cluster) == .transient_failure) return error.ConnectionUnavailable;
             const pass_duration = self.connection_attempt_delay orelse
                 self.backoff_policy.min_connect_timeout;
             var pass_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
@@ -1797,7 +1805,7 @@ pub const Channel = struct {
                     pass_deadline = outer;
                 }
             }
-            _ = self.warmWithDeadline(pass_deadline) catch |err| switch (err) {
+            _ = self.warmForRequest(pass_deadline, input) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory, error.ConcurrencyUnavailable => return err,
                 error.Timeout, error.ConnectionUnavailable => {},
                 else => if (!wait_for_ready) return err,
@@ -2669,6 +2677,7 @@ fn leastRequestSlotOutstanding(self: *Channel, index: usize) usize {
 fn weightedTargetInput(options: anytype) weighted_target.RequestInput {
     return .{
         .request_hash = options.request_hash,
+        .xds_cluster = options.xds_cluster,
         .metadata = options.metadata,
     };
 }

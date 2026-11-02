@@ -2044,6 +2044,21 @@ pub fn build(b: *std.Build) void {
     const grpc_locality_step = b.step("interop-grpc-locality", "Verify xDS locality generation with official grpc-js-xds and ordinary/shared routing with grpc-js");
     grpc_locality_step.dependOn(&grpc_locality.step);
 
+    const grpc_cluster_manager_client = b.addExecutable(.{
+        .name = "netz-grpc-cluster-manager-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_cluster_manager/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_cluster_manager = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_cluster_manager/run.py" });
+    grpc_cluster_manager.addArtifactArg(grpc_cluster_manager_client);
+    if (b.args) |args| grpc_cluster_manager.addArgs(args);
+    const grpc_cluster_manager_step = b.step("interop-grpc-cluster-manager", "Verify per-RPC cluster picking, failed-child isolation and config updates with official grpc-js-xds/grpc-js");
+    grpc_cluster_manager_step.dependOn(&grpc_cluster_manager.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

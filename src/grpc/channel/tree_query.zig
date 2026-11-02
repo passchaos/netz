@@ -17,7 +17,7 @@ fn WeightedChild(comptime W: type) type {
         else => @typeInfo(@FieldType(W, "children")).pointer.child,
     };
 }
-fn weightedChildren(weighted: anytype) []const WeightedChild(@TypeOf(weighted)) {
+pub fn weightedChildren(weighted: anytype) []const WeightedChild(@TypeOf(weighted)) {
     return switch (@typeInfo(@TypeOf(weighted))) {
         .pointer => weighted,
         else => weighted.children,

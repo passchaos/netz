@@ -601,7 +601,8 @@ reset race from closing with unread upload bytes.
    `outlier_detection_experimental` composite policy described below.
    The xDS locality adapter now expands resolver locality weights through
    `xds_wrr_locality_experimental`, as described below. ADS discovery, cluster
-   implementation/manager and other xDS control-plane policies remain open.
+   implementation and other xDS control-plane policies remain open. Cluster
+   manager selection now follows each RPC-local cluster attribute below.
 
 Machine-readable SharedChannel ORCA evidence is recorded in
 `docs/evidence/grpc_cpp_shared_orca_oob/2026-10-31.json`.
@@ -3332,3 +3333,52 @@ locality. This is locality-policy and transport evidence; ADS discovery and the
 remaining xDS control plane require further work. Machine-readable results and
 source/reference digests are in
 `docs/evidence/grpc_xds_locality/2026-11-03.json`.
+
+
+## RPC-local xDS cluster manager
+
+`xds_cluster_manager_experimental` now accepts its `children` map, parses each
+required `childPolicy` list through the recursive service-config parser, and
+builds independently owned child policies in ordinary Channel and SharedChannel.
+The caller supplies `UnaryCallOptions.xds_cluster` or
+`StreamingRequestOptions.xds_cluster` for each RPC. This attribute is copied into
+shared request storage and never becomes HTTP/2 metadata. A missing attribute
+selects the empty cluster name, as grpc-core does; an unknown cluster returns
+`UnknownCluster` before request headers are submitted. Service-config selectors
+and ADS route discovery remain future integration work.
+
+In this resolver adapter, the next `hierarchical_path` element identifies the
+cluster. Its child then consumes remaining priority/locality/weighted-target
+path elements through the existing recursive runtime. Cluster names select
+children directly; their weights do not participate in weighted random routing.
+Connectivity observers still see the aggregate of all current children. Ordinary
+RPC connection attempts are scoped to its selected cluster, so an unrelated
+failing backend cannot spend that call's connection budget. Public warm calls
+retain their explicit all-child behavior.
+
+SharedChannel schedules the selected child for every queued unary or stream-open
+job. A failed child's wait-for-ready request stays queued under its original
+deadline while other children continue claiming their own requests. Fail-fast
+admission and later health/connectivity changes consult the selected child's
+state rather than an unrelated ready sibling. Unknown/removed cluster requests
+finish with their scoped error; timeouts and abandonment cannot leave cached
+worker pointers after worker destruction. Updating config resets provisional
+picks and migrates matching child state through the existing transaction.
+Removed children follow the bounded retention policy, already admitted RPCs can
+finish, and reintroduced children can reuse retained live transports.
+
+Adjacent tests cover malformed/deep configs, empty maps, selector lifetime,
+ordinary/shared child selection, exact round-robin within one selected child,
+duplex routing, failed-child queue isolation, no ordinary connection attempts
+to an unrelated refused child, removal/restoration, active RPC completion after
+removal, nested locality and constructor allocation rollback.
+`zig build interop-grpc-cluster-manager --summary all` additionally executes the
+official grpc-js-xds cluster-manager picker with deterministic child pickers:
+a/b select their exact children, while unknown and removed clusters report
+INTERNAL. Three official grpc-js servers independently verify native unary and
+duplex payloads, complete call counts, absence of selector headers and exactly
+one HTTP/2 session per backend across config changes. This supplies policy and
+transport evidence; the cluster implementation, ADS discovery, load reporting
+and other xDS control-plane integration remain open. Machine-readable logs and
+source/reference digests are recorded in
+`docs/evidence/grpc_cluster_manager/2026-11-03.json`.

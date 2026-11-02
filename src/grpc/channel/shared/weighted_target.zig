@@ -29,7 +29,7 @@ pub fn Runtime(comptime State: type) type {
         const BuildError = std.mem.Allocator.Error || error{
             InvalidSharedOptions,
         };
-        const PickError = BuildError || error{MissingRequestHash};
+        const PickError = BuildError || error{ MissingRequestHash, UnknownCluster };
 
         const Leaf = struct {
             policy: enum { pick_first, round_robin, least_request, ring_hash, weighted_round_robin },
@@ -86,6 +86,7 @@ pub fn Runtime(comptime State: type) type {
         };
 
         const Node = struct {
+            cluster_manager: bool = false,
             refs: std.atomic.Value(usize) = .init(1),
             path: []const []const u8,
             kind: union(enum) {
@@ -373,6 +374,17 @@ pub fn Runtime(comptime State: type) type {
             return self.aggregateNode(self.root, state);
         }
 
+        pub fn clusterState(self: *Self, state: *State, cluster: ?[]const u8) connectivity.State {
+            const Context = struct {
+                runtime: *Self,
+                state: *State,
+                fn get(context: @This(), node: *Node) connectivity.State {
+                    return context.runtime.aggregateNode(node, context.state);
+                }
+            };
+            return @import("../cluster_route.zig").aggregate(self.root, Context{ .runtime = self, .state = state }, cluster, Context.get);
+        }
+
         pub fn pick(self: *Self, state: *State, job: anytype) PickError!?*Worker {
             return self.pickNode(self.root, state, job);
         }
@@ -503,6 +515,11 @@ pub fn Runtime(comptime State: type) type {
                     path,
                     config_value,
                 ),
+                .cluster_manager => |children| blk: {
+                    const node = try self.buildWeighted(children, path);
+                    node.cluster_manager = true;
+                    break :blk node;
+                },
                 .xds_wrr_locality => return error.InvalidSharedOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
@@ -805,6 +822,7 @@ pub fn Runtime(comptime State: type) type {
             state: *State,
             job: anytype,
         ) PickError!?*Worker {
+            if (node.cluster_manager) return self.pickNode(try @import("../cluster_route.zig").select(node, @import("../cluster_route.zig").jobCluster(job)), state, job);
             return switch (node.kind) {
                 .leaf => |*leaf| self.pickLeaf(node, leaf, state, job),
                 .weighted => |weighted| blk: {

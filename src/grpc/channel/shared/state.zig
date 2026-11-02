@@ -493,18 +493,24 @@ pub const State = struct {
     pub fn recomputeLocked(self: *State) void {
         const aggregate = self.aggregateLocked();
         self.tracker.setState(aggregate);
-        if (aggregate == .transient_failure) {
-            var cursor = self.head;
-            while (cursor) |job| {
-                const next = job.next;
-                if (!job.wait_for_ready) {
-                    self.removeQueuedLocked(job);
-                    self.finishLocked(job, null, error.ConnectionUnavailable);
-                }
+        var cursor = self.head;
+        while (cursor) |job| {
+            const next = job.next;
+            if (self.weighted_target) |*runtime| @import("../cluster_route.zig").validate(runtime.root, @import("../cluster_route.zig").jobCluster(job)) catch |err| {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, err);
                 cursor = next;
+                continue;
+            };
+            const cluster_state = if (self.weighted_target) |*runtime| runtime.clusterState(self, @import("../cluster_route.zig").jobCluster(job)) else aggregate;
+            if (!job.wait_for_ready and cluster_state == .transient_failure) {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, error.ConnectionUnavailable);
             }
+            cursor = next;
         }
     }
+
     pub const ConnectionPolicy = struct {
         active: bool,
         wake_at: ?i96 = null,
@@ -560,6 +566,10 @@ pub const State = struct {
             break;
         };
         worker.tracker.setState(.shutdown);
+        var queued_job = self.head;
+        while (queued_job) |job| : (queued_job = job.next) {
+            if (job.selected_worker == worker) job.selected_worker = null;
+        }
         self.retention.removeWorker(worker);
         self.wrr_scheduler.remove(worker);
         self.ring_hash_dirty = true;
@@ -884,6 +894,11 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or worker.retired or worker.source.suspended or worker.pending_settings != null or self.head == null) return null;
+        if (self.weighted_target) |*runtime| if (@import("../cluster_route.zig").contains(runtime.root)) {
+            self.evaluateOutliersLocked();
+            const job = @import("cluster_dispatch.zig").choose(self, runtime, worker, removeQueuedLocked, finishLocked) orelse return null;
+            return self.claimJobLocked(worker, job);
+        };
         const picked = self.pickLocked(worker) catch |err| {
             const job = self.head.?;
             self.removeQueuedLocked(job);
@@ -891,7 +906,9 @@ pub const State = struct {
             return null;
         } orelse return null;
         if (picked != worker) return null;
-        const job = self.head.?;
+        return self.claimJobLocked(worker, self.head.?);
+    }
+    fn claimJobLocked(self: *State, worker: *Worker, job: *Job) *Job {
         self.removeQueuedLocked(job);
         job.setOwnerWake(worker.wake);
         worker.capacity -= 1;
@@ -903,11 +920,11 @@ pub const State = struct {
             runtime.commit(self, worker);
             self.weighted_target_selected = null;
         }
-        self.selected = picked;
+        self.selected = worker;
         var count: usize = 0;
         var next: usize = 0;
         for (self.sources) |source| {
-            for (source.current, count..) |member, ordinal| if (member == picked) {
+            for (source.current, count..) |member, ordinal| if (member == worker) {
                 next = ordinal + 1;
             };
             count += source.current.len;
@@ -922,6 +939,12 @@ pub const State = struct {
             self.unlock();
             return error.SharedChannelClosed;
         }
+        if (self.weighted_target) |*runtime| {
+            @import("../cluster_route.zig").validate(runtime.root, @import("../cluster_route.zig").jobCluster(job)) catch |err| {
+                self.unlock();
+                return err;
+            };
+        }
         if (self.policy == .ring_hash) {
             job.routing_hash = job.requestHash(self.io, self.ring_hash_config) catch |err| {
                 self.unlock();
@@ -932,7 +955,8 @@ pub const State = struct {
             self.unlock();
             return error.SharedQueueFull;
         }
-        if (!job.wait_for_ready and self.aggregateLocked() == .transient_failure) {
+        const readiness = if (self.weighted_target) |*runtime| runtime.clusterState(self, @import("../cluster_route.zig").jobCluster(job)) else self.aggregateLocked();
+        if (!job.wait_for_ready and readiness == .transient_failure) {
             self.unlock();
             return error.ConnectionUnavailable;
         }

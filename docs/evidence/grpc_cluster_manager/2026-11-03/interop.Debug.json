@@ -1,0 +1,92 @@
+{
+  "status": "passed",
+  "grpc_js": "1.14.7",
+  "grpc_js_xds": "1.14.2",
+  "official_picker": {
+    "routes": [
+      "a",
+      "b"
+    ],
+    "unknown_status": 13,
+    "removed_status": 13,
+    "surviving_cluster": "b"
+  },
+  "results": [
+    {
+      "mode": "ordinary",
+      "counts": [
+        20,
+        20,
+        21
+      ],
+      "unknown_cluster": true,
+      "duplex": true,
+      "queue_isolation": false,
+      "removed_restored": false,
+      "wire_counts": [
+        20,
+        20,
+        21
+      ],
+      "sessions": [
+        1,
+        1,
+        1
+      ],
+      "selector_headers_absent": true
+    },
+    {
+      "mode": "shared",
+      "counts": [
+        21,
+        20,
+        23
+      ],
+      "unknown_cluster": true,
+      "duplex": true,
+      "queue_isolation": true,
+      "removed_restored": true,
+      "wire_counts": [
+        21,
+        20,
+        23
+      ],
+      "sessions": [
+        1,
+        1,
+        1
+      ],
+      "selector_headers_absent": true
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "583828ccb407e79d49cc029a3355de5ecffdf2ba7818d48d2e9b4ef25bcf5a83",
+    "src/grpc/mod.zig": "8cebecb508c1a50777dcd460bfc8cb7661573a50d19edd1daeba941de2122234",
+    "src/grpc/call.zig": "697a217c44989d2e46363b8a389944dc1c6fd13fd3b29dab37fd79a55a38aebc",
+    "src/grpc/stream/runtime.zig": "f87c947232e0f237e0157557d866c65832441048e6e82c49c353d896c08374c6",
+    "src/grpc/service_config.zig": "8626a0ebafe98f4dd9006cf23f00bc4b02906aad18a78f44039c68f7bbd7238b",
+    "src/grpc/service_config/cluster_manager.zig": "b7878b73277819afe592d8ed36f4eb27b130bc86cbe7fd3a978a08fa8e47fbde",
+    "src/grpc/channel.zig": "f6fd789db166acae6b7feb87073ebd2f3631a79cebb76a648b08926c453639ad",
+    "src/grpc/channel/cluster_route.zig": "0055cc7c3e8eb69da65e9100cb014d26c35567ac4fd922b844a0c0d76150ac01",
+    "src/grpc/channel/cluster_manager_tests.zig": "173b6911e643c5eb760e48edbad0228160235ad6f87a32a4e1fe5c7bfc690c9b",
+    "src/grpc/channel/cluster_manager_lifecycle_tests.zig": "224c455e984b050ef9ac33291e4110654576fbb40c4145d6e6a2f2425a13fc4f",
+    "src/grpc/channel/locality.zig": "402655cab764db1eb18a5b096733e3c5a6d8d5ac9452bc4f0fe55400c9eca5cd",
+    "src/grpc/channel/tree_query.zig": "7c1273e8620429871a4f404709e1fc30b2b8d65572eaa945cfd603c1b4afe102",
+    "src/grpc/channel/weighted_target.zig": "db1f87d7b0acf3fc306497642e723c7ba0987ed0dac94a9f9cb8d0630b9ae3f6",
+    "src/grpc/channel/shared/weighted_target.zig": "a6e94eb2995e67979db597d31be5825e47256b27d6be015b5e8cebc69d5669c7",
+    "src/grpc/channel/shared/state.zig": "937ce240464f626f7784e73c3b243ef666fe2624e7ea371338408790866c2ce4",
+    "src/grpc/channel/shared/job.zig": "76a83ac98c9dda3897743e6e224968f1c739cb0dd240bf875c73aaab312d8210",
+    "src/grpc/channel/shared/request_inputs.zig": "d187b029660cd010860654e0afe6c9ef20f563076c12e3a0991e1dc62e51d44a",
+    "src/grpc/channel/shared/cluster_dispatch.zig": "6470ccbb7e4ab9053632077f63d6616dabc0a675af204ab6a788e5851e906196",
+    "src/grpc/channel/shared/update/publish.zig": "454083299c343089ac320763397d9d1eaaa0aa3ed3722fded8e4de9b0f0f8fa7",
+    "src/grpc/channel/shared/retention/plan.zig": "447f2014c3ecb21ac187a6629500ce65edbb53bde5bc369112e528a6e711bc96",
+    "src/grpc/channel/shared/weighted_target/state_transfer.zig": "d62d5eaced27485b5e121d242b1234b0cfeb52327b7a21a507ab39305594d168",
+    "tools/interop/grpc_cluster_manager/client.zig": "e8e7accd416f47bb296adcb3a2a05fd88ce6cca20ba825ce5ea66d9df7f887aa",
+    "tools/interop/grpc_cluster_manager/peer.js": "b10968f73ec5ba50aeb8fd7bcec8e459222258eef8c309c5db2bf4923a8ff722",
+    "tools/interop/grpc_cluster_manager/run.py": "8ebf6f872f51c5cf38fac487bd9a972055d7c793d2f8b91b701b1672b63317f5",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_sha256": "4f1d907c50f2aa497bb2944a7c55b77207b31483ed6183853829b7d800b5b0a8",
+  "client_sha256": "16c20b566e7144328d66439716346f37160ba52555ca917ead4f82a1c74b262e"
+}

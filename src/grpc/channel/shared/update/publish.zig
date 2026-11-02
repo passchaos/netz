@@ -208,6 +208,8 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     state.wrr_scheduler = .{};
     state.ring_hash_ring.deinit(allocator);
     state.ring_hash_dirty = true;
+    var reset_picks = state.head;
+    while (reset_picks) |job| : (reset_picks = job.next) job.selected_worker = null;
     var queued = state.head;
     if (!same_config or !same_policy) while (queued) |job| : (queued = job.next) {
         job.routing_hash = null;

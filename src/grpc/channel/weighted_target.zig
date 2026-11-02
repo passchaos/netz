@@ -17,6 +17,8 @@ const service_config = @import("../service_config.zig");
 
 pub const RequestInput = struct {
     request_hash: ?u64 = null,
+    /// RPC-local xDS cluster attribute. It is never serialized as a header.
+    xds_cluster: ?[]const u8 = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     random_if_missing: bool = false,
 
@@ -47,7 +49,7 @@ pub fn Runtime(comptime Slot: type) type {
         priority_deactivation_timeout_ns: i96 = 15 * 60 * std.time.ns_per_s,
 
         const Self = @This();
-        const AggregateState = enum {
+        pub const AggregateState = enum {
             idle,
             connecting,
             ready,
@@ -58,6 +60,7 @@ pub fn Runtime(comptime Slot: type) type {
         };
         const PickError = std.mem.Allocator.Error || error{
             MissingRequestHash,
+            UnknownCluster,
         };
 
         const Leaf = struct {
@@ -105,6 +108,7 @@ pub fn Runtime(comptime Slot: type) type {
         };
 
         const Node = struct {
+            cluster_manager: bool = false,
             path: []const []const u8,
             kind: union(enum) {
                 leaf: Leaf,
@@ -113,6 +117,17 @@ pub fn Runtime(comptime Slot: type) type {
                 outlier: Outlier,
             },
         };
+
+        pub fn clusterState(self: *Self, slots: []Slot, cluster: ?[]const u8) AggregateState {
+            const Context = struct {
+                runtime: *Self,
+                slots: []Slot,
+                fn get(context: @This(), node: *Node) AggregateState {
+                    return context.runtime.aggregate(node, context.slots);
+                }
+            };
+            return @import("cluster_route.zig").aggregate(self.root, Context{ .runtime = self, .slots = slots }, cluster, Context.get);
+        }
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -479,6 +494,11 @@ pub fn Runtime(comptime Slot: type) type {
                     path,
                     config_value,
                 ),
+                .cluster_manager => |children| blk: {
+                    const node = try self.buildWeighted(children, path);
+                    node.cluster_manager = true;
+                    break :blk node;
+                },
                 .xds_wrr_locality => return error.InvalidChannelOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
@@ -720,6 +740,7 @@ pub fn Runtime(comptime Slot: type) type {
             io: std.Io,
             input: RequestInput,
         ) PickError!?usize {
+            if (node.cluster_manager) return self.pickNode(try @import("cluster_route.zig").select(node, input.xds_cluster), slots, io, input);
             return switch (node.kind) {
                 .leaf => |*leaf| try self.pickLeaf(
                     node,

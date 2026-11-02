@@ -20,6 +20,7 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
     var size = source.path.len;
     if (source.authority) |value| try add(&size, value.len);
     if (source.scheme) |value| try add(&size, value.len);
+    if (source.xds_cluster) |value| try add(&size, value.len);
     for (source.metadata) |field| {
         try add(&size, field.name.len);
         try add(&size, field.value.len);
@@ -39,6 +40,7 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
     options.path = copy(storage, &offset, source.path);
     options.authority = if (source.authority) |value| copy(storage, &offset, value) else null;
     options.scheme = if (source.scheme) |value| copy(storage, &offset, value) else null;
+    options.xds_cluster = if (source.xds_cluster) |value| copy(storage, &offset, value) else null;
     for (source.metadata, metadata) |field, *owned| owned.* = .{
         .name = copy(storage, &offset, field.name),
         .value = copy(storage, &offset, field.value),

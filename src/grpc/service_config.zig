@@ -141,6 +141,7 @@ pub const LoadBalancingNode = union(enum) {
     weighted_round_robin: WeightedRoundRobinConfig,
     weighted_target: WeightedTargetConfig,
     xds_wrr_locality: *const LoadBalancingNode,
+    cluster_manager: WeightedTargetConfig,
     priority: PriorityConfig,
     outlier_detection: struct {
         config: OutlierDetectionConfig,
@@ -154,7 +155,7 @@ pub const LoadBalancingNode = union(enum) {
             .least_request => .least_request,
             .ring_hash => .ring_hash,
             .weighted_round_robin => .weighted_round_robin,
-            .weighted_target, .xds_wrr_locality => .weighted_target,
+            .weighted_target, .xds_wrr_locality, .cluster_manager => .weighted_target,
             .priority => .priority,
             .outlier_detection => |wrapper| wrapper.child.leafPolicy(),
         };
@@ -625,6 +626,10 @@ fn parseLoadBalancingAt(
                     } },
                 );
                 return child;
+            }
+            if (std.mem.eql(u8, item.key_ptr.*, "xds_cluster_manager_experimental")) {
+                const children = try @import("service_config/cluster_manager.zig").parse(allocator, item.value_ptr.*, depth, parseLoadBalancingAt);
+                return configuredLoadBalancing(allocator, .{ .policy = .weighted_target, .configured = true }, .{ .cluster_manager = children });
             }
             if (std.mem.eql(u8, item.key_ptr.*, "xds_wrr_locality_experimental")) {
                 const child_entries = try @import("service_config/locality.zig").childPolicies(item.value_ptr.*);

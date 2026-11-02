@@ -199,6 +199,8 @@ test {
     _ = @import("channel/weighted_target_tests.zig");
     _ = @import("channel/locality.zig");
     _ = @import("channel/locality_runtime_tests.zig");
+    _ = @import("channel/cluster_manager_tests.zig");
+    _ = @import("channel/cluster_manager_lifecycle_tests.zig");
     _ = @import("channel/least_request_channel_tests.zig");
     _ = @import("channel/ring_hash_tests.zig");
     _ = @import("channel/proxy_tests.zig");

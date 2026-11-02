@@ -41,7 +41,7 @@ pub const Plan = struct {
         try self.used.append(self.state.allocator, entry);
     }
     fn collect(self: *Plan, old: *Node, next: *Node, generation: *Generation, transfer: *Transfer) State.Failure!void {
-        if (!query.equal(old.path, next.path)) return;
+        if (!query.equal(old.path, next.path) or old.cluster_manager != next.cluster_manager) return;
         if (old.kind == .outlier) return self.collect(old.kind.outlier.child, if (next.kind == .outlier) next.kind.outlier.child else next, generation, transfer);
         if (next.kind == .outlier) return self.collect(old, next.kind.outlier.child, generation, transfer);
         if (std.meta.activeTag(old.kind) != std.meta.activeTag(next.kind)) return;

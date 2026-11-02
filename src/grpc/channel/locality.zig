@@ -22,7 +22,7 @@ pub const Resolved = struct {
 pub fn contains(node: *const Node) bool {
     return switch (node.*) {
         .xds_wrr_locality => true,
-        .weighted_target => |v| for (v.targets) |child| {
+        .weighted_target, .cluster_manager => |v| for (v.targets) |child| {
             if (contains(child.child)) break true;
         } else false,
         .priority => |v| for (v.children) |child| {
@@ -36,6 +36,7 @@ pub fn contains(node: *const Node) bool {
 /// Runtime target weights can change without a service-config JSON change.
 /// Preserve the existing tree only while the generated target structure agrees.
 pub fn sameTargets(left: anytype, right: @TypeOf(left)) bool {
+    if (left.cluster_manager != right.cluster_manager) return false;
     if (std.meta.activeTag(left.kind) != std.meta.activeTag(right.kind)) return false;
     return switch (left.kind) {
         .leaf => true,
@@ -114,6 +115,11 @@ fn expand(allocator: std.mem.Allocator, node: *const Node, endpoints: anytype, p
             const children = try allocator.dupe(config.WeightedTargetConfig.Target, value.targets);
             for (children) |*child| child.child = try expand(allocator, child.child, endpoints, try childPath(allocator, path, child.name));
             break :blk .{ .weighted_target = .{ .targets = children } };
+        },
+        .cluster_manager => |value| blk: {
+            const children = try allocator.dupe(config.WeightedTargetConfig.Target, value.targets);
+            for (children) |*child| child.child = try expand(allocator, child.child, endpoints, try childPath(allocator, path, child.name));
+            break :blk .{ .cluster_manager = .{ .targets = children } };
         },
         .priority => |value| blk: {
             const children = try allocator.dupe(config.PriorityConfig.Child, value.children);

@@ -37,6 +37,8 @@ pub const RequestOptions = struct {
     /// Precomputed grpc-core `RequestHashAttribute` value used by
     /// `ring_hash_experimental` when no requestHashHeader is configured.
     request_hash: ?u64 = null,
+    /// RPC-local xDS cluster attribute. It is never serialized as a header.
+    xds_cluster: ?[]const u8 = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     /// Compatibility ceiling used for both directions unless a directional
