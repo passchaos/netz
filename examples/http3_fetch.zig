@@ -70,17 +70,16 @@ pub fn main(init: std.process.Init) !void {
     if (manual_alt_svc) |field_value| {
         discovered = try manualAltSvcTarget(allocator, uri, field_value);
     } else if (discover) {
-        discovered = discoverAltSvc(allocator, io, uri_text, uri) catch |err| skipped: {
+        discovered = discoverAltSvc(allocator, io, uri_text, uri, init.minimal.environ) catch |err| skipped: {
             std.debug.print("Alt-Svc discovery skipped: {s}\n", .{@errorName(err)});
             break :skipped null;
         };
     }
 
     // This is a protocol smoke tool, not a production WebPKI client: the QUIC
-    // handshake path accepts the certificate chain unless callers provide a
-    // `server_auth` verifier.  Keeping the example explicit lets it exercise
-    // public HTTP/3 reachability while the verifier policy remains pluggable.
-    var response = try fetchWithRetries(allocator, io, uri, method, verify_server, if (discovered) |*target| target else null);
+    // handshake path uses the process environment's native roots when
+    // `--verify` is set and otherwise accepts the certificate chain.
+    var response = try fetchWithRetries(allocator, io, uri, method, verify_server, if (discovered) |*target| target else null, init.minimal.environ);
     defer response.deinit(allocator);
     if (expected_status) |expected| {
         if (response.response.status != expected) return error.UnexpectedStatus;
@@ -151,11 +150,12 @@ fn fetchWithRetries(
     method: []const u8,
     verify_server: bool,
     discovered: ?*const DiscoveredTarget,
+    environ: std.process.Environ,
 ) !netz.http3.runtime.OwnedHandshakeResponse {
     var attempt: usize = 0;
     var last_err: ?anyerror = null;
     while (attempt < max_attempts) : (attempt += 1) {
-        return fetchOnce(allocator, io, uri, method, verify_server, discovered) catch |err| {
+        return fetchOnce(allocator, io, uri, method, verify_server, discovered, environ) catch |err| {
             last_err = err;
             std.debug.print(
                 "HTTP/3 fetch attempt {d}/{d} failed: {s}\n",
@@ -174,21 +174,14 @@ fn fetchOnce(
     method: []const u8,
     verify_server: bool,
     discovered: ?*const DiscoveredTarget,
+    environ: std.process.Environ,
 ) !netz.http3.runtime.OwnedHandshakeResponse {
     var original_dcid: [8]u8 = undefined;
     var local_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &original_dcid);
     try std.Io.randomSecure(io, &local_cid);
 
-    var system_store: ?netz.quic.tls.trust.SystemStore = null;
-    defer if (system_store) |*store| store.deinit();
-    var bundle_verifier: ?netz.quic.tls.trust.BundleVerifier = null;
-    const server_auth = if (verify_server) auth: {
-        const now = std.Io.Clock.real.now(io);
-        system_store = try netz.quic.tls.trust.SystemStore.init(allocator, io, now);
-        bundle_verifier = system_store.?.verifier(now.toSeconds());
-        break :auth bundle_verifier.?.clientVerifier();
-    } else null;
+    const native_environ: ?std.process.Environ = if (verify_server) environ else null;
 
     if (discovered) |target| {
         return try netz.http3.runtime.HandshakeClient.requestUriAltSvc(
@@ -216,7 +209,7 @@ fn fetchOnce(
                         .max_retries = 5,
                         .max_duration_ms = 30_000,
                     },
-                    .server_auth = server_auth,
+                    .system_environ = native_environ,
                 },
                 .session = .{ .max_stream_buffer = 512 * 1024 },
             },
@@ -241,7 +234,7 @@ fn fetchOnce(
                     .max_retries = 5,
                     .max_duration_ms = 30_000,
                 },
-                .server_auth = server_auth,
+                .system_environ = native_environ,
             },
             .session = .{ .max_stream_buffer = 512 * 1024 },
         },
@@ -253,6 +246,7 @@ fn discoverAltSvc(
     io: std.Io,
     uri_text: []const u8,
     uri: std.Uri,
+    environ: std.process.Environ,
 ) !?DiscoveredTarget {
     _ = uri_text;
     var endpoint = try netz.http3.runtime.uriEndpoint(allocator, uri);
@@ -263,7 +257,7 @@ fn discoverAltSvc(
     // runtime exposes raw blocking TCP/TLS operations and can hang when one
     // resolved address blackholes. If this probe fails, main treats discovery
     // as best-effort and falls back to the normal request path.
-    var response = try fetchWithRetries(allocator, io, uri, "HEAD", false, null);
+    var response = try fetchWithRetries(allocator, io, uri, "HEAD", false, null, environ);
     defer response.deinit(allocator);
 
     const alt = (try netz.http3.firstHttp3AltSvcHeader(response.response.headers)) orelse {
