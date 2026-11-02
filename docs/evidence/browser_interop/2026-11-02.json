@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "real-browser protocol interop",
+  "browser": {
+    "product": "Chromium",
+    "version": "149.0.7827.196",
+    "user_agent": "HeadlessChrome/149.0.0.0",
+    "launcher_sha256": "36cbbb620daeb933ae7861de07fcff05b5e1f7527303b5992459b8aa6707b845",
+    "process_sha256": "3a7459ac6edc2ed80101d3b5a0492cae71a0097012a4f236b308d0a9b848290f"
+  },
+  "gates": {
+    "webtransport": {
+      "command": "CHROME=/usr/bin/chromium zig build interop-webtransport-chrome -Doptimize=ReleaseFast",
+      "result": "passed",
+      "evidence": "CONNECT, DATAGRAM max_datagram_size=1024, bidi, uni, reset=71, stop=72, concurrent_sibling=true, reuse=true, drain-before-close=true, close=77/netz-done",
+      "server_side": "max_datagram_size=1178 oversized_rejected=true, reset=71, stop=72, concurrent_sibling=true, reuse=true, drain-before-close=true, client_io=chromium-network-service server_io=zio-std-io"
+    },
+    "websocket_cleartext": {
+      "command": "CHROME=/usr/bin/chromium zig build interop-websocket-chrome -Doptimize=ReleaseFast",
+      "result": "passed",
+      "evidence": "scheme=ws, rejected-origin, accepted-origin, subprotocol, compressed-text, binary, automatic-pong, close=1001/netz-browser-done"
+    },
+    "websocket_tls": {
+      "command": "CHROME=/usr/bin/chromium zig build interop-websocket-chrome -Doptimize=ReleaseFast -- --tls",
+      "result": "passed",
+      "evidence": "scheme=wss, rejected-origin, accepted-origin, subprotocol, compressed-text, binary, automatic-pong, close=1001/netz-browser-done"
+    },
+    "grpc_web_http1": {
+      "command": "CHROME=/usr/bin/chromium zig build interop-grpc-web-chrome -Doptimize=ReleaseFast",
+      "result": "passed",
+      "evidence": "grpc-web-2.1.1, unary binary/text, streaming incremental-text, error UNAUTHENTICATED, details google.rpc.Status, rejectedOrigin=true, protocols=http/1.1, rpc=6 preflight=5 rejected=1"
+    },
+    "grpc_web_h2": {
+      "command": "CHROME=/usr/bin/chromium zig build interop-grpc-web-chrome -Doptimize=ReleaseFast -- --tls --http2",
+      "result": "passed",
+      "evidence": "grpc-web-2.1.1, unary binary/text, streaming incremental-text, error UNAUTHENTICATED, details google.rpc.Status, rejectedOrigin=true, protocols=h2, rpc=6 preflight=4 rejected=1"
+    }
+  },
+  "blocked_environment": {
+    "firefox": {
+      "status": "not run",
+      "reason": "/usr/bin/firefox is an Ubuntu snap launcher and the firefox snap is not installed; this is an environment limitation, not a protocol result."
+    }
+  },
+  "conclusion": "Chromium 149 passes the WebTransport, WebSocket (ws/wss), and gRPC-Web (http/1.1 and h2) browser gates, including Origin rejection, compression, cancellation codes, session reuse, and terminal close."
+}
