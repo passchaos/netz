@@ -50,5 +50,12 @@
     "payload_4096_calls_ratio": 0.9975,
     "conclusion": "0/512/4-KiB persistent and per-call workloads stayed within about 0.7% of the 16-KiB default."
   },
+  "full_suite_verification": {
+    "command": "zig build test-lib --summary all",
+    "result": "6180/6180 passed",
+    "duration": "5m",
+    "webtransport_followup": "The cancellation pacing wake test was made deterministic by lowering its pacing rate from 100000 to 1000 bytes/s so the cancellation wait reliably receives the DRAIN capsule. Library behavior was unchanged.",
+    "webtransport_fix_commit": "9adfb686"
+  },
   "conclusion": "A 256-KiB frame size makes a 256-KiB message fit one DATA frame and improves the persistent large-message workload by about 14.4% with no small-message regression. A 10-stream 1-MiB flow-control control was neutral-to-slightly faster, so the library now advertises 256 KiB by default; peers still start at the RFC 16-KiB value until SETTINGS exchange, and applications can explicitly select 16 KiB."
 }
