@@ -40,7 +40,7 @@ test "WebTransport cancellation pacing wake submits mapped control after DRAIN" 
             var storage: [16]u8 = undefined;
             const drain = try control.writeDrainInto(&storage);
             if (role == .client) try pair.server.h3.sendResponseBodyPaced(0, drain, false) else try pair.client.h3.sendRequestBodyPaced(0, drain, false);
-            support.pace(pair.connection(role), threaded.io(), 100000);
+            support.pace(pair.connection(role), threaded.io(), 1000);
             const Canceller = struct {
                 fn run(target: @TypeOf(session), stream_id: u62, kind: Operation) !void {
                     try cancel(target, stream_id, kind, .fromNow(target.h3.established.connection.endpoint.io, .{ .clock = .awake, .raw = .fromMilliseconds(100) }));
