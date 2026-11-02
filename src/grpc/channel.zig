@@ -968,6 +968,13 @@ pub const Channel = struct {
         return self.connectivity_tracker.snapshot();
     }
 
+    /// Last health status observed by the opt-in ordinary Channel gate.
+    /// Null means checking is disabled or no Watch status has arrived yet.
+    pub fn healthServing(self: *const Channel) ?bool {
+        const gate = self.health_gate orelse return null;
+        return gate.status();
+    }
+
     /// Return an independent cursor that may wait concurrently and remains
     /// valid through Channel deinitialization until the watch is released.
     pub fn watchConnectivity(self: *const Channel) ConnectivityWatch {

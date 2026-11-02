@@ -10,6 +10,7 @@
     "null": "checking disabled",
     "call_shapes": ["unary", "streaming", "duplex"],
     "validation": "service names longer than grpc.health.max_service_name_len or invalid UTF-8 are rejected at Channel.init with InvalidChannelOptions",
+    "observability": "Channel.healthServing() returns null before the first Watch status or when checking is disabled, otherwise the last known serving state",
     "disable_health_check": "suppresses healthCheckConfig inheritance from a ServiceConfig; the Health Watch's own transport Channel sets it to avoid recursive checking"
   },
   "design": {

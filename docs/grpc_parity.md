@@ -3097,3 +3097,7 @@ names above `grpc.health.max_service_name_len` or invalid UTF-8 return
 inheritance from a ServiceConfig while explicit `health_check_service` still
 wins. The Health Watch's own transport Channel sets both fields so a
 ServiceConfig-driven Watch cannot recursively start another health gate.
+
+`Channel.healthServing()` exposes the last observed gate state: null before
+the first Watch status or when checking is disabled, true for SERVING or
+UNIMPLEMENTED, and false for the rejected states.

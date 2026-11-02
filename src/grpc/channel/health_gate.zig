@@ -66,6 +66,17 @@ pub const Gate = struct {
         return self.state.load(.acquire) != not_serving;
     }
 
+    /// Null while the Watch has not reported a status yet; otherwise the last
+    /// known serving state.
+    pub fn status(self: *const Gate) ?bool {
+        return switch (self.state.load(.acquire)) {
+            unknown => null,
+            serving => true,
+            not_serving => false,
+            else => unreachable,
+        };
+    }
+
     pub fn waitForKnown(self: *Gate, deadline: ?std.Io.Clock.Timestamp) !void {
         return self.waitUntil(deadline, unknown);
     }

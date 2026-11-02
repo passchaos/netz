@@ -124,9 +124,11 @@ test "ordinary Channel health gate follows a Watch and blocks NOT_SERVING" {
     });
     defer response.deinit();
     try std.testing.expectEqualStrings("pong", response.message.?.payload);
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServing());
 
     _ = try registry.setStatus("demo.Echo", .not_serving);
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    try std.testing.expectEqual(@as(?bool, false), channel.healthServing());
     try std.testing.expectError(
         error.ConnectionUnavailable,
         channel.unary(.{
@@ -152,6 +154,7 @@ test "ordinary Channel health gate follows a Watch and blocks NOT_SERVING" {
     });
     defer recovered.deinit();
     try std.testing.expectEqualStrings("pong", recovered.message.?.payload);
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServing());
 
     if (peer.err) |err| return err;
 }
