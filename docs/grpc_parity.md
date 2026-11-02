@@ -3077,3 +3077,7 @@ gate observe SERVING, switches the service to NOT_SERVING, observes
 unary call on the reused connection. The focused test passes 147/147 and the
 gRPC filter passes 564/564. Evidence is recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02.json`.
+
+A custom `address_resolver` or custom connector is shared with the dedicated
+Watch Channel, so such callbacks must support concurrent use by both the
+application Channel and the health Channel.

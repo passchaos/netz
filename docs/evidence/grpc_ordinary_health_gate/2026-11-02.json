@@ -34,6 +34,7 @@
   "limitations": [
     "the dedicated Watch is server-level, not same-subconnection health",
     "unknown and retrying Watch states fail open",
-    "the first gated call pays one health-status roundtrip"
+    "the first gated call pays one health-status roundtrip",
+    "a custom address_resolver or custom connector is shared with the dedicated Watch Channel and must support concurrent use"
   ]
 }
