@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "gate": "full library test suite after eager ordinary Channel health gate",
+  "head": "21d98a31",
+  "command": "zig build test-lib --summary all",
+  "result": {
+    "passed": 6180,
+    "total": 6180,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "notes": "Includes the opt-in ordinary Channel Health Watch gate, eager gate startup, the disable_health_check recursion guard for the Watch's own transport Channel, service-name validation, and unary/streaming/duplex gate coverage."
+}
