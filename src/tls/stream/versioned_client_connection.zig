@@ -45,6 +45,8 @@ pub const Error = std.mem.Allocator.Error ||
         ConflictingOcspVerifier,
         OcspPolicyRequiresRequest,
         TlsKeyUpdateUnavailable,
+        ReadFailed,
+        StreamTooLong,
     };
 
 pub const CaBundle = struct {
@@ -99,6 +101,10 @@ pub const VerifiedOptions = struct {
     /// omitting only DNS/IP identity matching.
     verify_host: bool = true,
     ca_bundle: ?CaBundle = null,
+    /// Optional process environment used to honor `SSL_CERT_FILE` and
+    /// `SSL_CERT_DIR` when no caller CA bundle is supplied. Null keeps the
+    /// platform store.
+    system_environ: ?std.process.Environ = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     stapled_ocsp: vail.x509.trust.StapledOcspPolicy = .ignore,
     request_ocsp: bool = true,
@@ -505,7 +511,10 @@ pub const Connection = struct {
                     .now_seconds = now.toSeconds(),
                 };
             } else {
-                system_store = try .init(allocator, io, now);
+                system_store = if (options.system_environ) |environ|
+                    try .initWithEnviron(allocator, io, now, environ)
+                else
+                    try .init(allocator, io, now);
                 bundle_verifier = system_store.?.verifier(now.toSeconds());
             }
             bundle_verifier.stapled_ocsp = options.stapled_ocsp;

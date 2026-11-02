@@ -419,6 +419,10 @@ pub const TlsClientOptions = struct {
     /// enabled, the runtime loads the operating-system root store for the
     /// handshake and frees it after TLS session establishment.
     ca_bundle: ?TlsCaBundle = null,
+    /// Optional process environment for vail's native trust store. When set,
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
+    /// roots, matching rustls-native-certs.
+    environ: ?std.process.Environ = null,
     /// Forward EOF without close_notify.  This is useful only when the HTTP
     /// layer independently verifies body length (for example Content-Length).
     allow_truncation_attacks: bool = false,
@@ -436,6 +440,10 @@ pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
 pub const VailTlsClientOptions = struct {
     verify_host: bool = true,
     ca_bundle: ?tls_stream.ClientCaBundle = null,
+    /// Optional process environment for vail's native trust store. When set,
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
+    /// roots, matching rustls-native-certs.
+    environ: ?std.process.Environ = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -5567,6 +5575,7 @@ fn verifiedTlsClientOptions(
         .server_name = tls_host,
         .verify_host = options.verify_host,
         .ca_bundle = options.ca_bundle,
+        .system_environ = options.environ,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,

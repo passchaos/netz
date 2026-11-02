@@ -1717,6 +1717,7 @@ fn connectVailStreamAttempt(
             .{ .bundle = bundle.bundle, .lock = bundle.lock }
         else
             null,
+        .system_environ = options.tls.environ,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,

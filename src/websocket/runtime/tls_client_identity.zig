@@ -127,6 +127,7 @@ fn verifiedOptions(
             .{ .bundle = bundle.bundle, .lock = bundle.lock }
         else
             null,
+        .system_environ = tls_options.environ,
         .server_verifier = identity_options.server_verifier,
         .stapled_ocsp = identity_options.stapled_ocsp,
         .request_ocsp = identity_options.request_ocsp,

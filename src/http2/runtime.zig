@@ -3924,6 +3924,10 @@ pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
 pub const TlsConnectOptions = struct {
     verify_host: bool = true,
     ca_bundle: ?tls_stream.ClientCaBundle = null,
+    /// Optional process environment for vail's native trust store. When set,
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
+    /// roots, matching rustls-native-certs.
+    environ: ?std.process.Environ = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -3953,6 +3957,7 @@ fn verifiedTlsClientOptions(
         .server_name = tls_host,
         .verify_host = options.verify_host,
         .ca_bundle = options.ca_bundle,
+        .system_environ = options.environ,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,
@@ -3978,6 +3983,13 @@ test "HTTP/2 TLS options preserve stapled OCSP policy" {
     try std.testing.expectEqual(StapledOcspPolicy.require, mapped.stapled_ocsp);
     try std.testing.expect(mapped.request_ocsp);
     try std.testing.expectEqualStrings("h2", mapped.alpn_protocols[0]);
+}
+
+test "HTTP/2 TLS options forward native certificate environment" {
+    const mapped = verifiedTlsClientOptions("example.com", .{
+        .environ = std.testing.environ,
+    });
+    try std.testing.expect(mapped.system_environ != null);
 }
 
 pub const Role = enum {
