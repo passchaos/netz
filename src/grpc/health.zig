@@ -74,6 +74,7 @@ pub const reconnecting = @import("health/reconnecting.zig");
 pub const ReconnectingWatch = reconnecting.ReconnectingWatch;
 pub const ReconnectingWatchOptions = reconnecting.Options;
 pub const ReconnectingWatchEvent = reconnecting.Event;
+pub const ReconnectingWatchAttemptObserver = reconnecting.AttemptObserver;
 
 test {
     _ = client;

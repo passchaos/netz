@@ -3071,10 +3071,12 @@ is UNKNOWN or NOT_SERVING; `NOT_SERVING`, `UNKNOWN`, and `SERVICE_UNKNOWN`
 reject fail-fast calls with `ConnectionUnavailable` when no endpoint is
 serving. `wait_for_ready` calls wait until any endpoint becomes serving or
 their deadline expires. `UNIMPLEMENTED` disables checking for that endpoint and
-allows calls through it. A failed Watch marks that endpoint as rejected while
-it retries, matching grpc-core's TRANSIENT_FAILURE admission. Fail-fast calls
-report `ConnectionUnavailable`; wait-for-ready calls continue awaiting SERVING
-or UNIMPLEMENTED. Healthy siblings remain selectable.
+allows calls through it. A failed Watch marks that endpoint as rejected during
+retry backoff, matching grpc-core's TRANSIENT_FAILURE admission. Fail-fast
+calls report `ConnectionUnavailable`; wait-for-ready calls continue awaiting
+recovery. A freshly established Watch returns the endpoint to UNKNOWN
+(CONNECTING), where either RPC mode waits for its first status or the caller's
+deadline/cancellation. Healthy siblings remain selectable.
 
 A real loopback test starts two health registries and unary responders,
 configures one NOT_SERVING and one SERVING endpoint, and proves that the
@@ -3146,9 +3148,9 @@ reuse their separate application connection. The Gate remains a stable state
 publisher until the parent joins and frees it.
 
 `channel/health_gate/admission.zig` now owns the state scan and admission wait.
-Watch retry failures are known rejections rather than UNKNOWN, so unary,
-streaming and duplex fail-fast starts reject without opening a business
-connection. A succeeding Watch restores a waiting unary call. Initial pending
+Watch retry failures are known rejections during backoff rather than UNKNOWN,
+so unary, streaming and duplex fail-fast starts reject without opening a
+business connection. A succeeding Watch restores a waiting unary call. Initial pending
 health admission has no implicit time limit for either RPC mode; a deterministic
 clock probe advances ten seconds per read and requires both modes to recover
 through an unbounded wait. Explicit deadlines pass unchanged to the wake
@@ -3178,3 +3180,33 @@ gated business calls. The grpc-cpp bounded h2c/TLS and proxy/failover matrix
 passed 11/11 build steps, including ordinary health admission and parent-
 shutdown Watch teardown. Evidence and source hashes are recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-lifecycle.json`.
+
+`ReconnectingWatch.nextWithDeadlineObserved` now reports a successfully
+established Watch through a synchronous, per-poll borrowed
+`ReconnectingWatchAttemptObserver`. It reports neither retry sleeps nor reads
+from an already active Watch. The ordinary Gate uses that notification to
+publish UNKNOWN before reading the new Watch's first status, matching
+grpc-core's `OnCallStartLocked` CONNECTING transition. A real h2c regression
+holds that status after a prior UNAVAILABLE failure and requires unary,
+streaming and duplex fail-fast starts to reach their own deadlines, then
+completes a default-mode unary call after SERVING arrives. The retry/backoff
+observer regression also checks one notification per fresh attempt, expired
+polls, repeated status reads and terminal UNIMPLEMENTED.
+
+Reconnecting Watch setup also advances connection input when the peer's
+`SETTINGS_MAX_CONCURRENT_STREAMS` is zero. Before a stream exists,
+`Connection.pumpClientWith{Timeout,Deadline}` provides the same single-owner
+frame routing and HPACK ordering as the duplex pump, with one absolute budget
+for input and control replies. Watch consumes SETTINGS until capacity returns,
+honors an unchanged zero limit, and reports GOAWAY instead of waiting for an
+impossible new stream. The independent Node peer holds zero capacity through
+the fail-fast checks, restores it on the same connection, delays SERVING
+through all three pending-start deadline checks, then verifies recovery and
+disabled-Watch connection release. It additionally requires zero client PINGs
+during capacity recovery.
+
+The health/idle-pump gate passed 173/173 tests, the existing duplex/multiplexed
+owner gate passed 161/161, and the package gate passed 26/26. The independent
+HTTP/2 runner passed 8/8 build steps with 26 original response scenarios and
+the restart/capacity lifecycle above. Logs and source hashes are recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart.json`.

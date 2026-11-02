@@ -68,7 +68,8 @@ function native(executable, port, manifest, health) {
     let output = '';
     const receive = chunk => {
       output += chunk;
-      if (output.includes('netz grpc health retry rejected: unary+streaming+duplex')) health.allowRecovery();
+      if (!health.resume && output.includes('netz grpc health retry rejected: unary+streaming+duplex')) health.allowRecovery();
+      if (!health.pendingChecked && output.includes('netz grpc health restarted CONNECTING: unary+streaming+duplex-deadlines')) health.allowServing();
     };
     child.stdout.on('data', receive);
     child.stderr.on('data', receive);
@@ -81,6 +82,7 @@ function native(executable, port, manifest, health) {
         try {
           assert.ok(output.includes('io=zio-std-io cases='+probes.length+' shared='+probes.filter(probe=>probe.shared).length+' shapes=unary+streaming+duplex+shared reuse=true'));
           assert.ok(output.includes('netz grpc health gate complete: retry+ready+disabled-close calls=2 reuse=true'));
+          assert.ok(output.includes('netz grpc health restarted CONNECTING: unary+streaming+duplex-deadlines'));
           process.stdout.write(output);
           resolve();
         } catch (error) {reject(error);}

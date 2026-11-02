@@ -2911,6 +2911,24 @@ origins and four QUIC connections over one association: creating C evicts A,
 then reconnecting A evicts B, proving churn reuses capacity without confusing
 identical relay source IP/port tuples or crossing TLS/`:authority` state.
 
+## Idle HTTP/2 client input progress
+
+`Connection.pumpClientWith{Timeout,Deadline}` now permits one connection owner
+to advance input before any stream handle exists. It uses the same retained
+frame routing, HPACK ordering and control handling as the duplex owner, while
+applying the original caller deadline to both input and control replies. The
+existing `pumpClientDuplexWithDeadline` still requires a registered handle.
+
+Focused regressions consume SETTINGS that change stream capacity from zero to
+one, open the next stream only after capacity returns, retain queued input on
+an expired operation, and resume after a read timeout. The independent gRPC
+HTTP/2 peer also restores a zero-capacity connection before its next Health
+Watch starts and requires that recovery to send no PING probes.
+
+The idle/health gate passed 173/173 tests, the existing duplex-owner gate
+passed 161/161, and the independent HTTP/2 gate passed 8/8 build steps. Evidence
+is recorded in `docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart.json`.
+
 ## Remaining evidence
 
 HTTP/1 public response persistence metadata now shares the runtime's framing

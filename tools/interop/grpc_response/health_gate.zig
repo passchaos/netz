@@ -17,6 +17,17 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16) !void {
     try std.testing.expectError(error.ConnectionUnavailable, channel.startStreaming(.{ .path = "/fixture.Health/Echo", .timeout = .{ .value = 1, .unit = .second } }));
     try std.testing.expectError(error.ConnectionUnavailable, channel.startDuplex(.{ .path = "/fixture.Health/Echo", .timeout = .{ .value = 1, .unit = .second } }));
     std.debug.print("netz grpc health retry rejected: unary+streaming+duplex\n", .{});
+    const restarted: std.Io.Clock.Timestamp = .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+    while (true) {
+        const generation = sync.snapshot();
+        if (channel.healthServingAt(0) == null) break;
+        if (restarted.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        try sync.wait(io, generation, restarted);
+    }
+    try std.testing.expectError(error.Timeout, channel.unary(.{ .path = "/fixture.Health/Echo", .message = "ping", .timeout = .{ .value = 20, .unit = .millisecond } }));
+    try std.testing.expectError(error.Timeout, channel.startStreaming(.{ .path = "/fixture.Health/Echo", .timeout = .{ .value = 20, .unit = .millisecond } }));
+    try std.testing.expectError(error.Timeout, channel.startDuplex(.{ .path = "/fixture.Health/Echo", .timeout = .{ .value = 20, .unit = .millisecond } }));
+    std.debug.print("netz grpc health restarted CONNECTING: unary+streaming+duplex-deadlines\n", .{});
     for (0..2) |_| {
         var response = try channel.unary(.{ .path = "/fixture.Health/Echo", .message = "ping", .wait_for_ready = true, .timeout = .{ .value = 5, .unit = .second } });
         defer response.deinit();

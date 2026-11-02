@@ -19,12 +19,22 @@ class HealthGatePeer {
     this.resume = false;
     this.watch = null;
     this.connectionClosed = false;
+    this.pendingChecked = false;
+    this.controlPings = 0;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
   }
 
   allowRecovery() {
     this.resume = true;
-    if (this.watch) this.serve();
+    // Zero capacity keeps the next Watch from starting before the native
+    // client has checked rejection in TRANSIENT_FAILURE.
+    this.session.settings({maxConcurrentStreams:1});
+  }
+
+  allowServing() {
+    this.pendingChecked = true;
+    assert.ok(this.watch && !this.watch.headersSent);
+    this.serve();
   }
 
   serve() {
@@ -62,15 +72,17 @@ class HealthGatePeer {
       assert.ok(this.watches <= 2, 'disabled Watch was retried');
       if (this.watches === 1) {
         this.session = stream.session;
+        this.session.on('ping', () => { this.controlPings++; });
         this.session.once('close', () => {
           this.connectionClosed = true;
           this.resolveClosed();
         });
+        this.session.settings({maxConcurrentStreams:0});
         stream.respond({':status':200, 'content-type':'application/grpc', 'grpc-status':'14'}, {endStream:true});
       } else {
         assert.equal(stream.session, this.session, 'Watch retry must reuse its dedicated connection');
         this.watch = stream;
-        if (this.resume) this.serve();
+        assert.equal(this.resume, true, 'a new Watch started before fail-fast checks completed');
       }
       return;
     }
@@ -95,7 +107,9 @@ class HealthGatePeer {
     assert.equal(this.watches, 2);
     assert.equal(this.calls, 2);
     assert.equal(this.connectionClosed, true);
-    return {watchAttempts:2, businessRpcs:2, failFast:'unary+streaming+duplex', waitForReady:true, disabledConnectionClosed:true};
+    assert.equal(this.pendingChecked, true);
+    assert.equal(this.controlPings, 0, 'capacity recovery must consume SETTINGS without probing');
+    return {watchAttempts:2, businessRpcs:2, failFast:'unary+streaming+duplex', restartedConnecting:'unary+streaming+duplex-deadlines', zeroCapacityRecovered:true, controlPings:0, waitForReady:true, disabledConnectionClosed:true};
   }
 }
 

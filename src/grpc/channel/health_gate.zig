@@ -86,7 +86,10 @@ pub const Gate = struct {
                 .raw = .fromSeconds(1),
                 .clock = .awake,
             });
-            const event = watch.nextWithDeadline(until) catch |err| switch (err) {
+            const event = watch.nextWithDeadlineObserved(until, .{
+                .context = self,
+                .started = watchStarted,
+            }) catch |err| switch (err) {
                 error.Canceled => break,
                 error.Timeout => continue,
                 else => {
@@ -119,6 +122,13 @@ pub const Gate = struct {
         self.publish(unknown);
     }
 
+    fn watchStarted(context: *anyopaque) void {
+        const self: *Gate = @ptrCast(@alignCast(context));
+        // A fresh Watch is CONNECTING rather than the preceding attempt's
+        // TRANSIENT_FAILURE. Both RPC modes await its first health result.
+        self.publish(unknown);
+    }
+
     fn publish(self: *Gate, value: u8) void {
         self.state.store(value, .release);
         if (self.wiring.state_out) |out| out.store(value, .release);
@@ -130,4 +140,5 @@ test {
     _ = @import("health_gate/disabled_tests.zig");
     _ = @import("health_gate/retry_tests.zig");
     _ = @import("health_gate/cancellation_tests.zig");
+    _ = @import("health_gate/restart_tests.zig");
 }

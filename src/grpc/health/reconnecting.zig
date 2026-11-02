@@ -44,6 +44,14 @@ pub const Event = union(enum) {
     disabled,
 };
 
+/// Borrowed for one poll. Called synchronously by that poll's owner after a
+/// new Watch is established and before reading its first response. Active
+/// Watch reads and retry sleeps do not emit another start notification.
+pub const AttemptObserver = struct {
+    context: *anyopaque,
+    started: *const fn (*anyopaque) void,
+};
+
 pub const ReconnectingWatch = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -171,6 +179,17 @@ pub const ReconnectingWatch = struct {
         self: *ReconnectingWatch,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Event {
+        return self.nextWithDeadlineObserved(deadline, null);
+    }
+
+    /// Observe fresh Watch starts while preserving the next-event contract
+    /// and the original absolute budget. The observer remains borrowed only
+    /// until this call returns and runs on the polling owner.
+    pub fn nextWithDeadlineObserved(
+        self: *ReconnectingWatch,
+        deadline: std.Io.Clock.Timestamp,
+        observer: ?AttemptObserver,
+    ) Error!Event {
         if (self.stopped) return error.HealthWatchStopped;
         if (self.disabled) return error.HealthWatchDisabled;
         if (expired(self.io, deadline)) return error.Timeout;
@@ -187,6 +206,17 @@ pub const ReconnectingWatch = struct {
             const connection = self.owner.connectWithDeadline(deadline) catch |err| {
                 return self.operationFailed(err, deadline);
             };
+            while (connection.availableLocalStreamCapacity() == 0) {
+                if (connection.peerGoAwayLastStreamId()) |last| {
+                    if (connection.next_client_stream_id > last) return self.operationFailed(error.ConnectionGoAway, deadline);
+                }
+                // No Watch reader exists yet. Consume connection control
+                // under the original poll budget until the peer permits a
+                // new stream; unchanged zero credit remains authoritative.
+                _ = connection.pumpClientWithDeadline(deadline) catch |err| {
+                    return self.operationFailed(err, deadline);
+                };
+            }
             self.watch = health.startWatchWithDeadline(
                 connection,
                 self.allocator,
@@ -196,6 +226,7 @@ pub const ReconnectingWatch = struct {
                 return self.operationFailed(err, deadline);
             };
             self.received_status = false;
+            if (observer) |listener| listener.started(listener.context);
         }
         var event = self.watch.?.nextWithDeadline(deadline) catch |err| {
             if (err == error.Timeout and !self.watch.?.terminal_seen) return err;

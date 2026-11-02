@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "Health Watch restart CONNECTING and idle HTTP/2 capacity recovery",
+  "decision": "accepted",
+  "base_head": "6b4ef614",
+  "reference": {
+    "grpc_core_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "source": "src/core/load_balancing/health_check_client.cc",
+    "contract": "OnRetryTimerStartLocked reports TRANSIENT_FAILURE; OnCallStartLocked reports CONNECTING; SERVING reports READY",
+    "grpc_js_version": "1.14.0"
+  },
+  "behavior": {
+    "observer": "nextWithDeadlineObserved borrows a synchronous AttemptObserver for one poll; successful fresh Watch establishment notifies before reading the first status; retry sleeps, active Watch reads, expired polls and disabled Watch polls do not notify",
+    "admission": "a fresh Watch returns the ordinary endpoint to UNKNOWN/CONNECTING; unary, streaming and duplex starts wait for status or their own deadline/cancellation instead of retaining the preceding TRANSIENT_FAILURE",
+    "capacity": "when no Watch exists and peer stream capacity is zero, the same owner pumps HTTP/2 input under the original deadline until SETTINGS restores capacity, without creating a stream or sending a PING probe",
+    "http2_api": "pumpClientWithTimeout/Deadline permits one client owner to route input while no handle exists; the original duplex-only pump still requires a registered handle; active-frame routing and HPACK ordering use the shared owner implementation"
+  },
+  "verification": {
+    "health_and_idle_pump_debug": {
+      "passed": 173,
+      "total": 173,
+      "exit_code": 0
+    },
+    "duplex_owner_debug": {
+      "passed": 161,
+      "total": 161,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "original_response_scenarios": 26,
+      "native_rpcs": 76,
+      "watch_attempts": 2,
+      "health_business_rpcs": 2,
+      "restarted_connecting_deadlines": "unary+streaming+duplex",
+      "zero_capacity_recovered": true,
+      "client_control_pings": 0,
+      "disabled_connection_closed": true,
+      "application_connection_reused": true,
+      "exit_code": 0
+    },
+    "regressions": [
+      "after UNAVAILABLE, a peer holds the restarted Watch status while all three fail-fast starts reach their own deadlines; SERVING then completes a default-mode unary call",
+      "the observer records four successful fresh attempts while expired/backoff polls, repeated status reads and terminal disabled polls preserve its count",
+      "idle HTTP/2 pump consumes zero/restored SETTINGS, starts no stream before capacity returns, rejects expired operations without consuming queued input, and resumes after read timeout",
+      "existing multiplexed/duplex pumps retain HPACK ordering, sibling routing, cancellation, partial-frame input and GOAWAY behavior",
+      "independent Node peer holds zero capacity until fail-fast rejection is confirmed, restores capacity, holds SERVING until pending-start deadline checks finish, and verifies two reused business calls and disabled-Watch connection EOF with zero PINGs"
+    ]
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='health gate' -Dtest-filter='reconnecting health Watch' -Dtest-filter='HTTP2 idle client pump' -Dtest-filter='HTTP2 client duplex' --summary all",
+    "zig build test-lib -Dtest-filter='HTTP/2 duplex pump' -Dtest-filter='HTTP/2 multiplexed duplex' -Dtest-filter='gRPC duplex event pump' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-grpc-response --summary all"
+  ],
+  "source_sha256": {
+    "src/grpc/channel.zig": "85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161",
+    "src/grpc/channel/health_gate.zig": "89ab47c89765818870cea171821878f1844a26a4a1e180e8fe2e664feb91ba8d",
+    "src/grpc/channel/health_gate/admission.zig": "11bc7b025cf7c1723418f6ac2191a22c5a6ae8a0050e71459c784b676cf04842",
+    "src/grpc/channel/health_gate/sync.zig": "0643ff389d52d1b391f688680483908778fa53f4814a806ef0e7c278f8f44950",
+    "src/grpc/channel/health_gate/retry_tests.zig": "1e79de3ca1c6633766500dbb440634046531c7631e83c26c8f33869f4f7085c3",
+    "src/grpc/channel/health_gate/restart_tests.zig": "763c3a5daa1058d83ad9e5bdaa9839091109ac579553ee9be9450ab0fbe79763",
+    "src/grpc/health.zig": "c3f3f1af5ef9c065975bead8d097ed1beb07c6cd1597222738207d06be6361e2",
+    "src/grpc/health/reconnecting.zig": "743d92f03bd7a8db79b1d522e46616d6ba2f7758187dc2be914cbfb33e4d55b3",
+    "src/grpc/health/reconnecting_tests.zig": "9c848d749862030f41bf8f4d0f689f89846d41d95f23d8ee05337336f0f1476d",
+    "src/http2/runtime.zig": "3ee4ed1fab02189f78b68f42205cfbf3d73206ce0b8b0ca63265c87493e870ef",
+    "src/http2/runtime/duplex/client_owner.zig": "5d30f56a1d297e6f59e29900bcfb32b22536bfa3b407716b63cc66972192ca6b",
+    "src/http2/runtime/duplex/client_pump_tests.zig": "29621e3f17f07771fb2d58327b8a4d6b286c0c462b80f83901aa3359feb4a48c",
+    "tools/interop/grpc_response/client.js": "5ffc4b397564239ab80ce0f6b8ef758dc4bc28fa03d7e18d7a5a048ae46a9cf2",
+    "tools/interop/grpc_response/health_gate.js": "b6507a81b9c91e1a03f00edd003830e4e10c04b94c28fd969e72e9425a897502",
+    "tools/interop/grpc_response/health_gate.zig": "d5b94d07e88ac6a04cc568f21ebc43ece0763f229f413bdf408e4d75f17e08a9",
+    "tools/interop/grpc_response_client.zig": "a5232b447530cba7462da5f9c1c433fb7ff4c82084c0a3e8e038ce1e8794b40f"
+  },
+  "artifact_sha256": {
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart/health-and-idle-pump.Debug.log": "a43ddff49feb82b0f3f682e1b04002e37fa0811ad463efecdd237452a67ea468",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart/duplex-owner.Debug.log": "fa8f73713ebf6464a9fceac51edbc9d2fb214118001ff29d6f30d551183d9f40",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart/package.Debug.log": "98251b58689f3ebbeb7a4e4b390eb1869f831ceda4ccfa04b60d2d96fe46e628",
+    "docs/evidence/grpc_ordinary_health_gate/2026-11-02-restart/interop-grpc-response.Debug.log": "f03590eaa3f787168c5e7ed72f54a2ab2dd26a516082a48a40dc642e7c16101b"
+  },
+  "remaining_scope": "Broader gRPC composite/xDS integration and long-duration/high-concurrency evidence remain open for the full protocol-library goal."
+}

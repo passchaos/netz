@@ -11,6 +11,14 @@ pub const PumpEvent = union(enum) {
 
 pub const Owners = @import("owners.zig").Owners;
 
+/// One connection owner may also advance input before any duplex handle
+/// exists. Control replies keep the caller's original absolute budget.
+pub fn pump(connection: anytype, deadline: std.Io.Clock.Timestamp, comptime hooks: anytype) hooks.Error!PumpEvent {
+    if (connection.aggregate_timeout_unusable) return error.ConnectionClosed;
+    if (connection.role != .client or connection.callback_reader_active) return error.UnexpectedFrame;
+    return ingest(connection, try hooks.readWire(connection, deadline), deadline, hooks);
+}
+
 pub fn queuedIndex(frames: anytype, start: usize, stream_id: u31) ?usize {
     for (frames[start..], start..) |frame, index| {
         if (frame.frame.header.stream_id == stream_id) return index;

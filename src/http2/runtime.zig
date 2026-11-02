@@ -55,6 +55,7 @@ test {
     _ = @import("runtime/stream/peer_termination_tests.zig");
     _ = client_duplex_owner;
     _ = @import("runtime/duplex/client_tests.zig");
+    _ = @import("runtime/duplex/client_pump_tests.zig");
     _ = @import("runtime/duplex/server_tests.zig");
     _ = @import("runtime/duplex/pump_tests.zig");
     _ = @import("runtime/ping_probe_tests.zig");
@@ -12162,7 +12163,21 @@ pub const Connection = struct {
     pub fn pumpClientDuplexWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!ClientDuplexPumpEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.checkClientDuplexPump();
-        return client_duplex_owner.ingest(self, try self.readClientDuplexWireFrame(deadline), deadline, client_duplex_hooks);
+        return client_duplex_owner.pump(self, deadline, client_duplex_hooks);
+    }
+
+    /// Advance one client frame under one absolute input/output budget, even
+    /// when no stream is active. A single owner must serialize this operation
+    /// with every client stream reader. Application frames retain normal
+    /// routing and HPACK ordering through the shared duplex owner.
+    pub fn pumpClientWithDeadline(self: *Connection, deadline: std.Io.Clock.Timestamp) Error!ClientDuplexPumpEvent {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return client_duplex_owner.pump(self, deadline, client_duplex_hooks);
+    }
+
+    pub fn pumpClientWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!ClientDuplexPumpEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.pumpClientWithDeadline(.fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
     }
 
     pub fn pumpClientDuplexWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!ClientDuplexPumpEvent {

@@ -1,0 +1,13 @@
+Build Summary: 8/8 steps succeeded; 161/161 tests passed
+test-lib success
++- run test 161 pass (161 total) 60ms MaxRSS:11M
+   +- compile test Debug native success 10s MaxRSS:983M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:26M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:26M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+

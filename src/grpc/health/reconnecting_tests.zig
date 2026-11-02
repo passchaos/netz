@@ -45,6 +45,18 @@ fn sendStatus(writer: *grpc.stream.ServerWriter, status: grpc.health.ServingStat
     try writer.writeMessage(message);
 }
 
+const StartObserver = struct {
+    starts: usize = 0,
+    fn started(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.starts += 1;
+    }
+    fn next(self: *@This(), watch: *grpc.health.ReconnectingWatch, timeout: std.Io.Duration) reconnecting.Error!reconnecting.Event {
+        const observer: grpc.health.ReconnectingWatchAttemptObserver = .{ .context = self, .started = started };
+        return watch.nextWithDeadlineObserved(.fromNow(watch.io, .{ .clock = .awake, .raw = timeout }), observer);
+    }
+};
+
 test "gRPC reconnecting health Watch backs off resets and disables on UNIMPLEMENTED" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -97,30 +109,41 @@ test "gRPC reconnecting health Watch backs off resets and disables on UNIMPLEMEN
     defer watch.deinit();
     @memset(&service, 'x');
 
-    const first = try watch.nextWithTimeout(.fromSeconds(3));
+    var observer: StartObserver = .{};
+    try std.testing.expectError(error.Timeout, observer.next(&watch, .fromNanoseconds(-1)));
+    try std.testing.expectEqual(@as(usize, 0), observer.starts);
+    const first = try observer.next(&watch, .fromSeconds(3));
+    try std.testing.expectEqual(@as(usize, 1), observer.starts);
     try std.testing.expectEqual(grpc.Status.unavailable, first.retrying.failure.rpc.status);
     try std.testing.expectEqual(@as(usize, 1), first.retrying.consecutive_failures);
     try std.testing.expect(!watch.isServing());
-    try std.testing.expectError(error.Timeout, watch.nextWithTimeout(.fromMilliseconds(1)));
+    try std.testing.expectError(error.Timeout, observer.next(&watch, .fromMilliseconds(1)));
+    try std.testing.expectEqual(@as(usize, 1), observer.starts);
     try std.testing.expectEqualDeep(first.retrying.deadline, watch.retry_at.?);
-    const second = try watch.nextWithTimeout(.fromSeconds(3));
+    const second = try observer.next(&watch, .fromSeconds(3));
+    try std.testing.expectEqual(@as(usize, 2), observer.starts);
     const second_rpc = switch (second.retrying.failure) {
         .rpc => |rpc| rpc,
         .transport => |err| return err,
     };
     try std.testing.expectEqual(grpc.Status.ok, second_rpc.status);
     try std.testing.expectEqual(@as(usize, 2), second.retrying.consecutive_failures);
-    try std.testing.expectEqual(grpc.health.ServingStatus.not_serving, (try watch.nextWithTimeout(.fromSeconds(3))).status.status);
+    try std.testing.expectEqual(grpc.health.ServingStatus.not_serving, (try observer.next(&watch, .fromSeconds(3))).status.status);
+    try std.testing.expectEqual(@as(usize, 3), observer.starts);
     try std.testing.expect(!watch.isServing());
-    try std.testing.expectEqual(grpc.health.ServingStatus.serving, (try watch.nextWithTimeout(.fromSeconds(3))).status.status);
+    try std.testing.expectEqual(grpc.health.ServingStatus.serving, (try observer.next(&watch, .fromSeconds(3))).status.status);
+    try std.testing.expectEqual(@as(usize, 3), observer.starts);
     try std.testing.expect(watch.isServing());
-    const restart = try watch.nextWithTimeout(.fromSeconds(3));
+    const restart = try observer.next(&watch, .fromSeconds(3));
+    try std.testing.expectEqual(@as(usize, 3), observer.starts);
     try std.testing.expectEqual(@as(usize, 0), restart.retrying.consecutive_failures);
     try std.testing.expect(!watch.isServing());
-    try std.testing.expectEqual(reconnecting.Event.disabled, try watch.nextWithTimeout(.fromSeconds(3)));
+    try std.testing.expectEqual(reconnecting.Event.disabled, try observer.next(&watch, .fromSeconds(3)));
+    try std.testing.expectEqual(@as(usize, 4), observer.starts);
     try std.testing.expect(watch.isServing());
     try watch.waitForServingWithTimeout(.fromMilliseconds(1));
-    try std.testing.expectError(error.HealthWatchDisabled, watch.nextWithTimeout(.fromSeconds(1)));
+    try std.testing.expectError(error.HealthWatchDisabled, observer.next(&watch, .fromSeconds(1)));
+    try std.testing.expectEqual(@as(usize, 4), observer.starts);
     try peer.await(io);
 }
 

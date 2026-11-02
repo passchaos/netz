@@ -5,10 +5,28 @@ const allocator = std.testing.allocator;
 test "ordinary Channel health gate rejects retrying Watch and restores wait-for-ready calls" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    const io = threaded.io();
-    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    const base = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, base, .{ .ip4 = .loopback(0) }, .{}, 4096);
     defer server.deinit();
     var retry_ready: std.Io.Event = .unset;
+    const RetrySleep = struct {
+        base: std.Io,
+        permitted: *std.Io.Event,
+        var active: ?*@This() = null;
+        fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            const self = active.?;
+            // Hold the retry timer until all fail-fast checks finish. The
+            // server's blocked read alone cannot stop a new Watch starting.
+            try self.permitted.wait(self.base);
+            return self.base.vtable.sleep(userdata, timeout);
+        }
+    };
+    var retry_sleep = RetrySleep{ .base = base, .permitted = &retry_ready };
+    RetrySleep.active = &retry_sleep;
+    defer RetrySleep.active = null;
+    var table = base.vtable.*;
+    table.sleep = RetrySleep.sleep;
+    const io: std.Io = .{ .userdata = base.userdata, .vtable = &table };
     const Peer = struct {
         fn consume(_: void, message: grpc.StreamingMessage) !void {
             try std.testing.expectEqualStrings("demo.Echo", (try grpc.health.decodeRequest(message.payload)).service);
@@ -40,8 +58,8 @@ test "ordinary Channel health gate rejects retrying Watch and restores wait-for-
             try writer.finishWithOptions(.{ .status = .unimplemented });
         }
     };
-    var peer = try io.concurrent(Peer.run, .{ &server, io, &retry_ready });
-    defer _ = peer.cancel(io) catch {};
+    var peer = try base.concurrent(Peer.run, .{ &server, base, &retry_ready });
+    defer _ = peer.cancel(base) catch {};
     var channel = try grpc.Channel.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address() } }, .{ .health_check_service = "demo.Echo" });
     defer channel.deinit();
 
