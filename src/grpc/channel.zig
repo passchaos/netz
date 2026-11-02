@@ -424,6 +424,10 @@ pub const Options = struct {
     /// a dedicated connection so it does not compete with application RPC
     /// readers; SharedChannel keeps its same-connection health owner.
     health_check_service: ?[]const u8 = null,
+    /// Suppress healthCheckConfig inheritance from a ServiceConfig. Explicit
+    /// `health_check_service` still wins; used by the Health Watch's own
+    /// transport Channel to avoid recursive checking.
+    disable_health_check: bool = false,
 
     pub fn validate(self: Options) error{InvalidChannelOptions}!void {
         try self.backoff.validate();
@@ -742,6 +746,7 @@ pub const Channel = struct {
         errdefer if (health_service) |name| allocator.free(name);
         var health_options = options;
         health_options.health_check_service = null;
+        health_options.disable_health_check = true;
         var result = Channel{
             .allocator = allocator,
             .io = io,
@@ -767,6 +772,7 @@ pub const Channel = struct {
             };
         }
         if (result.shuffle_address_list) result.shuffleSlots();
+        if (result.health_service != null) try result.ensureHealthGate();
         return result;
     }
 
@@ -817,7 +823,9 @@ pub const Channel = struct {
     ) Error!Channel {
         const balancing = config.loadBalancingConfig();
         var resolved = options;
-        if (!composite_owned and resolved.health_check_service == null) {
+        if (!composite_owned and !resolved.disable_health_check and
+            resolved.health_check_service == null)
+        {
             if (config.healthCheckServiceName()) |name| {
                 resolved.health_check_service = name;
             }

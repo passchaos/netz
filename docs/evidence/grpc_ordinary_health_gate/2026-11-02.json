@@ -9,11 +9,13 @@
     "empty_name": "overall server health",
     "null": "checking disabled",
     "call_shapes": ["unary", "streaming", "duplex"],
-    "validation": "service names longer than grpc.health.max_service_name_len or invalid UTF-8 are rejected at Channel.init with InvalidChannelOptions"
+    "validation": "service names longer than grpc.health.max_service_name_len or invalid UTF-8 are rejected at Channel.init with InvalidChannelOptions",
+    "disable_health_check": "suppresses healthCheckConfig inheritance from a ServiceConfig; the Health Watch's own transport Channel sets it to avoid recursive checking"
   },
   "design": {
     "watch_transport": "dedicated connection owned by channel/health_gate.zig; never competes with the application RPC reader",
-    "first_status": "the first gated call waits for a known status, bounded by the call deadline or five seconds when unbounded",
+    "startup": "the gate is created during Channel.init when health_check_service is configured; the dedicated Watch can connect while the application prepares its first call",
+    "first_status": "if the first gated call arrives before a status is known, it waits, bounded by the call deadline or five seconds when unbounded",
     "serving": "SERVING and UNIMPLEMENTED allow calls",
     "not_serving": "NOT_SERVING, UNKNOWN, and SERVICE_UNKNOWN reject fail-fast calls with ConnectionUnavailable",
     "wait_for_ready": "waits until serving or the call deadline",

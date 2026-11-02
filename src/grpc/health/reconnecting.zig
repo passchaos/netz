@@ -108,10 +108,13 @@ pub const ReconnectingWatch = struct {
         errdefer allocator.free(service);
         const owner = try allocator.create(channel.Channel);
         errdefer allocator.destroy(owner);
+        var channel_options = options.channel_options;
+        channel_options.health_check_service = null;
+        channel_options.disable_health_check = true;
         owner.* = if (config) |configured|
-            try channel.Channel.initWithServiceConfig(allocator, io, target, options.channel_options, configured)
+            try channel.Channel.initWithServiceConfig(allocator, io, target, channel_options, configured)
         else
-            try channel.Channel.init(allocator, io, target, options.channel_options);
+            try channel.Channel.init(allocator, io, target, channel_options);
         var retained = options;
         retained.watch.service = service;
         if (retained.service_override != null) retained.service_override = service;

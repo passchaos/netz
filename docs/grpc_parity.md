@@ -3059,10 +3059,12 @@ health; null keeps checking disabled. The gate owns a dedicated Watch
 connection so it never competes with an application RPC reader. SharedChannel
 continues to use its same-connection health owner.
 
-The gate starts lazily on the first unary, streaming, or duplex call. That
-call waits for a known status (bounded by its deadline, or five seconds when
-unbounded) before dispatch. Once known, `NOT_SERVING`, `UNKNOWN`, and
-`SERVICE_UNKNOWN` reject fail-fast calls with `ConnectionUnavailable`;
+The gate starts during `Channel.init` when configured, so the dedicated Watch
+can connect while the application prepares its first call. If the first call
+arrives before a status is known, it waits for one (bounded by its deadline, or
+five seconds when unbounded) before dispatch. Once known, `NOT_SERVING`,
+`UNKNOWN`, and `SERVICE_UNKNOWN` reject fail-fast calls with
+`ConnectionUnavailable`;
 `wait_for_ready` calls wait until the service becomes serving or their
 deadline expires. `UNIMPLEMENTED` disables checking and allows calls. A Watch
 transport retry returns to the unknown state and fails open until a new status
@@ -3090,3 +3092,8 @@ server and requires both `startStreaming` and `startDuplex` to return
 `Channel.Options.health_check_service` is validated before any allocation:
 names above `grpc.health.max_service_name_len` or invalid UTF-8 return
 `InvalidChannelOptions` from `Channel.init`.
+
+`Channel.Options.disable_health_check` suppresses `healthCheckConfig`
+inheritance from a ServiceConfig while explicit `health_check_service` still
+wins. The Health Watch's own transport Channel sets both fields so a
+ServiceConfig-driven Watch cannot recursively start another health gate.
