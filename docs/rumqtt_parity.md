@@ -6183,3 +6183,17 @@ proxy evidence for the entire suite.
    so a Prometheus counter reset cannot misclassify broker state. The broker
    embeds no HTTP server; applications serve the bytes from their own admin
    endpoint. Unit tests lock the sample mapping and byte-stable output.
+
+## QoS2 serial profile
+
+A 20,000-message serial QoS2 durable-session run (256-byte payload, publisher
+window 1, queue capacity 20,000) measured 20,581 publishes/s, p50 40.9 us, and
+p99 67.8 us. A 999-Hz `cycles:Pu` DWARF profile captured 915 samples. The
+broker spent 55.9% of children parked or waiting, with
+`__kernel_clock_gettime` at 13.2% self, `handlePubRel` at 15.4% children
+(2.05% self), `flushSlotLockedMode` at 8.6% children (3.4% self), and
+`routePublish` at 4.7% children (2.87% self). There is no single large CPU
+hotspot: the serial gap is dominated by event-loop wakeups, parking, and clock
+reads. Future work should reduce task wakeups or ownership boundaries rather
+than reworking the route/flush helpers. Rows, hashes and the command are in
+`docs/evidence/mqtt_qos2_serial_profile/2026-11-02.json`.

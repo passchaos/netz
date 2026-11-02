@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "MQTT QoS2 serial durable-session broker profile",
+  "decision": "profile-only; no code change accepted",
+  "head": "32302c4d6acec56044919a894cfa169218b813f9",
+  "workload": {
+    "protocol": "MQTT 5 over TCP",
+    "qos": 2,
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "warmup": 256,
+    "messages": 20000,
+    "publisher_window": 1,
+    "server_queue_capacity": 20000,
+    "session_expiry_seconds": 3600,
+    "broker_sha256": "c840020ed30701af60bed643c79b57cae18129e9dfd96bcfdf641deabe858c60",
+    "driver_sha256": "8133d25d62c1ac26d416b05a604b52b6f5895569760f0d12164063f9bd6e8fd1"
+  },
+  "command": "perf record -F 999 -e cycles:Pu -g --call-graph dwarf -- taskset -c 1 netz-mqtt-vector-broker --bind=127.0.0.1:18832 --connections=2 --max-queued-deliveries=20000 --max-outgoing-inflight=64",
+  "measurement": {
+    "publishes_per_s": 20581,
+    "p50_ns": 40945,
+    "p99_ns": 67797,
+    "p999_ns": 357368,
+    "elapsed_ns": 971726854,
+    "samples": 915
+  },
+  "profile": {
+    "Waiter.waitTask / Executor.park": "55.9% children; the broker is mostly parked or waiting for I/O and timers",
+    "__kernel_clock_gettime": "13.2% self",
+    "Broker.handlePubRel": "15.4% children, 2.05% self",
+    "Broker.flushSlotLockedMode": "8.6% children, 3.4% self",
+    "Broker.routePublish": "4.7% children, 2.87% self",
+    "Broker.enqueuePublishLocked": "6.5% children, 1.35% self",
+    "readBrokerEventOptionsOut": "9.7% children, 0.75% self",
+    "Executor.processCleanup": "3.23% self"
+  },
+  "conclusion": "Serial QoS2 latency is dominated by event-loop parking, wakeups, and clock reads rather than one large CPU hotspot. Further micro-optimizing route/flush helpers is unlikely to close the Mosquitto gap; a future change must reduce task wakeups or ownership boundaries, or improve the session/persistence scheduling path."
+}
