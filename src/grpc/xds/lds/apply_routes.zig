@@ -5,7 +5,7 @@ const ads = @import("../ads.zig");
 const rds = @import("../rds.zig");
 const shared = @import("../../channel/shared.zig");
 const Projection = @import("projection.zig").Projection;
-pub fn apply(self: *ctl.Controller, update: ads.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
+pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     var candidates: std.ArrayList(*rds.Snapshot) = .empty;
     defer {
         for (candidates.items) |snapshot| snapshot.release();
@@ -44,7 +44,7 @@ pub fn apply(self: *ctl.Controller, update: ads.Update, destination: shared.Shar
     }
     const projection = try Projection.create(self.allocator, selected.?, listener.value.hcm.max_stream_duration);
     defer projection.release();
-    const revision = try projection.publishWithDeadline(destination, deadline);
+    const revision = try self.publish(client, projection, destination, deadline);
     selected.?.retain();
     if (self.routes) |previous| previous.release();
     self.routes = selected.?;

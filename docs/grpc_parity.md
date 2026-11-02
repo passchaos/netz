@@ -3716,3 +3716,36 @@ stream/job layout changes; it now enters once and preserves the original
 cleanup-lock assertion. See [cluster admission](grpc_cluster_impl.md) and
 `docs/evidence/grpc_cluster_impl/2026-11-03.json`. Automatic LDS/RDS dependencies
 to CDS/EDS publication and broader bootstrap/failover/expiry/LRS remain open.
+
+
+## Automatic typed discovery and multi-cluster publication
+
+The typed discovery controller now derives LDS/RDS referenced clusters, watches
+EDS-backed CDS and service assignments and publishes a complete manager target
+with selected-cluster admission. Start rejects application calls until valid
+routes exist; pending CDS/EDS children keep fail-fast calls queued, while
+validated omissions remove resource admission. Cache staging uses immutable
+identity/CDS/EDS references and an independently retained target inventory with
+cluster-prefixed priority/locality paths. Same-name policy/data updates reuse
+cached/projected snapshots; service-name changes remove prior endpoints.
+
+ADS batched subscription preparation reserves all new type slots/names before
+publication and commits desired names only after the target/config/selector
+transaction succeeds. Accepted cache/version state survives ACK failure; invalid
+resources/duplicate names/allocation/old tokens/expired budgets preserve the old
+state. Old projection epochs retain cluster dependencies until config/call refs
+leave, and synchronization/later updates prune unused entries. Local non-LB
+service config and global admission options are retained. Cache limits count
+unique shared RDS sources plus CDS/EDS and target storage.
+
+The independent official LDS/RDS/CDS/EDS peer starts a native channel with no
+manual child map/endpoints, counts ten permitted grpc-js RPCs, verifies quota/
+category isolation and EDS-name replacement, rejects duplicate CDS without
+version/topology changes, preserves an old in-flight route and deletes listener
+admission. Both backend sessions stay reused. Native tests additionally cover
+constructor/start and publication allocation rollback, batch subscriptions,
+local method/retry defaults and resource-budget precedence. See
+[automatic typed discovery](grpc_xds_runtime.md) and
+`docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
+expiry/Delta/LRS, aggregate/DNS/security/filter and full rewrite integration
+remain open for the full library/control-plane objective.

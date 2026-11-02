@@ -10,6 +10,7 @@ pub const Locality = struct { region: []const u8 = "", zone: []const u8 = "", su
 pub const Drop = @import("../../channel/drop_policy.zig").Category;
 pub const Assignment = struct { cluster_name: []const u8, localities: []const Locality, drops: []const Drop, priority_count: usize };
 pub const Owned = struct {
+    wire: []const u8 = "",
     arena: std.heap.ArenaAllocator,
     value: Assignment,
     pub fn deinit(self: *Owned) void {
@@ -176,6 +177,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8, limits: Limits) E
     const gpa = owned.arena.allocator();
     var parser = Parser{ .gpa = gpa, .limits = limits };
     const storage = try gpa.dupe(u8, bytes);
+    owned.wire = storage;
     var reader: pb.Reader = .{ .bytes = storage };
     var cluster_name: []const u8 = "";
     var localities: std.ArrayList(Locality) = .empty;

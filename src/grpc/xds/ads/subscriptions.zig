@@ -3,6 +3,8 @@ const std = @import("std");
 const codec = @import("codec.zig");
 pub const Error = codec.Error || error{ DiscoveryTypeLimit, UnknownDiscoveryType, StaleDiscoveryResponse };
 pub const Options = struct { max_types: usize = 16, max_names_per_type: usize = 4096, max_name_bytes: usize = 4096 };
+pub const Subscription = @import("prepared_batch.zig").Subscription;
+pub const Batch = @import("prepared_batch.zig").Batch;
 var next_owner_id: std.atomic.Value(u64) = .init(1);
 pub const Token = struct { owner_id: u64, epoch: u64, sequence: u64 };
 pub const Entry = struct {
@@ -80,6 +82,9 @@ pub const State = struct {
         var prepared = try self.prepare(type_url, names);
         defer prepared.deinit();
         prepared.commit();
+    }
+    pub fn prepareMany(self: *State, requested: []const Subscription) Error!Batch {
+        return @import("prepared_batch.zig").prepare(self, requested);
     }
     /// Nonces and undecided responses belong to one stream; accepted versions
     /// and desired subscriptions survive reconnect and are replayed.

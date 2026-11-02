@@ -47,7 +47,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         defer if (source_owned) source.release();
         const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration);
         defer projection.release();
-        const revision = try projection.publishWithDeadline(destination, deadline);
+        const revision = try self.publish(client, projection, destination, deadline);
         if (subscription) |*prepared| prepared.commit();
         if (self.listener) |*previous| previous.deinit();
         self.listener = candidates.items[index];
@@ -61,7 +61,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     defer empty.release();
     const projection = try Projection.create(self.allocator, empty, null);
     defer projection.release();
-    const revision = try projection.publishWithDeadline(destination, deadline);
+    const revision = try self.publish(client, projection, destination, deadline);
     if (self.listener) |*previous| previous.deinit();
     self.listener = null;
     if (self.routes) |previous| previous.release();

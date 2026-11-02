@@ -63,6 +63,6 @@ locked the same mutex twice after StreamCall/Job layout changes. The injection
 now enters once, preserving its cleanup-lock assertion independently of other
 allocation sizes.
 
-This provides cluster-local admission over existing manager topology. Automatic
-LDS/RDS dependencies and CDS/EDS child publication, LRS and full control-plane
-bootstrap/failover/expiry integration remain subsequent work.
+[Automatic typed discovery](grpc_xds_runtime.md) now generates these cluster
+children from LDS/RDS/CDS/EDS. LRS and full control-plane bootstrap/failover/
+expiry integration remain subsequent work.

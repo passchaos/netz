@@ -4,8 +4,12 @@ const model = @import("model.zig");
 const ads = @import("../ads.zig");
 const rds = @import("../rds.zig");
 const shared = @import("../../channel/shared.zig");
-pub const Error = model.Error || ads.Error || rds.Error || shared.Error || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
-pub const Options = struct { listener_name: []const u8, authority: []const u8, max_header_bytes: usize = 65536, limits: model.Limits = .{} };
+pub const Error = model.Error || ads.Error || rds.Error || shared.Error || @import("../runtime/errors.zig").PublishError || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
+pub const Publisher = struct {
+    context: *anyopaque,
+    publish_fn: *const fn (*anyopaque, *ads.Client, *@import("projection.zig").Projection, shared.SharedChannel, std.Io.Clock.Timestamp) @import("../runtime/errors.zig").PublishError!u64,
+};
+pub const Options = struct { listener_name: []const u8, authority: []const u8, max_header_bytes: usize = 65536, limits: model.Limits = .{}, publisher: ?Publisher = null };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -32,6 +36,10 @@ pub const Controller = struct {
     pub fn routeOptions(self: *const Controller) rds.Options {
         return .{ .authority = self.options.authority, .max_header_bytes = self.options.max_header_bytes };
     }
+    pub fn publish(self: *Controller, client: *ads.Client, projection: *@import("projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.options.publisher) |publisher| return publisher.publish_fn(publisher.context, client, projection, destination, deadline);
+        return projection.publishWithDeadline(destination, deadline);
+    }
     pub fn empty(self: *Controller, name: []const u8) Error!*rds.Snapshot {
         var writer: std.Io.Writer.Allocating = .init(self.allocator);
         defer writer.deinit();
@@ -57,7 +65,7 @@ pub const Controller = struct {
         const revision = if (std.mem.eql(u8, url, model.type_url))
             try @import("apply_listener.zig").apply(self, client, update, destination, deadline)
         else if (std.mem.eql(u8, url, rds.type_url))
-            try @import("apply_routes.zig").apply(self, update, destination, deadline)
+            try @import("apply_routes.zig").apply(self, client, update, destination, deadline)
         else
             return error.WrongLdsResource;
         try client.acceptAppliedUpdate(update);

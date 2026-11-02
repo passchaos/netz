@@ -96,8 +96,9 @@ effective terminal handling, subscription/cache/version rollback and stale or
 expired decisions. Evidence is in
 `docs/evidence/grpc_lds/2026-11-03.json`.
 
-This adds client API Listener/HCM orchestration over application-provided
-cluster-manager topology. Bootstrap, automatic multi-cluster CDS/EDS children,
+[Automatic typed discovery](grpc_xds_runtime.md) now derives cluster/service
+subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.
+Bootstrap,
 control-plane failover/retry, resource expiry, Delta xDS, LRS, non-router HTTP
 filters, server listener/filter-chain interpretation and full security/rewriting
 configuration remain open.

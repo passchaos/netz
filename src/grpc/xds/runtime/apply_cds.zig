@@ -1,0 +1,66 @@
+//! Whole CDS response staging, EDS-name handoff and cached endpoint reprojection.
+const std = @import("std");
+const ctl = @import("controller.zig");
+const entry = @import("entry.zig");
+const cds = @import("../cds.zig");
+const ads = @import("../ads.zig");
+const shared = @import("../../channel/shared.zig");
+const Plan = @import("plan.zig").Plan;
+pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
+    var resources: std.ArrayList(*entry.Cluster) = .empty;
+    defer {
+        for (resources.items) |resource| resource.release();
+        resources.deinit(self.allocator);
+    }
+    var storage: usize = 0;
+    for (update.response.value.resources) |raw| {
+        var owned = try cds.decode(self.allocator, raw.value, self.options.limits.cds);
+        const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
+            owned.deinit();
+            return err;
+        };
+        errdefer resource.release();
+        storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
+        if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
+        try resources.append(self.allocator, resource);
+    }
+    std.mem.sort(*entry.Cluster, resources.items, {}, struct {
+        fn less(_: void, a: *entry.Cluster, b: *entry.Cluster) bool {
+            return std.mem.order(u8, a.resource.value.name, b.resource.value.name) == .lt;
+        }
+    }.less);
+    if (resources.items.len > 1) for (resources.items[1..], 0..) |resource, i| if (std.mem.eql(u8, resource.resource.value.name, resources.items[i].resource.value.name)) return error.DuplicateCdsResource;
+    var plan = try Plan.create(self, null);
+    defer plan.deinit();
+    for (plan.entries.items) |*item| {
+        const selected = for (resources.items) |resource| {
+            if (std.mem.eql(u8, resource.resource.value.name, item.identity.name)) break resource;
+        } else null;
+        if (selected) |resource| {
+            const same = if (item.cluster) |old| std.mem.eql(u8, old.resource.value.edsName(), resource.resource.value.edsName()) else false;
+            const snapshot = if (same and item.snapshot != null) blk: {
+                const before = item.cluster.?.resource.value;
+                const after = resource.resource.value;
+                if (before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json)) {
+                    item.snapshot.?.retain();
+                    break :blk item.snapshot.?;
+                }
+                break :blk try self.project(resource, item.snapshot.?.resource.wire);
+            } else try self.emptyEds(resource);
+            resource.retain();
+            if (item.cluster) |old| old.release();
+            if (item.snapshot) |old| old.release();
+            item.cluster = resource;
+            item.snapshot = snapshot;
+            if (!same) item.eds_seen = false;
+        } else {
+            if (item.cluster) |old| old.release();
+            if (item.snapshot) |old| old.release();
+            item.cluster = null;
+            item.snapshot = null;
+            item.eds_seen = false;
+        }
+        item.cds_seen = true;
+    }
+    return self.publish(client, &plan, self.latest.?, false, destination, deadline);
+}

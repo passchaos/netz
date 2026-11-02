@@ -10,4 +10,5 @@ pub const Event = @import("ads/client.zig").Event;
 test {
     _ = @import("ads/tests.zig");
     _ = @import("ads/transport_tests.zig");
+    _ = @import("ads/batch_tests.zig");
 }

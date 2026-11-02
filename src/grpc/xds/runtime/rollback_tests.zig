@@ -1,0 +1,64 @@
+//! One failed discovery transaction cannot partially commit names or caches.
+const std = @import("std");
+const grpc = @import("../../mod.zig");
+const runtime = @import("../runtime.zig");
+const ads = @import("../ads.zig");
+const lds = @import("../lds.zig");
+const cds = @import("../cds.zig");
+const eds = @import("../eds.zig");
+const gpa = std.testing.allocator;
+fn update(client: *ads.Client, url: []const u8, version: []const u8, resources: []const ads.codec.Any) !ads.Update {
+    const encoded = try ads.codec.encodeResponse(gpa, .{ .type_url = url, .version = version, .nonce = version, .resources = resources }, 65536);
+    defer gpa.free(encoded);
+    var response = try ads.codec.decodeResponse(gpa, encoded, .{});
+    errdefer response.deinit();
+    return .{ .response = response, .token = try client.subscriptions.received(response.value) };
+}
+test "gRPC xDS runtime transaction rollback preserves cluster snapshots subscriptions and versions" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var failing = std.testing.FailingAllocator.init(gpa, .{});
+    var channel = try grpc.SharedChannel.init(failing.allocator(), io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+    const routes = try @import("../rds/testing.zig").encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try @import("../lds/testing.zig").encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var initial = try update(&client, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+    defer initial.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, initial, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+    const a = try @import("../cds/testing.zig").cluster(gpa, "a", "service-a", "");
+    defer gpa.free(a);
+    var first = try update(&client, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = a }});
+    defer first.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, first, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+    const before = channel.configurationRevision();
+    const old_cluster = controller.entries.items[0].cluster.?;
+    const old_snapshot = controller.entries.items[0].snapshot.?;
+    const b = try @import("../cds/testing.zig").cluster(gpa, "a", "service-b", "");
+    defer gpa.free(b);
+    var candidate = try update(&client, cds.type_url, "c2", &.{.{ .type_url = cds.type_url, .value = b }});
+    defer candidate.deinit();
+    failing.fail_index = failing.alloc_index;
+    const result = controller.applyWithDeadline(&client, candidate, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(before, channel.configurationRevision());
+    try std.testing.expect(controller.entries.items[0].cluster.? == old_cluster and controller.entries.items[0].snapshot.? == old_snapshot);
+    try std.testing.expectEqualStrings("service-a", client.subscriptions.find(eds.type_url).?.names[0]);
+    try std.testing.expectEqualStrings("c1", client.acceptedVersion(cds.type_url).?);
+    try client.validateUpdate(candidate);
+    try std.testing.expectError(error.Timeout, controller.applyWithDeadline(&client, candidate, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromNanoseconds(-1) })));
+    try std.testing.expectEqual(before, channel.configurationRevision());
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, candidate, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+    try std.testing.expectEqualStrings("service-b", client.subscriptions.find(eds.type_url).?.names[0]);
+    try std.testing.expectEqualStrings("c2", client.acceptedVersion(cds.type_url).?);
+}

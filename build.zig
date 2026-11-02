@@ -2090,6 +2090,21 @@ pub fn build(b: *std.Build) void {
     const xds_regex_step = b.step("interop-grpc-xds-regex", "Compare bounded native xDS safe-regex full matching against official RE2 WASM");
     xds_regex_step.dependOn(&xds_regex.step);
 
+    const grpc_runtime_client = b.addExecutable(.{
+        .name = "netz-grpc-xds-runtime-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_xds_runtime/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_runtime = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_xds_runtime/run.py" });
+    grpc_runtime.addArtifactArg(grpc_runtime_client);
+    if (b.args) |args| grpc_runtime.addArgs(args);
+    const grpc_runtime_step = b.step("interop-grpc-xds-runtime", "Verify automatic LDS/RDS/CDS/EDS discovery and isolated cluster RPC admission");
+    grpc_runtime_step.dependOn(&grpc_runtime.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{
