@@ -454,6 +454,10 @@ pub fn policyDropResponse(allocator: std.mem.Allocator, category: []const u8) st
     return .{ .allocator = allocator, .transport = null, .was_dropped = true, .status = .unavailable, .status_message = try std.fmt.allocPrint(allocator, "EDS-configured drop: {s}", .{category}), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
 }
 
+pub fn circuitBreakerResponse(allocator: std.mem.Allocator) std.mem.Allocator.Error!UnaryResponse {
+    return .{ .allocator = allocator, .transport = null, .was_dropped = true, .status = .unavailable, .status_message = try allocator.dupe(u8, "circuit breaker drop"), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
+}
+
 pub fn perAttemptTimeoutResponse(
     allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!UnaryResponse {

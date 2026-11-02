@@ -34,6 +34,8 @@ pub fn Owner(comptime State: type) type {
             call.retain();
             call.setOwnerWake(worker.wake);
             worker.streams.appendAssumeCapacity(.{ .call = call, .stream = stream });
+            call.circuit_permit = job.circuit_permit;
+            job.circuit_permit = null;
             state.finish(job, null, null);
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
@@ -43,6 +45,8 @@ pub fn Owner(comptime State: type) type {
             worker.streams.items[index].stream.deinit();
             _ = worker.streams.swapRemove(index);
             state.lock();
+            if (call.circuit_permit) |*permit| permit.release();
+            call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
@@ -55,6 +59,8 @@ pub fn Owner(comptime State: type) type {
             worker.streams.items[index].stream.deinit();
             _ = worker.streams.swapRemove(index);
             state.lock();
+            if (call.circuit_permit) |*permit| permit.release();
+            call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
             call.terminal = response;

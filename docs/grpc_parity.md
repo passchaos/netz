@@ -3506,3 +3506,40 @@ allocator rollback and retry-throttle preservation. See
 [request drop semantics](grpc_eds_drop.md) and
 `docs/evidence/grpc_eds_drop/2026-11-03.json`. Circuit breaking and LRS reporting
 remain open with the broader xDS/control-plane objective.
+
+
+## Shared cluster circuit admission
+
+Channel circuit options now share a reference-counted process counter keyed by
+cluster plus EDS service name, matching grpc-core's call-counter identity.
+Endpoint admission atomically reserves a permit under the configured limit,
+while queued readiness waits hold no permit. Circuit rejection follows EDS drops
+and precedes application HEADERS, returning marked UNAVAILABLE for unary or
+CallDropped for stream opening; retries/hedging do not bypass it. The current
+permit transfers from a pending shared job to its active stream and releases
+only on actual attempt completion, cancellation cleanup, failure or shutdown.
+Ordinary streaming attaches the existing one-shot completion observer.
+
+Dynamic SharedChannel replacements preserve old active permits through limit
+or identity changes. Lowering the limit leaves active RPCs running; new calls
+reject until capacity returns. Disabling a policy does not erase active count
+from other same-identity channels. The process-owned identity registry survives
+first-channel allocator/backend destruction and removes entries after the last
+permit/policy release. Shared monotonic circuitStats report active/admitted/
+rejected values. EDS projection installs the default 1024 cap and can accept a
+CDS-provided logical identity and maximum via TargetOptions.
+
+Native tests cover cross-channel same/different EDS identities, cap changes with
+two real in-flight RPCs, shared cancel and peer/shutdown cleanup, ordinary
+terminal-only duplex/client-streaming release, allocator rollback, EDS limit
+projection and CAS
+competition among eight thread owners. `interop-grpc-circuit` compares actual
+official cluster-impl picker request start/end behavior, then validates native
+ordinary/shared traffic against an independent server: five permitted calls,
+no rejected payload on wire, three channel transports, a peer-observed canceled
+stream, preserved retry throttle and one hedging attempt. Existing EDS/drop
+interop remains required regression evidence. See
+[cluster circuit behavior](grpc_circuit.md) and
+`docs/evidence/grpc_circuit/2026-11-03.json`. Typed CDS extraction, per-child
+cluster implementation, LRS and remaining full control-plane integration are
+still open.

@@ -18,6 +18,8 @@ pub const Update = struct {
     /// Requires target != null; callers may release their reference on return.
     target_lifetime: ?TargetLifetime = null,
     /// Dynamic RPC admission categories; an empty replacement disables drops.
+    /// Replace cluster identity/limit atomically while existing permits finish.
+    circuit_breaker: union(enum) { keep, replace: ?channel.circuit_breaker.Options } = .keep,
     drop_categories: union(enum) { keep, replace: []const channel.drop_policy.Category } = .keep,
     service_config: union(enum) { keep, replace: ?[]const u8 } = .keep,
 };
@@ -54,6 +56,11 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
         .replace => |categories| try channel.drop_policy.Policy.init(state.allocator, categories),
     };
     errdefer drop.deinit();
+    var circuit = switch (update.circuit_breaker) {
+        .keep => if (state.circuit) |policy| policy.clone() else null,
+        .replace => |options_value| if (options_value) |policy| try channel.circuit_breaker.Policy.init(policy) else null,
+    };
+    errdefer if (circuit) |*policy| policy.deinit();
     const old_config = state.retainConfig();
     defer if (old_config) |config| config.release();
     const resolver_policy = if (update.target) |target| if (target == .resolved) target.resolved.policy else channel.SelectionPolicy.pick_first else state.resolver_policy;
@@ -99,5 +106,7 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     lifetime = null;
     const owned_drop = drop;
     drop = .{};
-    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop);
+    const owned_circuit = circuit;
+    circuit = null;
+    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop, owned_circuit);
 }

@@ -45,6 +45,7 @@ pub const State = struct {
     tracker: *connectivity.Tracker,
     policy: channel.SelectionPolicy,
     drop: channel.drop_policy.Policy = .{},
+    circuit: ?channel.circuit_breaker.Policy = null,
     drop_revision: u64 = 1,
     drop_counters: channel.drop_policy.Counters = .{},
     weighted_target: ?WeightedTarget = null,
@@ -146,6 +147,7 @@ pub const State = struct {
         if (self.target_lifetime) |owner| owner.release();
         self.config.deinit();
         self.drop.deinit();
+        if (self.circuit) |*policy| policy.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
         self.tracker.release();
@@ -332,6 +334,8 @@ pub const State = struct {
         self.retention.stopResolution();
     }
     fn finishLocked(self: *State, job: *Job, result: ?call.UnaryResponse, err: ?anyerror) void {
+        if (job.circuit_permit) |*permit| permit.release();
+        job.circuit_permit = null;
         job.result = result;
         job.err = if (self.closed and err != null) error.SharedChannelClosed else err;
         if (job.stream) |stream| if (job.err) |failure| stream.retireLocked(failure);
@@ -516,6 +520,18 @@ pub const State = struct {
                 continue;
             };
             if (dropped) |response| {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, response, null);
+                cursor = next;
+                continue;
+            }
+            const circuit_drop = @import("circuit_admission.zig").rejectIfSaturated(self, job) catch |err| {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, err);
+                cursor = next;
+                continue;
+            };
+            if (circuit_drop) |response| {
                 self.removeQueuedLocked(job);
                 self.finishLocked(job, response, null);
                 cursor = next;
@@ -922,6 +938,10 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or worker.retired or worker.source.suspended or worker.pending_settings != null or self.head == null) return null;
+        if (self.circuit) |policy| if (policy.saturated()) {
+            self.recomputeLocked();
+            return null;
+        };
         if (self.weighted_target) |*runtime| if (@import("../cluster_route.zig").contains(runtime.root)) {
             self.evaluateOutliersLocked();
             const job = @import("cluster_dispatch.zig").choose(self, runtime, worker, removeQueuedLocked, finishLocked) orelse return null;
@@ -936,8 +956,22 @@ pub const State = struct {
         if (picked != worker) return null;
         return self.claimJobLocked(worker, self.head.?);
     }
-    fn claimJobLocked(self: *State, worker: *Worker, job: *Job) *Job {
+    fn claimJobLocked(self: *State, worker: *Worker, job: *Job) ?*Job {
         self.removeQueuedLocked(job);
+        if (self.circuit) |policy| {
+            job.circuit_permit = policy.acquire() orelse {
+                if (job.stream != null) {
+                    self.finishLocked(job, null, error.CallDropped);
+                    return null;
+                }
+                const response = call.circuitBreakerResponse(self.allocator) catch |err| {
+                    self.finishLocked(job, null, err);
+                    return null;
+                };
+                self.finishLocked(job, response, null);
+                return null;
+            };
+        }
         job.setOwnerWake(worker.wake);
         worker.capacity -= 1;
         worker.outstanding_requests += 1;
@@ -967,7 +1001,7 @@ pub const State = struct {
             self.unlock();
             return error.SharedChannelClosed;
         }
-        if (self.drop.categories.len != 0) self.io.checkCancel() catch |err| {
+        if (self.drop.categories.len != 0 or self.circuit != null) self.io.checkCancel() catch |err| {
             self.unlock();
             return err;
         };
@@ -979,6 +1013,16 @@ pub const State = struct {
             job.retain();
             self.finishLocked(job, response, null);
             self.tracker.setState(self.aggregateLocked());
+            self.unlock();
+            return;
+        }
+        const circuit_drop = @import("circuit_admission.zig").rejectIfSaturated(self, job) catch |err| {
+            self.unlock();
+            return err;
+        };
+        if (circuit_drop) |response| {
+            job.retain();
+            self.finishLocked(job, response, null);
             self.unlock();
             return;
         }

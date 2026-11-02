@@ -2104,6 +2104,21 @@ pub fn build(b: *std.Build) void {
     const grpc_eds_drop_step = b.step("interop-grpc-eds-drop", "Verify EDS drop fractions, pre-wire RPC rejection, retry/hedging suppression and dynamic updates with official grpc-js-xds/grpc-js");
     grpc_eds_drop_step.dependOn(&grpc_eds_drop.step);
 
+    const grpc_circuit_client = b.addExecutable(.{
+        .name = "netz-grpc-circuit-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_circuit/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_circuit = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_circuit/run.py" });
+    grpc_circuit.addArtifactArg(grpc_circuit_client);
+    if (b.args) |args| grpc_circuit.addArgs(args);
+    const grpc_circuit_step = b.step("interop-grpc-circuit", "Verify shared cluster/EDS circuit budgets, changed limits and RPC permits against official grpc-js-xds/grpc-js");
+    grpc_circuit_step.dependOn(&grpc_circuit.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

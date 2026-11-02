@@ -204,6 +204,9 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     state.drop = prepared.drop;
     prepared.drop = previous_drop;
     if (drop_changed) state.drop_revision +%= 1;
+    const previous_circuit = state.circuit;
+    state.circuit = prepared.circuit;
+    prepared.circuit = previous_circuit;
     state.policy = prepared.policy;
     state.resolver_policy = prepared.resolver_policy;
     state.shuffle_addresses = prepared.shuffle;

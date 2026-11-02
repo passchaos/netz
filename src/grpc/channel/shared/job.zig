@@ -23,6 +23,7 @@ pub const Job = struct {
     routing_hash: ?ring_hash.RequestHash = null,
     selected_worker: ?*State.Worker = null,
     drop_revision: u64 = 0,
+    circuit_permit: ?@import("../circuit_breaker.zig").Permit = null,
     stream: ?*@import("state.zig").State.StreamCall = null,
     next: ?*Job = null,
     result: ?call.UnaryResponse = null,
@@ -73,6 +74,7 @@ pub const Job = struct {
     pub fn release(self: *Job) void {
         const parent = self.parent orelse return;
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (self.circuit_permit) |*permit| permit.release();
         if (self.result) |*result| result.deinit();
         self.releaseMessage();
         if (self.owned_inputs) |*owned| owned.deinit();

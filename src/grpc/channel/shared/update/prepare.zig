@@ -11,6 +11,7 @@ pub const Prepared = struct {
     allocator: std.mem.Allocator,
     config: ?*Generation,
     drop: channel.drop_policy.Policy = .{},
+    circuit: ?channel.circuit_breaker.Policy = null,
     endpoints: []channel.Endpoint,
     target_lifetime: ?@import("../target_lifetime.zig").Lifetime = null,
     sources: []*State.Source = &.{},
@@ -24,11 +25,12 @@ pub const Prepared = struct {
     retired_children: ?*State.Retention.Entry = null,
 
     /// Consumes the generation, canonical inventory and explicit ORCA clone.
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoints: []channel.Endpoint, resolver_policy: channel.SelectionPolicy, options: Options, config: ?*Generation, orca_override: ?orca_config.Config, target_lifetime: ?@import("../target_lifetime.zig").Lifetime, drop: channel.drop_policy.Policy) State.Failure!Prepared {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, endpoints: []channel.Endpoint, resolver_policy: channel.SelectionPolicy, options: Options, config: ?*Generation, orca_override: ?orca_config.Config, target_lifetime: ?@import("../target_lifetime.zig").Lifetime, drop: channel.drop_policy.Policy, circuit: ?channel.circuit_breaker.Policy) State.Failure!Prepared {
         var self = Prepared{
             .allocator = allocator,
             .config = config,
             .drop = drop,
+            .circuit = circuit,
             .endpoints = endpoints,
             .target_lifetime = target_lifetime,
             .policy = undefined,
@@ -79,6 +81,7 @@ pub const Prepared = struct {
 
     pub fn deinit(self: *Prepared) void {
         self.drop.deinit();
+        if (self.circuit) |*policy| policy.deinit();
         State.Retention.destroyList(self.retired_children);
         for (self.sources) |source| source.release();
         self.allocator.free(self.sources);

@@ -145,6 +145,7 @@ pub fn Call(comptime State: type) type {
         parent: *State,
         options: streaming.RequestOptions,
         owned_inputs: inputs.Inputs,
+        circuit_permit: ?@import("../../circuit_breaker.zig").Permit = null,
         deadline: ?std.Io.Clock.Timestamp,
         refs: std.atomic.Value(usize) = .init(1),
         cancel_requested: std.atomic.Value(bool) = .init(false),
@@ -192,6 +193,7 @@ pub fn Call(comptime State: type) type {
             if (self.decoder) |*decoder| decoder.deinit();
             if (self.chunk) |chunk| allocator.free(chunk);
             allocator.free(self.bytes);
+            if (self.circuit_permit) |*permit| permit.release();
             self.owned_inputs.deinit();
             if (self.owner_wake.load(.acquire)) |wake| wake.release();
             const parent = self.parent;

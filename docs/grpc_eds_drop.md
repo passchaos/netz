@@ -70,7 +70,8 @@ active-call completion, invalid input/cancellation boundaries, allocator rollbac
 and no retry-throttle debit. Evidence is recorded in
 `docs/evidence/grpc_eds_drop/2026-11-03.json`.
 
-This implements request drop categories. Cluster circuit breaking, LRS drop and
+This implements request drop categories. [Cluster circuit breaking](grpc_circuit.md)
+is also available. LRS drop and
 per-locality load reporting, route/resource validation and other remaining xDS
 control-plane integration are separate work.
 

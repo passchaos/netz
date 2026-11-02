@@ -1,0 +1,66 @@
+{
+  "status": "passed",
+  "shared_identity": true,
+  "independent_eds": true,
+  "limit_update": true,
+  "stream_cancel": true,
+  "retry_stopped": true,
+  "hedging_attempts": 1,
+  "active": 0,
+  "admitted": 4,
+  "rejected": 4,
+  "wire_calls": [
+    "hold-one",
+    "independent",
+    "release-one",
+    "stream",
+    "resumed"
+  ],
+  "wire_sessions": 3,
+  "peer_stream_canceled": true,
+  "official_oracle": {
+    "shared_identity": true,
+    "separate_eds": true,
+    "complete_after_release": true
+  },
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "build.zig": "286cf9c48698974a7e562b01b684043ef7e132e025358f2490c72904314513b6",
+    "src/grpc/mod.zig": "c8598299628073ea50443463e3d283aea3910ec7519a9f970cf38cb2e9f644fd",
+    "src/grpc/call.zig": "57327c04edd5347ad532180d295f36ae493f3d0f9f737b3fb275c6aa2e1f564e",
+    "src/grpc/channel.zig": "70f919bc178c20d1995f4ad8df98f36f9c54930facb1224ca0fae1b42580cd44",
+    "src/grpc/channel/circuit_breaker.zig": "363c490533f26cc30bc9cdf1f74e967c8e7075a66c8445ef5010448ec5669c24",
+    "src/grpc/channel/circuit_runtime_tests.zig": "9dd858b5ee16b207fef794f71c2813ae8be70bbcf89943101960fa8e2c01237c",
+    "src/grpc/channel/circuit_stream_tests.zig": "6e033607eee554b75130741095a075f9b2fb772ae75f8a69dbfa097aef57dfdf",
+    "src/grpc/channel/shared.zig": "fd7a4fa8e4f377da9c601c3bcc92693d3a09ed749e8ec84317edbc05ab3e86ba",
+    "src/grpc/channel/shared/state.zig": "f119bcb78c6d7d180cb27ae3ef3e47c27c829ec9cca66eabbec0dfe804d3421c",
+    "src/grpc/channel/shared/job.zig": "75502245531eb53ac091660b4a39c9815fcaa16128d85327694a43a865a3a993",
+    "src/grpc/channel/shared/circuit_admission.zig": "066b6ee31f79846d5e0acad44e267085e6bbc37495588eb7e08a7ea45f4887c0",
+    "src/grpc/channel/shared/init.zig": "1084368ac6e1e6c3d0aebb07873125ee0b7eae5c9fd5d6dc1f6ff038d5404dee",
+    "src/grpc/channel/shared/stream/call.zig": "6081e671189be3dd07f0675282d6576d6f62a54cac17209c0be20a2c4f2056ed",
+    "src/grpc/channel/shared/stream/owner.zig": "c6fd1b90f63e7cce8697c914ee75f3f6cf36da1f5444c8cd68ac7b8990194f2b",
+    "src/grpc/channel/shared/update.zig": "715ad8d67e38b6221593fc2062d9ece257d12336ada1b6001937760fd8d813cc",
+    "src/grpc/channel/shared/update/prepare.zig": "d625bfd7ea6c2121d9acd78ac6a7a05218a872828cf7ab031b76bffe201bd43d",
+    "src/grpc/channel/shared/update/publish.zig": "bc6ef9981afe6feb6d0c584ed407a24965391bc5a28bc5c7fe94462d7b820a99",
+    "src/grpc/xds/eds/target.zig": "765723dab8b0ef4eff54372758f7a1fa519c2da14e59f5b48ba4f62820626b79",
+    "tools/interop/grpc_circuit/client.zig": "8f79dbf6277f8ba7770cd26a203aefb11dbb1bf92250b730354c861374e9f0ae",
+    "tools/interop/grpc_circuit/peer.js": "87d0029da79a413646ab484b92985f43d500349d80a16057d564200bec0e8389",
+    "tools/interop/grpc_circuit/run.py": "24b0fbe6750d36ca762d169e34f4407b69d7328282dee2ae061c5b76ba6fa496",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "official_cluster_impl_sha256": "ff437150b48f65241d2314219f9ccd5c6edc2defc3ba81680651e120ac602fa7",
+  "client_sha256": "6a68cee2a4509488ebe7cc3c1b2f14fc8e02457eca9518f2ff7a678a8460373e"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-circuit success
++- run python3 success 560ms
+   +- compile exe netz-grpc-circuit-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:27M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:27M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

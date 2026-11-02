@@ -22,6 +22,7 @@ const least_request = @import("channel/least_request.zig");
 const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
 const proxy_policy = @import("channel/proxy_policy.zig");
+pub const circuit_breaker = @import("channel/circuit_breaker.zig");
 pub const drop_policy = @import("channel/drop_policy.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
 
@@ -42,6 +43,7 @@ pub const ProxyDirectReason = proxy_policy.DirectReason;
 pub const Error = streaming.Error || resolver.Error || ConnectError || error{
     InvalidChannelOptions,
     InvalidDropPolicy,
+    InvalidCircuitBreaker,
     CallDropped,
     MissingRequestHash,
     UnknownCluster,
@@ -417,6 +419,7 @@ pub const TlsHostProxyTarget = struct {
 };
 
 pub const Options = struct {
+    circuit_breaker: ?@import("channel/circuit_breaker.zig").Options = null,
     drop_categories: []const drop_policy.Category = &.{},
     backoff: BackoffPolicy = .{},
     /// Null uses the resolved target policy (pick_first for single targets).
@@ -480,6 +483,7 @@ const Slot = struct {
     weighted_outliers: []WeightedOutlier = &.{},
     weighted_target_ejected: bool = false,
     outstanding_requests: usize = 0,
+    circuit_permit: ?circuit_breaker.Permit = null,
     least_request_enabled: bool = false,
     outlier_enabled: bool = false,
     ring_hash_weight: u32 = 1,
@@ -680,6 +684,7 @@ pub const Channel = struct {
     outlier_config: ?service_config.OutlierDetectionConfig = null,
     outlier_next_evaluation_ns: ?i96 = null,
     drop: drop_policy.Policy = .{},
+    circuit: ?circuit_breaker.Policy = null,
     drop_counters: drop_policy.Counters = .{},
     canceled: std.Io.Event = .unset,
 
@@ -792,10 +797,14 @@ pub const Channel = struct {
         var drop = try drop_policy.Policy.init(allocator, options.drop_categories);
         errdefer drop.deinit();
         health_options.drop_categories = &.{};
+        health_options.circuit_breaker = null;
+        var circuit = if (options.circuit_breaker) |policy| try circuit_breaker.Policy.init(policy) else null;
+        errdefer if (circuit) |*policy| policy.deinit();
         var result = Channel{
             .allocator = allocator,
             .io = io,
             .drop = drop,
+            .circuit = circuit,
             .target = target,
             .slots = slots,
             .selection_policy = selection_policy,
@@ -823,6 +832,7 @@ pub const Channel = struct {
             result.ensureSlotHealthGates() catch |err| {
                 // The construction rollback still owns the local drop value.
                 result.drop = .{};
+                result.circuit = null;
                 result.deinit();
                 return err;
             };
@@ -968,6 +978,7 @@ pub const Channel = struct {
 
     pub fn deinit(self: *Channel) void {
         self.drop.deinit();
+        if (self.circuit) |*policy| policy.deinit();
         if (self.health_service) |name| {
             self.allocator.free(name);
             self.health_service = null;
@@ -982,6 +993,7 @@ pub const Channel = struct {
                 slot.health_gate = null;
             }
             slot.closeConnection();
+            if (slot.circuit_permit) |*permit| permit.release();
             slot.deinitPolicyState(self.allocator);
         }
         if (self.health_sync) |sync| {
@@ -1431,6 +1443,7 @@ pub const Channel = struct {
     ) Error!call.UnaryResponse {
         try self.validateDropRequest(options);
         if (try self.dropCategory(attempt_deadline)) |category| return call.policyDropResponse(allocator, category);
+        if (try self.circuitSaturated(attempt_deadline)) return call.circuitBreakerResponse(allocator);
         const routing_hash = try self.requestHash(options);
         const ready_connection = try self.ready(
             options.wait_for_ready orelse false,
@@ -1438,6 +1451,7 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(options),
         );
+        if (!self.acquireCircuit(ready_connection.index)) return call.circuitBreakerResponse(allocator);
         self.beginRequest(ready_connection.index);
         defer self.finishRequest(ready_connection.index);
         const timeout_header: ?wire.Timeout = if (rpc_deadline) |absolute| blk: {
@@ -1494,6 +1508,7 @@ pub const Channel = struct {
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
         if (try self.dropCategory(deadline)) |_| return error.CallDropped;
+        if (try self.circuitSaturated(deadline)) return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1501,9 +1516,9 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(resolved.options),
         );
+        if (!self.acquireCircuit(ready_connection.index)) return error.CallDropped;
         self.beginRequest(ready_connection.index);
-        var owns_request = self.slots[ready_connection.index]
-            .least_request_enabled;
+        var owns_request = self.slots[ready_connection.index].least_request_enabled or self.slots[ready_connection.index].circuit_permit != null;
         defer if (owns_request) self.finishRequest(ready_connection.index);
         var writer = streaming.startClientUnderDeadline(
             ready_connection.connection,
@@ -1553,6 +1568,7 @@ pub const Channel = struct {
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
         if (try self.dropCategory(deadline)) |_| return error.CallDropped;
+        if (try self.circuitSaturated(deadline)) return error.CallDropped;
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1560,9 +1576,9 @@ pub const Channel = struct {
             routing_hash,
             weightedTargetInput(resolved.options),
         );
+        if (!self.acquireCircuit(ready_connection.index)) return error.CallDropped;
         self.beginRequest(ready_connection.index);
-        var owns_request = self.slots[ready_connection.index]
-            .least_request_enabled;
+        var owns_request = self.slots[ready_connection.index].least_request_enabled or self.slots[ready_connection.index].circuit_permit != null;
         defer if (owns_request) self.finishRequest(ready_connection.index);
         var stream = duplex.startDuplexUnderDeadline(
             ready_connection.connection,
@@ -1952,7 +1968,7 @@ pub const Channel = struct {
     }
 
     fn validateDropRequest(self: *const Channel, options: anytype) Error!void {
-        if (self.drop.categories.len == 0) return;
+        if (self.drop.categories.len == 0 and self.circuit == null) return;
         _ = try call.parseRequestMetadata("POST", options.path, &.{ .{ .name = "content-type", .value = "application/grpc" }, .{ .name = "te", .value = "trailers" } });
         try call.validateCustomMetadata(options.metadata);
         try call.validateCustomBinaryMetadata(options.binary_metadata);
@@ -1971,6 +1987,26 @@ pub const Channel = struct {
         return self.drop.choose(self.io, &self.drop_counters);
     }
 
+    pub fn circuitStats(self: *const Channel) circuit_breaker.Stats {
+        return if (self.circuit) |policy| policy.stats() else .{};
+    }
+    fn circuitSaturated(self: *Channel, deadline: ?std.Io.Clock.Timestamp) Error!bool {
+        const policy = self.circuit orelse return false;
+        if (deadline) |until| _ = try @import("../internal/deadline.zig").usableAwake(self.io, until);
+        try self.io.checkCancel();
+        if (self.canceled.isSet()) return error.Canceled;
+        if (!policy.saturated()) return false;
+        policy.recordRejection();
+        return true;
+    }
+    fn acquireCircuit(self: *Channel, index: usize) bool {
+        const policy = self.circuit orelse return true;
+        const permit = policy.acquire() orelse return false;
+        std.debug.assert(self.slots[index].circuit_permit == null);
+        self.slots[index].circuit_permit = permit;
+        return true;
+    }
+
     fn beginRequest(self: *Channel, index: usize) void {
         const slot = &self.slots[index];
         if (slot.least_request_enabled) slot.outstanding_requests += 1;
@@ -1978,6 +2014,8 @@ pub const Channel = struct {
 
     fn finishRequest(self: *Channel, index: usize) void {
         const slot = &self.slots[index];
+        if (slot.circuit_permit) |*permit| permit.release();
+        slot.circuit_permit = null;
         if (!slot.least_request_enabled) return;
         std.debug.assert(slot.outstanding_requests != 0);
         slot.outstanding_requests -= 1;
@@ -2619,7 +2657,7 @@ pub const Channel = struct {
         index: usize,
     ) std.mem.Allocator.Error!?*completion.Observer {
         const slot = &self.slots[index];
-        if (!slot.least_request_enabled and !slot.outlier_enabled and
+        if (!slot.least_request_enabled and !slot.outlier_enabled and slot.circuit_permit == null and
             !hasWeightedOutlier(slot)) return null;
         return try completion.Observer.create(
             self.allocator,
@@ -2640,6 +2678,8 @@ pub const Channel = struct {
         const slot: *Slot = @ptrCast(
             @alignCast(context),
         );
+        if (slot.circuit_permit) |*permit| permit.release();
+        slot.circuit_permit = null;
         if (slot.least_request_enabled) {
             std.debug.assert(slot.outstanding_requests != 0);
             slot.outstanding_requests -= 1;

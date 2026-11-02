@@ -100,9 +100,12 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     errdefer if (!state_initialized) allocator.destroy(state);
     var drop = try channel.drop_policy.Policy.init(allocator, options.channel.drop_categories);
     errdefer if (!transferred) drop.deinit();
+    var circuit = if (options.channel.circuit_breaker) |circuit_options| try channel.circuit_breaker.Policy.init(circuit_options) else null;
+    errdefer if (!transferred) if (circuit) |*circuit_policy| circuit_policy.deinit();
     var retained = options;
     retained.service_config_json = null;
     retained.channel.drop_categories = &.{};
+    retained.channel.circuit_breaker = null;
     retained.health_service = owned_name;
     retained.health_metadata.service = owned_name orelse "";
     retained.orca_oob = null;
@@ -110,6 +113,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         .allocator = allocator,
         .io = io,
         .drop = drop,
+        .circuit = circuit,
         .options = retained,
         .config = .init(config_generation),
         .health_explicit = options.health_service != null or options.health_metadata.service.len != 0,

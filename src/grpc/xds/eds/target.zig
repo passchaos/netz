@@ -7,6 +7,9 @@ const http2 = @import("../../../http2/mod.zig");
 pub const Error = decode.Error || shared.Error || error{ UnsupportedEdsPolicy, InvalidEdsTarget };
 pub const Options = struct {
     authority: []const u8,
+    /// CDS circuit limit and logical cluster identity; EDS service is resource name.
+    max_concurrent_requests: u32 = 1024,
+    cluster: ?[]const u8 = null,
     limits: http2.runtime.Limits = .{},
     tls: ?struct { host: []const u8, options: http2.runtime.TlsConnectOptions = .{} } = null,
     /// Endpoint-level child policy shared by every locality.
@@ -65,6 +68,7 @@ pub const Snapshot = struct {
     resource: decode.Owned,
     endpoints: []const channel.Endpoint,
     service_config_json: []const u8,
+    circuit: channel.circuit_breaker.Options,
     pub fn create(gpa: std.mem.Allocator, bytes: []const u8, bounds: decode.Limits, options: Options) Error!*Snapshot {
         if (options.authority.len == 0 or options.attempt_delay.nanoseconds <= 0) return error.InvalidEdsTarget;
         var resource = try decode.decode(gpa, bytes, bounds);
@@ -119,8 +123,9 @@ pub const Snapshot = struct {
         var checked = @import("../../service_config.zig").ServiceConfig.parse(arena, json) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidEdsTarget;
         checked.deinit();
         const values = try endpoints.toOwnedSlice(arena);
+        const cluster = try arena.dupe(u8, options.cluster orelse resource.value.cluster_name);
         const self = try gpa.create(Snapshot);
-        self.* = .{ .allocator = gpa, .resource = resource, .endpoints = values, .service_config_json = json };
+        self.* = .{ .allocator = gpa, .resource = resource, .endpoints = values, .service_config_json = json, .circuit = .{ .cluster = cluster, .eds_service_name = resource.value.cluster_name, .max_concurrent_requests = options.max_concurrent_requests } };
         return self;
     }
     pub fn retain(self: *Snapshot) void {
@@ -143,6 +148,6 @@ pub const Snapshot = struct {
         return .{ .context = self, .retain_fn = retainContext, .release_fn = releaseContext };
     }
     pub fn publishWithDeadline(self: *Snapshot, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
-        return destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .drop_categories = .{ .replace = self.resource.value.drops }, .service_config = .{ .replace = self.service_config_json } }, deadline);
+        return destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .drop_categories = .{ .replace = self.resource.value.drops }, .circuit_breaker = .{ .replace = self.circuit }, .service_config = .{ .replace = self.service_config_json } }, deadline);
     }
 };

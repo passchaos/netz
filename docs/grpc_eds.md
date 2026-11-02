@@ -62,6 +62,10 @@ endpoint connection identity. Config-only updates retain the target owner too.
 TLS verification bundles, callbacks and custom contexts within supplied TLS
 options retain their existing caller-owned lifetime contracts.
 
+EDS snapshots now install a shared cluster/EDS circuit budget (default 1024),
+configurable with TargetOptions.cluster and max_concurrent_requests. See
+[cluster circuit admission](grpc_circuit.md).
+
 Drop categories are decoded, normalized to requests per million and applied
 before endpoint selection. See [request drop admission](grpc_eds_drop.md) for
 ordered sampling, unary/streaming errors and dynamic updates. UDP, named

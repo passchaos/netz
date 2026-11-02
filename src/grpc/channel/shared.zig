@@ -117,6 +117,11 @@ pub const SharedChannel = struct {
     pub fn keepAliveStats(self: SharedChannel) KeepAliveStats {
         return self.state.keepalive_counters.snapshot();
     }
+    pub fn circuitStats(self: SharedChannel) channel.circuit_breaker.Stats {
+        self.state.lock();
+        defer self.state.unlock();
+        return if (self.state.circuit) |policy| policy.stats() else .{};
+    }
     pub fn dropStats(self: SharedChannel) channel.drop_policy.Stats {
         return self.state.drop_counters.snapshot();
     }
