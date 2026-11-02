@@ -841,3 +841,30 @@ multiplexing latency and buffering for concurrent streams. Large single-stream
 applications should opt in on both endpoints; the official grpc-cpp
 comparison remains on fixed 16-KiB defaults. Rows are in
 `docs/evidence/grpc_shared_large_frame/2026-11-02.json`.
+
+## Official comparison with recommended large frames (2026-11-02)
+
+The official harness was rerun at `bb00a721` with the cached allocator and a
+256-KiB frame size on both netz endpoints. grpc-cpp remained at
+`03d65cc67c` with its default frames. Five alternating samples pinned CPU 12,
+used 100 warmups and 2,000 measured roundtrips, and validated every netz
+payload byte. Ratios are netz / grpc-cpp.
+
+| Mode | Payload | netz median ns | grpc-cpp median ns | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Persistent | 0 | 17,574 | 44,342 | 0.396 |
+| Persistent | 512 | 18,105 | 44,924 | 0.403 |
+| Persistent | 4 KiB | 22,182 | 50,356 | 0.441 |
+| Persistent | 256 KiB | 377,265 | 398,850 | 0.946 |
+| RPC per roundtrip | 0 | 54,512 | 124,537 | 0.438 |
+| RPC per roundtrip | 512 | 55,136 | 125,742 | 0.438 |
+| RPC per roundtrip | 4 KiB | 59,239 | 131,306 | 0.451 |
+| RPC per roundtrip | 256 KiB | 421,370 | 510,460 | 0.825 |
+
+Netz wins every measured shape in this configuration, including persistent
+256-KiB streaming ping-pong (5.4% faster) and 256-KiB per-call RPCs (17.5%
+faster). This is a recommended single-stream configuration result, not an
+equal-wire claim: netz uses 256-KiB frames while grpc-cpp keeps its default
+frames. The library default remains 16 KiB for multiplexing latency; see
+`http2.runtime.recommended_large_frame_size`. Rows and identities are in
+`docs/evidence/grpc_cpp_official_large_frame/2026-11-02.json`.

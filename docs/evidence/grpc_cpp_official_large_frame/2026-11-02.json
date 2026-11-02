@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "official grpc-cpp comparison with recommended 256-KiB frames",
+  "decision": "accepted tuning evidence; default unchanged",
+  "netz_revision": "bb00a721",
+  "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+  "cpu": 12,
+  "samples": 5,
+  "schedule": "alternating netz/grpc-cpp samples",
+  "warmup": 100,
+  "iterations": 2000,
+  "validation": "full-bytes for netz; grpc-cpp real_time",
+  "netz_binary_sha256": "790000508152cfaa026b30f0813d72a8936a856fd591e6eedc8201cd1096126d",
+  "netz_wrapper_sha256": "bcb241f2a57598dd4a81dbbf9b8069c1ed9cd893e448ba893fba9028591315a4",
+  "grpc_cpp_binary_sha256": "855317462977678e284399c8c1b37cd52196eb6532d03075d26ae8b8c50c0051",
+  "wrapper": "exec netz-bench-grpc-shared --cached-allocator --max-frame-size=262144 \"$@\"",
+  "results": [
+    {"mode": "persistent", "payload_bytes": 0, "netz_median_ns": 17574, "grpc_cpp_median_ns": 44342, "netz_over_grpc_cpp": 0.396},
+    {"mode": "persistent", "payload_bytes": 512, "netz_median_ns": 18105, "grpc_cpp_median_ns": 44924, "netz_over_grpc_cpp": 0.403},
+    {"mode": "persistent", "payload_bytes": 4096, "netz_median_ns": 22182, "grpc_cpp_median_ns": 50356, "netz_over_grpc_cpp": 0.441},
+    {"mode": "persistent", "payload_bytes": 262144, "netz_median_ns": 377265, "grpc_cpp_median_ns": 398850, "netz_over_grpc_cpp": 0.946},
+    {"mode": "calls", "payload_bytes": 0, "netz_median_ns": 54512, "grpc_cpp_median_ns": 124537, "netz_over_grpc_cpp": 0.438},
+    {"mode": "calls", "payload_bytes": 512, "netz_median_ns": 55136, "grpc_cpp_median_ns": 125742, "netz_over_grpc_cpp": 0.438},
+    {"mode": "calls", "payload_bytes": 4096, "netz_median_ns": 59239, "grpc_cpp_median_ns": 131306, "netz_over_grpc_cpp": 0.451},
+    {"mode": "calls", "payload_bytes": 262144, "netz_median_ns": 421370, "grpc_cpp_median_ns": 510460, "netz_over_grpc_cpp": 0.825}
+  ],
+  "conclusion": "With cached allocation and the recommended 256-KiB frame size on both netz endpoints, netz beats grpc-cpp in every measured shape: 0.396-0.451 for small messages, 0.946 for persistent 256-KiB streaming ping-pong, and 0.825 for 256-KiB per-call RPCs. The comparison uses netz large frames against grpc-cpp's default frames, so it is a recommended single-stream configuration result rather than an equal-wire result."
+}
