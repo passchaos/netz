@@ -1977,8 +1977,10 @@ The local gates cover disabled construction with a failing allocator and a
 connector probe, name ownership after JSON/config destruction, explicit name
 and balancing precedence, transactional allocation failure, and real h2c
 named/overall Watch delivery and cancellation without grpc-timeout. This
-configures the existing consumption-driven Watch; applying those live health
-updates to a background per-subchannel application picker remains open.
+configures the existing consumption-driven Watch. Ordinary Channel now also
+runs one background Watch per resolved endpoint and applies its live state to
+subchannel selection; SharedChannel applies the same health configuration to
+its same-connection endpoint admission.
 
 
 ## Shared client event pump and polling
@@ -3055,35 +3057,36 @@ only 422,643 to 422,045 ns (0.14%, 1/5 rounds) and was reverted. Rows are in
 
 `Channel.Options.health_check_service` adds an opt-in client Health Watch
 gate to ordinary Channel calls. An empty service name selects overall server
-health; null keeps checking disabled. The gate owns a dedicated Watch
-connection so it never competes with an application RPC reader. SharedChannel
-continues to use its same-connection health owner.
+health; null keeps checking disabled. Every resolved endpoint owns its own
+dedicated Watch connection, so health never competes with an application RPC
+reader and selection can distinguish SERVING from NOT_SERVING subchannels.
+SharedChannel continues to use its same-connection health owner.
 
-The gate starts during `Channel.init` when configured, so the dedicated Watch
-can connect while the application prepares its first call. If the first call
-arrives before a status is known, it waits for one (bounded by its deadline, or
-five seconds when unbounded) before dispatch. Once known, `NOT_SERVING`,
-`UNKNOWN`, and `SERVICE_UNKNOWN` reject fail-fast calls with
-`ConnectionUnavailable`;
-`wait_for_ready` calls wait until the service becomes serving or their
-deadline expires. `UNIMPLEMENTED` disables checking and allows calls. A Watch
-transport retry returns to the unknown state and fails open until a new status
-arrives, so a transient Watch-connection failure does not block the application
-connection. The dedicated Watch is a compatibility tradeoff: health is
-server-level rather than same-subconnection, unlike grpc-core's subchannel
-watch.
+Gates start during `Channel.init` for pre-resolved endpoints, or when a
+hostname resolver publishes its first address set. If the first call arrives
+before any status is known, it waits for one (bounded by its deadline, or five
+seconds when unbounded) before dispatch. Selection skips endpoints whose state
+is UNKNOWN or NOT_SERVING; `NOT_SERVING`, `UNKNOWN`, and `SERVICE_UNKNOWN`
+reject fail-fast calls with `ConnectionUnavailable` when no endpoint is
+serving. `wait_for_ready` calls wait until any endpoint becomes serving or
+their deadline expires. `UNIMPLEMENTED` disables checking for that endpoint and
+allows calls through it. A Watch transport retry returns that endpoint to the
+unknown state and fails open for that endpoint only, so a transient
+Watch-connection failure does not block application connections to healthy
+siblings.
 
-A real loopback test starts a health registry and a unary responder, lets the
-gate observe SERVING, switches the service to NOT_SERVING, observes
-`ConnectionUnavailable`, then starts a background recovery task and completes
-a `wait_for_ready` unary call after the service returns to SERVING on the
-reused connection. The focused test passes 147/147 and the gRPC filter passes
-564/564. Evidence is recorded in
-`docs/evidence/grpc_ordinary_health_gate/2026-11-02.json`.
+A real loopback test starts two health registries and unary responders,
+configures one NOT_SERVING and one SERVING endpoint, and proves that the
+initial unary call selects the serving endpoint and that
+`healthServingAt(0)`/`healthServingAt(1)` report independent states. Switching
+the serving endpoint to NOT_SERVING makes the aggregate gate false and rejects
+a fail-fast call; switching the first endpoint to SERVING restores an aggregate
+true and completes the next unary call. The earlier single-endpoint recovery
+test still covers `wait_for_ready` recovery on a reused connection.
 
-A custom `address_resolver` or custom connector is shared with the dedicated
-Watch Channel, so such callbacks must support concurrent use by both the
-application Channel and the health Channel.
+A custom `address_resolver` or custom connector is shared with every dedicated
+Watch Channel, so such callbacks must support concurrent use by the
+application Channel and each health Channel.
 
 A second focused test starts a NOT_SERVING registry with only a Health Watch
 server and requires both `startStreaming` and `startDuplex` to return
@@ -3098,6 +3101,9 @@ inheritance from a ServiceConfig while explicit `health_check_service` still
 wins. The Health Watch's own transport Channel sets both fields so a
 ServiceConfig-driven Watch cannot recursively start another health gate.
 
-`Channel.healthServing()` exposes the last observed gate state: null before
-the first Watch status or when checking is disabled, true for SERVING or
-UNIMPLEMENTED, and false for the rejected states.
+`Channel.healthServing()` exposes the aggregate state: null before any Watch
+status, when checking is disabled, or before a hostname resolves; true when at
+least one endpoint is SERVING or UNIMPLEMENTED; false when every known endpoint
+is in a rejected state. `Channel.healthServingAt(index)` exposes the same
+per-endpoint state in current slot order. Evidence is recorded in
+`docs/evidence/grpc_ordinary_health_gate/2026-11-02-per-endpoint.json`.

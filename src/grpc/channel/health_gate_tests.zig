@@ -288,3 +288,208 @@ test "ordinary Channel health gate validates service names before allocation" {
         ),
     );
 }
+
+const HealthPeer = struct {
+    server: *grpc.runtime.Server,
+    registry: *grpc.health.Registry,
+    io: std.Io,
+    tasks: [8]?std.Io.Future(anyerror!void) = .{null} ** 8,
+    accepted: usize = 0,
+    err: ?anyerror = null,
+
+    fn deinit(self: *HealthPeer) void {
+        for (&self.tasks) |*task| {
+            if (task.*) |*future| {
+                _ = future.cancel(self.io) catch {};
+            }
+        }
+    }
+
+    fn run(self: *HealthPeer) void {
+        while (true) {
+            const connection = self.server.acceptWithTimeout(.fromSeconds(3)) catch |err| switch (err) {
+                error.Canceled => return,
+                else => {
+                    self.err = err;
+                    return;
+                },
+            };
+            if (self.accepted == self.tasks.len) {
+                self.err = error.TooManyConnections;
+                return;
+            }
+            self.tasks[self.accepted] = self.io.async(HealthPeer.handle, .{
+                connection,
+                self.registry,
+            });
+            self.accepted += 1;
+        }
+    }
+
+    fn handle(
+        connection: grpc.runtime.ServerConnection,
+        registry: *grpc.health.Registry,
+    ) anyerror!void {
+        var conn = connection;
+        defer conn.deinit();
+        while (true) {
+            var stream = conn.acceptDuplexWithTimeout(.fromSeconds(3)) catch |err| switch (err) {
+                error.Canceled => return,
+                else => return err,
+            };
+            defer stream.deinit();
+            if (std.mem.eql(u8, stream.path, grpc.health.watch_path)) {
+                try conn.serveHealthWatch(registry, &stream);
+                return;
+            }
+            const Context = struct {
+                got: bool = false,
+                fn consume(self: *@This(), message: codec.DecodedMessage) !void {
+                    try std.testing.expectEqualStrings("ping", message.payload);
+                    self.got = true;
+                }
+            };
+            var context: Context = .{};
+            while (!context.got) {
+                var event = try stream.readRequestEvent(&context, Context.consume);
+                defer event.deinit();
+                switch (event) {
+                    .messages => {},
+                    .finished, .reset => return error.UnexpectedEndOfStream,
+                }
+            }
+            try stream.startResponse(.{});
+            _ = try stream.writeMessage("pong");
+            try stream.finishOk();
+        }
+    }
+};
+
+test "ordinary Channel health gate selects serving endpoints independently" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var bad_registry = try grpc.health.Registry.init(allocator, io);
+    defer bad_registry.deinit();
+    _ = try bad_registry.setStatus("demo.Echo", .not_serving);
+    var good_registry = try grpc.health.Registry.init(allocator, io);
+    defer good_registry.deinit();
+    _ = try good_registry.setStatus("demo.Echo", .serving);
+
+    var bad_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer bad_server.deinit();
+    var good_server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer good_server.deinit();
+
+    var bad_peer = HealthPeer{
+        .server = &bad_server,
+        .registry = &bad_registry,
+        .io = io,
+    };
+    defer bad_peer.deinit();
+    var bad_task = io.async(HealthPeer.run, .{&bad_peer});
+    defer bad_task.cancel(io);
+
+    var good_peer = HealthPeer{
+        .server = &good_server,
+        .registry = &good_registry,
+        .io = io,
+    };
+    defer good_peer.deinit();
+    var good_task = io.async(HealthPeer.run, .{&good_peer});
+    defer good_task.cancel(io);
+
+    const endpoints = [_]grpc.ChannelEndpoint{
+        .{ .cleartext_ip = .{ .address = bad_server.address() } },
+        .{ .cleartext_ip = .{ .address = good_server.address() } },
+    };
+    var channel = try grpc.Channel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints, .policy = .pick_first } },
+        .{ .health_check_service = "demo.Echo" },
+    );
+    defer channel.deinit();
+
+    var response = try channel.unary(.{
+        .path = "/demo.Echo/Unary",
+        .message = "ping",
+        .timeout = .{ .value = 3, .unit = .second },
+    });
+    defer response.deinit();
+    try std.testing.expectEqualStrings("pong", response.message.?.payload);
+    try std.testing.expectEqual(@as(?bool, false), channel.healthServingAt(0));
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServingAt(1));
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServing());
+
+    _ = try good_registry.setStatus("demo.Echo", .not_serving);
+    try waitHealthStatus(&channel, io, .{ .index = .{ .index = 1, .expected = false } });
+    try waitHealthStatus(&channel, io, .{ .aggregate = .{ .expected = false } });
+    try std.testing.expectEqual(@as(?bool, false), channel.healthServing());
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        channel.unary(.{
+            .path = "/demo.Echo/Unary",
+            .message = "ping",
+            .timeout = .{ .value = 1, .unit = .second },
+        }),
+    );
+
+    _ = try bad_registry.setStatus("demo.Echo", .serving);
+    try waitHealthStatus(&channel, io, .{ .index = .{ .index = 0, .expected = true } });
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServingAt(0));
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServing());
+    var recovered = try channel.unary(.{
+        .path = "/demo.Echo/Unary",
+        .message = "ping",
+        .timeout = .{ .value = 3, .unit = .second },
+    });
+    defer recovered.deinit();
+    try std.testing.expectEqualStrings("pong", recovered.message.?.payload);
+
+    if (bad_peer.err) |err| return err;
+    if (good_peer.err) |err| return err;
+}
+
+const HealthStatusWait = union(enum) {
+    index: struct { index: usize, expected: ?bool },
+    aggregate: struct { expected: ?bool },
+};
+
+fn waitHealthStatus(
+    channel: *const grpc.Channel,
+    io: std.Io,
+    wait: HealthStatusWait,
+) !void {
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        var current: ?bool = undefined;
+        var expected: ?bool = undefined;
+        switch (wait) {
+            .index => |query| {
+                current = channel.healthServingAt(query.index);
+                expected = query.expected;
+            },
+            .aggregate => |query| {
+                current = channel.healthServing();
+                expected = query.expected;
+            },
+        }
+        if (std.meta.eql(current, expected)) return;
+        if (attempts == 200) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+}

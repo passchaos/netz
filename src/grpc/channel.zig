@@ -464,6 +464,10 @@ const Slot = struct {
     least_request_enabled: bool = false,
     outlier_enabled: bool = false,
     ring_hash_weight: u32 = 1,
+    /// Per-subchannel Health Watch state. `serving` is also the default for
+    /// channels without health checking so selection can use one predicate.
+    health_state: std.atomic.Value(u8) = .init(health_gate.serving),
+    health_gate: ?*health_gate.Gate = null,
 
     fn closeConnection(self: *Slot) void {
         if (self.connection) |*connection| connection.close();
@@ -489,6 +493,14 @@ const Slot = struct {
 const ReadyConnection = struct {
     index: usize,
     connection: *http2.runtime.Connection,
+};
+
+/// Heap-owned wake state shared by every per-subchannel Health Gate. Channel
+/// values are movable, so gates must not borrow an Event or generation field
+/// embedded directly in the Channel struct.
+const HealthSync = struct {
+    generation: std.atomic.Value(u64) = .init(0),
+    changed: std.Io.Event = .unset,
 };
 
 const HostResolution = struct {
@@ -630,8 +642,8 @@ pub const Channel = struct {
     host_resolution: ?HostResolution = null,
     connectivity_tracker: *connectivity.Tracker,
     health_service: ?[]u8 = null,
-    health_gate: ?*health_gate.Gate = null,
     health_channel_options: Options = .{},
+    health_sync: ?*HealthSync = null,
     selected_index: ?usize = null,
     next_pick_index: usize = 0,
     wrr_config: ?service_config.WeightedRoundRobinConfig = null,
@@ -744,6 +756,12 @@ pub const Channel = struct {
         else
             null;
         errdefer if (health_service) |name| allocator.free(name);
+        const health_sync: ?*HealthSync = if (health_service != null) blk: {
+            const sync = try allocator.create(HealthSync);
+            sync.* = .{};
+            break :blk sync;
+        } else null;
+        errdefer if (health_sync) |sync| allocator.destroy(sync);
         var health_options = options;
         health_options.health_check_service = null;
         health_options.disable_health_check = true;
@@ -760,6 +778,7 @@ pub const Channel = struct {
             .connectivity_tracker = connectivity_tracker,
             .health_service = health_service,
             .health_channel_options = health_options,
+            .health_sync = health_sync,
         };
         for (result.slots) |*slot| {
             slot.least_request_enabled =
@@ -772,7 +791,12 @@ pub const Channel = struct {
             };
         }
         if (result.shuffle_address_list) result.shuffleSlots();
-        if (result.health_service != null) try result.ensureHealthGate();
+        if (result.health_service != null) {
+            result.ensureSlotHealthGates() catch |err| {
+                result.deinit();
+                return err;
+            };
+        }
         return result;
     }
 
@@ -866,6 +890,7 @@ pub const Channel = struct {
             else
                 .weighted_target;
             try result.shuffleLeafSubsets(result.slots, &result.selected_index);
+            try result.recreateHealthGates();
             try result.weighted_target_runtime.?.configureSlots(result.slots);
             result.weighted_target_runtime.?.startOutliers(io);
         }
@@ -909,10 +934,6 @@ pub const Channel = struct {
     }
 
     pub fn deinit(self: *Channel) void {
-        if (self.health_gate) |gate| {
-            gate.deinit();
-            self.health_gate = null;
-        }
         if (self.health_service) |name| {
             self.allocator.free(name);
             self.health_service = null;
@@ -922,8 +943,16 @@ pub const Channel = struct {
             resolution.deinit(self.allocator);
         }
         for (self.slots) |*slot| {
+            if (slot.health_gate) |gate| {
+                gate.deinit();
+                slot.health_gate = null;
+            }
             slot.closeConnection();
             slot.deinitPolicyState(self.allocator);
+        }
+        if (self.health_sync) |sync| {
+            self.allocator.destroy(sync);
+            self.health_sync = null;
         }
         self.allocator.free(self.slots);
         self.wrr_scheduler.deinit(self.allocator);
@@ -968,11 +997,33 @@ pub const Channel = struct {
         return self.connectivity_tracker.snapshot();
     }
 
-    /// Last health status observed by the opt-in ordinary Channel gate.
-    /// Null means checking is disabled or no Watch status has arrived yet.
+    /// Aggregate health status for the opt-in ordinary Channel gate.
+    /// Null means checking is disabled, no endpoints are resolved yet, or no
+    /// Watch status has arrived. With multiple subchannels, true means at
+    /// least one endpoint is SERVING and false means every known endpoint is
+    /// NOT_SERVING.
     pub fn healthServing(self: *const Channel) ?bool {
-        const gate = self.health_gate orelse return null;
-        return gate.status();
+        if (self.health_service == null) return null;
+        var known = false;
+        for (self.slots) |slot| switch (slot.health_state.load(.acquire)) {
+            health_gate.serving => return true,
+            health_gate.not_serving => known = true,
+            health_gate.unknown => {},
+            else => unreachable,
+        };
+        return if (known) false else null;
+    }
+
+    /// Last health status for one resolved endpoint, or null before its Watch
+    /// reports a status. Indexes follow the current slot order.
+    pub fn healthServingAt(self: *const Channel, index: usize) ?bool {
+        if (index >= self.slots.len) return null;
+        return switch (self.slots[index].health_state.load(.acquire)) {
+            health_gate.unknown => null,
+            health_gate.serving => true,
+            health_gate.not_serving => false,
+            else => unreachable,
+        };
     }
 
     /// Return an independent cursor that may wait concurrently and remains
@@ -1129,6 +1180,7 @@ pub const Channel = struct {
                 }
                 if (!state.active) continue;
             }
+            if (!slotHealthReady(slot)) continue;
             if (slot.connection != null) {
                 self.noteWarmedConnection(index);
                 ready_count += 1;
@@ -1223,44 +1275,138 @@ pub const Channel = struct {
         return self.unaryResolved(try config.resolveUnary(options));
     }
 
-    fn ensureHealthGate(self: *Channel) Error!void {
-        if (self.health_gate != null or self.health_service == null) return;
-        self.health_gate = health_gate.Gate.create(
-            self.allocator,
-            self.io,
-            self.target,
-            self.health_service.?,
-            self.health_channel_options,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.ConnectionUnavailable,
-        };
+    /// Channel options for a per-endpoint Watch. The endpoint is already
+    /// resolved, so resolver callbacks and multi-endpoint policies must not be
+    /// inherited into the Watch's single-target Channel.
+    fn slotHealthOptions(self: *const Channel) Options {
+        var options = self.health_channel_options;
+        options.address_resolver = null;
+        options.shuffle_address_list = null;
+        options.selection_policy = null;
+        return options;
     }
 
-    fn healthGateBeforeCall(
-        self: *Channel,
-        deadline: ?std.Io.Clock.Timestamp,
-        wait_for_ready: bool,
-    ) Error!void {
+    /// Slot order changed after gates were created (composite-policy setup).
+    /// Recreate gates so each published state is bound to its new slot.
+    fn recreateHealthGates(self: *Channel) Error!void {
         if (self.health_service == null) return;
-        try self.ensureHealthGate();
-        const gate = self.health_gate.?;
-        if (!gate.isKnown()) {
-            const until = deadline orelse std.Io.Clock.Timestamp.fromNow(
-                self.io,
-                .{ .raw = .fromSeconds(5), .clock = .awake },
+        for (self.slots) |*slot| {
+            if (slot.health_gate) |gate| {
+                gate.deinit();
+                slot.health_gate = null;
+            }
+            slot.health_state.store(health_gate.unknown, .release);
+        }
+        try self.ensureSlotHealthGates();
+    }
+
+    fn ensureSlotHealthGates(self: *Channel) Error!void {
+        if (self.health_service == null) return;
+        var missing: usize = 0;
+        for (self.slots) |slot| if (slot.health_gate == null) {
+            missing += 1;
+        };
+        if (missing == 0) return;
+        const Created = struct {
+            index: usize,
+            gate: *health_gate.Gate,
+        };
+        const created = self.allocator.alloc(Created, missing) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(created);
+        var count: usize = 0;
+        errdefer for (created[0..count]) |entry| {
+            entry.gate.deinit();
+            self.slots[entry.index].health_gate = null;
+            self.slots[entry.index].health_state.store(
+                health_gate.unknown,
+                .release,
             );
-            gate.waitForKnown(until) catch |err| switch (err) {
-                error.Timeout => return error.Timeout,
+        };
+        for (self.slots, 0..) |*slot, index| {
+            if (slot.health_gate != null) continue;
+            slot.health_gate = health_gate.Gate.create(
+                self.allocator,
+                self.io,
+                endpointTarget(slot.endpoint),
+                self.health_service.?,
+                self.slotHealthOptions(),
+                .{
+                    .state_out = &slot.health_state,
+                    .generation_out = &self.health_sync.?.generation,
+                    .signal = &self.health_sync.?.changed,
+                },
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
                 else => return error.ConnectionUnavailable,
             };
+            created[count] = .{ .index = index, .gate = slot.health_gate.? };
+            count += 1;
         }
-        if (gate.isServing()) return;
-        if (!wait_for_ready) return error.ConnectionUnavailable;
-        gate.waitForServing(deadline) catch |err| switch (err) {
-            error.Timeout => return error.Timeout,
-            else => return error.ConnectionUnavailable,
-        };
+    }
+
+    /// Wait until at least one subchannel is known. With `wait_for_ready`,
+    /// continue until one is SERVING; otherwise report unavailability as soon
+    /// as every known endpoint is NOT_SERVING.
+    fn waitForHealth(
+        self: *Channel,
+        wait_for_ready: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.health_service == null or self.slots.len == 0) return;
+        try self.ensureSlotHealthGates();
+        const known_deadline = deadline orelse std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = .fromSeconds(5), .clock = .awake },
+        );
+        while (true) {
+            var serving = false;
+            var unknown = false;
+            for (self.slots) |slot| switch (slot.health_state.load(.acquire)) {
+                health_gate.serving => serving = true,
+                health_gate.not_serving => {},
+                health_gate.unknown => unknown = true,
+                else => unreachable,
+            };
+            if (serving) return;
+            if (unknown) {
+                if (deadlineExpired(self.io, known_deadline)) {
+                    return error.Timeout;
+                }
+                try self.waitHealthChange(known_deadline);
+                continue;
+            }
+            if (!wait_for_ready) return error.ConnectionUnavailable;
+            if (deadline) |until| {
+                if (deadlineExpired(self.io, until)) return error.Timeout;
+            }
+            try self.waitHealthChange(deadline);
+        }
+    }
+
+    fn waitHealthChange(
+        self: *Channel,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        const sync = self.health_sync orelse return;
+        const generation = sync.generation.load(.acquire);
+        // A status may have changed between the caller's scan and this read.
+        if (sync.generation.load(.acquire) != generation) return;
+        sync.changed.reset();
+        if (sync.generation.load(.acquire) != generation) return;
+        if (deadline) |until| {
+            sync.changed.waitTimeout(
+                self.io,
+                .{ .deadline = until },
+            ) catch |err| switch (err) {
+                // A spurious wake and the caller's bound are both resolved by
+                // the next scan, which rechecks the absolute deadline.
+                error.Timeout => return,
+                else => return @errorCast(err),
+            };
+        } else {
+            sync.changed.wait(self.io) catch |err| return @errorCast(err);
+        }
     }
 
     fn unaryResolved(
@@ -1269,7 +1415,6 @@ pub const Channel = struct {
     ) Error!call.UnaryResponse {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
-        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         var options = resolved.options;
         options.wait_for_ready = resolved.wait_for_ready;
         return retry.runWithDeadline(
@@ -1352,7 +1497,6 @@ pub const Channel = struct {
     ) Error!streaming.ClientWriter {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
-        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1410,7 +1554,6 @@ pub const Channel = struct {
     ) Error!duplex.ClientDuplex {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
         const deadline = callDeadline(self.io, resolved.options.timeout);
-        try self.healthGateBeforeCall(deadline, resolved.wait_for_ready);
         const routing_hash = try self.requestHash(resolved.options);
         const ready_connection = try self.ready(
             resolved.wait_for_ready,
@@ -1465,6 +1608,7 @@ pub const Channel = struct {
         try self.prepareSlots();
         self.evaluateOutliers();
         try self.ensureHostResolution(wait_for_ready, deadline);
+        try self.waitForHealth(wait_for_ready, deadline);
         if (self.selection_policy == .weighted_round_robin and
             self.wrr_config != null)
         {
@@ -1494,6 +1638,7 @@ pub const Channel = struct {
             if (self.canceled.isSet()) return error.Canceled;
             _ = try self.applyPendingResolution(false);
             self.evaluateOutliers();
+            try self.waitForHealth(wait_for_ready, deadline);
             if (self.selection_policy == .weighted_round_robin and
                 self.wrr_config != null)
             {
@@ -1533,6 +1678,7 @@ pub const Channel = struct {
                         for (0..self.slots.len) |offset| {
                             const index = (start + offset) % self.slots.len;
                             if (self.slots[index].outlier.isEjected()) continue;
+                            if (!slotHealthReady(&self.slots[index])) continue;
                             if (self.slots[index].connection) |*connection| return self.select(index, connection);
                         }
                         var retryable: std.atomic.Value(bool) = .init(false);
@@ -1580,6 +1726,10 @@ pub const Channel = struct {
                 const slot = &self.slots[index];
                 if (slot.disabled) continue;
                 if (slot.outlier.isEjected()) {
+                    retryable_failure = true;
+                    continue;
+                }
+                if (!slotHealthReady(slot)) {
                     retryable_failure = true;
                     continue;
                 }
@@ -1650,6 +1800,8 @@ pub const Channel = struct {
     ) Error!ReadyConnection {
         const runtime = &self.weighted_target_runtime.?;
         while (true) {
+            try self.ensureHostResolution(wait_for_ready, deadline);
+            try self.waitForHealth(wait_for_ready, deadline);
             _ = runtime.evaluateOutliers(self.slots, self.io);
             if (self.selected_index) |index| {
                 if (self.slots[index].weighted_target_ejected) {
@@ -1814,6 +1966,7 @@ pub const Channel = struct {
         for (0..self.slots.len) |offset| {
             const index = (self.next_pick_index + offset) % self.slots.len;
             if (self.slots[index].outlier.isEjected()) continue;
+            if (!slotHealthReady(&self.slots[index])) continue;
             if (self.slots[index].connection) |*connection| {
                 return self.select(index, connection);
             }
@@ -2053,7 +2206,18 @@ pub const Channel = struct {
         if (self.shuffle_address_list) self.shuffleAddresses(unique);
 
         const replacement = try self.allocator.alloc(Slot, unique.len);
-        errdefer self.allocator.free(replacement);
+        errdefer {
+            if (self.health_service != null) {
+                for (replacement) |*slot| {
+                    if (slot.health_gate) |gate| {
+                        gate.deinit();
+                        slot.health_gate = null;
+                    }
+                }
+            }
+            self.allocator.free(replacement);
+        }
+        for (replacement) |*slot| slot.health_gate = null;
         const old_slots = self.slots;
         const old_selected = self.selected_index;
         var selected: ?usize = null;
@@ -2069,6 +2233,7 @@ pub const Channel = struct {
             }
             if (matched) |old_index| {
                 replacement[new_index] = old_slots[old_index];
+                replacement[new_index].health_gate = null;
                 old_slots[old_index].connection = null;
                 old_slots[old_index].weighted_outliers = &.{};
                 if (old_selected == old_index) selected = new_index;
@@ -2086,7 +2251,31 @@ pub const Channel = struct {
         if (self.weighted_target_runtime != null) {
             try self.shuffleLeafSubsets(replacement, &selected);
         }
+        if (self.health_service != null) {
+            for (replacement) |*slot| {
+                slot.health_state = .init(health_gate.unknown);
+                slot.health_gate = health_gate.Gate.create(
+                    self.allocator,
+                    self.io,
+                    endpointTarget(slot.endpoint),
+                    self.health_service.?,
+                    self.slotHealthOptions(),
+                    .{
+                        .state_out = &slot.health_state,
+                        .generation_out = &self.health_sync.?.generation,
+                        .signal = &self.health_sync.?.changed,
+                    },
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.ConnectionUnavailable,
+                };
+            }
+        }
         for (old_slots) |*slot| {
+            if (slot.health_gate) |gate| {
+                gate.deinit();
+                slot.health_gate = null;
+            }
             slot.closeConnection();
             slot.deinitPolicyState(self.allocator);
         }
@@ -2350,6 +2539,7 @@ pub const Channel = struct {
             if (slot.outlier.isEjected() or slot.weighted_target_ejected) {
                 continue;
             }
+            if (!slotHealthReady(slot)) continue;
             if (slot.connection) |*connection| {
                 if (connection.isReusable()) return true;
             }
@@ -2461,7 +2651,12 @@ fn waitUntil(
     try deadline.wait(io);
 }
 
+fn slotHealthReady(slot: *const Slot) bool {
+    return slot.health_state.load(.acquire) == health_gate.serving;
+}
+
 fn slotMayAttempt(slot: *Slot, io: std.Io) bool {
+    if (!slotHealthReady(slot)) return false;
     if (slot.outlier.isEjected()) return false;
     const target = slot.next_attempt_at_ns orelse return true;
     if (target > std.Io.Clock.awake.now(io).nanoseconds) return false;
@@ -2470,9 +2665,20 @@ fn slotMayAttempt(slot: *Slot, io: std.Io) bool {
 }
 
 fn wrrSlotReady(slot: *Slot) bool {
+    if (!slotHealthReady(slot)) return false;
     if (slot.outlier.isEjected() or slot.weighted_target_ejected) return false;
     const connection = if (slot.connection) |*value| value else return false;
     return connection.isReusable();
+}
+
+fn endpointTarget(endpoint: Endpoint) Target {
+    return switch (endpoint) {
+        .cleartext_ip => |value| .{ .cleartext_ip = value },
+        .cleartext_host => |value| .{ .cleartext_host = value },
+        .tls_host => |value| .{ .tls_host = value },
+        .tls_address => |value| .{ .tls_address = value },
+        .custom => |value| .{ .custom = value },
+    };
 }
 
 fn hasWeightedOutlier(slot: *const Slot) bool {

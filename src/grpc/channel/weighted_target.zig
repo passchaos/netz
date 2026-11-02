@@ -1112,6 +1112,11 @@ pub fn Runtime(comptime Slot: type) type {
 
         fn slotReady(slot: *Slot) bool {
             if (slot.disabled or slot.weighted_target_ejected) return false;
+            if (@hasField(Slot, "health_state")) {
+                // Matches health_gate.serving. UNKNOWN and NOT_SERVING both
+                // withhold readiness until the per-subchannel Watch reports.
+                if (slot.health_state.load(.acquire) != 1) return false;
+            }
             const connection = if (slot.connection) |*value| value else return false;
             return connection.isReusable();
         }

@@ -7,9 +7,19 @@ const std = @import("std");
 const channel = @import("../channel.zig");
 const health = @import("../health/reconnecting.zig");
 
-const unknown: u8 = 0;
-const serving: u8 = 1;
-const not_serving: u8 = 2;
+pub const unknown: u8 = 0;
+pub const serving: u8 = 1;
+pub const not_serving: u8 = 2;
+
+/// Optional channel-level observation points. `state_out` lets a Channel
+/// publish the per-subchannel state into the owning Slot without reading the
+/// Gate pointer from selection callbacks. `generation_out` and `signal` wake
+/// a single-owner caller waiting for any subchannel to become serving.
+pub const Wiring = struct {
+    state_out: ?*std.atomic.Value(u8) = null,
+    generation_out: ?*std.atomic.Value(u64) = null,
+    signal: ?*std.Io.Event = null,
+};
 
 pub const Gate = struct {
     allocator: std.mem.Allocator,
@@ -19,6 +29,7 @@ pub const Gate = struct {
     state: std.atomic.Value(u8) = .init(unknown),
     changed: std.Io.Event = .unset,
     stopped: std.atomic.Value(bool) = .init(false),
+    wiring: Wiring = .{},
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -26,6 +37,7 @@ pub const Gate = struct {
         target: channel.Target,
         service: []const u8,
         channel_options: channel.Options,
+        wiring: Wiring,
     ) health.Error!*Gate {
         const gate = try allocator.create(Gate);
         errdefer allocator.destroy(gate);
@@ -42,7 +54,11 @@ pub const Gate = struct {
             .allocator = allocator,
             .io = io,
             .watch = watch,
+            .wiring = wiring,
         };
+        // A new Gate has no status yet. Publish UNKNOWN before the watcher
+        // task can report its first result.
+        gate.publish(unknown);
         gate.task = io.async(Gate.run, .{gate});
         return gate;
     }
@@ -129,12 +145,21 @@ pub const Gate = struct {
     }
 
     fn setState(self: *Gate, value: u8) void {
-        self.state.store(value, .release);
+        self.publish(value);
         self.changed.set(self.io);
     }
 
     fn setUnknown(self: *Gate) void {
-        self.state.store(unknown, .release);
+        self.publish(unknown);
         self.changed.set(self.io);
+    }
+
+    fn publish(self: *Gate, value: u8) void {
+        self.state.store(value, .release);
+        if (self.wiring.state_out) |out| out.store(value, .release);
+        if (self.wiring.generation_out) |generation| {
+            _ = generation.fetchAdd(1, .acq_rel);
+        }
+        if (self.wiring.signal) |signal| signal.set(self.io);
     }
 };
