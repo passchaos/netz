@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "connectivity tracker setState lock-free fast path",
+  "decision": "rejected",
+  "baseline": {
+    "commit": "c259722e",
+    "src/grpc/channel/connectivity.zig": "c901ecee9b392f3ed17263f85eedab7b4088bacf7b6ebaa7d5181bd231936f98",
+    "binary_sha256": "349146a35d89a29f4f7be1e15d34265b941a6d8a520045b38c12d569192797d9"
+  },
+  "candidate": {
+    "src/grpc/channel/connectivity.zig": "97f7d5287de93a4c1c7c38074f2e3594cc36a4c1e95227c873d8f1553464787d",
+    "binary_sha256": "2018ec43c3e201e6c8c1cdd7c0e4928c9c740ae0ddfbfe637a2ee65855287d35",
+    "design": "Tracker.set_state compared an atomic state snapshot and the abandoned-waiter flag, returning before the tracker mutex when the requested state was already published and no waiter cleanup was pending."
+  },
+  "scope": {
+    "workload": "SharedChannel shared-unary persistent round trip, 262144-byte request and response",
+    "allocator": "cached",
+    "iterations": 300,
+    "warmup": 30,
+    "validation": "length-only",
+    "frame_size": 16384
+  },
+  "benchmark_method": {
+    "harness": "examples/bench_grpc_unary.zig --shared --no-validate",
+    "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
+    "runs_per_arm": 10,
+    "host": "shared host with unrelated load; no CPU pinning",
+    "metric": "ns_per_roundtrip from the benchmark result record"
+  },
+  "results": {
+    "baseline_samples_ns": [424187, 432878, 424614, 430475, 430491, 433208, 428766, 431615, 427886, 429813],
+    "candidate_samples_ns": [428641, 442659, 424540, 424855, 426182, 427419, 425747, 427430, 416225, 488155],
+    "baseline_median_ns": 430144,
+    "candidate_median_ns": 426800.5,
+    "candidate_over_baseline": 0.9922,
+    "round_wins": "3/5 ABBA rounds",
+    "paired_ratios": [1.0166, 0.9933, 0.9883, 0.9916, 1.0544]
+  },
+  "conclusion": "The 0.8% median improvement was not robust: one round regressed 1.7% and another 5.4%, and the change adds a new state-snapshot consistency obligation. The source change was reverted; the accepted tracker prune fast path remains."
+}

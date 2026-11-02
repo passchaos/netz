@@ -3039,3 +3039,9 @@ prune. Five ABBA rounds on the 256-KiB shared-unary workload moved the median
 from 429,209 ns to 424,903 ns (1.0% faster, 4/5 rounds). The gRPC filter passes
 564/564 and the connectivity-watch filter passes 160/160. Evidence is recorded
 in `docs/evidence/grpc_connectivity_prune_fast_path/2026-11-02.json`.
+
+A follow-up that skipped the tracker mutex when an atomic state snapshot
+matched the requested state moved the same median only 430,144 to 426,800.5 ns
+(0.8%, 3/5 rounds) and regressed one round by 5.4%, so it was reverted. The
+accepted prune fast path above is unchanged. Rows are in
+`docs/evidence/grpc_connectivity_set_state_rejected/2026-11-02.json`.
