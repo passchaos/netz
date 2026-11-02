@@ -65,6 +65,10 @@ pub const CustomConnector = struct {
     /// grpc-core hierarchical address path. Composite policies consume one
     /// element per level before delegating to a child policy.
     hierarchical_path: []const []const u8 = &.{},
+    /// xDS locality weight, separate from endpoint ring-hash weight. Zero
+    /// contributes no locality weight; localities without any positive weight
+    /// are omitted from generated xds_wrr_locality targets.
+    locality_weight: u32 = 0,
 };
 
 pub const max_hierarchical_path_depth: usize = 32;
@@ -94,6 +98,7 @@ pub const Endpoint = union(enum) {
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
         hierarchical_path: []const []const u8 = &.{},
+        locality_weight: u32 = 0,
     },
     cleartext_host: struct {
         /// DNS name or IP literal. IPv6 accepts bare or bracketed text;
@@ -104,6 +109,7 @@ pub const Endpoint = union(enum) {
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
         hierarchical_path: []const []const u8 = &.{},
+        locality_weight: u32 = 0,
     },
     tls_host: struct {
         /// DNS/IP certificate identity, independent of a custom resolver's
@@ -123,6 +129,7 @@ pub const Endpoint = union(enum) {
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
         hierarchical_path: []const []const u8 = &.{},
+        locality_weight: u32 = 0,
     },
     tls_address: struct {
         address: net.IpAddress,
@@ -133,6 +140,7 @@ pub const Endpoint = union(enum) {
         ring_hash_key: ?[]const u8 = null,
         ring_hash_weight: u32 = 1,
         hierarchical_path: []const []const u8 = &.{},
+        locality_weight: u32 = 0,
     },
     custom: CustomConnector,
 
@@ -233,6 +241,12 @@ pub const Endpoint = union(enum) {
             .tls_host => |target| target.hierarchical_path,
             .tls_address => |target| target.hierarchical_path,
             .custom => |target| target.hierarchical_path,
+        };
+    }
+
+    pub fn localityWeight(self: Endpoint) u32 {
+        return switch (self) {
+            inline else => |value| value.locality_weight,
         };
     }
 
@@ -509,6 +523,7 @@ const HostResolution = struct {
             ring_hash_key: ?[]const u8,
             ring_hash_weight: u32,
             hierarchical_path: []const []const u8,
+            locality_weight: u32,
         },
         tls: struct {
             host: []const u8,
@@ -517,6 +532,7 @@ const HostResolution = struct {
             ring_hash_key: ?[]const u8,
             ring_hash_weight: u32,
             hierarchical_path: []const []const u8,
+            locality_weight: u32,
         },
     },
 
@@ -539,6 +555,7 @@ const HostResolution = struct {
                         .ring_hash_key = value.ring_hash_key,
                         .ring_hash_weight = value.ring_hash_weight,
                         .hierarchical_path = value.hierarchical_path,
+                        .locality_weight = value.locality_weight,
                     },
                 },
             },
@@ -552,6 +569,7 @@ const HostResolution = struct {
                     .ring_hash_key = value.ring_hash_key,
                     .ring_hash_weight = value.ring_hash_weight,
                     .hierarchical_path = value.hierarchical_path,
+                    .locality_weight = value.locality_weight,
                 } },
             },
             else => return null,
@@ -592,6 +610,7 @@ const HostResolution = struct {
                 .ring_hash_key = value.ring_hash_key,
                 .ring_hash_weight = value.ring_hash_weight,
                 .hierarchical_path = value.hierarchical_path,
+                .locality_weight = value.locality_weight,
             } },
             .tls => |value| .{ .tls_address = .{
                 .address = address,
@@ -602,6 +621,7 @@ const HostResolution = struct {
                 .ring_hash_key = value.ring_hash_key,
                 .ring_hash_weight = value.ring_hash_weight,
                 .hierarchical_path = value.hierarchical_path,
+                .locality_weight = value.locality_weight,
             } },
         };
     }
@@ -874,9 +894,11 @@ pub const Channel = struct {
         var result = try init(allocator, io, target, resolved);
         errdefer result.deinit();
         if (owns_composite) {
-            result.weighted_target_runtime = try .initWithPriorityTimeouts(
+            const configured_endpoints: []const Endpoint = if (target == .resolved) target.resolved.endpoints else &.{target.endpoint(0)};
+            result.weighted_target_runtime = try .initResolvedWithPriorityTimeouts(
                 allocator,
                 balancing.root orelse return error.InvalidChannelOptions,
+                configured_endpoints,
                 (options.priority_failover_timeout orelse
                     std.Io.Duration.fromSeconds(10)).nanoseconds,
                 (options.priority_deactivation_timeout orelse
@@ -2764,6 +2786,7 @@ test "gRPC hierarchical endpoint paths validate and survive host resolution" {
         .host = "hierarchy.example",
         .port = 443,
         .hierarchical_path = &path,
+        .locality_weight = 7,
     } };
     try target.validate();
     var resolution = (try HostResolution.init(
@@ -2774,6 +2797,7 @@ test "gRPC hierarchical endpoint paths validate and survive host resolution" {
     )).?;
     defer resolution.deinit(std.testing.allocator);
     const resolved = resolution.endpoint(.{ .ip4 = .loopback(443) });
+    try std.testing.expectEqual(@as(u32, 7), resolved.localityWeight());
     try std.testing.expectEqual(@as(usize, 2), resolved.hierarchicalPath().len);
     try std.testing.expectEqualStrings(
         "priority-0",

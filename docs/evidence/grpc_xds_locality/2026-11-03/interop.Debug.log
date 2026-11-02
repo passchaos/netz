@@ -1,0 +1,138 @@
+{
+  "status": "passed",
+  "grpc_js": "1.14.7",
+  "grpc_js_xds": "1.14.2",
+  "upstream_generated_weights": [
+    {
+      "a": 1,
+      "b": 3
+    },
+    {
+      "a": 3,
+      "b": 1
+    }
+  ],
+  "results": [
+    {
+      "mode": "ordinary",
+      "before": [
+        58,
+        58,
+        284
+      ],
+      "after": [
+        0,
+        0,
+        0
+      ],
+      "removed": [
+        0,
+        0,
+        0
+      ],
+      "restored": [
+        0,
+        0,
+        0
+      ],
+      "generated_before": [
+        1,
+        3
+      ],
+      "generated_after": [
+        1,
+        3
+      ],
+      "wire_counts": [
+        58,
+        58,
+        284
+      ],
+      "sessions": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "mode": "shared",
+      "before": [
+        47,
+        47,
+        306
+      ],
+      "after": [
+        151,
+        151,
+        98
+      ],
+      "removed": [
+        0,
+        0,
+        20
+      ],
+      "restored": [
+        38,
+        37,
+        25
+      ],
+      "generated_before": [
+        1,
+        3
+      ],
+      "generated_after": [
+        3,
+        1
+      ],
+      "wire_counts": [
+        236,
+        235,
+        449
+      ],
+      "sessions": [
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "ca3d36335b4a31cdc83b7a857a6d3f1f2ba5b466b149dc7c81cea33de4922551",
+    "src/grpc/mod.zig": "8e184203ac6dd24d95362acaad15763abbdee2222e413d1b5664c098c7bbb3c4",
+    "src/grpc/service_config.zig": "bf64ad6cbd1f5da47c650fcb0252905126cb25a072db8621285c2cbe08a95836",
+    "src/grpc/service_config/locality.zig": "8d1c3c8761a75bd8c5122bb89c3d2df14820b1d74e362de3ecc992a5606c8643",
+    "src/grpc/channel.zig": "58cd814b335f5247880d7614bf26c045999c4592a72cabe256a92b0f51c75ec2",
+    "src/grpc/channel/locality.zig": "c4d833d9ab49af1b52879f9695598922fb939340185e2090cec5c7a7902b305e",
+    "src/grpc/channel/locality_tests.zig": "4ddc64907264cc451a07ad2b6834f8869d7105ca71c3537a691d9a4fc9dc1a16",
+    "src/grpc/channel/locality_runtime_tests.zig": "697caacde8ff81eb853aa91c7cfab5d40c05252c662d472d2d209535a85b5e79",
+    "src/grpc/channel/ring_hash.zig": "15e9be8a71ca787c3214c868c0dfb3fa8388eefda3c6b61e9b02e666a750e6fc",
+    "src/grpc/channel/weighted_target.zig": "7a88c8187d491c12ae2045e61261d012555368da073ac4a7d778b40697e81029",
+    "src/grpc/channel/shared/init.zig": "30f1008cb0cbd724e2db4752f5e4f5b94254ae67adff3e5a1468868e38b92d0b",
+    "src/grpc/channel/shared/weighted_target.zig": "7aec8b4bf0c5532134fc19673671482d53becc7de1405bfeb9a9136a4e861f4f",
+    "src/grpc/channel/shared/source.zig": "e1632c5e4e1d09a4faee235e7d226d8d419a811b2b181cbb7e58896b57c0b206",
+    "src/grpc/channel/shared/update/prepare.zig": "62e4e5769df3e03a814adc5ab1b2cffb64068035fcff86648c9ab4e6398ce942",
+    "src/grpc/channel/shared/update/publish.zig": "ad3737f704f71d85492d47e38928d52775bd1d4b3fbe168ed55f5f5c7b1070ae",
+    "tools/interop/grpc_locality/client.zig": "8a4dde9f89ad1edfd18bfa188f4dc43cf38574cd61ca00c581edb915e78a8f45",
+    "tools/interop/grpc_locality/peer.js": "14f2964375fe22af5d6cb76dc1accf75666ca49fc840f8d6d045953f536f9f96",
+    "tools/interop/grpc_locality/run.py": "1e7acc14b6b3e1ed33a71a28a070b46676b92b344a6b86056fe5cc408e0e7932",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_sha256": {
+    "load-balancer-xds-wrr-locality.js": "b776cecda58216d6abbd0c8e31f655633df36f7506304e6bf59ccdd50f07eed0",
+    "load-balancer-weighted-target.js": "6774cf4486f2b87820b5e57d1a50dfebd15139c3d5cc4b12113340bf18000c9e"
+  },
+  "client_sha256": "ca1a8cea4784331c871316ed07042067f1a8f67512e4de673404a5671cb08484"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-locality success
++- run python3 success 1s
+   +- compile exe netz-grpc-locality-client Debug native success 1m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:28M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 9ms MaxRSS:28M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

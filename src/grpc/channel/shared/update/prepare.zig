@@ -46,9 +46,10 @@ pub const Prepared = struct {
             if (self.policy == .priority and balancing.policy != .priority) {
                 return error.InvalidSharedOptions;
             }
-            self.weighted = try State.WeightedTarget.initWithPriorityTimeouts(
+            self.weighted = try State.WeightedTarget.initResolvedWithPriorityTimeouts(
                 allocator,
                 balancing.root orelse return error.InvalidSharedOptions,
+                endpoints,
                 (options.priority_failover_timeout orelse
                     std.Io.Duration.fromSeconds(10)).nanoseconds,
                 options.removed_child_retention.nanoseconds,

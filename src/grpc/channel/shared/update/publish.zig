@@ -182,12 +182,16 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     const previous_orca = state.orca_oob;
     state.orca_oob = prepared.orca_oob;
     prepared.orca_oob = previous_orca;
-    if (same_config and same_policy and state.weighted_target != null and prepared.weighted != null) {
+    const same_targets = state.weighted_target == null or prepared.weighted == null or
+        @import("../../locality.zig").sameTargets(state.weighted_target.?.root, prepared.weighted.?.root);
+    if (same_config and same_policy and same_targets and state.weighted_target != null and prepared.weighted != null) {
         prepared.weighted.?.deinit();
         prepared.weighted = null;
         if (!same_layout or weights_changed) state.weighted_target.?.invalidatePickers();
     } else {
         transfer.commit();
+        if (same_config and state.weighted_target != null and prepared.weighted != null)
+            @import("../../locality.zig").retainPriorityState(state.weighted_target.?.root, prepared.weighted.?.root);
         const previous_weighted = state.weighted_target;
         state.weighted_target = prepared.weighted;
         prepared.weighted = previous_weighted;

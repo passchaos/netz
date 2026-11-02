@@ -1,0 +1,6 @@
+{
+  "name": "netz-grpc-locality-interop",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "@grpc/grpc-js-xds": "1.14.2" }
+}

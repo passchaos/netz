@@ -154,6 +154,12 @@ pub fn Runtime(comptime Slot: type) type {
             return self;
         }
 
+        pub fn initResolvedWithPriorityTimeouts(allocator: std.mem.Allocator, root_config: *const service_config.LoadBalancingNode, endpoints: anytype, failover_ns: i96, deactivation_ns: i96) BuildError!Self {
+            var resolved = try @import("locality.zig").Resolved.init(allocator, root_config, endpoints);
+            defer resolved.deinit();
+            return initWithPriorityTimeouts(allocator, resolved.root, failover_ns, deactivation_ns);
+        }
+
         pub fn deinit(self: *Self) void {
             self.destroy(self.root);
             self.* = undefined;
@@ -473,6 +479,7 @@ pub fn Runtime(comptime Slot: type) type {
                     path,
                     config_value,
                 ),
+                .xds_wrr_locality => return error.InvalidChannelOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
                     path,

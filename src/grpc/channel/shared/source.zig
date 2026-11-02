@@ -117,6 +117,7 @@ pub fn Source(comptime Worker: type) type {
                     .ring_hash_key = v.ring_hash_key,
                     .ring_hash_weight = self.ring_hash_weight,
                     .hierarchical_path = v.hierarchical_path,
+                    .locality_weight = v.locality_weight,
                 } },
                 .tls_host => |v| if (v.proxy != null or
                     v.socks5_proxy != null)
@@ -131,6 +132,7 @@ pub fn Source(comptime Worker: type) type {
                         .ring_hash_key = v.ring_hash_key,
                         .ring_hash_weight = self.ring_hash_weight,
                         .hierarchical_path = v.hierarchical_path,
+                        .locality_weight = v.locality_weight,
                     } },
                 .cleartext_ip => |v| .{ .cleartext_ip = v },
                 .tls_address => |v| .{ .tls_address = v },

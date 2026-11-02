@@ -2029,6 +2029,21 @@ pub fn build(b: *std.Build) void {
     const grpc_connection_race_step = b.step("interop-grpc-connection-race", "Verify gRPC staggered endpoint selection and stalled handshake cleanup with grpc-js over h2c/TLS");
     grpc_connection_race_step.dependOn(&grpc_connection_race.step);
 
+    const grpc_locality_client = b.addExecutable(.{
+        .name = "netz-grpc-locality-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_locality/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_locality = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_locality/run.py" });
+    grpc_locality.addArtifactArg(grpc_locality_client);
+    if (b.args) |args| grpc_locality.addArgs(args);
+    const grpc_locality_step = b.step("interop-grpc-locality", "Verify xDS locality generation with official grpc-js-xds and ordinary/shared routing with grpc-js");
+    grpc_locality_step.dependOn(&grpc_locality.step);
+
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
         .root_module = b.createModule(.{

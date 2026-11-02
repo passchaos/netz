@@ -69,6 +69,8 @@ pub fn sameEndpointIdentity(left: anytype, right: @TypeOf(left)) bool {
             var normalized_right = @field(right, @tagName(tag));
             normalized_left.ring_hash_weight = 1;
             normalized_right.ring_hash_weight = 1;
+            normalized_left.locality_weight = 0;
+            normalized_right.locality_weight = 0;
             break :blk std.meta.eql(normalized_left, normalized_right);
         },
     };

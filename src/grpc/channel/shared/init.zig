@@ -33,6 +33,25 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     }
     const owned_name = if (name) |service| try allocator.dupe(u8, service) else null;
     errdefer if (!transferred) if (owned_name) |value| allocator.free(value);
+    const canonical_count = switch (target) {
+        .resolved => |resolved| resolved.endpoints.len,
+        else => 1,
+    };
+    const canonical_endpoints = try allocator.alloc(
+        channel.Endpoint,
+        canonical_count,
+    );
+    errdefer if (!transferred) allocator.free(canonical_endpoints);
+    for (canonical_endpoints, 0..) |*endpoint, index| {
+        endpoint.* = switch (target) {
+            .resolved => |resolved| resolved.endpoints[index],
+            .cleartext_ip => |value| .{ .cleartext_ip = value },
+            .cleartext_host => |value| .{ .cleartext_host = value },
+            .tls_host => |value| .{ .tls_host = value },
+            .tls_address => |value| .{ .tls_address = value },
+            .custom => |value| .{ .custom = value },
+        };
+    }
     const balancing = @import("balancing.zig").resolve(if (config) |*value| value.loadBalancingConfig() else service_config.LoadBalancingConfig{}, options.channel.selection_policy);
     const policy = @import("balancing.zig").select(balancing, options.channel.selection_policy, if (target == .resolved) target.resolved.policy else .pick_first);
     if (policy == .weighted_target and balancing.policy != .weighted_target) {
@@ -42,9 +61,10 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         return error.InvalidSharedOptions;
     }
     var weighted_target = if (policy == .weighted_target or policy == .priority)
-        State.WeightedTarget.initWithPriorityTimeouts(
+        State.WeightedTarget.initResolvedWithPriorityTimeouts(
             allocator,
             balancing.root orelse return error.InvalidSharedOptions,
+            canonical_endpoints,
             (options.priority_failover_timeout orelse
                 std.Io.Duration.fromSeconds(10)).nanoseconds,
             options.removed_child_retention.nanoseconds,
@@ -75,25 +95,6 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
         null;
     config = null;
     errdefer if (!transferred) if (config_generation) |value| value.release();
-    const canonical_count = switch (target) {
-        .resolved => |resolved| resolved.endpoints.len,
-        else => 1,
-    };
-    const canonical_endpoints = try allocator.alloc(
-        channel.Endpoint,
-        canonical_count,
-    );
-    errdefer if (!transferred) allocator.free(canonical_endpoints);
-    for (canonical_endpoints, 0..) |*endpoint, index| {
-        endpoint.* = switch (target) {
-            .resolved => |resolved| resolved.endpoints[index],
-            .cleartext_ip => |value| .{ .cleartext_ip = value },
-            .cleartext_host => |value| .{ .cleartext_host = value },
-            .tls_host => |value| .{ .tls_host = value },
-            .tls_address => |value| .{ .tls_address = value },
-            .custom => |value| .{ .custom = value },
-        };
-    }
     const state = try allocator.create(State);
     var state_initialized = false;
     errdefer if (!state_initialized) allocator.destroy(state);

@@ -599,8 +599,9 @@ reset race from closing with unread upload bytes.
    grpc-core's static-stride, blackout, expiration and RR-fallback semantics.
    SharedChannel now also implements the grpc-core
    `outlier_detection_experimental` composite policy described below.
-   Additional composite/xDS policies remain explicit integration work rather
-   than being silently inferred from ORCA metrics.
+   The xDS locality adapter now expands resolver locality weights through
+   `xds_wrr_locality_experimental`, as described below. ADS discovery, cluster
+   implementation/manager and other xDS control-plane policies remain open.
 
 Machine-readable SharedChannel ORCA evidence is recorded in
 `docs/evidence/grpc_cpp_shared_orca_oob/2026-10-31.json`.
@@ -3285,3 +3286,49 @@ The gRPC/health gate passed 587/587 tests, the public package gate passed
 retained-Watch probe plus all 26 original response scenarios. Logs and source
 hashes are recorded in
 `docs/evidence/grpc_ordinary_health_gate/2026-11-02-read-interruption.json`.
+
+
+## xDS locality weighted routing
+
+`xds_wrr_locality_experimental` now parses its required `childPolicy` list and
+expands resolver locality metadata into the existing owned `weighted_target`
+runtime in both ordinary Channel and SharedChannel. `ChannelEndpoint` variants
+and custom connectors expose `locality_weight` (default zero), independent of
+`ring_hash_weight`. At this policy level, the next `hierarchical_path` element
+names the locality. Parent priority/weighted-target policies consume their own
+path elements first, so nested locality snapshots isolate their address sets.
+Hostname resolution retains both the path and locality weight in promoted
+cleartext or TLS address endpoints.
+
+Following the local grpc-core `xds_wrr_locality.cc` implementation, only named
+localities with a positive weight become targets, the first positive weight
+wins conflicting reports for one locality, and target names sort independently
+of endpoint order. A locality without any positive report is omitted; addresses
+inside a selected locality still share its child policy. Empty resolver output
+produces an empty target set. Child policy selection and recursive depth retain
+the common service-config parser's ownership and validation rules. The runtime
+copies its own paths and complete leaf config before temporary expansion storage
+is released; allocation failure frees the candidate without publishing it.
+
+SharedChannel target updates regenerate locality targets even while keeping the
+same service-config generation. A 1:3 to 3:1 weight change affects new picks
+without replacing matching source/worker connections. Removing a locality
+retains its child under the existing bounded retention policy and lets admitted
+RPCs finish; restoring it reuses its live transport. Unchanged nested priority
+activation, deactivation deadlines and failover clocks survive target-only
+regeneration, while changed weights use the new target snapshot. Existing
+method, health, ORCA, outlier and picker ownership continues through the common
+transactional update path.
+
+`zig build interop-grpc-locality --summary all` runs two independent roles. The
+pinned official `@grpc/grpc-js-xds` 1.14.2 locality implementation generates its
+actual weighted-target child config, and the runner compares those 1:3 and 3:1
+weights to netz's installed runtime. Three official grpc-js servers then check
+all native ordinary/shared RPC payloads and wire counts. Each backend must see
+exactly one HTTP/2 connection across weight change, zero-weight removal and
+restoration. The ordinary 400-RPC phase and shared 400/400/20/100 phases check
+both locality distribution and round-robin balance inside the two-endpoint
+locality. This is locality-policy and transport evidence; ADS discovery and the
+remaining xDS control plane require further work. Machine-readable results and
+source/reference digests are in
+`docs/evidence/grpc_xds_locality/2026-11-03.json`.

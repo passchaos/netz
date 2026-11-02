@@ -1,8 +1,8 @@
 //! Recursive grpc-core weighted_target runtime for SharedChannel.
 //!
-//! The first runtime slice supports nested weighted targets with pick-first and
-//! round-robin leaves. Unsupported parsed leaves fail initialization instead
-//! of flattening into a different policy.
+//! Weighted targets and priorities compose pick-first, round-robin, least-request,
+//! ring-hash and ORCA-weighted leaves with outlier detection. Resolver locality
+//! policies expand to owned weighted-target snapshots before runtime construction.
 const std = @import("std");
 const service_config = @import("../../service_config.zig");
 const connectivity = @import("../connectivity.zig");
@@ -134,6 +134,12 @@ pub fn Runtime(comptime State: type) type {
             };
             self.root = try self.build(root_config, &.{});
             return self;
+        }
+
+        pub fn initResolvedWithPriorityTimeouts(allocator: std.mem.Allocator, root_config: *const service_config.LoadBalancingNode, endpoints: anytype, failover_ns: i96, deactivation_ns: i96) BuildError!Self {
+            var resolved = try @import("../locality.zig").Resolved.init(allocator, root_config, endpoints);
+            defer resolved.deinit();
+            return initWithPriorityTimeouts(allocator, resolved.root, failover_ns, deactivation_ns);
         }
 
         pub fn deinit(self: *Self) void {
@@ -497,6 +503,7 @@ pub fn Runtime(comptime State: type) type {
                     path,
                     config_value,
                 ),
+                .xds_wrr_locality => return error.InvalidSharedOptions,
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
                     path,
