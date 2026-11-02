@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "WebTransport HTTP/2 connection completion and retirement",
+  "decision": "accepted",
+  "base_head": "49cd9789",
+  "behavior": {
+    "generation_ids": "reserve the next generation ID while admitting the connection attempt under the State mutex; returned connector results do not reacquire that mutex for ID allocation",
+    "owner_admission": "EndpointClient.initWithDeadline transfers ownership on entry and checks caller deadline and cancellation before and after starting the connection owner; failed or late initialization closes the unpublished transport abortively",
+    "publication": "candidate State publication uses the original caller deadline and checks cancellation even after an uncontended acquisition; failed publication closes the unpublished candidate and records a failed attempt",
+    "failed_attempt": "one in-progress attempt publishes one allocation-free pending completion without waiting for the State mutex; the next CONNECT applies it once and schedules backoff from the recorded completion time",
+    "terminal_observation": "EndpointClient.terminalFailure reads an atomic error code, without its metadata mutex",
+    "retirement": "if State cannot be acquired immediately, mark the exact generation for retirement and return; old generation handles report StaleConnection; the next CONNECT removes it before establishing a new generation",
+    "abortive_shutdown": "an atomic flag and wake request owner shutdown without acquiring endpoint metadata mutex; worker rechecks the flag after resetting its wake; owner cleanup releases session state and closes without further protocol output",
+    "structure": "target/retry classification and owner initialization live in target.zig and init.zig; connection State remains the generation publication owner"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 186,
+      "total": 186,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "scope": "direct Session wire compatibility; the reconnecting facade and owner changes are exercised by the owning module TLS and socket-backed regressions",
+      "exit_code": 0
+    },
+    "completion_cases": [
+      "parent State mutex held during candidate publication until caller deadline",
+      "Canceled while candidate publication contends on State mutex",
+      "Canceled after an uncontended publication acquisition",
+      "connector OutOfMemory while State mutex is held",
+      "endpoint owner ConcurrencyUnavailable while State mutex is held",
+      "connector returns a transport after caller deadline",
+      "owner starts before deadline but caller clock advances past it before construction returns"
+    ],
+    "case_invariants": "no published candidate or retained activity, no uncancellable State acquisition, transferred provisional TCP connection reaches peer EOF, pending failed attempt is preserved and later consumed, next generation publishes successfully",
+    "retirement_invariants": "hold endpoint metadata mutex and reconnecting State mutex, observe terminal state and request retirement/shutdown without uncancellable acquisition, reject old generation ID, then establish replacement generation after old TCP connection reaches peer EOF",
+    "existing_tls": "future-Session-only reconnect, retained rejection, generation isolation and HTTP CONNECT/SOCKS5 proxy cases remain in the WebTransport HTTP2 gate"
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client.zig": "f91e097ae305c2d936f969d6ff16f2c4e3978de4a2ac4e4a885ce8dcad19bc1c",
+    "src/webtransport/h2/endpoint_client/init.zig": "0715b01b209f33295d118abac387070e3409b5300da7f7e123fed2969a89bcea",
+    "src/webtransport/h2/endpoint_client/worker.zig": "6ead7e83b114f3f6f2dad316ba56d954e70de9c15b746fb43dcf48759094ea59",
+    "src/webtransport/h2/endpoint_client/reconnecting.zig": "5025dc0f76164ce5e5b3721d5e2a0f7e32c6bcad2ca026ab40d2f4aa5645cfa0",
+    "src/webtransport/h2/endpoint_client/reconnecting/core.zig": "7c29c0ccc4fd7503220ce33c5fe743ab16b894595ec9c3513d7c791489d75e0c",
+    "src/webtransport/h2/endpoint_client/reconnecting/completion.zig": "75ce04dc5d2c35f3e5e5b9ea05c03a4ed82ecb4d1108290a92ad73f631b291a3",
+    "src/webtransport/h2/endpoint_client/reconnecting/completion_tests.zig": "536ffde0df578793a255e637fa867c011ecfe091d401647c4c541df63b1a597a",
+    "src/webtransport/h2/endpoint_client/reconnecting/target.zig": "169494aedb4bb44c43b59623aad30b3e60772ba9a7c30115ffac7b15011373b5",
+    "src/webtransport/h2/endpoint_client/reconnecting/admission.zig": "33b1de14491cdbb42f97f39017c051f66cd5adfa0fa82be05a0ae23afeed59ed",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "5e2f989b037540c265c664bf83b1a1e1c8162018f0523fb9046b76fe75f6f131",
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_reconnecting_completion/2026-11-02/webtransport-http2.Debug.log": "de9fbb6a28846390be268f577f9ef59e3b8bb950376bae820f73a42188796141",
+    "docs/evidence/webtransport_h2_reconnecting_completion/2026-11-02/package.Debug.log": "1114f1911133b7ae45c85c5c76539f7e31f7a9bf9e6c8b3f9a743aafbea0c71f",
+    "docs/evidence/webtransport_h2_reconnecting_completion/2026-11-02/interop-python.Debug.log": "12c14b9fc7a2dbb9def942636bcdb5865de4c99dff6acca088401e33bf0cbbd1"
+  },
+  "limitations": [
+    "custom connector callbacks must cooperate with the deadline; a callback returning late is rejected and its transport reclaimed, but the facade cannot preempt arbitrary callback code",
+    "final owner destruction still joins its task; the evidence covers the recorded creation/publication/retirement boundaries and does not claim arbitrary user-held internal locks can be preempted",
+    "broader protocol integration and multi-hour/high-concurrency evidence remain open for the full library goal"
+  ]
+}

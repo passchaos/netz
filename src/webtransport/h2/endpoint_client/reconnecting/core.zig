@@ -4,6 +4,8 @@ const http2 = @import("../../../../http2/mod.zig");
 const endpoint = @import("../../endpoint_client.zig");
 const timed_mutex = @import("../../../../internal/timed_mutex.zig");
 const admission = @import("admission.zig");
+const completion = @import("completion.zig");
+const deadline_policy = @import("../../../../internal/deadline.zig");
 
 pub const Error = endpoint.Error || error{
     ClientClosed,
@@ -11,150 +13,8 @@ pub const Error = endpoint.Error || error{
     InvalidReconnectOptions,
 };
 
-pub const CustomConnector = struct {
-    context: ?*anyopaque,
-    connect_fn: *const fn (
-        context: ?*anyopaque,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        deadline: std.Io.Clock.Timestamp,
-    ) http2.runtime.Error!http2.runtime.Connection,
-    retryable_fn: ?*const fn (context: ?*anyopaque, err: anyerror) bool = null,
-};
-
-/// Borrowed for the ReconnectingEndpointClient lifetime. Established
-/// connections and Sessions own their transport state independently.
-pub const Target = union(enum) {
-    cleartext_address: struct {
-        address: std.Io.net.IpAddress,
-        limits: http2.runtime.Limits = .{},
-    },
-    cleartext_host: struct {
-        host: []const u8,
-        port: u16,
-        limits: http2.runtime.Limits = .{},
-    },
-    tls_address: struct {
-        address: std.Io.net.IpAddress,
-        tls_host: []const u8,
-        authority: []const u8,
-        limits: http2.runtime.Limits = .{},
-        tls: http2.runtime.TlsConnectOptions = .{},
-    },
-    tls_host: struct {
-        host: []const u8,
-        port: u16,
-        limits: http2.runtime.Limits = .{},
-        tls: http2.runtime.TlsConnectOptions = .{},
-    },
-    tls_http_proxy: struct {
-        host: []const u8,
-        port: u16,
-        proxy: http2.runtime.HttpConnectProxy,
-        limits: http2.runtime.Limits = .{},
-        tls: http2.runtime.TlsConnectOptions = .{},
-    },
-    tls_socks5_proxy: struct {
-        proxy: http2.socks5_runtime.Proxy,
-        host: []const u8,
-        port: u16,
-        limits: http2.runtime.Limits = .{},
-        tls: http2.runtime.TlsConnectOptions = .{},
-    },
-    custom: CustomConnector,
-
-    fn validate(self: Target) Error!void {
-        switch (self) {
-            .cleartext_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
-            .tls_host => |value| if (value.port == 0) return error.InvalidReconnectOptions,
-            .tls_http_proxy => |value| if (value.port == 0) return error.InvalidReconnectOptions,
-            .tls_socks5_proxy => |value| if (value.port == 0) return error.InvalidReconnectOptions,
-            else => {},
-        }
-    }
-
-    fn connect(
-        self: Target,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        deadline: std.Io.Clock.Timestamp,
-    ) Error!http2.runtime.Connection {
-        return switch (self) {
-            .cleartext_address => |value| http2.runtime.Client.connectWithDeadline(
-                allocator,
-                io,
-                value.address,
-                value.limits,
-                deadline,
-            ),
-            .cleartext_host => |value| http2.runtime.Client.connectHostWithDeadline(
-                allocator,
-                io,
-                value.host,
-                value.port,
-                value.limits,
-                deadline,
-            ),
-            .tls_address => |value| http2.runtime.Client.connectTlsAddressWithDeadline(
-                allocator,
-                io,
-                value.address,
-                value.tls_host,
-                value.authority,
-                value.limits,
-                value.tls,
-                deadline,
-            ),
-            .tls_host => |value| http2.runtime.Client.connectTlsHostWithDeadline(
-                allocator,
-                io,
-                value.host,
-                value.port,
-                value.limits,
-                value.tls,
-                deadline,
-            ),
-            .tls_http_proxy => |value| http2.runtime.Client
-                .connectTlsHostViaProxyWithDeadline(
-                allocator,
-                io,
-                value.host,
-                value.port,
-                value.proxy,
-                value.limits,
-                value.tls,
-                deadline,
-            ),
-            .tls_socks5_proxy => |value| http2.socks5_runtime.Client
-                .connectTlsHostWithDeadline(
-                allocator,
-                io,
-                value.proxy,
-                value.host,
-                value.port,
-                value.limits,
-                value.tls,
-                deadline,
-            ),
-            .custom => |value| value.connect_fn(
-                value.context,
-                allocator,
-                io,
-                deadline,
-            ),
-        };
-    }
-
-    fn retryable(self: Target, err: anyerror) bool {
-        return switch (self) {
-            .custom => |value| if (value.retryable_fn) |classify|
-                classify(value.context, err)
-            else
-                retryableConnectError(err),
-            else => retryableConnectError(err),
-        };
-    }
-};
+pub const CustomConnector = @import("target.zig").CustomConnector;
+pub const Target = @import("target.zig").Target;
 
 pub const Backoff = struct {
     initial: std.Io.Duration = .fromSeconds(1),
@@ -192,15 +52,32 @@ pub const Generation = struct {
     refs: std.atomic.Value(usize) = .init(1),
     id: u64,
     client: endpoint.EndpointClient,
+    retire_requested: std.atomic.Value(bool) = .init(false),
 
     fn create(
         allocator: std.mem.Allocator,
         id: u64,
-        client: endpoint.EndpointClient,
-    ) std.mem.Allocator.Error!*Generation {
+        connection_value: http2.runtime.Connection,
+        options: endpoint.Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Generation {
+        var connection = connection_value;
+        var owned = true;
+        errdefer if (owned) connection.closeWithoutCloseNotify();
+        _ = try deadline_policy.usableAwake(connection.io, deadline);
+        try connection.io.checkCancel();
         const self = try allocator.create(Generation);
+        errdefer allocator.destroy(self);
+        owned = false;
+        const client = try endpoint.EndpointClient.initWithDeadline(allocator, connection, options, deadline);
         self.* = .{ .allocator = allocator, .id = id, .client = client };
         return self;
+    }
+
+    fn discardUnpublished(self: *Generation) void {
+        std.debug.assert(self.refs.load(.acquire) == 1);
+        self.client.deinitAbortive();
+        self.allocator.destroy(self);
     }
 
     pub fn retain(self: *Generation) void {
@@ -209,7 +86,7 @@ pub const Generation = struct {
 
     pub fn release(self: *Generation) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        self.client.deinit();
+        if (self.retire_requested.load(.acquire)) self.client.deinitAbortive() else self.client.deinit();
         self.allocator.destroy(self);
     }
 };
@@ -227,6 +104,7 @@ pub const State = struct {
     failures: usize = 0,
     next_attempt_ns: ?i96 = null,
     connecting: bool = false,
+    pending_failure: completion.Failure = .{},
     active: std.atomic.Value(usize) = .init(0),
     closed: bool = false,
 
@@ -275,7 +153,17 @@ pub const State = struct {
                 self.unlock();
                 return error.ClientClosed;
             }
+            self.applyPendingFailureLocked();
             if (self.current) |generation| {
+                if (generation.retire_requested.load(.acquire)) {
+                    self.current = null;
+                    self.failures +|= 1;
+                    self.scheduleBackoffLocked();
+                    self.unlock();
+                    generation.client.requestShutdownAbortive();
+                    generation.release();
+                    continue;
+                }
                 generation.retain();
                 self.unlock();
                 if (generation.client.terminalFailure()) |failure| {
@@ -287,6 +175,12 @@ pub const State = struct {
             }
             if (self.connecting) {
                 self.wake.reset();
+                // A producer does not need the State mutex to publish a
+                // failed attempt. Do not lose its wake across this reset.
+                if (self.pending_failure.ready.load(.acquire)) {
+                    self.unlock();
+                    continue;
+                }
                 self.unlock();
                 try waitEventUntil(&self.wake, self.io, deadline);
                 continue;
@@ -308,6 +202,7 @@ pub const State = struct {
                 continue;
             };
             self.connecting = true;
+            const generation_id = self.takeGenerationLocked();
             self.unlock();
 
             const attempt_deadline = earlier(
@@ -330,29 +225,32 @@ pub const State = struct {
                 }
                 continue;
             };
-            var client = endpoint.EndpointClient.init(
-                self.allocator,
-                connection,
-                self.options.endpoint,
-            ) catch |err| {
-                self.finishConnectFailure();
-                return err;
-            };
             const generation = Generation.create(
                 self.allocator,
-                self.takeGeneration(),
-                client,
+                generation_id,
+                connection,
+                self.options.endpoint,
+                deadline,
             ) catch |err| {
-                client.deinit();
                 self.finishConnectFailure();
                 return err;
             };
-            self.lock();
+            timed_mutex.lock(&self.mutex, self.io, deadline) catch |err| {
+                generation.discardUnpublished();
+                self.finishConnectFailure();
+                return err;
+            };
+            self.io.checkCancel() catch |err| {
+                self.unlock();
+                generation.discardUnpublished();
+                self.finishConnectFailure();
+                return err;
+            };
             self.connecting = false;
             self.wake.set(self.io);
             if (self.closed) {
                 self.unlock();
-                generation.release();
+                generation.discardUnpublished();
                 return error.ClientClosed;
             }
             self.failures = 0;
@@ -370,6 +268,7 @@ pub const State = struct {
         if (self.closed) return error.ClientClosed;
         const generation = self.current orelse return error.StaleConnection;
         if (generation.id != generation_id) return error.StaleConnection;
+        if (generation.retire_requested.load(.acquire)) return error.StaleConnection;
         generation.retain();
         return generation;
     }
@@ -399,8 +298,16 @@ pub const State = struct {
 
     fn retire(self: *State, generation: *Generation) bool {
         var removed = false;
-        self.lock();
+        if (!self.mutex.tryLock()) {
+            // The operation already owns this generation and State activity.
+            // Record retirement without waiting past its deadline. Handle
+            // lookup refuses it and the next CONNECT completes removal.
+            generation.retire_requested.store(true, .release);
+            self.wake.set(self.io);
+            return true;
+        }
         if (self.current == generation) {
+            generation.retire_requested.store(true, .release);
             self.current = null;
             self.failures +|= 1;
             self.scheduleBackoffLocked();
@@ -409,15 +316,13 @@ pub const State = struct {
         }
         self.unlock();
         if (removed) {
-            generation.client.requestShutdown();
+            generation.client.requestShutdownAbortive();
             generation.release();
         }
         return removed;
     }
 
-    fn takeGeneration(self: *State) u64 {
-        self.lock();
-        defer self.unlock();
+    fn takeGenerationLocked(self: *State) u64 {
         const result = self.next_generation;
         self.next_generation +%= 1;
         if (self.next_generation == 0) self.next_generation = 1;
@@ -425,15 +330,27 @@ pub const State = struct {
     }
 
     fn finishConnectFailure(self: *State) void {
-        self.lock();
-        defer self.unlock();
-        self.connecting = false;
-        self.failures +|= 1;
-        self.scheduleBackoffLocked();
+        self.pending_failure.publish(self.io);
+        if (self.mutex.tryLock()) {
+            self.applyPendingFailureLocked();
+            self.unlock();
+        }
         self.wake.set(self.io);
     }
 
+    fn applyPendingFailureLocked(self: *State) void {
+        const at_ns = self.pending_failure.take() orelse return;
+        self.connecting = false;
+        if (self.closed) return;
+        self.failures +|= 1;
+        self.scheduleBackoffFromLocked(at_ns);
+    }
+
     fn scheduleBackoffLocked(self: *State) void {
+        self.scheduleBackoffFromLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+    }
+
+    fn scheduleBackoffFromLocked(self: *State, at_ns: i96) void {
         var delay: f64 = @floatFromInt(self.options.backoff.initial.nanoseconds);
         const maximum: f64 = @floatFromInt(self.options.backoff.maximum.nanoseconds);
         var remaining = self.failures -| 1;
@@ -452,7 +369,7 @@ pub const State = struct {
             delay,
             @as(f64, @floatFromInt(std.math.maxInt(i96))),
         );
-        self.next_attempt_ns = std.Io.Clock.awake.now(self.io)
+        self.next_attempt_ns = (std.Io.Timestamp{ .nanoseconds = at_ns })
             .addDuration(.fromNanoseconds(@intFromFloat(@ceil(bounded))))
             .nanoseconds;
     }
@@ -469,7 +386,7 @@ pub const State = struct {
         self.wake.set(self.io);
         self.unlock();
         if (generation) |value| {
-            value.client.requestShutdown();
+            if (value.retire_requested.load(.acquire)) value.client.requestShutdownAbortive() else value.client.requestShutdown();
             value.release();
         }
         admission.waitForIdle(self);
@@ -497,35 +414,6 @@ fn waitEventUntil(
         };
         return;
     }
-}
-
-fn retryableConnectError(err: anyerror) bool {
-    return switch (err) {
-        error.AddressUnavailable,
-        error.ConnectionPending,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.DetectingNetworkConfigurationFailed,
-        error.HostUnreachable,
-        error.NameServerFailure,
-        error.NetworkDown,
-        error.NetworkUnreachable,
-        error.NoAddressReturned,
-        error.ProcessFdQuotaExceeded,
-        error.ProxyConnectionClosed,
-        error.ProxyConnectionRefused,
-        error.ProxyGeneralFailure,
-        error.ProxyHostUnreachable,
-        error.ProxyNetworkUnreachable,
-        error.ProxyTtlExpired,
-        error.SocketUnconnected,
-        error.SystemFdQuotaExceeded,
-        error.SystemResources,
-        error.Timeout,
-        error.UnknownHostName,
-        => true,
-        else => false,
-    };
 }
 
 fn connectionLost(err: anyerror) bool {

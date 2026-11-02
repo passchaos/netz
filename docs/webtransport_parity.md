@@ -2065,14 +2065,61 @@ Timeout, Canceled, expired and wrong-clock inputs. It requires zero connector
 calls, no generation/connecting changes, activity returning to zero, and no
 uncancellable State acquisition. Separate contended current and handle lookups
 return under their original budgets, and activity exit completes while the
-same mutex remains held. These checks audit facade State admission and lookup;
-connector callbacks, endpoint command ownership and connect-result/retirement
-publication retain their separate lifecycle verification boundaries.
+same mutex remains held. This first capture audits facade State admission and
+lookup. The connection completion and retirement capture below adds their
+publication paths; connector callbacks and endpoint command ownership retain
+their own lifecycle contracts.
 
 The WebTransport HTTP2 gate passed 185/185 tests, the public package gate
 passed 26/26, and the independent Python TLS/h2 gate passed 8/8 build steps
 in both endpoint directions. Source hashes and logs are recorded in
 `docs/evidence/webtransport_h2_reconnecting_admission/2026-11-02.json`.
+
+Connection completion now uses the same deadline through candidate owner
+initialization and State publication. A connection generation ID is reserved
+while admitting the attempt, so a returned connector result never waits on an
+uncancellable ID-allocation lock. `EndpointClient.initWithDeadline` transfers
+transport ownership on entry, checks the deadline before and after starting
+its owner, and rolls back failed or late initialization without extending
+teardown with TLS shutdown output. Address, hostname, TLS and proxy deadline
+constructors use this owner-admission path.
+
+An unpublished candidate that times out or is canceled before State
+publication is closed through the explicit abortive owner path. Failed attempts
+publish an allocation-free completion record even while another caller holds
+the State mutex. A later CONNECT applies that record exactly once, clears the
+in-progress attempt and schedules backoff from its recorded completion time.
+The wait/reset sequence checks for a concurrently published completion so it
+cannot discard the failure wake and strand discovery.
+
+Endpoint terminal failure is now an atomic observation. A retirement request
+that cannot acquire the reconnecting State mutex marks its exact generation
+for removal and returns; old handle lookup immediately reports StaleConnection.
+The next CONNECT completes that generation's removal before starting another
+attempt. The endpoint's abortive shutdown request is an atomic flag and wake;
+its worker checks that flag after resetting the wake event so a concurrent
+request cannot strand an idle owner. Retired generations use abortive shutdown, while ordinary owner
+destruction retains its existing close policy. Accepted Sessions are never
+replayed into the replacement connection.
+
+Socket-backed regressions cover contended publication Timeout/Canceled,
+cancellation on an uncontended publication, connector allocation failure,
+owner concurrency failure, a connector returning after its deadline, and an
+owner starting just before construction expires. Every case returns with no
+published candidate or retained caller activity, closes transferred provisional
+transports, then successfully publishes a new generation. The same tests hold
+both the endpoint metadata mutex and reconnecting State mutex while requesting
+retirement, require no uncancellable acquisition, reject the old generation,
+and establish the next generation after the old transport closes. Target and
+retry classification plus transactional owner construction now live in
+cohesive modules beside their owning runtime.
+
+The complete WebTransport HTTP2 gate passed 186/186 tests, the public package
+gate passed 26/26, and the independent Python TLS/h2 wire gate passed 8/8 build
+steps in both directions. The new socket-backed cases and the existing TLS
+reconnect/proxy cases cover the owner/publication changes; the Python gate
+checks direct Session wire compatibility. Logs and source hashes are recorded
+in `docs/evidence/webtransport_h2_reconnecting_completion/2026-11-02.json`.
 
 HTTP/2 endpoint clients can now establish their origin connection through an
 HTTP/1.1 CONNECT proxy. `HttpConnectProxy` keeps URI, proxy-only headers and

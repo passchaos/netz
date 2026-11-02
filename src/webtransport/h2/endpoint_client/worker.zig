@@ -10,18 +10,24 @@ pub fn Worker(comptime State: type) type {
         pub fn run(state: *State) std.Io.Cancelable!void {
             var terminal: ?anyerror = null;
             defer {
+                const abortive = state.abortive_shutdown.load(.acquire);
+                if (abortive) {
+                    state.connection.aggregate_timeout_unusable = true;
+                    state.connection.terminal_write_failed = true;
+                }
                 for (state.slots) |*slot| if (slot.session) |*session| {
                     session.deinit();
                     slot.session = null;
                     slot.failure = null;
                 };
                 state.active_sessions = 0;
-                state.connection.close();
+                if (abortive) state.connection.closeWithoutCloseNotify() else state.connection.close();
                 state.workerStopped(terminal);
                 state.release();
             }
             while (true) {
-                while (state.claim()) |job| {
+                while (!state.abortive_shutdown.load(.acquire)) {
+                    const job = state.claim() orelse break;
                     if (job.canceled()) {
                         _ = state.finish(job, error.Canceled);
                         continue;
@@ -39,6 +45,7 @@ pub fn Worker(comptime State: type) type {
                     if (!delivered) rollbackAbandoned(state, job);
                     job.release();
                 }
+                if (state.abortive_shutdown.load(.acquire)) return;
                 const buffered = pollRouted(state, outputDeadline(state)) catch |err| {
                     if (err == error.Canceled) return error.Canceled;
                     terminal = err;
@@ -46,7 +53,7 @@ pub fn Worker(comptime State: type) type {
                 };
                 if (buffered.progress and !buffered.blocked) continue;
                 state.lock();
-                if (state.closed) {
+                if (state.closed or state.abortive_shutdown.load(.acquire)) {
                     state.unlock();
                     return;
                 }
@@ -55,6 +62,12 @@ pub fn Worker(comptime State: type) type {
                     continue;
                 }
                 state.wake.reset();
+                // Abortive shutdown publishes without taking this mutex.
+                // Recheck after reset so a prior request cannot lose its wake.
+                if (state.abortive_shutdown.load(.acquire)) {
+                    state.unlock();
+                    return;
+                }
                 const active = state.connection.activeClientDuplexCount() != 0;
                 state.unlock();
                 if (!active or buffered.blocked) {

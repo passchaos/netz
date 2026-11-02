@@ -89,7 +89,9 @@ const State = struct {
     queued: usize = 0,
     closed: bool = false,
     worker_stopped: bool = false,
+    abortive_shutdown: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
+    failure_code: std.atomic.Value(u16) = .init(0),
 
     pub const Job = job_mod.Job(State);
     const Worker = @import("endpoint_client/worker.zig").Worker(State);
@@ -133,7 +135,7 @@ const State = struct {
     fn enqueue(self: *State, job: *Job) Error!void {
         self.lock();
         defer self.unlock();
-        if (self.closed) return error.EndpointClosed;
+        if (self.closed or self.abortive_shutdown.load(.acquire)) return error.EndpointClosed;
         if (self.failure) |failure| return @errorCast(failure);
         if (self.queued >= self.options.max_queued_commands) return error.EndpointQueueFull;
         job.retain();
@@ -146,7 +148,7 @@ const State = struct {
         const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = self.options.operation_timeout, .clock = .awake });
         const job = Job.create(self, operation, deadline) catch return;
         self.lock();
-        if (self.closed or self.failure != null) {
+        if (self.closed or self.abortive_shutdown.load(.acquire) or self.failure != null) {
             self.unlock();
             job.release();
             return;
@@ -209,7 +211,10 @@ const State = struct {
     pub fn workerStopped(self: *State, terminal: ?anyerror) void {
         self.lock();
         defer self.unlock();
-        if (!self.closed and terminal != null) self.failure = terminal;
+        if (!self.closed) if (terminal) |failure| {
+            self.failure = failure;
+            self.failure_code.store(@intFromError(failure), .release);
+        };
         while (self.head) |job| {
             self.head = job.next;
             if (self.head == null) self.tail = null;
@@ -226,37 +231,24 @@ pub const EndpointClient = struct {
 
     /// Takes ownership of an already negotiated HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointClient {
-        var connection = connection_value;
-        var connection_owned = true;
-        errdefer if (connection_owned) connection.close();
-        try options.validate();
-        const state = try allocator.create(State);
-        var state_owned = true;
-        errdefer if (state_owned) allocator.destroy(state);
-        const slots = try allocator.alloc(Slot, options.max_sessions);
-        var slots_owned = true;
-        errdefer if (slots_owned) allocator.free(slots);
-        @memset(slots, .{});
-        state.* = .{ .allocator = allocator, .io = connection.io, .options = options, .connection = connection, .slots = slots };
-        connection_owned = false;
-        state_owned = false;
-        slots_owned = false;
-        state.retain();
-        state.group.concurrent(state.io, State.Worker.run, .{state}) catch |err| {
-            state.closed = true;
-            state.worker_stopped = true;
-            state.connection.close();
-            state.release();
-            state.release();
-            return err;
-        };
-        return .{ .state = state };
+        return initUntil(allocator, connection_value, options, null);
+    }
+
+    /// Transfer ownership on entry and bound owner admission by the original
+    /// deadline. Failed or late construction closes the unpublished transport
+    /// without TLS shutdown output or an additional cleanup budget.
+    pub fn initWithDeadline(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
+        return initUntil(allocator, connection_value, options, deadline);
+    }
+
+    fn initUntil(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, deadline: ?std.Io.Clock.Timestamp) Error!EndpointClient {
+        return @import("endpoint_client/init.zig").create(EndpointClient, State, Slot, State.Worker.run, allocator, connection_value, options, deadline);
     }
 
     pub fn connectAddressWithDeadline(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, limits: http2.runtime.Limits, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
         try options.validate();
         const connection = try http2.runtime.Client.connectWithDeadline(allocator, io, address, limits, deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectAddressWithTimeout(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, limits: http2.runtime.Limits, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -265,7 +257,7 @@ pub const EndpointClient = struct {
     pub fn connectHostWithDeadline(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
         try options.validate();
         const connection = try http2.runtime.Client.connectHostWithDeadline(allocator, io, host, port, limits, deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectHostWithTimeout(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -274,7 +266,7 @@ pub const EndpointClient = struct {
     pub fn connectTlsAddressWithDeadline(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, tls_host: []const u8, authority: []const u8, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
         try options.validate();
         const connection = try http2.runtime.Client.connectTlsAddressWithDeadline(allocator, io, address, tls_host, authority, limits, tls_options, deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectTlsAddressWithTimeout(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, tls_host: []const u8, authority: []const u8, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -283,7 +275,7 @@ pub const EndpointClient = struct {
     pub fn connectTlsHostWithDeadline(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, deadline: std.Io.Clock.Timestamp) Error!EndpointClient {
         try options.validate();
         const connection = try http2.runtime.Client.connectTlsHostWithDeadline(allocator, io, host, port, limits, tls_options, deadline);
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectTlsHostWithTimeout(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: http2.runtime.Limits, tls_options: http2.runtime.TlsConnectOptions, options: Options, timeout: std.Io.Duration) Error!EndpointClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -312,7 +304,7 @@ pub const EndpointClient = struct {
             tls_options,
             deadline,
         );
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectTlsHostViaProxyWithTimeout(
         allocator: std.mem.Allocator,
@@ -361,7 +353,7 @@ pub const EndpointClient = struct {
             tls_options,
             deadline,
         );
-        return init(allocator, connection, options);
+        return initWithDeadline(allocator, connection, options, deadline);
     }
     pub fn connectTlsHostViaSocks5WithTimeout(
         allocator: std.mem.Allocator,
@@ -549,9 +541,8 @@ pub const EndpointClient = struct {
     /// reconnecting owner uses this only to retire the complete connection
     /// generation; stream-local failures remain scoped to their Session.
     pub fn terminalFailure(self: EndpointClient) ?anyerror {
-        self.state.lock();
-        defer self.state.unlock();
-        return self.state.failure;
+        const code = self.state.failure_code.load(.acquire);
+        return if (code == 0) null else @errorFromInt(code);
     }
 
     /// Request endpoint shutdown without releasing this owner. Retained
@@ -560,12 +551,24 @@ pub const EndpointClient = struct {
         self.state.close();
     }
 
+    pub fn requestShutdownAbortive(self: EndpointClient) void {
+        self.state.abortive_shutdown.store(true, .release);
+        self.state.wake.set(self.state.io);
+    }
+
     pub fn deinit(self: *EndpointClient) void {
         const state = self.state;
         state.close();
         state.group.cancel(state.io);
         state.release();
         self.* = undefined;
+    }
+
+    /// Stop the owner and release its transport without further protocol
+    /// output. Used for a candidate whose initialization/publication failed.
+    pub fn deinitAbortive(self: *EndpointClient) void {
+        self.requestShutdownAbortive();
+        self.deinit();
     }
 };
 

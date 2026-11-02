@@ -19,4 +19,5 @@ test {
     _ = @import("reconnecting/tests.zig");
     _ = @import("reconnecting/admission_tests.zig");
     _ = @import("reconnecting/admission_lifetime_tests.zig");
+    _ = @import("reconnecting/completion_tests.zig");
 }
