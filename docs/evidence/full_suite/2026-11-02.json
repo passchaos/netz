@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "gate": "full library test suite",
+  "head": "c56f410cd58d7b34d9784017adee35870f9bd0c7",
+  "command": "zig build test-lib --summary all",
+  "result": {
+    "passed": 6177,
+    "total": 6177,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "notes": "The suite includes the deterministic HTTP/3 pool backoff fix from the same commit. This is the first clean full-suite pass after the recent SharedChannel request-ownership, duplex burst, and connectivity-prune changes."
+}
